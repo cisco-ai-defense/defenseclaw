@@ -1,21 +1,65 @@
 #!/bin/bash
 # DefenseClaw shim for curl — inspects URL and flags before executing.
+#
+# Avarice F-2029 / chain F-3397: pre-fix this shim called the gateway's
+# /api/v1/inspect/tool endpoint UNAUTHENTICATED. With a configured
+# gateway token the sidecar returns 401 + {"error":"unauthorized"}; the
+# shim's `jq -r '.action // "allow"'` then fell back to "allow" and
+# exec'd the real curl. Combined with the inspect-request hook also
+# being unauthenticated (F-2025), a malicious agent had a complete
+# unauthenticated path past every inspection layer.
+#
+# Fix: load the gateway bearer token from .token (written next to the
+# shim) or DEFENSECLAW_GATEWAY_TOKEN, send Authorization on every
+# inspection call, and treat HTTP 401/403 OR a {"error":...} response
+# WITHOUT a recognized action field as a HARD BLOCK so a misconfigured
+# auth path can never be silently downgraded to "allow".
 set -euo pipefail
 SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
 REAL_BINARY=$(PATH="$(echo "$PATH" | sed "s|${SHIM_DIR}:||g; s|:${SHIM_DIR}||g")" which curl 2>/dev/null || echo /usr/bin/curl)
 
 API_ADDR="{{.APIAddr}}"
 
-RESULT=$("$REAL_BINARY" -s -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${SHIM_DIR}/.token" ]; then
+  # shellcheck source=/dev/null
+  . "${SHIM_DIR}/.token"
+fi
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
+
+RESPONSE=$("$REAL_BINARY" -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
   -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: shim/curl/2.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
   -d "$(jq -n --arg tool "curl" --arg cmd "$*" \
     '{tool: $tool, args: {command: $cmd}}')" 2>/dev/null) || {
+  # Transport failures fall back to the real binary (gateway down must
+  # not brick the agent) — same posture as the connector hooks.
   exec "$REAL_BINARY" "$@"
 }
 
-ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null)
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+  echo "DefenseClaw: shim auth rejected (HTTP ${HTTP_CODE}) — refusing to exec curl" >&2
+  exit 1
+fi
+
+ACTION=$(echo "$RESULT" | jq -r '.action // empty' 2>/dev/null) || ACTION=""
+if [ -z "${ACTION}" ]; then
+  # No recognized action means either the response is malformed or the
+  # gateway returned an error envelope. Either way, do NOT default to
+  # allow — that was the F-2029 silent-bypass.
+  echo "DefenseClaw: shim received unparseable response (HTTP ${HTTP_CODE}) — refusing to exec curl" >&2
+  exit 1
+fi
 if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | jq -r '.reason // "blocked by DefenseClaw"')
   echo "DefenseClaw: $REASON" >&2

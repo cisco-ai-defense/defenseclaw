@@ -220,10 +220,16 @@ func loadDotEnvIntoOS(path string) {
 // Per-sink construction lives in internal/cli/audit_sinks.go to keep
 // root.go focused on lifecycle.
 func initAuditSinks() {
-	if cfg == nil || len(cfg.AuditSinks) == 0 {
+	if cfg == nil {
 		return
 	}
-	mgr, err := buildAuditSinks(cfg.AuditSinks, appVersion)
+	// Build when there is any global sink OR any per-connector
+	// observability override (D5b) — a global-empty install that only
+	// routes a connector to its own sink must still install the manager.
+	if len(cfg.AuditSinks) == 0 && len(cfg.Observability.Connectors) == 0 {
+		return
+	}
+	mgr, err := buildAuditSinks(cfg.AuditSinks, cfg.Observability, appVersion)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: audit sinks init: %v\n", err)
 	}

@@ -566,7 +566,7 @@ func TestFindRegexLoc_PreservesOriginalWhenMatchable(t *testing.T) {
 func TestFindRegexMatch_NormalizedFallbackReturnsLowered(t *testing.T) {
 	original := "4111\u200B1111\u200B1111\u200B1111"
 	normalized := normalizeForTriage(original)
-	match, wasNormalized, ok := findRegexMatch(original, normalized, piiDataRegexes[2]) // CC regex
+	match, wasNormalized, ok := findRegexMatch(original, normalized, piiDataRegexes[1]) // CC regex
 	if !ok {
 		t.Fatalf("expected credit card match via normalized fallback; got none")
 	}

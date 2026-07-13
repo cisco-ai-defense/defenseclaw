@@ -1,0 +1,59 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from defenseclaw.platform_support import supported_connectors
+from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
+
+ROOT = Path(__file__).resolve().parents[2]
+INSTALL_SH = ROOT / "scripts" / "install.sh"
+INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+
+
+def test_sandbox_installer_fallback_uses_selected_release() -> None:
+    text = INSTALL_SH.read_text()
+    assert "raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" not in text
+    assert (
+        "raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh"
+        in text
+    )
+
+
+def test_release_installers_track_known_connector_choices() -> None:
+    sh_text = INSTALL_SH.read_text()
+    sh_match = re.search(r"readonly CONNECTOR_CHOICES=\(([^)]*)\)", sh_text)
+    assert sh_match is not None
+    shell_choices = tuple(sh_match.group(1).split())
+
+    ps_text = INSTALL_PS1.read_text()
+    ps_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", ps_text, re.DOTALL)
+    assert ps_match is not None
+    ps_choices = tuple(re.findall(r'"([^"]+)"', ps_match.group(1)))
+    hook_match = re.search(
+        r"\$HookConnectors = \$ConnectorChoices \| Where-Object "
+        r'\{ \$_ -notin @\((.*?)\) \}',
+        ps_text,
+        re.DOTALL,
+    )
+    assert hook_match is not None
+    hook_exclusions = tuple(re.findall(r'"([^"]+)"', hook_match.group(1)))
+
+    assert shell_choices == (*CONNECTOR_CHOICES, "none")
+
+    windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
+    assert ps_choices == (*windows_choices, "none")
+    assert hook_exclusions == ("codex", "claudecode", "none")
+    assert tuple(c for c in ps_choices if c not in hook_exclusions) == tuple(
+        c for c in windows_choices if c not in hook_exclusions
+    )

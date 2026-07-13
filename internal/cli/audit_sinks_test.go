@@ -34,7 +34,7 @@ func TestBuildAuditSinks_SkipsDisabledEntries(t *testing.T) {
 		},
 	}
 
-	mgr, err := buildAuditSinks(sinks, "test")
+	mgr, err := buildAuditSinks(sinks, config.ObservabilityConfig{}, "test")
 	if err != nil {
 		t.Fatalf("buildAuditSinks err=%v", err)
 	}
@@ -70,7 +70,7 @@ func TestBuildAuditSinks_AggregatesBadEntriesButKeepsGoodOnes(t *testing.T) {
 		},
 	}
 
-	mgr, err := buildAuditSinks(sinks, "v0")
+	mgr, err := buildAuditSinks(sinks, config.ObservabilityConfig{}, "v0")
 	if err == nil {
 		t.Fatal("expected aggregated error for broken sinks")
 	}
@@ -95,14 +95,14 @@ func TestBuildAuditSinks_UnknownKindReported(t *testing.T) {
 	sinks := []config.AuditSink{
 		{Name: "weird", Kind: "kafka_topic", Enabled: true},
 	}
-	_, err := buildAuditSinks(sinks, "v0")
+	_, err := buildAuditSinks(sinks, config.ObservabilityConfig{}, "v0")
 	if err == nil || !strings.Contains(err.Error(), "unknown sink kind") {
 		t.Fatalf("expected unknown-kind error, got %v", err)
 	}
 }
 
 func TestBuildAuditSinks_EmptyListReturnsEmptyManager(t *testing.T) {
-	mgr, err := buildAuditSinks(nil, "v0")
+	mgr, err := buildAuditSinks(nil, config.ObservabilityConfig{}, "v0")
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
@@ -126,7 +126,7 @@ func TestBuildAuditSinks_ResolvesEnvTokens(t *testing.T) {
 			},
 		},
 	}
-	mgr, err := buildAuditSinks(sinks, "v0")
+	mgr, err := buildAuditSinks(sinks, config.ObservabilityConfig{}, "v0")
 	if err != nil {
 		t.Fatalf("buildAuditSinks err=%v", err)
 	}
@@ -166,5 +166,75 @@ func TestDefaultSinkResource_EmptyVersionStillValid(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("missing service.name on fallback resource")
+	}
+}
+
+// connSinkPtr builds a *[]config.AuditSink override dimension for tests.
+func connSinkPtr(ss ...config.AuditSink) *[]config.AuditSink {
+	out := append([]config.AuditSink(nil), ss...)
+	return &out
+}
+
+// TestBuildAuditSinks_PerConnectorOverride asserts a connector's
+// observability override builds + registers its own sinks (routed only to
+// that connector) while the global sinks stay registered for everyone else.
+func TestBuildAuditSinks_PerConnectorOverride(t *testing.T) {
+	global := []config.AuditSink{
+		{
+			Name: "global-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+			OTLPLogs: &config.OTLPLogsSinkConfig{Endpoint: "127.0.0.1:4318", Protocol: "http", Insecure: true},
+		},
+	}
+	obs := config.ObservabilityConfig{
+		Connectors: map[string]config.PerConnectorObservability{
+			"codex": {AuditSinks: connSinkPtr(config.AuditSink{
+				Name: "codex-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+				OTLPLogs: &config.OTLPLogsSinkConfig{Endpoint: "127.0.0.1:4319", Protocol: "http", Insecure: true},
+			})},
+			// suppress: explicit empty override builds nothing but must still
+			// register the override so claudecode's events are dropped.
+			"claudecode": {AuditSinks: connSinkPtr()},
+		},
+	}
+	mgr, err := buildAuditSinks(global, obs, "v0")
+	if err != nil {
+		t.Fatalf("buildAuditSinks err=%v", err)
+	}
+	// 1 global + 1 codex = 2 sinks total (claudecode suppress adds none).
+	if mgr.Len() != 2 {
+		t.Fatalf("Len=%d want 2 (global + codex; claudecode suppressed)", mgr.Len())
+	}
+
+	names := map[string]bool{}
+	for _, s := range mgr.Sinks() {
+		names[s.Name()] = true
+	}
+	if !names["global-otlp"] || !names["codex-otlp"] {
+		t.Fatalf("expected global-otlp + codex-otlp registered, got %v", names)
+	}
+}
+
+// TestBuildAuditSinks_PerConnectorInheritUnset asserts a connector with no
+// audit_sinks dimension is NOT marked as override (it inherits global), so its
+// events keep flowing to the global sinks — the no-silent-drop default.
+func TestBuildAuditSinks_PerConnectorInheritUnset(t *testing.T) {
+	global := []config.AuditSink{
+		{
+			Name: "global-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+			OTLPLogs: &config.OTLPLogsSinkConfig{Endpoint: "127.0.0.1:4318", Protocol: "http", Insecure: true},
+		},
+	}
+	// hermes sets only webhooks → audit_sinks dimension nil → inherit.
+	obs := config.ObservabilityConfig{
+		Connectors: map[string]config.PerConnectorObservability{
+			"hermes": {Webhooks: &[]config.WebhookConfig{{URL: "https://h.example"}}},
+		},
+	}
+	mgr, err := buildAuditSinks(global, obs, "v0")
+	if err != nil {
+		t.Fatalf("buildAuditSinks err=%v", err)
+	}
+	if mgr.Len() != 1 {
+		t.Fatalf("Len=%d want 1 (only global; hermes audit_sinks unset = inherit)", mgr.Len())
 	}
 }

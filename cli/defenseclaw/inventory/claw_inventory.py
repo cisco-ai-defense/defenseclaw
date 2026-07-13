@@ -146,13 +146,14 @@ def build_claw_aibom(
         "errors": errors,
     }
     _attach_connector_paths(out, cfg, connector)
+    _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
     return out
 
 
 def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     """One INFO finding per category so audit logging stays compact."""
-    target = _expand(cfg.claw.config_file)
+    target = _aibom_target_path(inv, cfg)
     ts = datetime.now(timezone.utc)
     category_labels = [
         ("skills", "Skills"),
@@ -243,12 +244,28 @@ def enrich_with_policy(
             source_path = _inventory_source_path(
                 item, target_type, candidates, scan_entry, action_entry, cfg,
             )
+            # F-0423: prior scans are indexed by both full target and
+            # ``basename(target)``. A basename hit alone must NOT credit a
+            # *different* on-disk asset that merely shares the basename with
+            # a clean/already-scanned verdict. Once the item resolved to a
+            # concrete path, require the matched scan's target to refer to
+            # the same path; otherwise drop the scan so the asset is treated
+            # as unscanned rather than inheriting a stranger's result.
+            if scan_entry is not None and not _scan_entry_matches_path(scan_entry, source_path):
+                scan_entry = None
+            # F-0742: a ``source: user`` (or other operator/third-party)
+            # AIBOM row must not be silently blessed by the first-party
+            # allow list just because its resolved path lands under a
+            # first-party provenance dir. Suppress the first-party bypass
+            # for untrusted provenance so those rows still get scanned.
+            allow_first_party = _source_allows_first_party(item.get("source"))
             verdict, detail = _admission_verdict(
                 pe, target_type, policy_name,
                 scan_entry, action_entry,
                 fallback_actions,
                 policy_dir=policy_dir,
                 source_path=source_path,
+                allow_first_party=allow_first_party,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
@@ -289,6 +306,58 @@ def _fallback_actions_for(
     return skill_actions
 
 
+# F-0742: AIBOM rows carry a ``source`` describing where the asset came
+# from. Anything that is operator-, workspace-, or third-party-sourced is
+# untrusted provenance and must not be auto-allowed by the first-party
+# allow list (which is meant only for genuinely bundled first-party
+# assets). Unknown/empty sources keep the prior behaviour so we don't
+# regress legitimate first-party (e.g. bundled plugin) detection.
+_UNTRUSTED_INVENTORY_SOURCES: frozenset[str] = frozenset(
+    {"user", "workspace", "local", "project", "third-party", "thirdparty", "external"}
+)
+
+
+def _source_allows_first_party(source: Any) -> bool:
+    """Return ``False`` when an inventory ``source`` is untrusted provenance.
+
+    A ``source: user`` row (and similar operator/third-party provenance)
+    must not bypass scanning via the first-party allow list (F-0742).
+    """
+    return str(source or "").strip().lower() not in _UNTRUSTED_INVENTORY_SOURCES
+
+
+def _paths_equivalent(a: str, b: str) -> bool:
+    """True if two paths/identifiers refer to the same location.
+
+    Compares raw strings first (covers URLs / commands / identical paths)
+    then falls back to ``realpath`` so symlink or ``..`` differences don't
+    register as a spurious mismatch.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except (OSError, ValueError):
+        return False
+
+
+def _scan_entry_matches_path(scan_entry: dict[str, Any], source_path: str) -> bool:
+    """F-0423: gate a (possibly basename-indexed) scan hit by full path.
+
+    A scan entry selected via ``basename(target)`` must only be trusted for
+    the inventory item when the item resolved to the *same* path as the
+    scan target. When we have no independent path to compare (the source
+    path itself fell back to the scan target, or no path is known) we keep
+    the name/basename match so existing no-path inventories still resolve.
+    """
+    target = str(scan_entry.get("target") or "")
+    if not target or not source_path:
+        return True
+    return _paths_equivalent(source_path, target)
+
+
 def _admission_verdict(
     pe: Any,
     target_type: str,
@@ -298,6 +367,7 @@ def _admission_verdict(
     skill_actions: SkillActionsConfig,
     policy_dir: str = "",
     source_path: str = "",
+    allow_first_party: bool = True,
 ) -> tuple[str, str]:
     """Replicate admission ordering for offline inventory evaluation."""
     from defenseclaw.enforce.admission import evaluate_admission
@@ -312,6 +382,7 @@ def _admission_verdict(
         action_entry=action_entry,
         fallback_actions=skill_actions,
         include_quarantine=True,
+        allow_first_party=allow_first_party,
     )
     if decision.verdict == "scan":
         return "unscanned", "no scan result"
@@ -332,13 +403,22 @@ def _inventory_source_path(
 ) -> str:
     import os
 
-    if action_entry is not None and action_entry.source_path:
-        return action_entry.source_path
-
+    # F-0422: prefer the LIVE on-disk location advertised by the inventory
+    # item over the stored ``ActionEntry.source_path``. The stored path is
+    # recorded at allow/scan time and can be stale; returning it first hid a
+    # mismatch between where the asset actually lives now and the pinned
+    # path, letting admission honour a path-pinned allow for a *different*
+    # on-disk asset that merely shares the registered name. The live path is
+    # authoritative for the admission decision (it is what gets compared
+    # against the pin / first-party provenance); the stored path is only a
+    # fallback when the item advertises no concrete location.
     for key in ("path", "baseDir", "filePath", "scan_target", "url", "command"):
         raw = item.get(key)
         if raw:
             return str(raw)
+
+    if action_entry is not None and action_entry.source_path:
+        return action_entry.source_path
 
     if cfg is None:
         if scan_entry is not None and scan_entry.get("target"):
@@ -499,16 +579,9 @@ def format_claw_aibom_human(
 # ---------------------------------------------------------------------------
 # Polymorphic-path attachment
 #
-# These keys ride alongside the historical ``openclaw_config`` /
-# ``claw_home`` for back-compat (existing TUI / Go consumers still
-# parse those). New consumers should prefer ``connector_home`` /
-# ``connector_config_files`` / ``connector_skill_dirs`` /
-# ``connector_plugin_dirs`` / ``connector_mcp_files`` because they
-# carry the right value for non-OpenClaw connectors instead of an
-# ``~/.openclaw`` fallback that confuses operators running the CLI
-# against e.g. Codex or Claude Code. See ``internal/tui/inventory.go``
-# for the renderer side that picks the polymorphic value when it's
-# present and falls back to the legacy keys otherwise.
+# Connector-aware path metadata lives in ``connector_*`` fields. The
+# historical ``openclaw_config`` field is retained only for OpenClaw
+# inventories; non-OpenClaw JSON should not imply OpenClaw is installed.
 # ---------------------------------------------------------------------------
 
 def _attach_connector_paths(
@@ -517,9 +590,7 @@ def _attach_connector_paths(
     """Populate ``connector_*`` polymorphic path fields on *out*.
 
     Best-effort: any helper that raises is silently elided so a
-    misconfigured cfg never hijacks the inventory pipeline. The
-    legacy ``openclaw_config`` / ``claw_home`` keys remain populated
-    by the caller — this helper only ADDs polymorphic siblings.
+    misconfigured cfg never hijacks the inventory pipeline.
     """
     try:
         out["connector_home"] = connector_paths.connector_home(
@@ -548,6 +619,41 @@ def _attach_connector_paths(
         out["connector_mcp_files"] = list(_collect_mcp_config_files(connector, cfg))
     except Exception:
         out["connector_mcp_files"] = []
+
+
+def _sync_legacy_connector_paths(out: dict[str, Any]) -> None:
+    """Publish a connector-neutral primary config path.
+
+    ``openclaw_config`` predates multi-connector inventory and is now emitted
+    only for actual OpenClaw scans. ``connector_config`` is the neutral single
+    primary path; ``connector_config_files`` remains the full ordered list.
+    """
+    connector = str(out.get("connector") or out.get("claw_mode") or "").lower()
+    home = str(out.get("connector_home") or "")
+    if home:
+        out["claw_home"] = home
+
+    config_files = out.get("connector_config_files") or []
+    if isinstance(config_files, list) and config_files:
+        first = config_files[0]
+        if first:
+            out["connector_config"] = first
+            if connector == "openclaw":
+                out["openclaw_config"] = first
+    if connector != "openclaw":
+        out.pop("openclaw_config", None)
+
+
+def _aibom_target_path(inv: dict[str, Any], cfg: Config) -> str:
+    config_files = inv.get("connector_config_files") or []
+    if isinstance(config_files, list) and config_files:
+        first = config_files[0]
+        if first:
+            return str(first)
+    legacy = inv.get("openclaw_config")
+    if legacy:
+        return str(legacy)
+    return _expand(cfg.claw.config_file)
 
 
 def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
@@ -1400,6 +1506,8 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     * claudecode — ``~/.claude/settings.json`` ``tools`` field
     * codex      — ``~/.codex/config.toml`` ``[tools]`` table
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` (tools are inline)
+    * opencode   — ``opencode.json`` tool map + ``tools/`` JS/TS files
+    * antigravity — plugin/global slash command files as invokable tools
     """
     home = os.path.expanduser("~")
     name = (connector or "").lower()
@@ -1415,6 +1523,10 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
         return _tools_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
         )
+    if name == "opencode":
+        return _tools_from_opencode(cfg)
+    if name == "antigravity":
+        return _tools_from_antigravity(cfg)
     return []
 
 
@@ -1587,9 +1699,13 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
     if not os.path.isfile(path):
         return []
     try:
-        # Python 3.11+: tomllib in stdlib. Earlier we'd need tomli;
-        # the project pins 3.12 so this is safe.
-        import tomllib
+        # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
+        # advertised target) it is absent, so fall back to the tomli
+        # backport rather than silently dropping Codex tool definitions.
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
 
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -1636,6 +1752,165 @@ def _tools_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
                 "source": path,
             })
     return rows
+
+
+def _tools_from_opencode(cfg: Config) -> list[dict[str, Any]]:
+    workspace = _connector_workspace_dir(cfg)
+    rows: list[dict[str, Any]] = []
+    for path in connector_paths._opencode_config_paths(workspace):  # type: ignore[attr-defined]
+        rows.extend(_tools_from_opencode_config(path))
+    rows.extend(
+        _tools_from_script_dirs(
+            _opencode_tool_dirs(workspace),
+            kind="custom-tool",
+            extensions=(".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"),
+        )
+    )
+    return _dedup_tool_rows(rows)
+
+
+def _tools_from_antigravity(cfg: Config) -> list[dict[str, Any]]:
+    workspace = _connector_workspace_dir(cfg)
+    return _dedup_tool_rows(
+        _tools_from_script_dirs(
+            _antigravity_command_dirs(workspace),
+            kind="slash-command",
+            extensions=(".md", ".txt", ".json", ".yaml", ".yml"),
+        )
+    )
+
+
+def _connector_workspace_dir(cfg: Config) -> str:
+    try:
+        return cfg.connector_workspace_dir()
+    except Exception:
+        return ""
+
+
+def _opencode_tool_dirs(workspace_dir: str) -> list[str]:
+    home = os.path.expanduser("~")
+    custom = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
+    return _dedup_paths(
+        [
+            os.path.join(workspace_dir, ".opencode", "tools") if workspace_dir else "",
+            os.path.join(home, ".config", "opencode", "tools"),
+            os.path.join(os.path.expanduser(custom), "tools") if custom else "",
+        ]
+    )
+
+
+def _antigravity_command_dirs(workspace_dir: str) -> list[str]:
+    home = os.path.expanduser("~")
+    plugin_dirs = connector_paths.plugin_dirs("antigravity", workspace_dir=workspace_dir)
+    return _dedup_paths(
+        [
+            os.path.join(workspace_dir, ".agents", "commands") if workspace_dir else "",
+            os.path.join(workspace_dir, "_agents", "commands") if workspace_dir else "",
+            os.path.join(home, ".gemini", "antigravity-cli", "commands"),
+            *list(_plugin_component_dirs(plugin_dirs, "commands")),
+        ]
+    )
+
+
+def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
+    out: list[str] = []
+    for plugin_dir in plugin_dirs:
+        if not os.path.isdir(plugin_dir):
+            continue
+        try:
+            entries = sorted(os.listdir(plugin_dir))
+        except OSError:
+            continue
+        for entry in entries:
+            plugin_root = os.path.join(plugin_dir, entry)
+            if not os.path.isdir(plugin_root):
+                continue
+            component_dir = os.path.join(plugin_root, component)
+            if os.path.isdir(component_dir):
+                out.append(component_dir)
+    return _dedup_paths(out)
+
+
+def _tools_from_opencode_config(path: str) -> list[dict[str, Any]]:
+    data = connector_paths._load_json_or_jsonc(path)  # type: ignore[attr-defined]
+    if not isinstance(data, dict):
+        return []
+    raw_tools = data.get("tool")
+    if raw_tools is None:
+        raw_tools = data.get("tools")
+    if not isinstance(raw_tools, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for tool_id, body in raw_tools.items():
+        if isinstance(body, dict):
+            rows.append({
+                "id": str(tool_id),
+                "name": str(body.get("name") or tool_id),
+                "description": str(body.get("description", "")),
+                "source": path,
+                "kind": "config-tool",
+            })
+        else:
+            rows.append({
+                "id": str(tool_id),
+                "name": str(tool_id),
+                "source": path,
+                "kind": "config-tool",
+            })
+    return rows
+
+
+def _tools_from_script_dirs(
+    dirs: list[str],
+    *,
+    kind: str,
+    extensions: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for root in dirs:
+        if not os.path.isdir(root):
+            continue
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            full = os.path.join(root, entry)
+            if not os.path.isfile(full):
+                continue
+            stem, ext = os.path.splitext(entry)
+            if ext.lower() not in extensions:
+                continue
+            rows.append({
+                "id": stem,
+                "name": stem,
+                "source": full,
+                "kind": kind,
+            })
+    return rows
+
+
+def _dedup_tool_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = str(row.get("id") or row.get("name") or row.get("source") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def _dedup_paths(paths: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
 
 
 def _providers_from_env(
@@ -1787,6 +2062,7 @@ def _build_aibom_from_filesystem(
         "errors": errors,
     }
     _attach_connector_paths(out, cfg, connector)
+    _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
     return out
 
@@ -1860,10 +2136,33 @@ def _read_skill_description(path: str) -> str:
     """
     for marker in ("SKILL.md", "README.md"):
         marker_path = os.path.join(path, marker)
+        # F-0424: a skill directory is attacker-influenced content. A
+        # ``SKILL.md``/``README.md`` that is a symlink could point at an
+        # arbitrary readable file (``~/.ssh/id_rsa``, ``/etc/passwd``, …)
+        # and leak its first lines into the inventory ``description``.
+        # Reject symlinked markers and open with ``O_NOFOLLOW`` so the
+        # final component cannot be a symlink even under a TOCTOU race.
+        try:
+            if os.path.islink(marker_path):
+                continue
+        except OSError:
+            continue
         if not os.path.isfile(marker_path):
             continue
         try:
-            with open(marker_path, encoding="utf-8", errors="replace") as f:
+            fd = os.open(marker_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            continue
+        try:
+            reader = os.fdopen(fd, encoding="utf-8", errors="replace")
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            continue
+        try:
+            with reader as f:
                 text = f.read(2048)
         except OSError:
             continue

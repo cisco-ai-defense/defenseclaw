@@ -4,12 +4,13 @@ services:
   splunk:
     image: ${SPLUNK_IMAGE}
     env_file:
-      - ${SPLUNK_ENV_FILE:-../env/.env.example}
+      - ${SPLUNK_ENV_FILE:?set SPLUNK_ENV_FILE to a private environment file}
     ports:
-      # Bound to 0.0.0.0 so the runner host can expose dashboards and HEC when needed.
-      - "0.0.0.0:8000:8000"
-      - "0.0.0.0:8088:8088"
-      - "0.0.0.0:8089:8089"
+      # Bound to loopback by default. Override SPLUNK_HOST_BIND=0.0.0.0 in the
+      # shell only when the runner host must expose dashboards/HEC on the LAN.
+      - "${SPLUNK_HOST_BIND:-127.0.0.1}:8000:8000"
+      - "${SPLUNK_HOST_BIND:-127.0.0.1}:8088:8088"
+      - "${SPLUNK_HOST_BIND:-127.0.0.1}:8089:8089"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -37,6 +38,7 @@ services:
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
       S3_SSE: "${S3_SSE:-AES256}"
       SPLUNK_BASE_URL: "https://splunk:8089"
+      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD:?set the Splunk password}"
       SPLUNK_VERIFY_TLS: "false"
       TENANT_ID: "${TENANT_ID:-c3-demo-tenant}"
       WORKSPACE_ID: "${WORKSPACE_ID:-workspace-demo}"

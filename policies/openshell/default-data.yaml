@@ -16,8 +16,15 @@ network_policies:
       tls: skip
 
   allow_channels:
+    # F-0546: messaging egress (Slack/Discord/Telegram) is a prime
+    # exfiltration channel, so it is granted only to the known agent
+    # runtimes that legitimately drive channel integrations — not to every
+    # sandbox binary via a `/**` wildcard.
     binaries:
-    - path: /**
+    - path: /**/node
+    - path: /**/openclaw
+    - path: /**/claude
+    - path: /**/codex
     endpoints:
     - host: "**.telegram.org"
       ports: [443]

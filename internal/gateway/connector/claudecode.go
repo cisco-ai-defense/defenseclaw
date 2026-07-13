@@ -229,12 +229,18 @@ func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
 		},
 		HookScripts: hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
 
 func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 	return c.AgentPaths(opts).HookScripts
+}
+
+func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{{
+		Scope:       EnvScopeNone,
+		Description: "Hooks and native OpenTelemetry are written to Claude Code settings; no shell environment variables are required.",
+	}}
 }
 
 // HookCapabilities declares the Claude Code hook surface for the
@@ -459,6 +465,7 @@ var hookGroups = []struct {
 	{"InstructionsLoaded", "*", 30000},
 	{"UserPromptSubmit", "", 30000},
 	{"UserPromptExpansion", "", 30000},
+	{"MessageDisplay", "", 10000},
 	{"PreToolUse", "*", 30000},
 	{"PermissionRequest", "*", 30000},
 	{"PostToolUse", "*", 30000},

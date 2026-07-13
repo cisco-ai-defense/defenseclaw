@@ -12,6 +12,7 @@ package sinks
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -449,6 +450,69 @@ func TestDefaultSourceTypeOverrides_IsIsolated(t *testing.T) {
 	a["llm-judge-response"] = "mutated"
 	if b["llm-judge-response"] != "defenseclaw:judge" {
 		t.Fatalf("mutation leaked across callers: %q", b["llm-judge-response"])
+	}
+}
+
+// TestSplunkHECSink_TLSSecureByDefault pins the fix: a sink
+// built with the zero-value config (no VerifyTLS, no
+// InsecureSkipVerify) must construct an http.Client whose TLS
+// transport REJECTS unverified peers. Pre-fix the same shape silently
+// downgraded to InsecureSkipVerify=true and leaked the HEC token to
+// any MITM peer.
+func TestSplunkHECSink_TLSSecureByDefault(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      SplunkHECConfig
+		wantSkip bool
+	}{
+		{
+			name:     "zero-value defaults to verify",
+			cfg:      SplunkHECConfig{Endpoint: "https://splunk.example:8088", Token: "t"},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=true is honoured (no-op vs new default)",
+			cfg: SplunkHECConfig{
+				Endpoint: "https://splunk.example:8088", Token: "t", VerifyTLS: true,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=false is IGNORED (new default wins)",
+			cfg: SplunkHECConfig{
+				Endpoint: "https://splunk.example:8088", Token: "t", VerifyTLS: false,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "explicit insecure_skip_verify=true honoured (dev opt-out)",
+			cfg: SplunkHECConfig{
+				Endpoint: "https://splunk.example:8088", Token: "t", InsecureSkipVerify: true,
+			},
+			wantSkip: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink, err := NewSplunkHECSink(tt.cfg)
+			if err != nil {
+				t.Fatalf("NewSplunkHECSink err=%v", err)
+			}
+			defer sink.Close()
+			tr, ok := sink.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("unexpected transport type %T", sink.client.Transport)
+			}
+			if tr.TLSClientConfig == nil {
+				t.Fatal("TLSClientConfig must be set")
+			}
+			if got := tr.TLSClientConfig.InsecureSkipVerify; got != tt.wantSkip {
+				t.Fatalf("InsecureSkipVerify=%v want %v", got, tt.wantSkip)
+			}
+			if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+				t.Fatalf("MinVersion=%d must be >=TLS1.2", tr.TLSClientConfig.MinVersion)
+			}
+		})
 	}
 }
 

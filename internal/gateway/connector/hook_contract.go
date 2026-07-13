@@ -64,7 +64,13 @@ type HookContract struct {
 	Capabilities            HookCapability
 	SupportsTraceparent     bool
 	NativeOTLP              bool
-	Notes                   []string
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes: "extra"). Empty
+	// for flat-payload connectors. See HookProfile.ContentEnvelopeKey
+	// for the generic-decoder semantics and the no-recursive-scan
+	// rationale.
+	ContentEnvelopeKey string
+	Notes              []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -101,6 +107,10 @@ var builtinHookContracts = map[string][]HookContract{
 			"PreToolUse",
 			"PermissionRequest",
 			"PostToolUse",
+			"SubagentStart",
+			"SubagentStop",
+			"PreCompact",
+			"PostCompact",
 			"Stop",
 		},
 		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
@@ -136,6 +146,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"SessionStart",
 			"UserPromptSubmit",
 			"UserPromptExpansion",
+			"MessageDisplay",
 			"PreToolUse",
 			"PermissionRequest",
 			"PermissionDenied",
@@ -143,11 +154,15 @@ var builtinHookContracts = map[string][]HookContract{
 			"PostToolUseFailure",
 			"PostToolBatch",
 			"Stop",
+			"StopFailure",
+			"SubagentStart",
 			"SubagentStop",
 			"SessionEnd",
 			"InstructionsLoaded",
 			"ConfigChange",
+			"CwdChanged",
 			"FileChanged",
+			"WorktreeRemove",
 			"TaskCreated",
 			"TaskCompleted",
 			"TeammateIdle",
@@ -196,18 +211,47 @@ var builtinHookContracts = map[string][]HookContract{
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
 		ResponseFieldName:       "hook_output",
-		Events:                  []string{"pre_tool_call"},
-		AIDSurfaces:             []string{"tool_call"},
+		// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
+		// Only pre_tool_call can block; pre_llm_call injects context;
+		// the remaining events are observe-only telemetry decoded for
+		// inspection/audit. Order follows the agent lifecycle.
+		Events: []string{
+			"pre_llm_call",
+			"pre_tool_call",
+			"post_tool_call",
+			"post_llm_call",
+			"on_session_start",
+			"on_session_end",
+			"on_session_finalize",
+			"on_session_reset",
+			"subagent_start",
+			"subagent_stop",
+		},
+		// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
+		// session + subagent lifecycle → event_content (audit envelope).
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
 		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       false,
+			CanBlock:     true,
+			CanAskNative: false,
+			// Only pre_tool_call honors a blocking stdout response;
+			// pre_llm_call can inject context but cannot veto, and the
+			// post/session/subagent events are read-only on Hermes' side
+			// (their stdout is ignored). Hermes never blocks on exit code
+			// or hook timeout, so SupportsFailClosed stays false.
 			BlockEvents:        []string{"pre_tool_call"},
 			SupportsFailClosed: false,
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		// Hermes nests inspectable content (prompt, tool result, model
+		// response, child summary) inside the per-event `extra` object;
+		// the generic decoder opens this one declared envelope when
+		// every top-level content lookup misses.
+		ContentEnvelopeKey: "extra",
 		Notes: []string{
-			"Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks.",
+			"Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event `extra` envelope; the generic decoder lifts those fields into the canonical lifecycle.",
+			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; hermes remains live-smoke pending (docs/CONNECTOR-MATRIX.md).",
+			"Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; otherwise Hermes prompts for per-(event,command) consent on first use and silently skips unaccepted hooks. Setup writes hooks_auto_accept so all events register, and the managed-backup heals it.",
 		},
 	}},
 	"cursor": {{
@@ -219,13 +263,27 @@ var builtinHookContracts = map[string][]HookContract{
 		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{
+			"sessionStart",
+			"sessionEnd",
 			"preToolUse",
+			"postToolUse",
+			"postToolUseFailure",
+			"subagentStart",
+			"subagentStop",
 			"beforeShellExecution",
+			"afterShellExecution",
 			"beforeMCPExecution",
+			"afterMCPExecution",
 			"beforeReadFile",
+			"afterFileEdit",
 			"beforeTabFileRead",
+			"afterTabFileEdit",
 			"beforeSubmitPrompt",
+			"preCompact",
 			"stop",
+			"afterAgentResponse",
+			"afterAgentThought",
+			"workspaceOpen",
 		},
 		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
 		Capabilities: HookCapability{
@@ -264,9 +322,16 @@ var builtinHookContracts = map[string][]HookContract{
 		Events: []string{
 			"pre_user_prompt",
 			"pre_read_code",
+			"post_read_code",
 			"pre_write_code",
+			"post_write_code",
 			"pre_run_command",
+			"post_run_command",
 			"pre_mcp_tool_use",
+			"post_mcp_tool_use",
+			"post_cascade_response",
+			"post_cascade_response_with_transcript",
+			"post_setup_worktree",
 		},
 		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
 		Capabilities: HookCapability{
@@ -290,11 +355,17 @@ var builtinHookContracts = map[string][]HookContract{
 		HookConfigPathTemplates: []string{"~/.gemini/settings.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{
+			"SessionStart",
 			"BeforeAgent",
 			"BeforeModel",
+			"BeforeToolSelection",
 			"BeforeTool",
 			"AfterTool",
+			"AfterModel",
 			"AfterAgent",
+			"PreCompress",
+			"Notification",
+			"SessionEnd",
 		},
 		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
 		Capabilities: HookCapability{
@@ -325,35 +396,31 @@ var builtinHookContracts = map[string][]HookContract{
 		HookConfigPathTemplates: []string{"~/.copilot/hooks/defenseclaw.json", "<workspace>/.github/hooks/defenseclaw.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{
+			"sessionStart",
+			"sessionEnd",
+			"userPromptSubmitted",
 			"preToolUse",
-			"PreToolUse",
+			"postToolUse",
 			"permissionRequest",
-			"PermissionRequest",
 			"agentStop",
-			"Stop",
+			"subagentStart",
 			"subagentStop",
-			"SubagentStop",
 			"postToolUseFailure",
-			"PostToolUseFailure",
+			"errorOccurred",
+			"preCompact",
 			"notification",
-			"Notification",
 		},
 		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
 		Capabilities: HookCapability{
 			CanBlock:     true,
 			CanAskNative: true,
-			AskEvents:    []string{"preToolUse", "PreToolUse"},
+			AskEvents:    []string{"preToolUse"},
 			BlockEvents: []string{
 				"preToolUse",
-				"PreToolUse",
 				"permissionRequest",
-				"PermissionRequest",
 				"agentStop",
-				"Stop",
 				"subagentStop",
-				"SubagentStop",
 				"postToolUseFailure",
-				"PostToolUseFailure",
 			},
 			SupportsFailClosed: false,
 			Scope:              "user,workspace",
@@ -445,6 +512,79 @@ var builtinHookContracts = map[string][]HookContract{
 			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
 			"Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
 			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts.",
+		},
+	}},
+	"opencode": {{
+		Connector:               "opencode",
+		ContractID:              "opencode-hooks-v1",
+		MinAgentVersion:         "0.0.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
+		ResponseFieldName:       "hook_output",
+		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
+		// bridge plugin wires tool.execute.before (block) and
+		// tool.execute.after (observe). opencode has no hook-driven ask
+		// or context-injection channel, so blocking is the only active
+		// verdict and it is delivered by throwing inside the plugin.
+		Events: []string{
+			"session.created", "session.updated", "session.status", "session.idle",
+			"session.compacted", "session.error", "session.deleted",
+			"tool.execute.before", "tool.execute.after",
+		},
+		AIDSurfaces: []string{"tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents:  []string{"tool.execute.before"},
+			// The thrown Error is authoritative — opencode aborts the
+			// tool — so the bridge can fail closed on an unreachable
+			// gateway when the operator selects fail-closed.
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		// The JS bridge POSTs JSON over fetch and does not propagate the
+		// W3C traceparent the shell hooks forward via _hardening.sh.
+		SupportsTraceparent: false,
+		Notes: []string{
+			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
+			"Block is the only active verdict: opencode has no hook-driven ask or context-injection surface. tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+			"Contract is unbounded (min 0.0.0): the plugin hook API is documented as a stable contract rather than a versioned floor, matching the OpenHands precedent.",
+		},
+	}},
+	"omnigent": {{
+		Connector:               "omnigent",
+		ContractID:              "omnigent-custom-policy-v1",
+		MinAgentVersion:         "0.0.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v1",
+		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
+		ResponseFieldName:       "",
+		Events: []string{
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PostToolUse",
+			"AfterAgentResponse",
+			"BeforeModel",
+			"AfterModel",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+		Capabilities: HookCapability{
+			CanBlock:           true,
+			CanAskNative:       true,
+			AskEvents:          []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"},
+			BlockEvents:        []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		Notes: []string{
+			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
+			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
+			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-action confirm verdicts use DefenseClaw's explicit fallback.",
+			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
+			"Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require its optional tracing extra.",
 		},
 	}},
 }
@@ -597,6 +737,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
+	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
 
 	contractCaps := contract.Capabilities
 	if profile.Capabilities.ConfigPath != "" && contractCaps.ConfigPath == "" {

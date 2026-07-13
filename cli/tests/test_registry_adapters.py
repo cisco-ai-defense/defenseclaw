@@ -165,7 +165,7 @@ def _stub_resolver():
 class TestClawhubAdapter(unittest.TestCase):
     """Verifies the npm-metadata path produces a valid Manifest and that
     the SSRF / size guards are now wired through (they were skipped in
-    the previous direct-requests.get implementation)."""
+    The previous direct-requests.get implementation)."""
 
     def _src(self, url: str = "") -> RegistrySource:
         return RegistrySource(id="ch", kind="clawhub", url=url, content="skill")

@@ -20,12 +20,16 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.config import RegistrySource
-from defenseclaw.models import Event
+from defenseclaw.db import Store
+from defenseclaw.models import Counts, Event
 from defenseclaw.tui.app import (
+    _DEFENSECLAW_LOGO,
     DefenseClawTUI,
+    _catalog_panel_invalidated_by_command,
     _enforcement_label,
     _event_histogram,
     _fetch_ai_usage,
+    _overview_config,
     _policy_posture,
 )
 from defenseclaw.tui.executor import CommandEvent
@@ -51,13 +55,16 @@ from defenseclaw.tui.panels.overview import (
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
+from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
+from defenseclaw.tui.services.tui_state import STATE_FILENAME
+from defenseclaw.tui.widgets.action_menu import ActionMenu
 from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static
+from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
 
 @pytest.mark.asyncio
@@ -70,9 +77,206 @@ async def test_textual_shell_starts_on_overview() -> None:
         assert app.active_panel == "overview"
         assert "Overview" in app.body_text
         assert "SERVICES" in app.body_text
+        assert "OBSERVABILITY DESTINATIONS" in app.body_text
         assert "SCANNERS" in app.body_text
         assert "backend=textual" in app.status_text
         assert app.hint_text
+
+
+@pytest.mark.asyncio
+async def test_overview_renders_observability_destination_panel(tmp_path) -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
+    overview.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destinations": [
+                        {
+                            "name": "galileo",
+                            "preset": "galileo",
+                            "enabled": True,
+                            "signals": "traces",
+                            "endpoint": "https://api.example.test/otel/traces",
+                            "routing": {"accepted": 3, "dropped": 1},
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        console = Console(width=170, height=80, record=True)
+        console.print(app._overview_renderable())
+        rendered = console.export_text()
+
+    assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
+    assert "Galileo" in rendered
+    assert "traces" in rendered
+    assert "75.0% (3/4)" in rendered
+    assert "api.example.test" in rendered
+    assert "/otel/traces" in rendered
+
+
+@pytest.mark.asyncio
+async def test_overview_scroll_keys_move_body_scroll_container() -> None:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(120, 18)) as pilot:
+        await pilot.pause()
+        scroller = app.query_one("#body-scroll", VerticalScroll)
+        assert scroller.max_scroll_y > 0
+
+        await pilot.press("j")
+        await pilot.pause()
+        assert scroller.scroll_y >= 5
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert scroller.scroll_y == scroller.max_scroll_y
+
+        assert app._last_body_signature is not None
+        render_calls = 0
+        original_renderable = app._overview_renderable
+
+        def counted_renderable():
+            nonlocal render_calls
+            render_calls += 1
+            return original_renderable()
+
+        app._overview_renderable = counted_renderable  # type: ignore[method-assign]
+        app._mark_overview_scroll_activity()
+        app._render_chrome()
+        assert render_calls == 0
+
+        refresh_calls = 0
+
+        def counted_refresh() -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+
+        metric_refresh_calls = 0
+
+        def counted_metric_refresh() -> None:
+            nonlocal metric_refresh_calls
+            metric_refresh_calls += 1
+
+        app._refresh_models_from_disk = counted_refresh  # type: ignore[method-assign]
+        app._render_overview_metrics = counted_metric_refresh  # type: ignore[method-assign]
+        app._overview_last_scroll_activity_at = 0.0
+        app._overview_sampled_refresh_scheduled = True
+        app._periodic_refresh()
+        assert refresh_calls == 0
+        assert metric_refresh_calls == 1
+
+        scroller.scroll_to(y=0, animate=False, immediate=True)
+        app._periodic_refresh()
+        assert refresh_calls == 0
+        assert metric_refresh_calls == 2
+
+        sampled_render_calls = 0
+
+        def counted_sampled_render() -> None:
+            nonlocal sampled_render_calls
+            sampled_render_calls += 1
+
+        sampled_timer_calls = 0
+
+        def immediate_sampled_timer(_delay: float, callback, **_kwargs: object) -> object:
+            nonlocal sampled_timer_calls
+            sampled_timer_calls += 1
+            callback()
+            return object()
+
+        app._render_chrome = counted_sampled_render  # type: ignore[method-assign]
+        app.set_timer = immediate_sampled_timer  # type: ignore[method-assign]
+        # Keep the mount-time interval from racing this direct sampler assertion on slow CI.
+        app._periodic_refresh_running = True  # noqa: SLF001
+        app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - isolate direct sampler assertions.
+
+        scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        await pilot.pause()
+        app._schedule_overview_sampled_refresh()
+        await pilot.pause()
+        assert sampled_timer_calls == 0
+        assert sampled_render_calls == 0
+
+        scroller.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+        app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - previous blocked call did not render.
+        app._overview_last_scroll_activity_at = 0.0
+        app._schedule_overview_sampled_refresh()
+        await pilot.pause()
+        assert sampled_timer_calls == 1
+        assert sampled_render_calls == 1
+
+
+def test_overview_body_signature_ignores_clock_only_labels() -> None:
+    app = DefenseClawTUI()
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=12s\nCodex 0s ago\nDoctor 1m ago\nCalls 6"
+    first = app._overview_body_signature()
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=13s\nCodex 1s ago\nDoctor 2m ago\nCalls 6"
+    assert app._overview_body_signature() == first
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=13s\nCodex 1s ago\nDoctor 2m ago\nCalls 7"
+    assert app._overview_body_signature() != first
+
+
+@pytest.mark.asyncio
+async def test_textual_shell_ignores_persisted_last_panel_on_startup(tmp_path) -> None:
+    (tmp_path / STATE_FILENAME).write_text(
+        json.dumps({"active_panel": "logs", "theme": ""}),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        assert app.state.active_panel == "logs"
+        assert app.active_panel == "overview"
+        assert app.query_one("#tabs").active == "tab-overview"
+        assert "Overview" in app.body_text
+
+
+@pytest.mark.asyncio
+async def test_stale_tab_activation_does_not_bounce_back_after_rapid_clicks() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        tabs = app.query_one("#tabs")
+
+        # Simulate rapid mouse clicks where Textual's tab strip has already
+        # moved to Logs, but the older Alerts activation is delivered first.
+        tabs.active = "tab-logs"
+        app._on_tab_activated(SimpleNamespace(tab=SimpleNamespace(id="tab-alerts")))  # noqa: SLF001
+        app._on_tab_activated(SimpleNamespace(tab=SimpleNamespace(id="tab-logs")))  # noqa: SLF001
+        await pilot.pause()
+
+        assert app.active_panel == "logs"
+        assert tabs.active == "tab-logs"
 
 
 @pytest.mark.asyncio
@@ -375,6 +579,28 @@ async def test_mouse_click_switches_top_level_tabs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_policy_tab_is_removed() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+
+        tabs = app.query_one("#tabs", Tabs)
+        assert tabs.get_tab("tab-tools") is None
+        assert all("Tool Policy" not in str(tab.label) for tab in tabs.query(Tab))
+
+        await pilot.press("T")
+        await pilot.pause()
+
+        assert app.active_panel == "overview"
+
+        app.action_switch_panel("tools")
+        await pilot.pause()
+
+        assert app.active_panel == "overview"
+
+
+@pytest.mark.asyncio
 async def test_mouse_click_opens_command_drawer() -> None:
     app = DefenseClawTUI()
 
@@ -394,7 +620,7 @@ async def test_command_palette_suggestions_tab_complete_and_click_execute() -> N
     app = DefenseClawTUI()
     seen: dict[str, tuple[str, tuple[str, ...]]] = {}
 
-    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "") -> None:
+    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "", **_kwargs: object) -> None:
         seen["command"] = (binary, args)
         seen["display"] = ("display", (display_name,))
 
@@ -449,7 +675,10 @@ async def test_activity_panel_uses_activity_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_mode_key_opens_native_picker_and_preview() -> None:
+async def test_overview_mode_key_opens_native_picker_and_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The untrusted-binary routing scans the live host; force "trusted" so the
+    # picker path under test stays hermetic regardless of local installs.
+    monkeypatch.setattr("defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: None)
     app = DefenseClawTUI()
 
     async with app.run_test(size=(150, 44)) as pilot:
@@ -467,7 +696,8 @@ async def test_overview_mode_key_opens_native_picker_and_preview() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_mode_picker_mouse_click_opens_preview() -> None:
+async def test_overview_mode_picker_mouse_click_opens_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: None)
     app = DefenseClawTUI()
 
     async with app.run_test(size=(150, 44)) as pilot:
@@ -479,6 +709,29 @@ async def test_overview_mode_picker_mouse_click_opens_preview() -> None:
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
         assert "defenseclaw setup codex --yes" in screen.preview.masked_display
+
+
+@pytest.mark.asyncio
+async def test_overview_mode_picker_routes_untrusted_binary_to_trusted_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inverse of the hermetic stubs above: when the connector binary IS in an
+    # untrusted directory, setup must route into the Trusted Paths editor
+    # instead of dispatching a setup the trust gate would refuse.
+    monkeypatch.setattr(
+        "defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: "/opt/untrusted/bin"
+    )
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.press("m")
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        screen = app.screen_stack[-1]
+        assert screen.__class__.__name__ == "TrustedPathsEditorScreen"
+        assert "/opt/untrusted/bin" in screen._context_text
 
 
 @pytest.mark.asyncio
@@ -519,7 +772,10 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         assert app.screen_stack[-1].__class__.__name__ == "RedactionToggleScreen"
         assert app.screen_stack[-1].model.title == "Redaction kill-switch"
 
-        await pilot.press("enter")
+        await pilot.press("enter")  # redaction-off is a danger action -> arms only
+        await pilot.pause()
+        assert not seen  # not run yet; the gate requires a second confirm
+        await pilot.press("enter")  # confirms
         await pilot.pause()
         assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
         assert config.privacy.disable_redaction is True
@@ -541,8 +797,9 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "UninstallScreen"
 
-        await pilot.press("a")
-        await pilot.press("enter")
+        await pilot.press("a")  # select the wipe row (danger)
+        await pilot.press("enter")  # arms only
+        await pilot.press("enter")  # confirms
         await pilot.pause()
         assert seen[-1] == ("defenseclaw", ("uninstall", "--all", "--yes"))
 
@@ -674,6 +931,7 @@ async def test_activity_forwards_input_to_running_command() -> None:
 @pytest.mark.asyncio
 async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
     alerts = AlertsPanelModel()
+    alerts.show_all_severities = True
     alerts.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", details="token"),
@@ -788,6 +1046,7 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
 @pytest.mark.asyncio
 async def test_alerts_table_row_click_updates_cursor() -> None:
     alerts = AlertsPanelModel()
+    alerts.show_all_severities = True
     alerts.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
@@ -930,6 +1189,139 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catalog_control_action_uses_visible_table_cursor() -> None:
+    skills = SkillsPanelModel(connector="codex")
+    skills.apply_loaded(
+        [
+            SkillRow(name="alpha", status="active"),
+            SkillRow(name="beta", status="active"),
+        ]
+    )
+    app = DefenseClawTUI(skills_model=skills)
+    captured: list[tuple[str, object]] = []
+
+    def fake_apply_catalog_action(panel: str, action: object) -> bool:
+        captured.append((panel, action))
+        return True
+
+    app._apply_catalog_action = fake_apply_catalog_action  # type: ignore[method-assign]
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("3")
+        await pilot.pause()
+
+        table = app.query_one("#panel-table", DataTable)
+        table.move_cursor(row=1, column=0, animate=False)
+        skills.set_cursor(0)
+
+        app._handle_catalog_control("skills", "skills-block")  # noqa: SLF001
+
+    assert skills.cursor == 1
+    assert captured
+    panel, action = captured[0]
+    assert panel == "skills"
+    assert action.intent.args == ("skill", "block", "beta")
+
+
+@pytest.mark.asyncio
+async def test_successful_skill_policy_mutation_reloads_loaded_skills_panel() -> None:
+    skills = SkillsPanelModel(connector="hermes")
+    skills.apply_loaded(
+        [
+            SkillRow(
+                name="clean-skill",
+                status="blocked",
+                actions="blocked",
+                install_action="block",
+            )
+        ]
+    )
+    skills.detail_open = True
+    app = DefenseClawTUI(skills_model=skills)
+    app.active_panel = "skills"
+    reloaded: list[str] = []
+
+    async def fake_load_catalog(panel: str) -> None:
+        reloaded.append(panel)
+        skills.apply_loaded(
+            [
+                SkillRow(
+                    name="clean-skill",
+                    status="allowed",
+                    actions="allowed",
+                    install_action="allow",
+                )
+            ]
+        )
+
+    app._load_catalog_model = fake_load_catalog  # type: ignore[method-assign]
+
+    await app._handle_successful_command("defenseclaw", ("skill", "allow", "clean-skill"))  # noqa: SLF001
+
+    assert reloaded == ["skills"]
+    assert skills.selected() is not None
+    assert skills.selected().status == "allowed"
+    assert skills.selected().actions == "allowed"
+    assert "allowed" in app._detail_text()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_successful_tool_policy_mutation_refreshes_and_rerenders_loaded_tools_panel() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.entries = [
+                SimpleNamespace(
+                    target_name="@codex/write_file",
+                    actions=SimpleNamespace(install="block"),
+                    reason="manual block",
+                    updated_at=None,
+                )
+            ]
+
+        def list_actions_by_type(self, target_type: str) -> list[SimpleNamespace]:
+            assert target_type == "tool"
+            return self.entries
+
+    store = Store()
+    tools = ToolsPanelModel(store)
+    tools.show_connector_column = True
+    tools.set_connector_filter("codex")
+    tools.refresh()
+    app = DefenseClawTUI(tools_model=tools)
+    app.active_panel = "tools"
+    rendered: list[bool] = []
+
+    def fake_render_chrome() -> None:
+        rendered.append(True)
+
+    app._render_chrome = fake_render_chrome  # type: ignore[method-assign]
+    store.entries = [
+        SimpleNamespace(
+            target_name="@codex/write_file",
+            actions=SimpleNamespace(install="allow"),
+            reason="manual allow",
+            updated_at=None,
+        )
+    ]
+
+    await app._handle_successful_command("defenseclaw", ("tool", "allow", "write_file"))  # noqa: SLF001
+
+    assert rendered == [True]
+    assert tools.selected() is not None
+    assert tools.selected().connector == "codex"
+    assert tools.selected().status == "allowed"
+    assert tools.selected().dispatch_target == "write_file"
+
+
+def test_catalog_mutation_command_classifier_ignores_read_only_commands() -> None:
+    assert _catalog_panel_invalidated_by_command(("skill", "allow", "clean-skill")) == "skills"
+    assert _catalog_panel_invalidated_by_command(("skill", "list", "--json")) is None
+    assert _catalog_panel_invalidated_by_command(("mcp", "set", "filesystem")) == "mcps"
+    assert _catalog_panel_invalidated_by_command(("plugin", "info", "x")) is None
+    assert _catalog_panel_invalidated_by_command(("tool", "block", "write_file")) == "tools"
+
+
+@pytest.mark.asyncio
 async def test_logs_and_audit_panels_render_worker_models() -> None:
     logs = LogsPanelModel()
     logs.lines["gateway"] = ["event tick seq=1", "error failed"]
@@ -953,6 +1345,68 @@ async def test_logs_and_audit_panels_render_worker_models() -> None:
         assert app.active_panel == "audit"
         assert app.query_one("#panel-table", DataTable).row_count == 1
         assert "events recorded" in app.body_text or "shown of 1 events" in app.body_text
+
+
+@pytest.mark.asyncio
+async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
+    """Cursor movement must not reconstruct a large unchanged log table."""
+
+    logs = LogsPanelModel()
+    logs.filter_mode = ""
+    logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
+    app = DefenseClawTUI(logs_model=logs)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("8")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        row_objects = tuple(table.rows.values())
+
+        logs.cursor["gateway"] = 1
+        app._render_chrome()  # noqa: SLF001 - exercise the render fast path directly.
+
+        assert tuple(table.rows.values()) == row_objects
+        assert all(
+            current is previous
+            for current, previous in zip(table.rows.values(), row_objects, strict=True)
+        )
+        assert table.cursor_row == 1
+
+
+@pytest.mark.asyncio
+async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
+    """A new tail line should retain existing DataTable row objects."""
+
+    logs = LogsPanelModel()
+    logs.filter_mode = ""
+    logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
+    app = DefenseClawTUI(logs_model=logs)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("8")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        previous_second_row = list(table.rows.values())[1]
+        logs.set_cursor(50)
+        app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
+        assert table.cursor_row == 50
+        restore_flags: list[bool] = []
+        update_delta = app._update_panel_table_delta  # noqa: SLF001
+
+        def tracked_update_delta(*args: object) -> bool:
+            restore_flags.append(app._restoring_table_cursor)  # noqa: SLF001
+            return update_delta(*args)  # type: ignore[arg-type]
+
+        app._update_panel_table_delta = tracked_update_delta  # type: ignore[method-assign]  # noqa: SLF001
+
+        logs.lines["gateway"] = logs.lines["gateway"][1:] + ["error row=new"]
+        app._render_chrome()  # noqa: SLF001 - deterministic stream refresh.
+
+        assert restore_flags == [True]
+        assert table.cursor_row == 50
+        assert table.row_count == 200
+        assert list(table.rows.values())[0] is previous_second_row
+        assert str(table.get_cell_at((199, 0))) == "error row=new"
 
 
 @pytest.mark.asyncio
@@ -1048,7 +1502,7 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
 async def test_successful_first_run_command_deactivates_embedded_setup() -> None:
     app = DefenseClawTUI(first_run=True)
 
-    async def fake_run(binary: str, args: tuple[str, ...]):
+    async def fake_run(binary: str, args: tuple[str, ...], **_kwargs: object):
         yield CommandEvent("start", " ".join((binary, *args)))
         yield CommandEvent("done", exit_code=0, duration=0.01)
 
@@ -1109,6 +1563,9 @@ async def test_audit_export_writes_json_without_command_preview(tmp_path) -> Non
         exported = tmp_path / "defenseclaw-audit-export.json"
         assert exported.exists()
         assert "skill://alpha" in exported.read_text(encoding="utf-8")
+        # F-0781: audit exports can carry sensitive identifiers, so the file
+        # must be owner-only rather than world-readable under the umask.
+        assert (exported.stat().st_mode & 0o777) == 0o600
         assert "Audit exported" in app.status_text
         assert app.screen_stack[-1].__class__.__name__ != "CommandPreviewScreen"
 
@@ -1203,6 +1660,127 @@ async def test_ai_usage_poll_fans_out_to_overview_and_ai_panel(monkeypatch: pyte
         assert overview.ai_usage is snapshot
         assert ai.snapshot is snapshot
         assert "1 active" in overview.ai_discovery_box().summary_parts
+
+
+def test_scheduled_background_polls_are_single_flight(tmp_path) -> None:
+    config = SimpleNamespace(
+        data_dir=str(tmp_path),
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token"),
+    )
+    app = DefenseClawTUI(config=config)
+    scheduled: list[object] = []
+
+    def fake_run_worker(coro: object, **_kwargs: object) -> None:
+        scheduled.append(coro)
+
+    def close_last_scheduled() -> None:
+        close = getattr(scheduled.pop(), "close", None)
+        if callable(close):
+            close()
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app._schedule_health_poll()  # noqa: SLF001
+    app._schedule_health_poll()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._health_poll_running is True  # noqa: SLF001
+    close_last_scheduled()
+    app._health_poll_running = False  # noqa: SLF001
+
+    app._schedule_ai_usage_poll()  # noqa: SLF001
+    app._schedule_ai_usage_poll()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._ai_usage_poll_running is True  # noqa: SLF001
+    close_last_scheduled()
+    app._ai_usage_poll_running = False  # noqa: SLF001
+
+    app._schedule_credentials_refresh()  # noqa: SLF001
+    app._schedule_credentials_refresh()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._credentials_refresh_running is True  # noqa: SLF001
+    close_last_scheduled()
+
+
+@pytest.mark.asyncio
+async def test_background_poll_wrappers_clear_single_flight_flags(tmp_path) -> None:
+    config = SimpleNamespace(
+        data_dir=str(tmp_path),
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token"),
+    )
+    app = DefenseClawTUI(config=config)
+    calls: list[str] = []
+
+    async def fake_health() -> None:
+        calls.append("health")
+
+    async def fake_ai_usage(*, force_render: bool) -> None:
+        calls.append(f"ai:{force_render}")
+
+    async def fake_credentials() -> None:
+        calls.append("credentials")
+
+    app._poll_health = fake_health  # type: ignore[method-assign]
+    app._poll_ai_usage = fake_ai_usage  # type: ignore[method-assign]
+    app._load_setup_credentials = fake_credentials  # type: ignore[method-assign]
+
+    app._health_poll_running = True  # noqa: SLF001
+    await app._poll_health_once()  # noqa: SLF001
+    assert app._health_poll_running is False  # noqa: SLF001
+
+    app._ai_usage_poll_running = True  # noqa: SLF001
+    await app._poll_ai_usage_once(force_render=False)  # noqa: SLF001
+    assert app._ai_usage_poll_running is False  # noqa: SLF001
+
+    app._credentials_refresh_running = True  # noqa: SLF001
+    await app._refresh_credentials_once()  # noqa: SLF001
+    assert app._credentials_refresh_running is False  # noqa: SLF001
+    assert calls == ["health", "ai:False", "credentials"]
+
+
+def test_slow_refresh_scheduler_is_single_flight(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    scheduled: list[object] = []
+
+    def fake_run_worker(coro: object, **_kwargs: object) -> None:
+        scheduled.append(coro)
+
+    def close_last_scheduled() -> None:
+        close = getattr(scheduled.pop(), "close", None)
+        if callable(close):
+            close()
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app._schedule_slow_refresh()  # noqa: SLF001
+    app._schedule_slow_refresh()  # noqa: SLF001
+
+    assert len(scheduled) == 1
+    assert app._slow_refresh_running is True  # noqa: SLF001
+    close_last_scheduled()
+
+
+@pytest.mark.asyncio
+async def test_slow_refresh_uses_tools_store_refresh_without_catalog_subprocess(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    app.tools_model.loaded = True
+    refreshed: list[str] = []
+    loaded: list[str] = []
+
+    def fake_tools_refresh() -> None:
+        refreshed.append("tools")
+
+    async def fake_load_catalog(panel: str) -> None:
+        loaded.append(panel)
+
+    app.tools_model.refresh = fake_tools_refresh  # type: ignore[method-assign]
+    app._load_catalog_model = fake_load_catalog  # type: ignore[method-assign]
+
+    app._slow_refresh_running = True  # noqa: SLF001
+    await app._run_slow_refresh()  # noqa: SLF001
+
+    assert refreshed == ["tools"]
+    assert loaded == []
+    assert app._slow_refresh_running is False  # noqa: SLF001
 
 
 def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
@@ -1678,7 +2256,7 @@ async def test_activity_rerun_button_replays_last_command(monkeypatch) -> None:
     app = DefenseClawTUI()
     seen: dict[str, tuple[str, tuple[str, ...]]] = {}
 
-    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "") -> None:
+    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "", **_kwargs: object) -> None:
         seen["command"] = (binary, args)
 
     async with app.run_test(size=(180, 50)) as pilot:
@@ -1770,6 +2348,9 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "defenseclaw doctor" in contents
         assert "checking docker daemon" in contents
         assert "ok" in contents
+        # F-0782: activity output frequently contains tokens/secrets, so the
+        # saved file must be owner-only (0600), not world-readable.
+        assert (saved[0].stat().st_mode & 0o777) == 0o600
 
 
 # ---------------------------------------------------------------------------
@@ -2186,6 +2767,77 @@ def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -
     # (otherwise we'd close the live store we just installed).
     app._refresh_cached_config()  # noqa: SLF001
     assert new_store.closed is False, "live store was closed by no-op reload"
+
+
+def test_startup_binds_alerts_model_to_audit_store(monkeypatch, tmp_path) -> None:
+    """Startup alerts refresh must use the summary reader, not a second DB scan."""
+
+    store = object()
+    monkeypatch.setattr("defenseclaw.tui.app._audit_store", lambda _cfg: store)
+
+    app = DefenseClawTUI(
+        config=SimpleNamespace(audit_db=str(tmp_path / "audit.sqlite")),
+        data_dir=tmp_path,
+    )
+
+    assert app.alerts_model.store is store
+
+
+def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_path) -> None:
+    """Refreshing alerts should use actionable summaries and cheap counts."""
+
+    class FakeStore:
+        def list_actionable_alert_summaries(self, limit: int) -> list[AlertEvent]:
+            assert limit == 500
+            return [
+                AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
+            ]
+
+        def list_alert_summaries(self, _limit: int) -> list[AlertEvent]:
+            raise AssertionError("default refresh should use actionable summaries")
+
+        def list_alerts(self, _limit: int) -> list[AlertEvent]:
+            raise AssertionError("refresh should use list_alert_summaries")
+
+        def get_counts(self) -> object:
+            raise AssertionError("refresh should not scan counts")
+
+        def get_enforcement_counts(self) -> Counts:
+            return Counts(
+                blocked_skills=7,
+                allowed_skills=8,
+                blocked_mcps=9,
+                allowed_mcps=10,
+                total_scans=11,
+            )
+
+    overview = OverviewPanelModel()
+    overview.set_enforcement_counts(
+        EnforcementCounts(
+            blocked_skills=2,
+            allowed_skills=3,
+            blocked_mcps=4,
+            allowed_mcps=5,
+            total_scans=6,
+            active_alerts=999,
+        )
+    )
+    app = DefenseClawTUI(
+        data_dir=tmp_path,
+        alerts_model=AlertsPanelModel(store=FakeStore()),
+        overview_model=overview,
+    )
+
+    app._refresh_alerts()  # noqa: SLF001 - regression for the startup refresh path.
+
+    assert overview.enforcement == EnforcementCounts(
+        blocked_skills=7,
+        allowed_skills=8,
+        blocked_mcps=9,
+        allowed_mcps=10,
+        total_scans=11,
+        active_alerts=1,
+    )
 
 
 def test_safe_body_renderable_handles_bracketed_status_strings() -> None:
@@ -2798,14 +3450,14 @@ def test_audit_panel_render_text_renders_e_export_close_filter_literally() -> No
     panel = AuditPanelModel()
     # Inject a synthetic event so render_text reaches the header line.
     panel.set_events([
-        Event(
-            id="1",
-            action="scan",
-            target="example",
-            severity="info",
-            details="",
-        )
-    ])
+            Event(
+                id="1",
+                action="scan",
+                target="example",
+                severity="HIGH",
+                details="",
+            )
+        ])
     panel.apply_filter()
     rendered = panel.render_text(height=24)
     plain = Text.from_markup(rendered).plain
@@ -3319,10 +3971,13 @@ def test_enforcement_label_multi_connector() -> None:
         guardrail_mode="action",
         connector_modes=(("codex", "action"), ("claudecode", "action")),
     )
-    assert _enforcement_label(multi) == "2 connectors (hook observability)"
+    assert _enforcement_label(multi) == "2 connectors (per-connector modes)"
 
     single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
-    assert _enforcement_label(single) == "codex hook observability (action)"
+    assert _enforcement_label(single) == "codex hook enforcement (action)"
+
+    omnigent = OverviewConfig(guardrail_connector="omnigent", guardrail_mode="action")
+    assert _enforcement_label(omnigent) == "omnigent policy enforcement (action)"
 
 
 @pytest.mark.asyncio
@@ -3375,6 +4030,56 @@ async def test_hook_calls_tile_counts_audit_events_and_deeplinks_to_logs() -> No
 
 
 @pytest.mark.asyncio
+async def test_hook_calls_tile_uses_unfiltered_hook_events_from_store(tmp_path) -> None:
+    """Default Audit refresh hides INFO hook rows; Overview metrics still count them."""
+
+    store = Store(str(tmp_path / "audit.sqlite"))
+    store.init()
+    for i in range(4):
+        store.log_event(
+            Event(
+                id=f"hook-info-{i}",
+                action="connector-hook",
+                target="preToolUse",
+                severity="INFO",
+                details="connector=cursor action=allow",
+            )
+        )
+    store.log_event(
+        Event(
+            id="hook-block",
+            action="connector-hook",
+            target="preToolUse",
+            severity="HIGH",
+            details="connector=cursor action=block",
+        )
+    )
+
+    cfg = OverviewConfig(data_dir=str(tmp_path), claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="cursor", state="running", requests=0),
+        )
+    )
+    audit = AuditPanelModel(store)
+    audit.refresh()
+
+    assert [event.id for event in audit.items] == ["hook-block"]
+
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 5
+        assert "a4" in metrics["hook_calls"].detail
+        assert "b1" in metrics["hook_calls"].detail
+
+
+@pytest.mark.asyncio
 async def test_hook_calls_tile_splits_stats_per_connector_in_multi() -> None:
     """D1=B: with >1 connector active, the Hook Calls tile relabels to the
     connector count and its detail attributes allow/block counts to each
@@ -3418,6 +4123,562 @@ async def test_hook_calls_tile_splits_stats_per_connector_in_multi() -> None:
         blocks_tile = metrics["blocks"]
         assert "codex" in blocks_tile.detail
         assert "cursor" not in blocks_tile.detail
+
+
+@pytest.mark.asyncio
+async def test_overview_header_tiles_scope_to_selected_connector() -> None:
+    """Connector-scoped Overview tiles show connector values plus fleet context."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    audit = AuditPanelModel()
+    audit.set_events(
+        [
+            Event(id="codex-a1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="codex-a2", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="codex-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=codex action=block"),
+            Event(id="cursor-a", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=cursor action=allow"),
+            Event(id="cursor-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=cursor action=block"),
+            Event(id="old-a", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="action=allow"),
+            Event(id="old-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=old action=block"),
+        ]
+    )
+    alerts = AlertsPanelModel()
+    alerts.set_events(
+        [
+            AlertEvent(id="codex-b", severity="INFO", action="connector-hook",
+                       target="preToolUse",
+                       details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe"),
+            AlertEvent(id="cursor-b", severity="MEDIUM", action="connector-hook",
+                       target="preToolUse", details="connector=cursor action=alert"),
+            AlertEvent(id="cursor-finding-2", severity="LOW", action="scan",
+                       target="skill://cursor", details="connector=cursor scanner=skill"),
+            AlertEvent(id="old-b", severity="HIGH", action="connector-hook",
+                       target="preToolUse", details="connector=old action=block"),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        all_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert all_metrics["hook_calls"].label == "Hook Calls (2 connectors)"
+        assert all_metrics["hook_calls"].value == 5
+        assert "outside roster 2" in all_metrics["hook_calls"].detail
+        assert all_metrics["blocks"].label == "Blocks"
+        assert all_metrics["blocks"].value == 2
+        assert "outside roster 1" in all_metrics["blocks"].detail
+        assert all_metrics["findings"].label == "Findings"
+        assert all_metrics["findings"].value == 3
+        assert "outside roster 1" in all_metrics["findings"].detail
+
+        app._set_connector_filter("codex")
+        codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert codex_metrics["hook_calls"].label == "Hook Calls (codex)"
+        assert codex_metrics["hook_calls"].value == 3
+        assert "fleet 7" in codex_metrics["hook_calls"].detail
+        assert codex_metrics["blocks"].label == "Blocks (codex)"
+        assert codex_metrics["blocks"].value == 1
+        assert "fleet 3" in codex_metrics["blocks"].detail
+        assert codex_metrics["findings"].label == "Findings (codex)"
+        assert codex_metrics["findings"].value == 1
+        assert "fleet 4" in codex_metrics["findings"].detail
+
+        app._set_connector_filter("cursor")
+        cursor_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert cursor_metrics["hook_calls"].label == "Hook Calls (cursor)"
+        assert cursor_metrics["hook_calls"].value == 2
+        assert cursor_metrics["blocks"].label == "Blocks (cursor)"
+        assert cursor_metrics["blocks"].value == 1
+        assert cursor_metrics["findings"].label == "Findings (cursor)"
+        assert cursor_metrics["findings"].value == 2
+        assert "fleet 4" in cursor_metrics["findings"].detail
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() -> None:
+    """The CONNECTORS table should not look frozen at the 500-row window cap."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    events = [
+        Event(
+            id=f"codex-{i}",
+            timestamp=base + timedelta(seconds=i),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        )
+        for i in range(498)
+    ]
+    events.extend(
+        Event(
+            id=f"claudecode-{i}",
+            timestamp=base + timedelta(seconds=498 + i),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=claudecode action=allow",
+        )
+        for i in range(2)
+    )
+    class HookStatsStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            return {
+                "antigravity": {
+                    "calls": 10,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=1)).isoformat(),
+                },
+                "claudecode": {
+                    "calls": 4402,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base + timedelta(seconds=499)).isoformat(),
+                },
+                "codex": {
+                    "calls": 16090,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base + timedelta(minutes=10)).isoformat(),
+                },
+                "hermes": {
+                    "calls": 152,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=2)).isoformat(),
+                },
+                "opencode": {
+                    "calls": 37,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=3)).isoformat(),
+                },
+            }
+
+    audit = AuditPanelModel(HookStatsStore())
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].label == "Hook Calls (5 connectors)"
+        assert metrics["hook_calls"].value == 20691
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 16090
+        assert rows["claudecode"].calls == 4402
+        assert rows["antigravity"].calls == 10
+        assert rows["hermes"].calls == 152
+        assert rows["opencode"].calls == 37
+        assert rows["codex"].last_activity != "—"
+
+
+@pytest.mark.asyncio
+async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
+    """Cold startup should not flash lifetime hook totals as active-session counts."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    base = datetime.now(timezone.utc) - timedelta(minutes=1)
+    events = [
+        Event(
+            id="codex-a",
+            timestamp=base,
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        ),
+        Event(
+            id="codex-b",
+            timestamp=base + timedelta(seconds=1),
+            action="connector-hook",
+            target="preToolUse",
+            severity="HIGH",
+            details="connector=codex action=block",
+        ),
+        Event(
+            id="cursor-a",
+            timestamp=base + timedelta(seconds=2),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=cursor action=allow",
+        ),
+    ]
+
+    class HookStatsStore:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            self.stats_calls += 1
+            return {
+                "codex": {
+                    "calls": 20000,
+                    "alerts": 500,
+                    "blocks": 250,
+                    "newest": (base + timedelta(hours=1)).isoformat(),
+                },
+                "cursor": {
+                    "calls": 7000,
+                    "alerts": 100,
+                    "blocks": 50,
+                    "newest": (base + timedelta(hours=1, seconds=1)).isoformat(),
+                },
+            }
+
+    store = HookStatsStore()
+    audit = AuditPanelModel(store)
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 3
+        assert metrics["blocks"].value == 1
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 2
+        assert rows["cursor"].calls == 1
+        assert store.stats_calls == 0
+
+        overview.set_health(
+            HealthSnapshot(
+                gateway=SubsystemHealth(state="running"),
+                connectors=(
+                    ConnectorHealth(name="codex", state="running"),
+                    ConnectorHealth(name="cursor", state="running"),
+                ),
+            )
+        )
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 27000
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 20000
+        assert rows["cursor"].calls == 7000
+        assert store.stats_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overview_prefers_live_connector_counts_over_lifetime_history() -> None:
+    """Live health counters are the current dashboard number; history is fallback."""
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=2)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("claudecode", "observe"), ("codex", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="disabled"),
+            guardrail=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(
+                    name="claudecode",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=6,
+                    tool_inspections=1,
+                ),
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=135,
+                    tool_inspections=73,
+                ),
+            ),
+        )
+    )
+    events = [
+        Event(
+            id=f"claude-live-{i}",
+            timestamp=since + timedelta(seconds=i),
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            details="connector=claudecode action=allow",
+        )
+        for i in range(6)
+    ]
+    events.extend(
+        [
+            Event(
+                id="codex-observe-would-block",
+                timestamp=since + timedelta(seconds=7),
+                action="connector-hook",
+                target="PostToolUse",
+                severity="INFO",
+                details="connector=codex action=allow raw_action=block severity=CRITICAL mode=observe would_block=true",
+            ),
+            Event(
+                id="codex-observe-alert",
+                timestamp=since + timedelta(seconds=8),
+                action="connector-hook",
+                target="PostToolUse",
+                severity="INFO",
+                details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe would_block=false",
+            ),
+        ]
+    )
+
+    class HookStatsStore:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            self.stats_calls += 1
+            return {
+                "claudecode": {
+                    "calls": 4408,
+                    "alerts": 5,
+                    "blocks": 12,
+                    "newest": (since + timedelta(seconds=5)).isoformat(),
+                },
+                "codex": {
+                    "calls": 16216,
+                    "alerts": 54,
+                    "blocks": 27,
+                    "newest": (since + timedelta(seconds=10)).isoformat(),
+                },
+            }
+
+        def count_scan_results_since(self, since_arg: datetime | None) -> int:
+            assert since_arg is not None
+            return 2
+
+    store = HookStatsStore()
+    audit = AuditPanelModel(store)
+    alerts = AlertsPanelModel()
+    alerts.set_events(
+        [
+            AlertEvent(
+                id="old-claude-finding",
+                timestamp=since - timedelta(hours=1),
+                severity="CRITICAL",
+                action="connector-hook",
+                target="old",
+                details="connector=claudecode action=block",
+            ),
+            AlertEvent(
+                id="live-claude-finding",
+                timestamp=since + timedelta(seconds=3),
+                severity="MEDIUM",
+                action="connector-hook",
+                target="live",
+                details="connector=claudecode action=alert",
+            ),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["claudecode"].calls == 6
+        assert rows["codex"].calls == 135
+        assert rows["codex"].blocks == 0
+        assert rows["codex"].alerts == 2
+        assert store.stats_calls == 0
+
+        app._set_connector_filter("codex")
+        codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert codex_metrics["findings"].value == 2
+        assert store.stats_calls == 0
+
+        app._set_connector_filter("claudecode")
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
+        assert metrics["hook_calls"].value == 6
+        assert metrics["findings"].value == 1
+        assert store.stats_calls == 0
+
+        session_counts = app._overview_session_enforcement_counts()
+        assert session_counts.active_alerts == 3
+        assert session_counts.total_scans == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_alerts_and_findings_use_distinct_buckets() -> None:
+    """Hook alerts count decisions; Findings only count severity-bearing decisions."""
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=2)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="disabled"),
+            connectors=(
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=2,
+                ),
+                ConnectorHealth(
+                    name="cursor",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=0,
+                ),
+            ),
+        )
+    )
+    events = [
+        Event(
+            id="codex-alert-no-finding",
+            timestamp=since + timedelta(seconds=1),
+            action="connector-hook",
+            target="PostToolUse",
+            severity="INFO",
+            details="connector=codex action=allow raw_action=alert severity=NONE mode=observe",
+        ),
+        Event(
+            id="codex-alert-finding",
+            timestamp=since + timedelta(seconds=2),
+            action="connector-hook",
+            target="PostToolUse",
+            severity="INFO",
+            details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe",
+        ),
+    ]
+
+    class HookStatsStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+    audit = AuditPanelModel(HookStatsStore())
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=AlertsPanelModel())
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].alerts == 2
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["findings"].value == 1
+
+        session_counts = app._overview_session_enforcement_counts()
+        assert session_counts.active_alerts == 2
+
+
+def test_overview_reuses_hook_event_snapshot_within_one_render() -> None:
+    """Overview metrics/rows should not re-query the same hook window per connector."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    events = [
+        Event(
+            id=f"codex-{i}",
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        )
+        for i in range(10)
+    ]
+
+    class CountingHookStore:
+        calls = 0
+        scan_count_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            self.calls += 1
+            return list(events[:limit])
+
+        def count_scan_results_since(self, _since: datetime | None) -> int:
+            self.scan_count_calls += 1
+            return 0
+
+    store = CountingHookStore()
+    audit = AuditPanelModel(store)
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    with app._connector_hook_event_render_cache():
+        app._overview_renderable()
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert store.calls == 1
+    assert store.scan_count_calls == 1
+    assert metrics["hook_calls"].value == 10
+    assert rows["codex"].calls == 10
 
 
 @pytest.mark.asyncio
@@ -3479,14 +4740,82 @@ async def test_catalog_inventory_show_connector_column_in_multi() -> None:
             app.skills_model,
             app.mcps_model,
             app.plugins_model,
+            app.tools_model,
             app.inventory_model,
         ):
             assert model.show_connector_column is True
 
         app._set_connector_filter("cursor")
-        for model in (app.skills_model, app.mcps_model, app.plugins_model):
+        app._sync_catalog_connector_filters()
+        for model in (app.skills_model, app.mcps_model, app.plugins_model, app.tools_model):
             assert model.connector_filter == "cursor"
         assert app.inventory_model.connector_filter == "cursor"
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_filter_does_not_refilter_hidden_panels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overview chip clicks should not synchronously filter every hidden table."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    hidden_filter_calls: list[str] = []
+
+    def record_filter(connector: str) -> None:
+        hidden_filter_calls.append(connector)
+
+    for model in (
+        app.alerts_model,
+        app.audit_model,
+        app.logs_model,
+        app.skills_model,
+        app.mcps_model,
+        app.plugins_model,
+        app.tools_model,
+        app.inventory_model,
+    ):
+        monkeypatch.setattr(model, "set_connector_filter", record_filter)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        app._set_connector_filter("cursor")
+
+    assert hidden_filter_calls == []
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_filter_defers_full_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overview filter changes should avoid a full chrome render in the hot path."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        render_calls: list[str] = []
+
+        def record_render() -> None:
+            render_calls.append("full")
+
+        monkeypatch.setattr(app, "_render_chrome", record_render)
+        app._set_connector_filter("cursor")
+
+        assert app._connector_filter() == "cursor"
+        assert render_calls == []
 
 
 @pytest.mark.asyncio
@@ -3504,6 +4833,7 @@ async def test_catalog_inventory_no_connector_column_in_single() -> None:
             app.skills_model,
             app.mcps_model,
             app.plugins_model,
+            app.tools_model,
             app.inventory_model,
         ):
             assert model.show_connector_column is False
@@ -3568,6 +4898,27 @@ async def test_catalog_body_shows_connector_chip_in_multi() -> None:
         assert "Connector:" in body
         assert "All" in body
         assert "cursor" in body
+        assert "press" in body and "m" in body
+
+
+@pytest.mark.asyncio
+async def test_overview_body_shows_connector_chip_in_multi() -> None:
+    """Overview shows a compact scope label; table panes keep the full chip."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        body = app.body_text
+        assert "Connector scope:" in body
+        assert "All connectors" in body
         assert "press" in body and "m" in body
 
 
@@ -3748,6 +5099,7 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
     cfg = OverviewConfig(
         data_dir="/tmp/dc",
         claw_mode="codex",
+        guardrail_enabled=True,
         guardrail_connector="codex",
         connector_modes=(("codex", "action"), ("cursor", "observe")),
         connector_packs=(("codex", "strict"), ("cursor", "permissive")),
@@ -3811,7 +5163,8 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         all_text = render()
         assert "ENFORCEMENT" in all_text
         assert "ENFORCEMENT · " not in all_text
-        assert "Hook calls" not in all_text
+        assert "Hook calls" in all_text
+        assert "Blocks" in all_text
 
         # Narrow to codex: connector-scoped hook metrics + per-connector
         # Skills/MCPs/scan coverage from codex's aibom snapshot.
@@ -3824,8 +5177,16 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         assert "Scanned" in codex_text
         assert "1/3 assets" in codex_text
         assert "(gateway-wide)" not in codex_text
-        # SCANNERS surfaces the connector's enforcement policy.
+        # CONFIGURATION and SCANNERS narrow with ENFORCEMENT instead of
+        # keeping the generic multi-connector summary.
+        assert "CONFIGURATION · codex" in codex_text
+        assert "Connector" in codex_text and "Codex (codex)" in codex_text
+        assert "Mode" in codex_text and "action" in codex_text
+        assert "Rule pack" in codex_text and "strict" in codex_text
+        assert "Last activity" in codex_text
+        assert "SCANNERS · codex" in codex_text
         assert "policy" in codex_text
+        assert "coverage" in codex_text
 
 
 @pytest.mark.asyncio
@@ -3907,3 +5268,458 @@ def test_connectors_health_array_parsed() -> None:
     names = [c.name for c in snap.connectors]
     assert names == ["codex", "cursor"]
     assert snap.connectors[0].requests == 5
+
+
+# --- A2: _overview_config roster build is defensive -------------------------
+
+
+class _RosterGuardrail:
+    """Guardrail stub with per-connector ``effective_*`` for roster tests."""
+
+    enabled = True
+    connector = ""
+    mode = "observe"
+    hilt = SimpleNamespace(enabled=False, min_severity="")
+
+    def __init__(self, modes=None, disabled=(), raise_on=()):
+        self._modes = modes or {}
+        self._disabled = set(disabled)
+        self._raise_on = set(raise_on)
+
+    def effective_enabled(self, connector):
+        return connector not in self._disabled
+
+    def effective_mode(self, connector):
+        if connector in self._raise_on:
+            raise RuntimeError(f"boom:{connector}")
+        return self._modes.get(connector, "observe")
+
+    def effective_rule_pack_dir(self, connector):
+        if connector in self._raise_on:
+            raise RuntimeError(f"boom:{connector}")
+        return ""
+
+
+def _roster_config(active_connectors, guardrail) -> SimpleNamespace:
+    """Minimal config stub exercising :func:`_overview_config`."""
+
+    return SimpleNamespace(
+        data_dir="/tmp/dc",
+        environment="dev",
+        policy_dir="",
+        claw=SimpleNamespace(mode="codex"),
+        guardrail=guardrail,
+        llm=SimpleNamespace(provider="", model=""),
+        inspect_llm=SimpleNamespace(provider="", model=""),
+        cisco_ai_defense=SimpleNamespace(endpoint=""),
+        privacy=SimpleNamespace(disable_redaction=False),
+        active_connectors=active_connectors,
+    )
+
+
+def test_overview_config_degrades_when_active_connectors_raises() -> None:
+    """A2: a throwing connector enumeration degrades to a single-connector
+    view (empty roster) instead of crashing or blanking the whole overview."""
+
+    def boom():
+        raise RuntimeError("malformed connector key")
+
+    cfg = _roster_config(boom, _RosterGuardrail())
+    overview = _overview_config(cfg)
+    assert overview is not None
+    assert overview.connector_modes == ()
+    # The rest of the config still resolves — only the roster is degraded.
+    assert overview.claw_mode == "codex"
+
+
+def test_overview_config_keeps_other_connectors_when_one_lookup_throws() -> None:
+    """A2: one connector whose guardrail lookups raise must not zero the
+    roster; the partial roster (all connectors) survives, the bad one blank."""
+
+    guardrail = _RosterGuardrail(
+        modes={"codex": "action", "cursor": "observe"}, raise_on={"cursor"}
+    )
+    cfg = _roster_config(lambda: ["codex", "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    modes = dict(overview.connector_modes)
+    assert list(modes) == ["codex", "cursor"]
+    assert modes["codex"] == "action"
+    assert modes["cursor"] == ""  # fell back, not dropped
+
+
+def test_overview_config_skips_malformed_connector_key() -> None:
+    """A2: a single malformed (non-string) key is skipped while the valid
+    connectors still populate the roster — it is no longer swallowed together
+    with the entire roster by one broad ``except``."""
+
+    guardrail = _RosterGuardrail(modes={"codex": "action", "cursor": "observe"})
+    cfg = _roster_config(lambda: ["codex", 123, "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    names = [connector for connector, _mode in overview.connector_modes]
+    assert names == ["codex", "cursor"]
+
+
+def test_overview_config_marks_disabled_connector_in_roster() -> None:
+    """A2 (regression baseline): a per-connector kill switch still flags the
+    connector as disabled while keeping it in the filterable roster."""
+
+    guardrail = _RosterGuardrail(
+        modes={"codex": "action", "cursor": "observe"}, disabled={"cursor"}
+    )
+    cfg = _roster_config(lambda: ["codex", "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    names = [connector for connector, _mode in overview.connector_modes]
+    assert names == ["codex", "cursor"]
+    assert overview.connector_disabled == ("cursor",)
+
+
+def test_overview_config_no_connectors_yields_empty_claw_mode() -> None:
+    """A1 (Root R1, display-only): a genuinely-zero-connector config resolves
+    the display connector to "" — never a phantom "openclaw". The adapter passes
+    the real (empty) claw.mode so active_connector_name() falls through to ""."""
+
+    cfg = _roster_config(lambda: [], _RosterGuardrail())
+    cfg.claw = SimpleNamespace(mode="")
+    overview = _overview_config(cfg)
+    assert overview.claw_mode == ""
+    assert OverviewPanelModel(overview, version="test").active_connector_name() == ""
+
+
+def test_overview_config_sets_roster_error_when_enumeration_raises() -> None:
+    """A2: a throwing active_connectors() stashes a visible diagnostic in
+    roster_error (surfaced by the Overview notices) instead of degrading
+    silently."""
+
+    def boom():
+        raise RuntimeError("malformed connector key")
+
+    cfg = _roster_config(boom, _RosterGuardrail())
+    overview = _overview_config(cfg)
+    assert "malformed connector key" in overview.roster_error
+    # The model turns it into a visible error notice.
+    notices = OverviewPanelModel(overview, version="test").build_notices()
+    assert any(n.level == "error" for n in notices)
+
+
+def test_flatten_scanner_overrides_skips_malformed() -> None:
+    """N3: a malformed scanner_overrides branch is skipped, not fatal."""
+
+    from defenseclaw.tui.app import _flatten_scanner_overrides
+
+    flat = _flatten_scanner_overrides(
+        {
+            "mcp": {"LOW": {"runtime": "block", "file": "none"}},
+            "bad": "not-a-dict",
+            "plugin": {"HIGH": "also-bad"},
+        }
+    )
+    assert ("mcp", "LOW", "runtime", "block") in flat
+    assert all(entry[0] != "plugin" for entry in flat)
+    assert _flatten_scanner_overrides("nope") == ()
+
+
+def test_overview_config_reads_scanner_overrides_from_active_policy(tmp_path) -> None:
+    """N3: the adapter flattens the active policy's data.json scanner_overrides
+    into OverviewConfig so the Overview/status can surface them."""
+
+    rego = tmp_path / "rego"
+    rego.mkdir()
+    (rego / "data.json").write_text(
+        json.dumps(
+            {
+                "scanner_overrides": {
+                    "secrets": {"HIGH": {"file": "block", "install": "warn"}}
+                }
+            }
+        )
+    )
+    cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
+    cfg.policy_dir = str(tmp_path)
+    overview = _overview_config(cfg)
+    assert ("secrets", "HIGH", "file", "block") in overview.scanner_overrides
+    assert ("secrets", "HIGH", "install", "warn") in overview.scanner_overrides
+    assert "secrets" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+
+
+def test_overview_body_renders_scanner_override_summary() -> None:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        scanner_overrides=(("secrets", "HIGH", "file", "block"),),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    body = app._overview_body_text(overview.service_cards())  # noqa: SLF001 - render regression surface.
+
+    assert "overrides" in body
+    assert "secrets: HIGH file=block" in body
+
+
+def _multi_connector_app() -> DefenseClawTUI:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    return DefenseClawTUI(overview_model=OverviewPanelModel(cfg, version="test"))
+
+
+@pytest.mark.asyncio
+async def test_connector_chip_click_sets_and_clears_filter() -> None:
+    """E1: a mouse click on a connector-chip segment applies that filter (the
+    coordinate-mapped path that replaces the crash-prone @click action links),
+    and clicking the All segment clears it."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        # Render the chip (line 0 of a chip-bearing body) and its click-map.
+        app.body_text = app._connector_chip_text() + "list body\nmore body"
+        cursor = next(s for s in app._chip_click_segments if s[2] == "cursor")
+        assert app._handle_body_chip_click((cursor[0] + cursor[1]) // 2, 0) is True
+        assert app._connector_filter() == "cursor"
+
+        # Clicking a non-chip line is ignored regardless of x.
+        app.body_text = app._connector_chip_text() + "list body\nmore body"
+        assert app._handle_body_chip_click(0, 1) is False
+
+        all_seg = next(s for s in app._chip_click_segments if s[2] == "")
+        assert app._handle_body_chip_click((all_seg[0] + all_seg[1]) // 2, 0) is True
+        assert app._connector_filter() == ""
+
+
+@pytest.mark.asyncio
+async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
+    """Overview keeps the picker UX while deferring the heavy dashboard repaint."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._overview_renderable()
+
+        assert app._chip_click_segments == []
+        assert app._handle_body_chip_click(0, len(_DEFENSECLAW_LOGO.splitlines()) + 2) is False
+        scope = app.query_one("#overview-scope", Static)
+
+        def scope_text() -> str:
+            return str(scope.render())
+
+        metrics = app.query_one("#overview-metrics", OverviewMetrics)
+
+        def metric_labels() -> set[str]:
+            return {tile.metric.label for tile in metrics.query(MetricTile)}
+
+        assert "All connectors" in scope_text()
+        assert "Hook Calls (2 connectors)" in metric_labels()
+
+        render_calls = 0
+        deferred_calls = 0
+        original_renderable = app._overview_renderable
+
+        def counted_renderable():
+            nonlocal render_calls
+            render_calls += 1
+            return original_renderable()
+
+        def counted_deferred_render() -> None:
+            nonlocal deferred_calls
+            deferred_calls += 1
+
+        app._overview_renderable = counted_renderable  # type: ignore[method-assign]
+        app._schedule_overview_deferred_render = counted_deferred_render  # type: ignore[method-assign]
+
+        assert app._connector_filter() == ""
+        await pilot.press("m")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
+        assert app._connector_filter() == ""
+        assert render_calls == 0
+
+        await pilot.click("#action-menu-row-1")
+        await pilot.pause()
+        assert app._connector_filter() == "codex"
+        assert "Codex (codex)" in scope_text()
+        assert "Hook Calls (codex)" in metric_labels()
+        assert render_calls == 0
+        assert deferred_calls == 1
+
+        await pilot.press("m")
+        await pilot.pause()
+        await pilot.click("#action-menu-row-0")
+        await pilot.pause()
+        assert app._connector_filter() == ""
+        assert "All connectors" in scope_text()
+        assert "Hook Calls (2 connectors)" in metric_labels()
+        assert render_calls == 0
+        assert deferred_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_repaints_connector_rows_when_activity_changes_while_scrolled() -> None:
+    """Lower CONNECTORS rows update live without idle clock-only body churn."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    audit = AuditPanelModel()
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(120, 18)) as pilot:
+        await pilot.pause()
+        scroller = app.query_one("#body-scroll", VerticalScroll)
+        assert scroller.max_scroll_y > 0
+        scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        await pilot.pause()
+
+        app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
+        render_calls = 0
+
+        original_render_chrome = app._render_chrome
+
+        def counted_render_chrome() -> None:
+            nonlocal render_calls
+            render_calls += 1
+            original_render_chrome()
+
+        def immediate_timer(_delay: float, callback, **_kwargs: object) -> object:
+            callback()
+            return object()
+
+        app._render_chrome = counted_render_chrome  # type: ignore[method-assign]
+        app.set_timer = immediate_timer  # type: ignore[method-assign]
+        app._overview_last_scroll_activity_at = 0.0
+
+        app._periodic_refresh()
+        await pilot.pause()
+        assert render_calls == 0
+
+        audit.set_events(
+            [
+                Event(
+                    id="claude-block",
+                    timestamp=datetime.now(timezone.utc),
+                    action="connector-hook",
+                    target="preToolUse",
+                    severity="HIGH",
+                    details="connector=claudecode action=block",
+                )
+            ]
+        )
+
+        app._periodic_refresh()
+        await pilot.pause()
+
+        assert render_calls == 1
+        assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["claudecode"].blocks == 1
+        assert rows["claudecode"].last_activity.endswith("ago")
+
+
+@pytest.mark.asyncio
+async def test_setup_m_key_does_not_open_connector_filter_picker() -> None:
+    """Setup is an action surface: connector scope is chosen inside wizards,
+    not via the shared view filter used by catalog/signal panes."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ != "ActionMenuScreen"
+
+
+@pytest.mark.asyncio
+async def test_connector_filter_picker_highlights_current_filter() -> None:
+    """The `m` picker should visually start on the active shared connector filter."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._set_connector_filter("cursor")  # noqa: SLF001 - shared filter state setup.
+        app.action_switch_panel("alerts")
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+
+        screen = app.screen_stack[-1]
+        menu = screen.query_one(ActionMenu)
+        assert menu.selected_index == 2
+        assert "cursor" in menu.actions[2].label
+        assert "current" in menu.actions[2].label
+        assert not menu.query_one("#action-menu-row-0", Button).has_class("-selected")
+        assert menu.query_one("#action-menu-row-2", Button).has_class("-selected")
+
+
+def test_destructive_intent_modal_is_danger_gated() -> None:
+    """N1: a destructive catalog intent builds a red-bordered consequence modal
+    whose only action is danger-gated (requires the explicit second confirm)."""
+
+    from defenseclaw.tui.app import TOKENS
+    from defenseclaw.tui.services.catalog_state import CatalogCommandIntent
+
+    app = DefenseClawTUI()
+    intent = CatalogCommandIntent(
+        label="remove plugin foo",
+        args=("plugin", "remove", "foo"),
+        origin="plugins",
+        risk="destructive",
+    )
+    model = app._destructive_intent_modal(intent)
+    assert len(model.actions) == 1
+    assert model.default_action().danger is True
+    assert model.border_color == TOKENS.accent_red
+    assert "plugin remove foo" in model.details[0]
+
+
+@pytest.mark.asyncio
+async def test_destructive_intent_routes_through_consequence_modal() -> None:
+    """N1: dispatching a destructive catalog intent opens the consequence
+    danger-modal (not the one-step command preview), and a single Enter only
+    arms it — the command can't run on one keypress."""
+
+    from defenseclaw.tui.services.catalog_state import CatalogCommandIntent
+
+    app = DefenseClawTUI()
+    intent = CatalogCommandIntent(
+        label="remove plugin foo",
+        args=("plugin", "remove", "foo"),
+        origin="plugins",
+        risk="destructive",
+    )
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        app.run_worker(app._confirm_and_run_intent(intent), exclusive=False, thread=False)
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ConsequenceModalScreen"
+        # First Enter only arms the danger action; the modal stays open.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ConsequenceModalScreen"
+        # Cancel out without running the command.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.command_running

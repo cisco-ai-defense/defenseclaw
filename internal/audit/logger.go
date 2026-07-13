@@ -168,9 +168,27 @@ func NewLogger(store *Store) *Logger {
 // downstream forwarding (events still hit SQLite + OTel when those are
 // configured).
 func (l *Logger) SetSinks(m *sinks.Manager) {
+	l.configureSinks(m)
 	l.mu.Lock()
 	l.sinks = m
 	l.mu.Unlock()
+}
+
+// SwapSinks installs a new audit-sink manager and returns the previous manager
+// so callers that own a runtime reload can close it after the swap.
+func (l *Logger) SwapSinks(m *sinks.Manager) *sinks.Manager {
+	if l == nil {
+		return nil
+	}
+	l.configureSinks(m)
+	l.mu.Lock()
+	old := l.sinks
+	l.sinks = m
+	l.mu.Unlock()
+	return old
+}
+
+func (l *Logger) configureSinks(m *sinks.Manager) {
 	if m != nil {
 		m.SetDeliveryHook(l.sinkDeliveryHook)
 		m.SetCircuitCallbacks(l.onCircuitTripActivity, l.onCircuitRecoverActivity)

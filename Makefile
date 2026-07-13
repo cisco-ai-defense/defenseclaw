@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.7.0
+VERSION     := 0.8.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -11,6 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
+UPGRADE_SMOKE_FROM ?= 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -30,11 +31,15 @@ endif
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        upgrade-smoke upgrade-smoke-matrix \
         set-version \
         _bundle-data \
+        proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -56,7 +61,7 @@ set-version:
 	fi
 	@scripts/stamp-version.sh "$(VERSION)"
 
-# CI gate that fails when the four version sources disagree, catching
+# CI gate that fails when the five version sources disagree, catching
 # drift before it reaches a release artifact. Mirrors the contract
 # enforced by scripts/stamp-version.sh.
 check-version-sync:
@@ -64,7 +69,8 @@ check-version-sync:
 	py_ver=$$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | awk -F'"' '{print $$2}'); \
 	init_ver=$$(grep -E '^__version__[[:space:]]*=' cli/defenseclaw/__init__.py | head -1 | awk -F'"' '{print $$2}'); \
 	pkg_ver=$$(grep -E '^  "version":' extensions/defenseclaw/package.json | head -1 | awk -F'"' '{print $$4}'); \
-	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ]; then \
+	mac_ver=$$(grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj | head -1 | awk -F'=' '{gsub(/[;[:space:]]/,"",$$2); print $$2}'); \
+	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ] && [ "$${pkg_ver}" = "$${mac_ver}" ]; then \
 		echo "version sync OK: $${mk_ver}"; \
 	else \
 		echo "version drift detected:" >&2; \
@@ -72,6 +78,7 @@ check-version-sync:
 		echo "  pyproject.toml                   : $${py_ver}" >&2; \
 		echo "  cli/defenseclaw/__init__.py      : $${init_ver}" >&2; \
 		echo "  extensions/defenseclaw/package.json: $${pkg_ver}" >&2; \
+		echo "  macos/DefenseClawMac project     : $${mac_ver}" >&2; \
 		echo "" >&2; \
 		echo "fix with: make set-version VERSION=X.Y.Z" >&2; \
 		exit 1; \
@@ -278,15 +285,43 @@ dev-install:
 pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv venv $(VENV) --python 3.12 --clear
-	uv pip install -e . --python $(VENV_BIN)/python$(EXE)
+	uv sync --frozen --no-dev --python 3.12
 
 dev-pycli: pycli
-	uv pip install --group dev --python $(VENV_BIN)/python$(EXE)
+	uv sync --frozen --python 3.12
 	@echo ""
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
+
+# ---------------------------------------------------------------------------
+# Protobuf regeneration
+# ---------------------------------------------------------------------------
+# `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
+# Client) contract at proto/defenseclaw/secureclient/v1/*.proto.
+# Tool binaries are installed under .tools/bin so contributors do not
+# need protoc-gen-go in their global $GOPATH/bin, and the versions
+# are pinned to what the generated files were produced against.
+# The generated .pb.go files are committed, so `make gateway` /
+# `make build` never invoke `proto` — you only run it when the .proto
+# changes.
+PROTO_TOOLS_DIR := $(CURDIR)/.tools
+PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
+PROTOC_GEN_GO_VERSION      := v1.36.5
+PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+
+proto-tools:
+	@mkdir -p $(PROTO_TOOLS_BIN)
+	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+proto: proto-tools
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found — brew install protobuf (or apt install protobuf-compiler)"; exit 1; }
+	@cd proto/defenseclaw/secureclient/v1 && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		secureclient.proto
+	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
@@ -480,10 +515,10 @@ plugin-install: cli-install plugin
 
 test: cli-test gateway-test
 
-cli-test:
+cli-test: _bundle-data
 	$(VENV)/bin/python -m pytest cli/tests -q
 
-cli-test-cov:
+cli-test-cov: _bundle-data
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 cli-test-snap:
@@ -491,6 +526,125 @@ cli-test-snap:
 
 gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./test/... -v
+
+# packaging-macos-test runs the pure-bash unit tests for the macOS installer
+# scripts under packaging/macos/. They don't touch /Library, sudo, or
+# launchctl and are safe to run on any macOS or Linux dev host.
+packaging-macos-test:
+	packaging/macos/tests/run_tests.sh
+
+# packaging-macos-bundle assembles a shippable folder + tarball containing
+# the prebuilt gateway binary alongside the install / uninstall scripts.
+# The bundle is fully self-contained — no repo tree required at install
+# time. Layout:
+#
+#   defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH)/
+#     defenseclaw-gateway              (binary)
+#     install.sh                       (calls the binary next to it)
+#     uninstall.sh
+#     com.defenseclaw.gateway.plist    (installed to /Library/LaunchDaemons)
+#     lib/installer_lib.sh
+#     lib/scrub_agent_configs.py
+#     README.md                        (short usage)
+#
+# Ships as dist/defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH).tar.gz.
+#
+# Overrides: GOOS/GOARCH cross-compile the gateway.
+BUNDLE_GOOS  ?= darwin
+# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
+# packaging team ships one artifact for both Intel and Apple Silicon. Override
+# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
+BUNDLE_GOARCH ?= universal
+BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
+BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
+# BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
+# argument (no shell re-parsing / eval).
+BUNDLE_LDFLAGS := -X main.version=$(VERSION)
+# BUNDLE_TAGS is the comma-separated `go build -tags` value applied to
+# the packaged gateway binary. The macOS bundle ships as the managed
+# distribution and pulls the managed cloud auth provider via
+# internal/managed/cloudreg/provider_cisco.go. Override to "" only for
+# local packaging tests where the private overlay isn't available; the
+# resulting binary will fail-closed under managed_enterprise mode.
+BUNDLE_TAGS  ?= cmid
+# CMID_OVERLAY is the absolute (or repo-relative) path to the real
+# cloudreg provider_cisco.go file — the one that imports the managed
+# cloud auth module. The OSS working tree only ships a stub at that
+# location so `go build`/`go test`/`go mod tidy` succeed in a clean
+# environment with no private-registry access. Release builds pass
+# CMID_OVERLAY=<path> plus CMID_VERSION=<pseudo-version>; the bundle
+# script swaps the overlay in, `go get`s the pinned version, builds,
+# then restores the stub from a snapshot whether the build succeeded or
+# failed.
+#
+# Example (release):
+#   make packaging-macos-bundle \
+#     CMID_OVERLAY=/path/to/private/provider_cisco.go \
+#     CMID_VERSION=v0.0.0-20260708144546-897b54f9678e
+CMID_OVERLAY ?=
+CMID_VERSION ?=
+
+packaging-macos-bundle:
+	@scripts/build-macos-bundle.sh \
+	    "$(BUNDLE_GOOS)" \
+	    "$(BUNDLE_GOARCH)" \
+	    "$(BUNDLE_NAME)" \
+	    "$(BUNDLE_DIR)" \
+	    "$(DIST_DIR)" \
+	    "$(VERSION)" \
+	    "$(BUNDLE_LDFLAGS)" \
+	    "$(BUNDLE_TAGS)" \
+	    "$(CMID_OVERLAY)" \
+	    "$(CMID_VERSION)"
+
+# Native SwiftUI companion-app checks and release packaging. The release target
+# builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
+# zip. Both are ad-hoc signed by default; scripts/build-macos-app-release.sh
+# switches to Developer ID signing/notarization when credentials are present.
+macos-app-license-check:
+	python3 scripts/macos_license_headers.py
+
+macos-app-upstream-check:
+	python3 scripts/check-macos-upstream.py
+
+macos-app-build: macos-app-license-check
+	xcodebuild \
+	    -project macos/DefenseClawMac/DefenseClawMac.xcodeproj \
+	    -scheme DefenseClawMac \
+	    -configuration Release \
+	    -destination 'generic/platform=macOS' \
+	    -derivedDataPath build/macos-app/DerivedData \
+	    ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+	    MARKETING_VERSION="$(VERSION)" \
+	    CODE_SIGNING_ALLOWED=NO \
+	    build
+
+macos-app-test:
+	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
+	macos/DefenseClawMac/script/test_numeric_safety.sh
+	macos/DefenseClawMac/script/test_output_safety.sh
+	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
+	$(MAKE) macos-app-build
+
+macos-app-release: macos-app-license-check extensions dist-cli
+	scripts/build-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+macos-app-release-verify:
+	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+# security-suite-test runs the deterministic security + PII coverage suite
+# (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
+# No LLM key or running gateway required; this is the CI-safe tier and is
+# also covered by `make gateway-test`.
+security-suite-test:
+	go test ./internal/gateway/ -run 'TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
+
+# security-suite-eval scores the judge corpus against a live model and runs
+# the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
+security-suite-eval:
+	GUARDRAIL_BENCHMARK_LLM=1 go test ./internal/gateway/ -run '^(TestSecuritySuiteJudge|TestEvalInjectionJudge|TestEvalPIIJudge|TestEvalExfilJudge|TestEvalToolInjectionJudge)$$' -count=1 -timeout 120m -v
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
@@ -511,7 +665,6 @@ py-connector-matrix-test:
 		cli/tests/test_agent_discovery.py \
 		cli/tests/test_cmd_guardrail_matrix.py \
 		cli/tests/test_cmd_init.py \
-		cli/tests/test_cmd_setup_mode.py \
 		cli/tests/test_codeguard_opt_in.py \
 		cli/tests/test_connector_mcp_writers.py \
 		cli/tests/test_connector_paths.py \
@@ -543,7 +696,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -559,6 +712,9 @@ check-error-codes:
 
 check-schemas:
 	@$(VENV)/bin/python scripts/check_schemas.py
+
+check-grafana-dashboards: _bundle-data
+	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
@@ -589,6 +745,12 @@ check-llm-catalog:
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
+
+upgrade-smoke:
+	@scripts/test-upgrade-release.sh $(ARGS)
+
+upgrade-smoke-matrix:
+	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
 
 # ---------------------------------------------------------------------------
 # Lint targets
@@ -652,6 +814,7 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 dist-cli: _bundle-data
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
+	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data:
@@ -659,6 +822,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
+	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
@@ -676,6 +840,7 @@ _bundle-data:
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
+	cp internal/envvars/registry.json cli/defenseclaw/_data/envvars/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
@@ -771,4 +936,5 @@ clean:
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml
 	rm -rf cli/defenseclaw/_data
+	rm -rf build/macos-app
 	find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

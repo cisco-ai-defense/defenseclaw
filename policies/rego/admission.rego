@@ -152,10 +152,44 @@ _is_blocked if {
 	entry.target_type == input.target_type
 }
 
+# F-0941: a manual allow entry must not be honored for a DIFFERENT on-disk
+# asset that merely reuses a previously-allowed NAME. When the stored entry
+# pins a ``source_path``, the request's ``input.path`` must match it (exact
+# normalised path, or a path-component containment so a re-rooted but
+# equivalent path still matches). A legacy entry with no ``source_path`` keeps
+# name+type matching so existing allows are not broken.
 _is_explicit_allow_listed if {
 	some entry in input.allow_list
 	entry.target_name == input.target_name
 	entry.target_type == input.target_type
+	_allow_entry_path_matches(entry)
+}
+
+# No source_path pin on the entry → name+type match is sufficient (legacy).
+_allow_entry_path_matches(entry) if {
+	not entry.source_path
+}
+
+_allow_entry_path_matches(entry) if {
+	entry.source_path == ""
+}
+
+# Pinned entry: the presented path must equal the pinned path (normalised) ...
+_allow_entry_path_matches(entry) if {
+	entry.source_path != ""
+	_normalize_path(input.path) == _normalize_path(entry.source_path)
+}
+
+# ... or contain the pinned path as a contiguous run of components, so an
+# equivalent path that adds/strips a redundant leading segment still matches
+# while a wholly different path (the attack) does not.
+_allow_entry_path_matches(entry) if {
+	entry.source_path != ""
+	_provenance_prefix_matches(input.path, entry.source_path)
+}
+
+_normalize_path(value) := normalized if {
+	normalized := replace(lower(value), "\\", "/")
 }
 
 _is_policy_allow_listed if {
@@ -173,9 +207,30 @@ _path_matches_provenance(entry) if {
 	count(entry.source_path_contains) == 0
 }
 
+# F-0543: match provenance markers by whole path *components* (a contiguous
+# slice of components), not a bare substring. The old
+# `contains(lower(input.path), lower(prefix))` test accepted attacker paths
+# whose components merely embedded the marker (e.g. `.defenseclaw-evil`
+# satisfying a `.defenseclaw` allow, or `.codex-plugin/defenseclaw` placed
+# anywhere). This mirrors the Python `_matches_provenance` component matcher.
 _path_matches_provenance(entry) if {
 	some prefix in entry.source_path_contains
-	contains(lower(input.path), lower(prefix))
+	_provenance_prefix_matches(input.path, prefix)
+}
+
+_provenance_prefix_matches(path, prefix) if {
+	path_comps := _path_components(path)
+	prefix_comps := _path_components(prefix)
+	n := count(prefix_comps)
+	n > 0
+	count(path_comps) >= n
+	some i in numbers.range(0, count(path_comps) - n)
+	array.slice(path_comps, i, i + n) == prefix_comps
+}
+
+_path_components(value) := comps if {
+	normalized := replace(lower(value), "\\", "/")
+	comps := [part | some part in split(normalized, "/"); part != ""]
 }
 
 _is_allow_bypassed if {

@@ -337,7 +337,7 @@ func (a *APIServer) effectiveRulePackDir(connector string) string {
 	if a == nil || a.scannerCfg == nil {
 		return ""
 	}
-	return a.scannerCfg.Guardrail.EffectiveRulePackDir(connector)
+	return a.scannerCfg.EffectiveRulePackDirForConnector(connector)
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on

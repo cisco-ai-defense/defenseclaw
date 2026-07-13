@@ -479,7 +479,7 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, insig
 		if load == nil {
 			load = map[string]interface{}{}
 		}
-		load["paths"] = appendUniqueString(load["paths"], extDir)
+		load["paths"] = appendUniqueString(removeDefenseClawLoadPaths(load["paths"]), extDir)
 		plugins["load"] = load
 
 		if insightClawInstalled {
@@ -594,7 +594,7 @@ func uninstallOpenClawExtension(ocHome string) error {
 			plugins["entries"] = entries
 		}
 		if load, ok := plugins["load"].(map[string]interface{}); ok {
-			load["paths"] = removeString(load["paths"], extDir)
+      load["paths"] = removeDefenseClawLoadPaths(load["paths"])
 			load["paths"] = removeString(load["paths"], insightExtDir)
 			plugins["load"] = load
 		}
@@ -643,6 +643,43 @@ func removeString(existing interface{}, s string) []interface{} {
 		out = append(out, v)
 	}
 	return out
+}
+
+func removeDefenseClawLoadPaths(existing interface{}) []interface{} {
+	list, _ := existing.([]interface{})
+	out := make([]interface{}, 0, len(list))
+	for _, v := range list {
+		if isDefenseClawLoadPath(v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func isDefenseClawLoadPath(value interface{}) bool {
+	switch v := value.(type) {
+	case string:
+		return isDefenseClawPathString(v)
+	case map[string]interface{}:
+		for _, nested := range v {
+			if isDefenseClawLoadPath(nested) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, nested := range v {
+			if isDefenseClawLoadPath(nested) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isDefenseClawPathString(value string) bool {
+	clean := filepath.Clean(strings.TrimSpace(value))
+	return filepath.Base(clean) == "defenseclaw"
 }
 
 func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
@@ -809,13 +846,14 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	ocHome := openClawHome()
 	return AgentPaths{
-		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
-		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:  hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{
+		PatchedFiles:         []string{filepath.Join(ocHome, "openclaw.json")},
+		BackupFiles:          []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
+		HookScripts:          hookScriptPathsForConnector(opts, c),
+		GeneratedFiles:       subprocessGeneratedFiles(opts),
+		GeneratedExecutables: subprocessGeneratedExecutables(opts),
+		CreatedDirs: append([]string{
 			filepath.Join(ocHome, "extensions", "defenseclaw"),
-			filepath.Join(opts.DataDir, "shims"),
-		},
+		}, subprocessCreatedDirs(opts)...),
 	}
 }
 

@@ -42,10 +42,30 @@ means.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
+import subprocess
 import sys
+from collections.abc import Iterable
 
-__all__ = ["pid_alive", "read_pid_file", "pid_file_alive"]
+__all__ = [
+    "pid_alive",
+    "read_pid_file",
+    "pid_file_alive",
+    "GATEWAY_PROCESS_NAMES",
+    "process_argv0_basename",
+    "process_is_gateway",
+]
+
+# The exact basenames the DefenseClaw gateway daemon advertises in argv0.
+# Identity verification matches these *exactly* (not by prefix): a generic
+# ``defenseclaw`` prefix would let an attacker plant a process such as
+# ``defenseclaw-not-gateway`` and have a spoofed PID file accepted as the
+# live gateway (Avarice F-0101 / F-0121 / F-0721).
+GATEWAY_PROCESS_NAMES: tuple[str, ...] = (
+    "defenseclaw-gateway",
+    "defenseclaw-gateway.exe",
+)
 
 
 def pid_alive(pid: int) -> bool:
@@ -139,3 +159,104 @@ def pid_file_alive(pid_file: str) -> bool:
     if pid is None:
         return False
     return pid_alive(pid)
+
+
+def process_argv0_basename(pid: int) -> str | None:
+    """Best-effort basename of a running process's argv0.
+
+    Reads ``/proc/<pid>/cmdline`` (Linux) and falls back to
+    ``ps -p <pid> -o command=`` (macOS/BSD). Returns the lowercased-free
+    basename, or ``None`` when the process identity cannot be determined
+    (so callers can fail closed).
+    """
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":  # pragma: no cover - exercised via mocks
+        argv0 = _process_image_path_windows(pid)
+        if not argv0:
+            return None
+        base = ntpath.basename(argv0.strip()).strip()
+        return base.lower() or None
+
+    proc_cmdline = f"/proc/{pid}/cmdline"
+    try:
+        with open(proc_cmdline, "rb") as fh:
+            raw = fh.read()
+        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except FileNotFoundError:
+        # /proc not present (macOS/BSD) — fall back to ps.
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            # No ps either — identity unknown.
+            return None
+        if out.returncode != 0:
+            return None
+        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+    except OSError:
+        return None
+    base = os.path.basename(argv0.strip()).strip()
+    return base.lower() or None
+
+
+def _process_image_path_windows(pid: int) -> str | None:  # pragma: no cover - Windows only
+    """Return the executable image path for ``pid`` using a native Windows API."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+
+    query_image_name = kernel32.QueryFullProcessImageNameW
+    query_image_name.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    query_image_name.restype = wintypes.BOOL
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not query_image_name(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return buf.value
+    finally:
+        close_handle(handle)
+
+
+def process_is_gateway(
+    pid: int,
+    expected_names: Iterable[str] = GATEWAY_PROCESS_NAMES,
+) -> bool:
+    """Return True only when ``pid``'s argv0 basename is one of the known
+    DefenseClaw gateway binary names.
+
+    Fails closed: if the process identity cannot be read (no ``/proc`` and
+    no ``ps``), or the basename does not match exactly, returns False. This
+    blocks stale/planted ``gateway.pid`` spoofing where the recorded PID
+    points at an unrelated live process.
+    """
+    base = process_argv0_basename(pid)
+    if not base:
+        return False
+    return base in set(expected_names)

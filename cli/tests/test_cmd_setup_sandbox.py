@@ -7,21 +7,22 @@ import shutil
 import stat
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import call, patch
 
+from defenseclaw.commands import cmd_init_sandbox
 from defenseclaw.commands.cmd_setup_sandbox import (
     _generate_launcher_scripts,
     _generate_resolv_conf,
     _generate_systemd_units,
     _parse_host_resolv,
     _pre_pair_device,
+    write_device_key_provenance,
 )
 
 
 def _patch_no_sudo():
-    return patch(
-        "defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False
-    )
+    return patch("defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False)
 
 
 class TestParseHostResolv(unittest.TestCase):
@@ -71,8 +72,12 @@ class TestGenerateResolvConf(unittest.TestCase):
 
 
 class _MockOpenshell:
-    def __init__(self):
+    def __init__(self, sandbox_home: str = "/home/sandbox"):
         self.host_networking = True
+        self.sandbox_home = sandbox_home
+
+    def effective_sandbox_home(self) -> str:
+        return self.sandbox_home
 
 
 class _MockGuardrail:
@@ -87,11 +92,21 @@ class _MockGateway:
         self.port = 18789
 
 
+class _MockClaw:
+    """launcher generation now reads
+    ``cfg.claw.openclaw_home_original`` to pin the privileged
+    pre-sandbox repair to the operator-confirmed home path."""
+
+    def __init__(self, openclaw_home_original: str = ""):
+        self.openclaw_home_original = openclaw_home_original
+
+
 class _MockCfg:
-    def __init__(self):
+    def __init__(self, openclaw_home_original: str = ""):
         self.gateway = _MockGateway()
         self.guardrail = _MockGuardrail()
         self.openshell = _MockOpenshell()
+        self.claw = _MockClaw(openclaw_home_original)
 
 
 class TestGenerateSystemdUnits(unittest.TestCase):
@@ -105,8 +120,11 @@ class TestGenerateSystemdUnits(unittest.TestCase):
 
     def test_unit_files_created(self):
         _generate_systemd_units(
-            self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         systemd_dir = os.path.join(self.data_dir, "systemd")
         expected_files = [
@@ -121,8 +139,11 @@ class TestGenerateSystemdUnits(unittest.TestCase):
 
     def test_unit_files_contain_keywords(self):
         _generate_systemd_units(
-            self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         systemd_dir = os.path.join(self.data_dir, "systemd")
 
@@ -137,8 +158,11 @@ class TestGenerateSystemdUnits(unittest.TestCase):
 
     def test_no_gateway_service_generated(self):
         _generate_systemd_units(
-            self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         sidecar_path = os.path.join(self.data_dir, "systemd", "defenseclaw-gateway.service")
         self.assertFalse(os.path.exists(sidecar_path))
@@ -158,7 +182,11 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_scripts_created(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         expected = [
@@ -175,7 +203,11 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_scripts_are_executable(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         for name in ("pre-sandbox.sh", "start-sandbox.sh", "post-sandbox.sh", "cleanup-sandbox.sh"):
@@ -184,7 +216,11 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_start_sandbox_contains_openshell(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "start-sandbox.sh")) as f:
             content = f.read()
@@ -193,7 +229,11 @@ class TestGenerateLauncherScripts(unittest.TestCase):
     def test_post_sandbox_contains_host_ip(self):
         host_ip = "10.200.0.1"
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, host_ip, "10.200.0.2", _MockCfg(),
+            self.data_dir,
+            self.sandbox_home,
+            host_ip,
+            "10.200.0.2",
+            _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "post-sandbox.sh")) as f:
             content = f.read()
@@ -234,7 +274,11 @@ class TestLauncherScriptConditionals(unittest.TestCase):
     def _gen(self, host_networking, guardrail_enabled):
         cfg = _CfgFactory.make(host_networking, guardrail_enabled)
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", cfg,
+            self.data_dir,
+            self.sandbox_home,
+            "10.200.0.1",
+            "10.200.0.2",
+            cfg,
         )
 
     # --- (True, True) — full rules ---
@@ -321,6 +365,123 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertNotIn("getaddrinfo", content)
         self.assertIn("openclaw gateway run", content)
 
+    # --- S3.HIGH_BUG: scoped sandbox cleanup regressions ---
+
+    def test_cleanup_sandbox_uses_saved_namespace_marker(self):
+        """cleanup-sandbox.sh must read the per-instance namespace marker
+        rather than regex-matching all sandbox|openshell namespaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SAVED_NS=", content)
+        # Legacy regex must only run when the operator explicitly opts in.
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
+
+    def test_cleanup_sandbox_no_unconditional_regex_namespace_delete(self):
+        """The regex-based 'sandbox|openshell' namespace delete must NOT
+        run unconditionally in cleanup-sandbox.sh."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        # The legacy block, if present, MUST be guarded by the opt-in env var.
+        if "grep -E 'sandbox|openshell'" in content:
+            # Must appear inside an opt-in branch.
+            self.assertIn(
+                'DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}" = "1"',
+                content,
+            )
+
+    def test_cleanup_sandbox_no_blanket_veth_delete(self):
+        """Blanket `veth-h-*` delete is disallowed: it would remove other
+        sandbox instances' interfaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_cleanup_iptables_restores_route_localnet(self):
+        """cleanup-sandbox.sh must restore the saved route_localnet value
+        instead of forcing it to 0."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertNotIn("sysctl -w net.ipv4.conf.all.route_localnet=0", content)
+
+    def test_post_sandbox_saves_route_localnet(self):
+        """post-sandbox.sh must capture the prior route_localnet value
+        before flipping it to 1."""
+        self._gen(True, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertIn("sysctl -n net.ipv4.conf.all.route_localnet", content)
+
+    def _gen_run_sandbox(self, pinned_home: str = "", sandbox_home: str = "/home/sandbox"):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _generate_run_sandbox_script,
+        )
+
+        cfg = _CfgFactory.make(True, True)
+        cfg.openshell = _MockOpenshell(sandbox_home=sandbox_home)
+        cfg.claw = _MockClaw(openclaw_home_original=pinned_home)
+        _generate_run_sandbox_script(self.data_dir, "10.200.0.1", cfg)
+
+    def test_run_sandbox_acl_fixer_uses_pinned_home_not_root(self):
+        """F-0427: the background ACL fixer in run-sandbox.sh must NOT
+        blanket-grant the sandbox user rwX on a hardcoded /root/.openclaw.
+        It must template the operator-confirmed pinned OpenClaw home plus
+        the sandbox-owned $SANDBOX_HOME/.openclaw."""
+        self._gen_run_sandbox(
+            pinned_home="/home/operator/.openclaw",
+            sandbox_home="/home/sandbox",
+        )
+        content = self._read_script("run-sandbox.sh")
+        # The hardcoded root path must be gone from the ACL fixer loop.
+        self.assertNotIn("/root/.openclaw", content)
+        # The pinned home and the sandbox's own .openclaw must be present.
+        self.assertIn("/home/operator/.openclaw", content)
+        self.assertIn("/home/sandbox/.openclaw", content)
+
+    def test_run_sandbox_acl_fixer_without_pin_skips_root(self):
+        """F-0427: with no pinned home, the ACL fixer must fall back to
+        ONLY the sandbox's own .openclaw — never root's."""
+        self._gen_run_sandbox(pinned_home="", sandbox_home="/home/sandbox")
+        content = self._read_script("run-sandbox.sh")
+        self.assertNotIn("/root/.openclaw", content)
+        self.assertIn("/home/sandbox/.openclaw", content)
+
+    def test_run_sandbox_records_namespace_marker(self):
+        """run-sandbox.sh must persist the discovered namespace name into
+        $DATA_DIR/sandbox.netns so cleanup is scoped to this instance."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SANDBOX_NS=", content)
+
+    def test_run_sandbox_strays_are_scoped_to_data_dir(self):
+        """run-sandbox.sh stop must not kill processes by name only.
+        The finding (#5) was that pgrep -f matches across the
+        host. The replacement must verify processes belong to this
+        instance via /proc/<pid>/cmdline or cwd referencing $DATA_DIR."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("_proc_is_ours", content)
+        self.assertIn("_kill_scoped_strays", content)
+        self.assertIn("/proc/$pid/cmdline", content)
+        # The legacy unscoped helper must be gone.
+        self.assertNotIn("_kill_strays openshell-sandbox", content)
+        self.assertNotIn("_kill_strays defenseclaw-gateway", content)
+
+    def test_pre_sandbox_skips_blanket_veth_delete(self):
+        """pre-sandbox.sh must not delete every veth-h-* on the host."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_pre_sandbox_uses_saved_namespace_marker(self):
+        """pre-sandbox.sh must prefer the saved namespace marker over
+        regex-matching shared host state."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
 
 
 class TestPrePairDevice(unittest.TestCase):
@@ -336,6 +497,19 @@ class TestPrePairDevice(unittest.TestCase):
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
+    def _write_device_key(self, blob: bytes) -> str:
+        """Write a device.key with mode 0o600 + a VALID gateway-minted
+        provenance sentinel (HMAC over the key bytes keyed by the
+        owner-only per-install secret). F-1441: a verifiable sentinel
+        — not a forgeable literal — is what the hardened pre-pair flow
+        now requires before it will touch paired.json."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(blob)
+        os.chmod(path, 0o600)
+        write_device_key_provenance(self.data_dir, path)
+        return path
+
     def test_no_device_key(self):
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertFalse(result)
@@ -346,10 +520,7 @@ class TestPrePairDevice(unittest.TestCase):
             return json.load(f)
 
     def test_with_ed25519_key(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -362,10 +533,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(device["role"], "operator")
 
     def test_updates_existing_device(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         _pre_pair_device(self.data_dir, self.sandbox_home)
         _pre_pair_device(self.data_dir, self.sandbox_home)
@@ -374,10 +542,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1, "Should update, not duplicate")
 
     def test_32_byte_pubkey(self):
-        key_data = os.urandom(32)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(32))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -386,6 +551,115 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1)
         device = list(paired.values())[0]
         self.assertEqual(device["displayName"], "defenseclaw-sidecar")
+
+    def test_f2551_overpermissive_mode_refused(self):
+        """device.key mode 0o644 (group/world read)
+        must be refused even with a VALID provenance sentinel present."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        # Mint a valid sentinel, THEN loosen the mode — proving the mode
+        # gate fires independently of provenance.
+        write_device_key_provenance(self.data_dir, path)
+        os.chmod(path, 0o644)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: 0o644 device.key was accepted")
+
+    def test_f2551_missing_provenance_refused(self):
+        """a 0o600 device.key without the gateway
+        provenance sentinel must be refused (a local user could have
+        planted the file before sandbox setup ran)."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        # No .provenance file alongside.
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: device.key without sentinel accepted")
+
+    def test_f1441_forged_literal_provenance_refused(self):
+        """F-1441: a sibling .provenance file containing an arbitrary
+        literal (the legacy forgeable shape ``source=test``) must NOT be
+        accepted — only a verifiable HMAC sentinel keyed by the owner-only
+        per-install secret counts. A local attacker can plant both
+        device.key and an arbitrary provenance literal; that path must
+        fail closed."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+        os.chmod(path + ".provenance", 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: forgeable literal provenance was accepted")
+
+    def test_f1441_tampered_device_key_invalidates_sentinel(self):
+        """F-1441: the sentinel is bound to the device.key bytes via HMAC.
+        If an attacker mints a valid sentinel for one key then swaps in a
+        different device.key, the HMAC no longer matches and pairing is
+        refused."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(64))
+        os.chmod(path, 0o600)
+        write_device_key_provenance(self.data_dir, path)
+        # Swap the key bytes AFTER the sentinel was minted.
+        with open(path, "wb") as f:
+            f.write(os.urandom(64))
+        os.chmod(path, 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: sentinel accepted for a swapped device.key")
+
+    def test_f1441_wrong_secret_provenance_refused(self):
+        """F-1441: a provenance HMAC computed with an attacker-chosen
+        secret (i.e. without the owner-only per-install secret) must be
+        refused. Simulates an attacker who knows the sentinel format but
+        not the secret."""
+        import hashlib
+        import hmac
+
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _PROVENANCE_SENTINEL_PREFIX,
+        )
+
+        key_bytes = os.urandom(32)
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(key_bytes)
+        os.chmod(path, 0o600)
+        forged = hmac.new(b"attacker-secret", key_bytes, hashlib.sha256).hexdigest()
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write(_PROVENANCE_SENTINEL_PREFIX + forged + "\n")
+        os.chmod(path + ".provenance", 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: HMAC with wrong secret was accepted")
+
+    def test_f2551_legacy_optin_bypasses_sentinel(self):
+        """The DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 escape hatch
+        keeps the legacy behavior for operators who can't yet
+        regenerate device.key via the new gateway flow."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+
+        prev = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY")
+        try:
+            os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = "1"
+            result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        finally:
+            if prev is None:
+                os.environ.pop("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", None)
+            else:
+                os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = prev
+        self.assertTrue(result, "legacy opt-in env var must keep working")
 
     def test_pem_encoded_key(self):
         import base64
@@ -398,12 +672,17 @@ class TestPrePairDevice(unittest.TestCase):
 
         pem_data = (
             "-----BEGIN ED25519 PRIVATE KEY-----\n"
-            + base64.b64encode(seed).decode() + "\n"
+            + base64.b64encode(seed).decode()
+            + "\n"
             + "-----END ED25519 PRIVATE KEY-----\n"
         )
         key_path = os.path.join(self.data_dir, "device.key")
         with open(key_path, "w") as f:
             f.write(pem_data)
+        # regenerate the on-disk perms + a VALID gateway-minted provenance
+        # sentinel that the hardened pre-pair flow now requires.
+        os.chmod(key_path, 0o600)
+        write_device_key_provenance(self.data_dir, key_path)
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -431,7 +710,8 @@ class TestPrePairDevice(unittest.TestCase):
 
         pem_data = (
             "-----BEGIN ED25519 PRIVATE KEY-----\n"
-            + base64.b64encode(seed).decode() + "\n"
+            + base64.b64encode(seed).decode()
+            + "\n"
             + "-----END ED25519 PRIVATE KEY-----\n"
         ).encode()
 
@@ -454,6 +734,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
     def _make_cfg(self, connector_value: str | None) -> object:
         """Build a stand-in for FullConfig that exposes the same surface
         the validator reads from."""
+
         class _Guardrail:
             def __init__(self, connector: str | None):
                 self.connector = connector
@@ -473,6 +754,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         # Should not raise.
         _validate_sandbox_connector(self._make_cfg("openclaw"))
 
@@ -480,12 +762,14 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         _validate_sandbox_connector(self._make_cfg(""))
 
     def test_none_treated_as_openclaw(self):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         _validate_sandbox_connector(self._make_cfg(None))
 
     def test_codex_aborts_with_clickexception(self):
@@ -493,6 +777,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         with self.assertRaises(_click.ClickException) as ctx:
             _validate_sandbox_connector(self._make_cfg("codex"))
         msg = str(ctx.exception.message)
@@ -506,6 +791,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         with self.assertRaises(_click.ClickException):
             _validate_sandbox_connector(self._make_cfg("claudecode"))
 
@@ -514,6 +800,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         with self.assertRaises(_click.ClickException):
             _validate_sandbox_connector(self._make_cfg("zeptoclaw"))
 
@@ -521,6 +808,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         # Case-insensitive — "OpenClaw" must be accepted.
         _validate_sandbox_connector(self._make_cfg("OpenClaw"))
 
@@ -528,6 +816,7 @@ class TestValidateSandboxConnector(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _validate_sandbox_connector,
         )
+
         _validate_sandbox_connector(self._make_cfg("   "))
 
 
@@ -550,6 +839,7 @@ class TestSandboxFrameworkRoots(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _sandbox_framework_roots,
         )
+
         roots = _sandbox_framework_roots(self._make_cfg("openclaw"), "/home/sandbox")
         self.assertEqual(roots, ["/home/sandbox/.openclaw"])
 
@@ -557,6 +847,7 @@ class TestSandboxFrameworkRoots(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _sandbox_framework_roots,
         )
+
         # Defense-in-depth — even if a caller bypasses validation, the
         # iteration over [] is safe.
         self.assertEqual(
@@ -572,7 +863,175 @@ class TestSupportedSandboxConnectors(unittest.TestCase):
         from defenseclaw.commands.cmd_setup_sandbox import (
             SUPPORTED_SANDBOX_CONNECTORS,
         )
+
         self.assertEqual(SUPPORTED_SANDBOX_CONNECTORS, frozenset({"openclaw"}))
+
+
+class TestTrustedPrivilegedCommands(unittest.TestCase):
+    def test_attacker_path_entry_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = os.path.join(directory, "setfacl")
+            with open(command, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(command, 0o755)
+            with (
+                patch.object(cmd_init_sandbox, "_TRUSTED_SYSTEM_DIRS", ()),
+                patch.dict(os.environ, {"PATH": directory}),
+            ):
+                self.assertIsNone(cmd_init_sandbox._trusted_system_command("setfacl"))
+
+    def test_group_writable_root_command_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = os.path.join(directory, "setfacl")
+            with open(command, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(command, 0o755)
+            fake_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o775, st_uid=0)
+            with (
+                patch.object(cmd_init_sandbox, "_TRUSTED_SYSTEM_DIRS", (directory,)),
+                patch.object(cmd_init_sandbox.os, "stat", return_value=fake_stat),
+            ):
+                self.assertIsNone(cmd_init_sandbox._trusted_system_command("setfacl"))
+
+    def test_privileged_argv_resolves_sudo_and_helper(self):
+        resolved = {"sudo": "/usr/bin/sudo", "chown": "/usr/sbin/chown"}
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_system_command", side_effect=resolved.get) as trusted_command,
+            patch.object(
+                cmd_init_sandbox,
+                "_trusted_root_owned_file",
+                side_effect=lambda path, **_kwargs: path,
+            ),
+            patch.object(cmd_init_sandbox.os, "access", return_value=True),
+        ):
+            argv = cmd_init_sandbox._trusted_privileged_argv("chown", "-R", "sandbox:sandbox", "/srv/sandbox")
+        self.assertEqual(argv, ["/usr/bin/sudo", "/usr/sbin/chown", "-R", "sandbox:sandbox", "/srv/sandbox"])
+        self.assertEqual(trusted_command.call_args_list, [call("chown"), call("sudo")])
+
+    def test_missing_trusted_apt_get_falls_back_without_executing(self):
+        with (
+            patch.object(cmd_init_sandbox, "_trusted_system_command", return_value=None) as trusted_command,
+            patch.object(cmd_init_sandbox.subprocess, "run") as run,
+        ):
+            cmd_init_sandbox._ensure_iptables()
+        self.assertEqual(trusted_command.call_args_list, [call("iptables"), call("apt-get")])
+        run.assert_not_called()
+
+    def test_sudo_validation_failure_aborts(self):
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_system_command", return_value="/usr/bin/sudo"),
+            patch.object(
+                cmd_init_sandbox.subprocess,
+                "run",
+                side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=1)],
+            ) as run,
+        ):
+            with self.assertRaisesRegex(cmd_init_sandbox.click.ClickException, "sudo authentication failed"):
+                cmd_init_sandbox._ensure_sudo_cache()
+        self.assertEqual(
+            run.call_args_list,
+            [call(["/usr/bin/sudo", "-n", "true"], capture_output=True), call(["/usr/bin/sudo", "-v"], check=False)],
+        )
+
+    def test_sudo_write_propagates_chmod_failure(self):
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=["trusted"]) as trusted_argv,
+            patch.object(
+                cmd_init_sandbox.subprocess,
+                "run",
+                side_effect=[SimpleNamespace(returncode=0), SimpleNamespace(returncode=1)],
+            ),
+        ):
+            self.assertFalse(cmd_init_sandbox._sudo_write("content", "/etc/example", 0o600))
+        self.assertEqual(
+            trusted_argv.call_args_list,
+            [call("tee", "--", "/etc/example"), call("chmod", "600", "--", "/etc/example")],
+        )
+
+    def test_privileged_script_requires_trusted_ancestors(self):
+        script = "/opt/defenseclaw/install.sh"
+        trusted_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+        trusted_dir = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        trusted_paths = {
+            script: trusted_file,
+            "/opt/defenseclaw": trusted_dir,
+            "/opt": trusted_dir,
+            "/": trusted_dir,
+        }
+        with (
+            patch.object(cmd_init_sandbox.os.path, "realpath", return_value=script),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: trusted_paths[path]),
+        ):
+            self.assertEqual(cmd_init_sandbox._trusted_root_owned_file(script), script)
+
+        writable_dir = SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0)
+        writable_paths = {**trusted_paths, "/opt/defenseclaw": writable_dir}
+        with (
+            patch.object(cmd_init_sandbox.os.path, "realpath", return_value=script),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: writable_paths[path]),
+        ):
+            self.assertIsNone(cmd_init_sandbox._trusted_root_owned_file(script))
+
+    def test_trusted_system_command_accepts_root_owned_alternatives_chain(self):
+        link = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
+        executable = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        metadata = {
+            "/usr/sbin/iptables": link,
+            "/etc/alternatives/iptables": link,
+            "/usr/sbin/iptables-nft": executable,
+            "/usr/sbin": directory,
+            "/usr": directory,
+            "/etc/alternatives": directory,
+            "/etc": directory,
+            "/": directory,
+        }
+        targets = {
+            "/usr/sbin/iptables": "/etc/alternatives/iptables",
+            "/etc/alternatives/iptables": "/usr/sbin/iptables-nft",
+        }
+        with (
+            patch.object(cmd_init_sandbox, "_TRUSTED_SYSTEM_DIRS", ("/usr/sbin",)),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: metadata[path]),
+            patch.object(cmd_init_sandbox.os, "readlink", side_effect=lambda path: targets[path]),
+            patch.object(cmd_init_sandbox.os.path, "realpath", side_effect=lambda path: path),
+            patch.object(cmd_init_sandbox.os, "access", return_value=True),
+        ):
+            self.assertEqual(cmd_init_sandbox._trusted_system_command("iptables"), "/usr/sbin/iptables-nft")
+
+    def test_existing_openclaw_integration_requires_pin(self):
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as sandbox_home:
+            target = os.path.join(data_dir, "openclaw")
+            os.makedirs(target)
+            with open(os.path.join(data_dir, cmd_init_sandbox.OPENCLAW_OWNERSHIP_BACKUP), "w") as handle:
+                handle.write("{}")
+            os.symlink(target, os.path.join(sandbox_home, ".openclaw"))
+            cfg = SimpleNamespace(data_dir=data_dir, claw=SimpleNamespace(openclaw_home_original=""))
+            with (
+                patch.object(cmd_init_sandbox, "_ensure_parent_traversal") as traversal,
+                patch.object(cmd_init_sandbox, "_ensure_sandbox_acls") as acls,
+            ):
+                self.assertFalse(cmd_init_sandbox._integrate_openclaw_home(cfg, sandbox_home))
+            traversal.assert_not_called()
+            acls.assert_not_called()
+
+    def test_install_preserves_openshell_version_across_sudo(self):
+        cfg = SimpleNamespace(openshell=SimpleNamespace(sandbox_version="1.2.3"))
+        command = ["/usr/bin/sudo", "/bin/bash", "/trusted/install", "--install-dir", "/usr/local/bin"]
+        with (
+            patch.object(cmd_init_sandbox, "_find_installer_script", return_value="/trusted/install"),
+            patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=command.copy()),
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run,
+            patch.object(cmd_init_sandbox.shutil, "which", return_value="/usr/local/bin/openshell-sandbox"),
+        ):
+            self.assertTrue(cmd_init_sandbox._install_openshell_sandbox(cfg))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[1], "--preserve-env=OPENSHELL_VERSION")
+        self.assertEqual(run.call_args.kwargs["env"]["OPENSHELL_VERSION"], "1.2.3")
 
 
 if __name__ == "__main__":

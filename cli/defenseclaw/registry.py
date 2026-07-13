@@ -28,8 +28,17 @@ import tarfile
 import zipfile
 from enum import Enum
 from urllib.parse import quote as urlquote
+from urllib.parse import urljoin
 
 import requests
+
+from defenseclaw.registries.adapters._base import _PinnedConnect
+from defenseclaw.registries.ssrf import (
+    Resolver,
+    SSRFError,
+    guard_url,
+    resolve_and_pin,
+)
 
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MB safety cap
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
@@ -79,19 +88,114 @@ def _npm_metadata_url(package_name: str, version: str | None, registry_url: str)
     return f"{registry_url}/{package_name}/{tag}"
 
 
-def _stream_download(url: str, dest_path: str) -> None:
-    """Download a URL to *dest_path* with streaming and a size cap."""
-    resp = requests.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True)
-    resp.raise_for_status()
-    total = 0
-    with open(dest_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=65536):
-            total += len(chunk)
-            if total > MAX_DOWNLOAD_BYTES:
-                raise RegistryError(
-                    f"download exceeds {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB limit"
+def _stream_download(
+    url: str,
+    dest_path: str,
+    *,
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
+) -> None:
+    """Download a URL to *dest_path* with streaming, a size cap, and SSRF guards.
+
+    F-0347: the legacy archive download used a bare
+    ``requests.get(url, stream=True)`` with neither an SSRF check nor
+    redirect control, so a hostile registry or package publisher could
+    point the download (directly or via a 30x ``Location``) at loopback,
+    private, link-local, or RFC 6598 CGNAT hosts — exactly the SSRF
+    pattern the central guard exists to stop. We now:
+
+    * validate + pin every hop through
+      :func:`defenseclaw.registries.ssrf.resolve_and_pin`;
+    * pin the TCP connect to the vetted IP (``_PinnedConnect``) so a
+      low-TTL DNS rebind cannot swap in an internal address between the
+      check and the connect;
+    * follow redirects manually with ``allow_redirects=False`` so each
+      hop is re-validated instead of trusting :mod:`requests` to follow
+      an attacker-chosen ``Location``.
+
+    ``allow_private`` mirrors the operator opt-in used elsewhere;
+    ``resolver`` is plumbed to the guard so tests can stub DNS without
+    network access.
+    """
+    try:
+        ip, host, port = resolve_and_pin(
+            url, allow_private=allow_private, resolver=resolver
+        )
+    except SSRFError as exc:
+        raise RegistryError(
+            f"refusing to download from unsafe URL: {exc}"
+        ) from exc
+
+    pin = _PinnedConnect(host, port, ip)
+    current_url = url
+    with pin:
+        resp = requests.get(
+            current_url, timeout=DOWNLOAD_TIMEOUT, stream=True, allow_redirects=False,
+        )
+        try:
+            hops = 0
+            while getattr(resp, "is_redirect", False) and hops < 5:
+                location = resp.headers.get("Location")
+                if not location:
+                    raise RegistryError(
+                        f"redirect with empty Location header from {current_url}"
+                    )
+                if not location.lower().startswith(("http://", "https://")):
+                    location = urljoin(current_url, location)
+                try:
+                    next_ip, next_host, next_port = resolve_and_pin(
+                        location, allow_private=allow_private, resolver=resolver,
+                    )
+                except SSRFError as exc:
+                    raise RegistryError(
+                        f"redirect blocked by SSRF guard: {exc}"
+                    ) from exc
+                resp.close()
+                pin.repin(next_host, next_port, next_ip)
+                resp = requests.get(
+                    location, timeout=DOWNLOAD_TIMEOUT, stream=True,
+                    allow_redirects=False,
                 )
-            f.write(chunk)
+                current_url = location
+                hops += 1
+            if getattr(resp, "is_redirect", False):
+                raise RegistryError(
+                    f"too many redirects starting from {url}"
+                )
+            resp.raise_for_status()
+            total = 0
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise RegistryError(
+                            f"download exceeds {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB limit"
+                        )
+                    f.write(chunk)
+        finally:
+            resp.close()
+
+
+def _reject_extracted_symlinks(dest_dir: str) -> None:
+    """Walk *dest_dir* and refuse any symlink entry (F-0181).
+
+    System ``tar`` (used on the prefix extraction path) materializes
+    symlink members verbatim. A symlink under the extraction root could
+    later be followed by the plugin scanner to read/write an arbitrary
+    host path, so we fail closed if any link is found. Reuses the shared
+    :func:`defenseclaw.safety.is_symlink` guard rather than re-deriving
+    ``os.path.islink`` logic.
+    """
+    from defenseclaw.safety import is_symlink
+
+    for root, dirs, files in os.walk(dest_dir):
+        for name in dirs + files:
+            entry = os.path.join(root, name)
+            if is_symlink(entry):
+                raise RegistryError(
+                    f"tar extraction produced a symlink entry: {entry!r} "
+                    f"(refusing to leave a symlink inside the plugin tree)"
+                )
 
 
 def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> None:
@@ -105,6 +209,25 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
     if tarfile.is_tarfile(archive_path):
         if prefix:
             strip = prefix.count("/")
+            # F-0181: the prefix path shells out to system ``tar``, which
+            # bypasses the Python ``tarfile`` "data" filter / manual
+            # symlink-rejection that the non-prefix branch below applies.
+            # System ``tar`` happily extracts symlink (and hardlink/device)
+            # members, so a malicious tarball could plant a symlink under
+            # ``dest_dir`` that later reads/writes outside the intended
+            # root. Pre-inspect every member that would be extracted and
+            # refuse anything that isn't a plain file or directory, matching
+            # the safety contract of the non-prefix branch before we run the
+            # privileged-feeling subprocess.
+            with tarfile.open(archive_path) as tf:
+                for m in tf.getmembers():
+                    if not m.name.startswith(prefix):
+                        continue
+                    if not (m.isfile() or m.isdir()):
+                        raise RegistryError(
+                            f"tar contains non-regular member under prefix "
+                            f"{prefix!r}: {m.name!r} (type={m.type!r})"
+                        )
             result = subprocess.run(
                 [
                     "tar", "xzf", archive_path,
@@ -119,13 +242,65 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                     f"tar extraction failed (exit {result.returncode}): "
                     f"{result.stderr.strip()[:200]}"
                 )
+            # Defense-in-depth: even though we pre-inspected members, walk
+            # the extracted tree and reject any symlink that slipped through
+            # (e.g. a TOCTOU swap of the archive between inspect and
+            # extract). Refuse to leave a symlink that points outside the
+            # extraction root in place.
+            _reject_extracted_symlinks(dest_dir)
         else:
             with tarfile.open(archive_path) as tf:
                 try:
                     tf.extractall(dest_dir, filter="data")
                 except TypeError:
-                    # Python < 3.12 lacks the filter parameter
-                    tf.extractall(dest_dir)
+                    # Python <3.12 lacks the `filter`
+                    # parameter. The legacy fallback called
+                    # tf.extractall(dest_dir) WITHOUT any path-
+                    # traversal validation, so a malicious tar with
+                    # `../escape`, absolute-path members, symlinks
+                    # pointing outside the dest, hardlinks, or
+                    # special device files could write outside
+                    # dest_dir before the plugin was scanned. We
+                    # reproduce the Python 3.12 "data" filter
+                    # contract by hand: regular files and dirs only,
+                    # all paths must resolve under dest_dir, and
+                    # anything that looks like traversal is fatal.
+                    safe_root = os.path.realpath(dest_dir)
+                    members: list[tarfile.TarInfo] = []
+                    for m in tf.getmembers():
+                        # Reject anything that isn't a plain file or
+                        # directory. The 3.12+ data filter does the
+                        # same — symlinks/hardlinks/devices/FIFOs
+                        # have no place inside a plugin tarball.
+                        if not (m.isfile() or m.isdir()):
+                            raise RegistryError(
+                                f"tar contains non-regular member: {m.name!r} "
+                                f"(type={m.type!r}, )"
+                            )
+                        # Tar members are POSIX paths regardless of
+                        # the host OS; split on `/` and `\\` so we
+                        # catch traversal attempts on Windows hosts
+                        # too.
+                        normalized = m.name.replace("\\", "/")
+                        if normalized.startswith("/") or normalized.startswith("\\"):
+                            raise RegistryError(
+                                f"tar contains absolute-path entry: {m.name!r}"
+                            )
+                        parts = os.path.normpath(normalized).split("/")
+                        if ".." in parts:
+                            raise RegistryError(
+                                f"tar contains path-traversal entry: {m.name!r}"
+                            )
+                        member_path = os.path.realpath(
+                            os.path.join(dest_dir, normalized)
+                        )
+                        if (member_path != safe_root
+                                and not member_path.startswith(safe_root + os.sep)):
+                            raise RegistryError(
+                                f"tar contains path-traversal entry: {m.name!r}"
+                            )
+                        members.append(m)
+                    tf.extractall(dest_dir, members=members)
     elif zipfile.is_zipfile(archive_path):
         safe_root = os.path.realpath(dest_dir)
         with zipfile.ZipFile(archive_path) as zf:
@@ -157,12 +332,24 @@ def fetch_npm_package(
     dest_dir: str,
     registry_url: str = DEFAULT_NPM_REGISTRY,
     version: str | None = None,
+    *,
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
 ) -> str:
     """Fetch a package from the npm registry and extract it into *dest_dir*.
 
     Returns the path to the extracted plugin root directory.
     """
     meta_url = _npm_metadata_url(package_name, version, registry_url)
+    # F-0347: the metadata GET also crosses the registry trust boundary,
+    # so guard it before dialing (the tarball download itself is guarded
+    # inside _stream_download).
+    try:
+        guard_url(meta_url, allow_private=allow_private, resolver=resolver)
+    except SSRFError as exc:
+        raise RegistryError(
+            f"refusing npm registry lookup for unsafe URL: {exc}"
+        ) from exc
     try:
         meta_resp = requests.get(meta_url, timeout=METADATA_TIMEOUT)
         meta_resp.raise_for_status()
@@ -178,7 +365,10 @@ def fetch_npm_package(
 
     archive_path = os.path.join(dest_dir, "package.tgz")
     try:
-        _stream_download(tarball_url, archive_path)
+        _stream_download(
+            tarball_url, archive_path,
+            allow_private=allow_private, resolver=resolver,
+        )
     except requests.RequestException as exc:
         raise RegistryError(f"tarball download failed: {exc}") from exc
 
@@ -194,6 +384,9 @@ def fetch_from_clawhub(
     uri: str,
     dest_dir: str,
     plugin_name: str | None = None,
+    *,
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
 ) -> str:
     """Fetch a plugin from the clawhub registry (npm ``openclaw`` package).
 
@@ -205,10 +398,16 @@ def fetch_from_clawhub(
     if plugin_name is None:
         plugin_name = name
 
+    meta_url = f"{DEFAULT_NPM_REGISTRY}/openclaw/latest"
+    # F-0347: guard the metadata GET before dialing.
     try:
-        meta = requests.get(
-            f"{DEFAULT_NPM_REGISTRY}/openclaw/latest", timeout=METADATA_TIMEOUT,
-        ).json()
+        guard_url(meta_url, allow_private=allow_private, resolver=resolver)
+    except SSRFError as exc:
+        raise RegistryError(
+            f"refusing npm registry lookup for unsafe URL: {exc}"
+        ) from exc
+    try:
+        meta = requests.get(meta_url, timeout=METADATA_TIMEOUT).json()
         tarball_url = meta.get("dist", {}).get("tarball")
     except requests.RequestException as exc:
         raise RegistryError(f"npm registry lookup failed: {exc}") from exc
@@ -218,7 +417,10 @@ def fetch_from_clawhub(
 
     archive_path = os.path.join(dest_dir, "openclaw.tgz")
     try:
-        _stream_download(tarball_url, archive_path)
+        _stream_download(
+            tarball_url, archive_path,
+            allow_private=allow_private, resolver=resolver,
+        )
     except requests.RequestException as exc:
         raise RegistryError(f"tarball download failed: {exc}") from exc
 
@@ -243,14 +445,22 @@ def fetch_from_clawhub(
     return extract_dir
 
 
-def fetch_from_url(url: str, dest_dir: str) -> str:
+def fetch_from_url(
+    url: str,
+    dest_dir: str,
+    *,
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
+) -> str:
     """Download a plugin archive from a direct HTTP(S) URL and extract it.
 
     Returns the path to the extracted plugin root directory.
     """
     archive_path = os.path.join(dest_dir, "download")
     try:
-        _stream_download(url, archive_path)
+        _stream_download(
+            url, archive_path, allow_private=allow_private, resolver=resolver,
+        )
     except requests.RequestException as exc:
         raise RegistryError(f"download failed: {exc}") from exc
 

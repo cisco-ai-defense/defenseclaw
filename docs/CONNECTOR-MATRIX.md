@@ -11,27 +11,76 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands |
-| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- |
-| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        |
-| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   |
-| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no        |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills |
-| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands | Antigravity | OpenCode | OmniGent |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- | ----------- | -------- | -------- |
+| LLM traffic interception    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
+| Proxy-side response scan    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        | OK          | OK       | OK       |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   | partial     | partial  | OK       |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | preToolUse | no        | PreToolUse  | no       | ASK      |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        | no          | no       | no       |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills | skills/rules | no skills | no skills |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills | skills/plugins | no | no |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only | hook-only | hook-only | env-opt-in |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and OpenHands connectors do not
+The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, and OmniGent connectors do not
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
+
+### OmniGent custom-policy setup
+
+OmniGent integrates through its documented custom Python policy API rather
+than a command hook. On POSIX shells, run:
+
+```bash
+defenseclaw setup omnigent --mode action --yes
+omnigent server --config "${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
+```
+
+On Windows PowerShell, run:
+
+```powershell
+defenseclaw setup omnigent --mode action --yes
+$configHome = if ($env:OMNIGENT_CONFIG_HOME) { $env:OMNIGENT_CONFIG_HOME } else { Join-Path $HOME ".omnigent" }
+omnigent server --config (Join-Path $configHome "config.yaml")
+```
+
+`~/.omnigent/config.yaml` is the default. When `OMNIGENT_CONFIG_HOME` is set,
+both OmniGent and DefenseClaw use `OMNIGENT_CONFIG_HOME/config.yaml` instead
+(`$OMNIGENT_CONFIG_HOME/config.yaml` on POSIX or
+`$env:OMNIGENT_CONFIG_HOME\config.yaml` in PowerShell).
+
+Setup installs an owner-only policy module under
+`~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, adds its directory to
+the OmniGent CLI environment through `defenseclaw_omnigent.pth`, registers
+`defenseclaw_omnigent_policy` in `policy_modules`, and activates the
+`defenseclaw_guardrail` server-wide policy. Restart OmniGent after setup so it
+reloads the module and policy registry. Managed backups restore the original
+YAML and Python environment files on connector teardown. OmniGent policy
+events map as follows: `request` → `UserPromptSubmit`, `tool_call` →
+`PreToolUse`, `tool_result` → `PostToolUse`, `response` →
+`AfterAgentResponse`, `llm_request` → `BeforeModel`, and `llm_response` →
+`AfterModel`. DefenseClaw verdicts map back to OmniGent `ALLOW`, `ASK`, and
+`DENY`. OmniGent can park `request`, `tool_call`, and `llm_request` for native
+`ASK` approval; post-action phases cannot pause cleanly and use DefenseClaw's
+explicit confirm fallback. The bridge forwards an active OpenTelemetry W3C
+trace context when one exists.
+
+OmniGent also honors the standard OpenTelemetry process environment variables,
+but this channel is not activated by connector setup. Export the variables in
+the process that starts OmniGent.
+Point `OTEL_EXPORTER_OTLP_ENDPOINT` at the DefenseClaw gateway, use
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, and provide the DefenseClaw source,
+client, and token headers through `OTEL_EXPORTER_OTLP_HEADERS`. Logs and metrics
+are available with OmniGent's base install; native traces require its optional
+`tracing` extra. DefenseClaw reports these variables but does not modify shell
+startup files. Hook telemetry remains available without native OTLP.
 
 ### Observability dimension (multi-connector)
 
@@ -49,17 +98,34 @@ ruleset filtering by destination, with per-connector allowed hosts merged into
 one allowlist at boot (see [`ARCHITECTURE.md` → Firewall scope](ARCHITECTURE.md)
 and [`OBSERVABILITY-CONTRACT.md` → Connector dimension fields](OBSERVABILITY-CONTRACT.md)).
 
+## Custom-provider enforcement (LLM traffic mode)
+
+Provider resolution is global, but whether a [custom provider](/docs/setup/unified-llm-key)
+touches the *agent* is per-connector. Each connector reports an
+`llm_traffic_mode` on `GET /v1/connectors` (and in `ConnectorCapabilities`):
+
+| Connector class | `llm_traffic_mode` | A bound custom provider… |
+| --- | --- | --- |
+| OpenClaw, ZeptoClaw | `proxy` | is **enforced** on the agent's model traffic (agent upstream, judge, or both) |
+| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode, OmniGent) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
+
+The CLI states this when binding (`setup llm`) and when listing
+(`setup provider list`), so an operator can't silently attach a custom provider
+to a hook connector believing it changes the agent's model.
+
 ## Platform support
 
 | Connector | macOS | Linux | Windows |
 | --------- | ----- | ----- | ------- |
 | OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
-| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands (hook-based) | OK | OK | OK |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, OmniGent (hook-based) | OK | OK | OK |
 
-Windows is **hook-only**: the eight hook-based connectors run their hook
-decisions natively in the `defenseclaw` binary (the agent invokes
-`defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
-or shell shims are required. The proxy connectors (OpenClaw, ZeptoClaw) need
+Windows is **hook-only**: the shell-hook connectors run their hook
+decisions natively in the `defenseclaw-gateway` binary (the agent invokes
+`defenseclaw-gateway hook --connector <name> --event <event>`), so no Git Bash, `jq`,
+or shell shims are required. OpenCode is cross-platform without shims by a
+different route — its bridge plugin is JavaScript and calls the gateway over
+HTTP directly, so it never needs the native hook binary. The proxy connectors (OpenClaw, ZeptoClaw) need
 the local guardrail proxy, which DefenseClaw does not host on Windows; they are
 hidden from the connector pickers and rejected by setup there. The Go registry
 (`connectorSupportedOnOS`) and the Python `platform_support` module are the two
@@ -90,12 +156,15 @@ with a warning. Action mode fails closed unless
 | ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | tool_call |
+| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Antigravity | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result, event_content |
+| OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
+| OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result, event_content |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
 bound when an upstream release publishes a breaking hook change; otherwise,
@@ -120,16 +189,22 @@ Claude Code is pinned to the current documented hook surface captured at
 
 | Connector | can_block | can_ask_native | ask_events | block_events | supports_fail_closed | scope | config_path |
 | --------- | --------- | -------------- | ---------- | ------------ | -------------------- | ----- | ----------- |
+| Claude Code | yes | yes | `PreToolUse` | 14 current lifecycle events; exact list is checked against `capability-matrix.json` | yes | user | `~/.claude/settings.json` |
+| Codex | yes | no | none | `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` | yes | user | `~/.codex/config.toml` |
 | Hermes | yes | no | none | `pre_tool_call` | no | user | `~/.hermes/config.yaml` |
 | Cursor | yes | yes | `beforeShellExecution`, `beforeMCPExecution` | documented pre-action hooks | yes | user | `~/.cursor/hooks.json` |
 | Windsurf | yes | no | none | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | no | user | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
-| Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
+| Copilot CLI | yes | yes | `preToolUse` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop`, `postToolUseFailure` | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
+| Antigravity | yes | yes | `PreToolUse` | `PreToolUse` | no | user | `~/.gemini/config/hooks.json` |
+| OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
+| OmniGent | yes | yes | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | all six mapped policy phases | yes | user | `$OMNIGENT_CONFIG_HOME/config.yaml` when set, otherwise `~/.omnigent/config.yaml`, plus installed Python policy |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
-`ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
-preserving `raw_action: "confirm"` in the hook response.
+`ask_events`. Every other event takes its connector-specific alert, allow, or
+context fallback immediately while preserving `raw_action: "confirm"` for
+audit. The DefenseClaw TUI can review those records but cannot resume the call.
 
 ## Local Surface Matrix
 
@@ -141,6 +216,9 @@ preserving `raw_action: "confirm"` in the hook response.
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
 | Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` discovery/scan only | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
+| OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
+| OmniGent | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
 setup, or sidecar setup. Operators must run `defenseclaw codeguard install`
@@ -156,7 +234,8 @@ non-CodeGuard paths require `--replace`.
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
-| Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
+| OmniGent | optional logs/metrics via externally supplied OTLP env vars; traces with optional `tracing` extra | header token | hook-generated logs, spans, counters |
+| Hermes / Cursor / Windsurf / OpenCode | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
 ---
 
@@ -200,9 +279,11 @@ harmless (permission denied) if a regression ever lets it through.
 | Cursor | live | live | live\* | `cursor-agent -p --force` | gated on a one-time headless-hook validation |
 | Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
 | OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
-| Hermes | contract-only | contract-only | contract-only | — | only `pre_tool_call` mapped |
+| OpenCode | contract-only | contract-only | contract-only | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
+| Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
+| OmniGent | contract-only | contract-only | contract-only | — | Python custom-policy bridge covered by local integration tests; live smoke pending |
 
 `\*` = advisory cell (`continue-on-error`) until it goes consistently green.
 All Windows live cells and every Copilot cell start advisory; they are promoted
@@ -275,15 +356,11 @@ generates the evidence a maintainer uses to update the floors and ceilings.
 
 ---
 
-## By-design connector limitations (WONTFIX, architectural)
+## By-design connector limitations
 
-Plan PR #194 / matrix §"Out of scope". Each item below is **not a bug** —
-it is a property of the host agent's design. We do not own those binaries,
-so we cannot fix the limitation directly. Instead, the proxy provides the
-same security guarantee from a different surface, and the on-disk
-artefacts we ship today are forward-compatible: the moment the upstream
-agent grows external-script hook support, our setup is wired and the
-fix is purely on the agent side.
+These constraints come from each host's current extension surface. Proxy
+connectors can enforce in the LLM data path; hook connectors can enforce only
+on events the host actually emits and honors.
 
 ### 1. ZeptoClaw `before_tool` hook wiring is by design
 
@@ -305,40 +382,35 @@ fix is purely on the agent side.
   would silently no-op or, worse, write a malformed `HookRule` and
   break the user's config.
 
-### 2. Codex hook invocation is by design
+### 2. Codex is hook-only, not proxy-routed
 
 - Source: [`internal/gateway/connector/codex.go`](../internal/gateway/connector/codex.go)
-  near `buildCodexHooksTable`.
-- Why: Today's `codex` binary does **not** honor a settings-based hook
-  invocation pipeline. There is no codex code path that reads a
-  `[hooks]` table out of `config.toml` and shells out to `command` on
-  the matching event. The schema slot exists in the TOML grammar but
-  no handler is wired in the codex runtime.
-- What we ship: We still write the `[hooks]` block as a
-  forward-compatibility placeholder. The script lands on disk; the
-  table is well-formed per the published TOML schema. The day codex
-  grows hook support, no DefenseClaw change is needed.
-- What replaces it: Path-based interception. The proxy admits Codex via
-  the `/c/codex/...` route prefix (`codex.HookAPIPath()`), which forces
-  every tool call through `GuardrailProxy.Route` + response-scan.
-  `ToolModeBoth` on the connector ensures pre-call telemetry is captured
-  from the LLM response side, where the proxy still has the unstreamed
-  `tool_calls` array to inspect.
+  near `buildCodexHooksTable` and `HookCapabilities`.
+- Current contract: Codex `>=0.124.0` honors the stable hook table DefenseClaw
+  writes to `~/.codex/config.toml`. DefenseClaw wires six lifecycle events;
+  five are block-capable and `SessionStart` is context/telemetry only.
+- Data path: Codex talks directly to its configured upstream model provider.
+  DefenseClaw does **not** rewrite Codex through an LLM proxy. Inspection comes
+  from lifecycle hooks, native OTel, and the agent-turn-complete notify bridge.
+- HITL: Codex has no native ask response. `confirm` becomes an alert/system
+  message with `raw_action` retained for audit; there is no TUI resume path.
 
 ---
 
 ## Implementation pointers
 
-If you came here because something looks "missing" for ZeptoClaw or
-Codex pre-tool gating, the answer is almost always one of:
+If you came here because something looks "missing" for ZeptoClaw or Codex
+pre-tool gating, first identify which integration family you are inspecting:
 
-- "It's enforced at the proxy, not the agent — read `Route()`."
-- "It's a forward-compat artefact — we don't expect the agent to read it."
-- "The schema doesn't support what you're trying to do."
+- ZeptoClaw is proxy-backed; read its routing and response-scan path.
+- Codex is hook-only; read `HookCapabilities`, `buildCodexHooksTable`, and the
+  Codex response shaper.
+- A host event not listed as block/ask-capable is telemetry or fallback, not a
+  hidden approval queue.
 
-Before adding code that "fixes" either case, re-read the
-**By-design connector limitations** section above and check whether the
-proxy already covers the scenario via `ToolModeBoth` and response-scan.
+Before adding code that "fixes" either case, check the checked public matrix at
+`docs-site/data/capability-matrix.json`; connector tests now enforce parity for
+all hook-backed rows.
 
 ---
 

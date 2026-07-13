@@ -143,9 +143,15 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 		gotIdentity          AgentIdentity
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSession = SessionIDFromContext(r.Context())
-		gotTrace = TraceIDFromContext(r.Context())
-		gotIdentity = AgentIdentityFromContext(r.Context())
+		// CorrelationMiddleware only peeks the agent identity so an
+		// unauthenticated flood cannot mint unbounded session entries.
+		// Stand in for an authenticated handler and promote, exactly as
+		// the proxy / api success paths do, to mint the session-scoped
+		// agent_instance_id.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		gotSession = SessionIDFromContext(ctx)
+		gotTrace = TraceIDFromContext(ctx)
+		gotIdentity = AgentIdentityFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -174,6 +180,35 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	}
 }
 
+func TestCorrelationMiddlewareTrustsUserHeadersOnlyFromLoopback(t *testing.T) {
+	reg := NewAgentRegistry("agent-ci", "CI Agent")
+	mw := CorrelationMiddleware(reg)
+	for _, tc := range []struct {
+		name       string
+		remoteAddr string
+		wantUserID string
+	}{
+		{name: "remote ignored", remoteAddr: "203.0.113.8:443", wantUserID: ""},
+		{name: "loopback accepted", remoteAddr: "127.0.0.1:54321", wantUserID: "spoof-attempt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got AgentIdentity
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = AgentIdentityFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set(SessionIDHeader, "identity-session")
+			req.Header.Set(llmEventUserIDHeader, "spoof-attempt")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got.UserID != tc.wantUserID {
+				t.Fatalf("user_id=%q want %q", got.UserID, tc.wantUserID)
+			}
+		})
+	}
+}
+
 // TestCorrelationMiddleware_StampsAuditEnvelope closes the v7 loop:
 // the middleware snapshots the resolved correlation + agent identity
 // into an audit.CorrelationEnvelope so any downstream call to
@@ -188,7 +223,11 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 
 	var env audit.CorrelationEnvelope
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		env = audit.EnvelopeFromContext(r.Context())
+		// Promote (as an authenticated handler would) so the envelope
+		// picks up the minted agent_instance_id; the middleware alone
+		// only peeks to avoid minting on unauthenticated requests.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		env = audit.EnvelopeFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 

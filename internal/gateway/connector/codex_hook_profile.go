@@ -289,5 +289,9 @@ func canonicalHookEvent(event string) string {
 	event = strings.ToLower(strings.TrimSpace(event))
 	event = strings.ReplaceAll(event, "_", "")
 	event = strings.ReplaceAll(event, "-", "")
+	// Strip dots so opencode's dotted plugin-hook names
+	// ("tool.execute.before") match BlockEvents entries written in the
+	// same dotted form. Mirrors canonicalEvent in the gateway package.
+	event = strings.ReplaceAll(event, ".", "")
 	return event
 }

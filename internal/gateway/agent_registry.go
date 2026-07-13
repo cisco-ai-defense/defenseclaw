@@ -36,6 +36,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -97,11 +98,26 @@ type AgentRegistry struct {
 	sessions map[string]sessionEntry // session_id -> instance
 }
 
-// sessionEntry is the per-session record kept in-memory. Only
-// AgentInstanceID is surfaced to observability today; future
-// tracks may add last-seen timestamps, request counts, etc.
+// ("Unauthenticated requests can grow the agent
+// session registry"): the legacy registry minted and retained an entry
+// for every distinct X-DefenseClaw-Session-Id, with no TTL or LRU cap.
+// CorrelationMiddleware ran before tokenAuth, so an unauthenticated
+// caller could send a flood of unique IDs to /health (or even to
+// rejected-auth paths) and grow the in-memory map without bound.
+//
+// The cap below is intentionally generous (legitimate sidecars rarely
+// exceed a few hundred concurrent sessions) but strict enough to bound
+// the per-process memory cost. When the cap is exceeded we evict the
+// oldest entries first; this keeps long-lived sessions stable while
+// shedding rotated/spoofed IDs.
+const agentRegistryMaxSessions = 4096
+
+// sessionEntry is the per-session record kept in-memory. “LastSeen“
+// powers oldest-first eviction once the registry grows past the cap;
+// “AgentInstanceID“ is the value surfaced to observability today.
 type sessionEntry struct {
 	AgentInstanceID string
+	LastSeen        time.Time
 }
 
 // NewAgentRegistry constructs a registry with a fresh sidecar
@@ -163,24 +179,74 @@ func (r *AgentRegistry) AgentName() string {
 // seen. An empty sessionID returns "" (no session means no
 // per-session identity) — callers should surface that as a missing
 // agent_instance_id field rather than synthesising one.
+//
+// ("Unauthenticated requests can grow the agent
+// session registry"): updates LastSeen on every lookup and enforces a
+// bounded LRU eviction so a flood of unique session IDs cannot
+// permanently grow the registry.
 func (r *AgentRegistry) AgentInstanceForSession(sessionID string) string {
 	if r == nil || sessionID == "" {
 		return ""
 	}
+	now := time.Now()
 	r.mu.RLock()
 	entry, ok := r.sessions[sessionID]
 	r.mu.RUnlock()
 	if ok {
+		// Refresh LastSeen on access so legitimate long-lived
+		// sessions stay near the top of the LRU.
+		r.mu.Lock()
+		if existing, stillThere := r.sessions[sessionID]; stillThere {
+			existing.LastSeen = now
+			r.sessions[sessionID] = existing
+		}
+		r.mu.Unlock()
 		return entry.AgentInstanceID
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if entry, ok = r.sessions[sessionID]; ok {
+		entry.LastSeen = now
+		r.sessions[sessionID] = entry
 		return entry.AgentInstanceID
 	}
-	entry = sessionEntry{AgentInstanceID: uuid.NewString()}
+	if len(r.sessions) >= agentRegistryMaxSessions {
+		r.evictOldestLocked()
+	}
+	entry = sessionEntry{AgentInstanceID: uuid.NewString(), LastSeen: now}
 	r.sessions[sessionID] = entry
 	return entry.AgentInstanceID
+}
+
+// evictOldestLocked drops the single oldest session entry to make room
+// for a new one. Caller must hold r.mu (write lock). O(N) on registry
+// size, which is bounded by agentRegistryMaxSessions, so the worst-case
+// eviction cost stays small.
+//
+// Tie-break: when multiple entries share the same LastSeen (common
+// under bursty traffic and unit-test wallclocks with low resolution),
+// fall back to lexicographic key order. Without this tie-break the
+// victim depends on Go's randomized map iteration, which makes both
+// behavior and tests flaky.
+func (r *AgentRegistry) evictOldestLocked() {
+	var oldestKey string
+	var oldestSeen time.Time
+	for key, entry := range r.sessions {
+		if oldestKey == "" {
+			oldestKey = key
+			oldestSeen = entry.LastSeen
+			continue
+		}
+		if entry.LastSeen.Before(oldestSeen) {
+			oldestKey = key
+			oldestSeen = entry.LastSeen
+		} else if entry.LastSeen.Equal(oldestSeen) && key < oldestKey {
+			oldestKey = key
+		}
+	}
+	if oldestKey != "" {
+		delete(r.sessions, oldestKey)
+	}
 }
 
 // Resolve returns the three-tier identity for a request context.
@@ -188,7 +254,27 @@ func (r *AgentRegistry) AgentInstanceForSession(sessionID string) string {
 // AgentID and SidecarInstanceID are populated.
 // inboundAgentID, when non-empty, overrides the configured logical agent id
 // for this request (HTTP header X-DefenseClaw-Agent-Id).
+//
+// Resolve mints a new agent_instance_id when the session is new.
+// Authenticated callers should use Resolve; unauthenticated middleware
+// should use ResolvePeek to avoid letting unauthenticated traffic
+// grow the session map.
 func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID string) AgentIdentity {
+	return r.resolve(ctx, sessionID, inboundAgentID, true)
+}
+
+// ResolvePeek returns the three-tier identity for a request context
+// WITHOUT minting a new entry when sessionID is unknown. The
+// AgentInstanceID is left empty for unknown sessions; callers can
+// upgrade to Resolve once authentication has succeeded. // S2.MEDIUM ("CorrelationMiddleware mints unauthenticated agent
+// sessions") closure: combined with the AgentRegistry LRU cap, this
+// stops unauthenticated requests from amplifying memory usage by
+// flooding distinct X-DefenseClaw-Session-Id headers.
+func (r *AgentRegistry) ResolvePeek(ctx context.Context, sessionID, inboundAgentID string) AgentIdentity {
+	return r.resolve(ctx, sessionID, inboundAgentID, false)
+}
+
+func (r *AgentRegistry) resolve(ctx context.Context, sessionID, inboundAgentID string, mint bool) AgentIdentity {
 	_ = ctx
 	logicalID := strings.TrimSpace(inboundAgentID)
 	if logicalID == "" {
@@ -205,16 +291,38 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 		SidecarInstanceID: r.SidecarInstanceID(),
 	}
 	if sessionID != "" {
-		// agent_instance_id is session-scoped per the observability
-		// contract (docs/OBSERVABILITY-CONTRACT.md: "Per conversation").
-		// Do NOT mix logicalID into the key — two requests in the
-		// same session with different X-DefenseClaw-Agent-Id headers
-		// (or one with, one falling back to configured agent.id)
-		// must resolve to the same instance id so audit / JSONL /
-		// OTel group cleanly per conversation.
-		id.AgentInstanceID = r.AgentInstanceForSession(sessionID)
+		if mint {
+			// agent_instance_id is session-scoped per the observability
+			// contract (docs/OBSERVABILITY-CONTRACT.md: "Per conversation").
+			id.AgentInstanceID = r.AgentInstanceForSession(sessionID)
+		} else {
+			id.AgentInstanceID = r.peekAgentInstance(sessionID)
+		}
 	}
 	return id
+}
+
+// peekAgentInstance returns the existing instance id for sessionID
+// without minting a new entry. Updates LastSeen on hit so the LRU
+// reflects observed activity even from peek-only callers.
+func (r *AgentRegistry) peekAgentInstance(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	now := time.Now()
+	r.mu.RLock()
+	entry, ok := r.sessions[sessionID]
+	r.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	r.mu.Lock()
+	if existing, stillThere := r.sessions[sessionID]; stillThere {
+		existing.LastSeen = now
+		r.sessions[sessionID] = existing
+	}
+	r.mu.Unlock()
+	return entry.AgentInstanceID
 }
 
 // AgentIdentity is the value object returned by Resolve. The three
@@ -225,4 +333,6 @@ type AgentIdentity struct {
 	AgentType         string
 	AgentInstanceID   string
 	SidecarInstanceID string
+	UserID            string
+	UserName          string
 }

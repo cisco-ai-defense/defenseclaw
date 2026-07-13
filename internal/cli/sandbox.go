@@ -47,7 +47,7 @@ var (
 )
 
 var sandboxExecCmd = &cobra.Command{
-	Use:   "exec -- <command> [args...]",
+	Use:   "exec [--netns] -- <command> [args...]",
 	Short: "Run a command as the sandbox user",
 	Long: `Run a command as the sandbox user on the host.
 
@@ -55,9 +55,9 @@ By default, runs via 'sudo -u sandbox <command>' on the host filesystem.
 The sandbox home directory is shared (Landlock restricts, doesn't overlay),
 so all changes persist.
 
-Use --netns to run inside the sandbox's network namespace (for debugging).`,
-	DisableFlagParsing: true,
-	RunE:               runSandboxExec,
+Use --netns to run inside the sandbox's network namespace (for debugging).
+Place -- before the command so command-specific flags are passed through.`,
+	RunE: runSandboxExec,
 }
 
 var sandboxShellCmd = &cobra.Command{
@@ -114,31 +114,24 @@ func runSandboxStatus(_ *cobra.Command, _ []string) error {
 }
 
 func runSandboxExec(_ *cobra.Command, args []string) error {
-	// Strip leading "--" if present
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
-	}
-
-	// Check for --netns flag manually since we disabled flag parsing
-	netns := false
-	var cmdArgs []string
-	for _, a := range args {
-		if a == "--netns" {
-			netns = true
-		} else {
-			cmdArgs = append(cmdArgs, a)
-		}
-	}
-
-	if len(cmdArgs) == 0 {
+	if len(args) == 0 {
 		return fmt.Errorf("sandbox exec: no command specified")
 	}
 
-	if netns {
-		return sandboxExecInNetns(cmdArgs)
+	if sandboxExecNetns {
+		return sandboxExecInNetns(args)
 	}
 
-	cmd := exec.Command("sudo", append([]string{"-u", "sandbox"}, cmdArgs...)...)
+	// ("sandbox exec arguments can be interpreted
+	// as sudo options"): sudo parses options before the command, so
+	// any cmdArgs[0] starting with `-` (e.g. `-u root`) is consumed
+	// by sudo itself rather than executed as the sandbox user. The
+	// `--` terminator forces sudo to treat everything that follows
+	// as the command vector, restoring the intended trust boundary.
+	cmd := exec.Command(
+		"sudo",
+		append([]string{"-u", "sandbox", "--"}, args...)...,
+	)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -146,7 +139,7 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 }
 
 func runSandboxShell(_ *cobra.Command, _ []string) error {
-	cmd := exec.Command("sudo", "-u", "sandbox", "bash")
+	cmd := exec.Command("sudo", "-u", "sandbox", "--", "bash")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -159,7 +152,10 @@ func sandboxExecInNetns(args []string) error {
 		return err
 	}
 
-	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox"}
+	// ("sandbox exec arguments can be interpreted
+	// as sudo options"): same `--` terminator hardening as the
+	// non-netns path above.
+	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox", "--"}
 	nsArgs = append(nsArgs, args...)
 	cmd := exec.Command("ip", nsArgs...)
 	cmd.Stdin = os.Stdin

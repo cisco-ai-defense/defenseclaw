@@ -1,6 +1,10 @@
 import { createMDX } from 'fumadocs-mdx/next';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const withMDX = createMDX();
+const rootDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = dirname(rootDir);
 
 const rawBase = process.env.BASE_PATH ?? '/defenseclaw';
 // Empty string is the convention for "no basePath" in Next.js. Treat
@@ -20,6 +24,12 @@ const config = {
   images: {
     // Required for static export — Next's image optimizer needs a server.
     unoptimized: true,
+  },
+  turbopack: {
+    root: repoRoot,
+    resolveAlias: {
+      tailwindcss: `${rootDir}/node_modules/tailwindcss/index.css`,
+    },
   },
   experimental: {
     // We render mermaid as a client component, so server bundling stays clean.

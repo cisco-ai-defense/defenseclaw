@@ -47,6 +47,20 @@ func intAttrValue(r sdklog.Record, key string) (int64, bool) {
 	return out, found
 }
 
+func boolAttrValue(r sdklog.Record, key string) (bool, bool) {
+	var out, found bool
+	r.WalkAttributes(func(kv log.KeyValue) bool {
+		if string(kv.Key) == key {
+			if kv.Value.Kind() == log.KindBool {
+				out, found = kv.Value.AsBool(), true
+			}
+			return false
+		}
+		return true
+	})
+	return out, found
+}
+
 func TestGatewaySeverityToOTel(t *testing.T) {
 	cases := []struct {
 		in      gatewaylog.Severity
@@ -257,6 +271,24 @@ func TestEmitGatewayEventWithContext_PropagatesTraceContext(t *testing.T) {
 	}
 	if got := rec.TraceFlags(); got != trace.FlagsSampled {
 		t.Fatalf("record trace flags=%v want %v", got, trace.FlagsSampled)
+	}
+}
+
+func TestEmitGatewayEventPreservesExplicitFalseAgentFlags(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	value := false
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle, Severity: gatewaylog.SeverityInfo,
+		AgentReportedCost: &value, SessionResumed: &value,
+	})
+	record := exp.snapshot()[0]
+	for _, key := range []string{
+		"defenseclaw.agent.reported_cost.present",
+		"defenseclaw.session.resumed",
+	} {
+		if got, found := boolAttrValue(record, key); !found || got {
+			t.Fatalf("%s=(%v,%v), want explicit false", key, got, found)
+		}
 	}
 }
 
@@ -509,6 +541,35 @@ func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {
 	assertAttrString(t, rec, "defenseclaw.llm.reply_to_prompt_id", "prompt-1")
 	if got, ok := intAttrValue(rec, "defenseclaw.tool.exit_code"); !ok || got != 2 {
 		t.Fatalf("defenseclaw.tool.exit_code=%d ok=%v, want 2", got, ok)
+	}
+}
+
+func TestEmitGatewayEvent_HookDecisionAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventHookDecision,
+		Severity:  gatewaylog.SeverityHigh,
+		SessionID: "sess-hook",
+		AgentID:   "agent-hook",
+		Connector: "codex",
+		HookDecision: &gatewaylog.HookDecisionPayload{
+			Connector: "codex", Event: "PreToolUse", Result: "ok",
+			Action: "block", RawAction: "block", Severity: gatewaylog.SeverityHigh,
+			Mode: "action", WouldBlock: false, Enforced: true, StepIdx: 4,
+			LatencyMs: 17, Reason: "blocked by policy", EvaluationID: "eval-1",
+			RuleIDs: []string{"TOOL.BLOCK"},
+		},
+	})
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "hook_decision")
+	assertAttrString(t, rec, "defenseclaw.hook.connector", "codex")
+	assertAttrString(t, rec, "defenseclaw.hook.event", "PreToolUse")
+	assertAttrString(t, rec, "defenseclaw.hook.action", "block")
+	assertAttrString(t, rec, "defenseclaw.hook.raw_action", "block")
+	assertAttrString(t, rec, "defenseclaw.hook.evaluation_id", "eval-1")
+	assertAttrString(t, rec, "defenseclaw.hook.rule_ids", "TOOL.BLOCK")
+	if got, ok := intAttrValue(rec, "defenseclaw.hook.step_idx"); !ok || got != 4 {
+		t.Fatalf("defenseclaw.hook.step_idx=%d ok=%v, want 4", got, ok)
 	}
 }
 

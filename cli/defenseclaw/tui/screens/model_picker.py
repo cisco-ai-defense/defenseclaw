@@ -27,6 +27,7 @@ and writes back the model id the screen dismisses with.
 
 from __future__ import annotations
 
+from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -207,7 +208,10 @@ class ModelPickerScreen(ModalScreen[str | None]):
         for index, model in enumerate(self._rows):
             marker = ">" if index == self.selected_index else " "
             suffix = "  [#475569](custom)[/]" if model not in self._models else ""
-            lines.append(f"{marker} [#22D3EE]{model}[/]{suffix}")
+            # Escape the model id before interpolating into markup: a free-text
+            # id containing ``[`` (e.g. ``gpt[4``) would otherwise crash the
+            # Rich render on the keystroke after the bracket.
+            lines.append(f"{marker} [#22D3EE]{rich_escape(model)}[/]{suffix}")
         target.update("\n".join(lines))
 
 

@@ -34,7 +34,7 @@ Coverage:
 * ``--json`` mode silences all of the above and emits the unchanged
   ``ScanResult.to_json()`` contract — *not* the new
   ``render_json_payload`` shape, because automation still parses
-  the legacy contract.
+  The legacy contract.
 """
 
 from __future__ import annotations
@@ -227,6 +227,65 @@ class TestScanUXErrorPath(_PluginScanUXBase):
         # And the new preamble must NOT have run for a target that
         # never resolved.
         self.assertNotIn("Scanning 1 plugin", result.output)
+
+
+class TestScanHostConnectorResolve(_PluginScanUXBase):
+    """P-B: ``plugin scan <name> --connector X`` resolves a host-owned plugin."""
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_resolves_host_connector_plugin(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        host_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        os.makedirs(os.path.join(host_dir, "hostplug"))
+        self.app.cfg.active_connectors = lambda: ["openclaw", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [host_dir] if c == "codex" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "hostplug", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # The scanner must have been handed the host dir, not "not found".
+        self.assertEqual(
+            mock_scan.call_args.args[0], os.path.join(host_dir, "hostplug"),
+        )
+
+
+class TestScanAllSweep(_PluginScanUXBase):
+    """P-C: ``plugin scan --all`` sweeps installed plugins across connectors."""
+
+    def test_target_plus_all_is_mutually_exclusive(self) -> None:
+        result = self.invoke(["scan", self.plugin_name, "--all"])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("not both", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_all_scans_managed_plugin(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        result = self.invoke(["scan", "--all"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # demo-plugin lives in the managed plugin_dir → it gets swept.
+        self.assertTrue(mock_scan.called)
+        scanned = {c.args[0] for c in mock_scan.call_args_list}
+        self.assertIn(self.plugin_path, scanned)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_all_fans_out_across_active_connectors(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        self.app.cfg.active_connectors = lambda: ["openclaw", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: []  # type: ignore[method-assign]
+        result = self.invoke(["scan", "--all"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Each active connector gets its own banner.
+        self.assertIn("── connector: openclaw ──", result.output)
+        self.assertIn("── connector: codex ──", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_all_literal_arg_accepted(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        result = self.invoke(["scan", "all"])
+        self.assertEqual(result.exit_code, 0, result.output)
 
 
 if __name__ == "__main__":

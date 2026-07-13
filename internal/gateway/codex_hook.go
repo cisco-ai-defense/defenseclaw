@@ -52,6 +52,7 @@ type codexHookRequest struct {
 	Model                string                 `json:"model,omitempty"`
 	Source               string                 `json:"source,omitempty"`
 	ToolName             string                 `json:"tool_name,omitempty"`
+	MCPServerName        string                 `json:"mcp_server_name,omitempty"`
 	ToolUseID            string                 `json:"tool_use_id,omitempty"`
 	ToolInput            map[string]interface{} `json:"tool_input,omitempty"`
 	ToolResponse         interface{}            `json:"tool_response,omitempty"`
@@ -158,7 +159,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			}
 		}
 	case "UserPromptSubmit":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   req.Prompt,
 			Direction: "prompt",
@@ -166,10 +167,11 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		})
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
-			Tool:      codexToolName(req),
-			Args:      codexToolArgs(req),
-			Direction: "tool_call",
-			Connector: "codex",
+			Tool:          codexToolName(req),
+			Args:          codexToolArgs(req),
+			Direction:     "tool_call",
+			Connector:     "codex",
+			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -178,7 +180,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "PostToolUse":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
@@ -304,10 +306,13 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+	if a.scannerCfg.ManualConnectorConfigured("codex") && !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
 		return false
 	}
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+		return true
+	}
+	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
@@ -324,7 +329,7 @@ func (a *APIServer) codexMode() string {
 		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("codex"))
+			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -634,12 +639,57 @@ func validateGitCwd(cwd string) (string, error) {
 // safeGitEnv returns environment variables that prevent git from executing
 // attacker-controlled config hooks (core.fsmonitor, core.hooksPath, etc.)
 // by disabling system/global config and pointing HOME to a safe empty dir.
+//
+// Avarice F-3347: the legacy implementation only disabled system and
+// global config. Repository-local `.git/config` remained active, so a
+// hostile workspace could set `core.fsmonitor`, `core.hooksPath`,
+// `protocol.<x>.allow=user`, etc. and have git execute attacker
+// commands during routine `git diff` / `git ls-files` calls. We use
+// GIT_CONFIG_COUNT/KEY/VALUE to provide a *replacement* config layer
+// that overrides anything set in the repository, and unset
+// GIT_CONFIG_PARAMETERS so a poisoned parent env can't add more.
 func safeGitEnv() []string {
-	return append(os.Environ(),
+	// (key, value) pairs that neutralise the most dangerous repo-
+	// local config knobs. Note: we cannot fully prevent git from
+	// reading `.git/config`, but per `gitconfig(5)`,
+	// GIT_CONFIG_KEY_<n>/VALUE_<n> entries override repo-local
+	// values so any malicious setting becomes a no-op for the
+	// hooks/diff helpers we run.
+	overrides := []string{
+		"core.fsmonitor", "false",
+		"core.fsmonitorhookversion", "1",
+		"core.hooksPath", "/dev/null",
+		"core.sshCommand", "false",
+		"core.gitProxy", "false",
+		"core.editor", "/bin/false",
+		"core.pager", "cat",
+		"diff.external", "false",
+		"diff.tool", "false",
+		"protocol.allow", "never",
+		"protocol.file.allow", "never",
+		"protocol.ext.allow", "never",
+		"uploadpack.allowFilter", "false",
+		"uploadpack.allowAnySHA1InWant", "false",
+		"safe.directory", "*",
+	}
+	env := append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME="+os.TempDir(),
+		// Disable any pre-existing GIT_CONFIG_PARAMETERS override
+		// inherited from a parent process.
+		"GIT_CONFIG_PARAMETERS=",
 	)
+	pairs := 0
+	for i := 0; i+1 < len(overrides); i += 2 {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", pairs, overrides[i]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", pairs, overrides[i+1]),
+		)
+		pairs++
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", pairs))
+	return env
 }
 
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {

@@ -23,10 +23,10 @@ Choose the InsightClaw `endpoint` carefully if you override it: send telemetry o
 
 ```bash
 defenseclaw setup openclaw --mode observe --restart
-defenseclaw setup openclaw --mode action --human-approval --rule-pack strict --restart
+defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-`setup openclaw` is an alias around [`defenseclaw setup guardrail --connector openclaw`](/docs/setup/guardrail) — it pins `claw.mode=openclaw` and inherits every guardrail flag. Unlike Claude Code / Codex, the proxy is **always** in the data path here: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
+`setup openclaw` is an alias around [`defenseclaw setup guardrail --connector openclaw`](/docs/setup/guardrail) and inherits every guardrail flag. Unlike Claude Code / Codex, the proxy is **always** in the data path here: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
 
 #### What this command sets vs. leaves at defaults
 
@@ -40,7 +40,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
 | HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
@@ -75,14 +75,14 @@ defenseclaw setup openclaw \
   --restart
 ```
 
-HIGH findings pause for operator approval; CRITICAL still blocks unconditionally. OpenClaw is one of the two connectors with a native approval surface (via the bundled DefenseClaw plugin), so chat-origin approvals reach the agent UI directly. See the [HITL page](/docs/hitl) for the per-connector matrix.
+HIGH findings can pause for operator approval; CRITICAL still blocks unconditionally. OpenClaw's bundled DefenseClaw plugin provides a native chat-origin approval surface, so approvals reach the agent UI directly. See the [HITL page](/docs/hitl) for the per-connector matrix.
 
 </Tab>
 
 <Tab value="Action + judge">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup openclaw \
   --mode action \
@@ -104,13 +104,11 @@ Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents 
 defenseclaw policy activate strict
 defenseclaw setup openclaw \
   --mode action \
-  --human-approval \
-  --hilt-min-severity low \
   --rule-pack strict \
   --restart
 ```
 
-Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the OpenShell sandbox profile and an MCP allow-list for full lockdown.
+Block MEDIUM and above, alert on LOW, and do not offer approval for findings that have already crossed the block threshold. Pair with the OpenShell sandbox profile and a reviewed first-party allow-list for full lockdown.
 
 </Tab>
 
@@ -156,12 +154,12 @@ A hash-checked backup of `openclaw.json` is stored before edits; teardown restor
 ## What the plugin does
 
 <Sequence
-  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle."
+  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle. Plugin is the bundled DefenseClaw plugin; Gateway is defenseclaw-gateway."
   participants={[
     { id: 'u',  label: 'User',                kind: 'operator' },
-    { id: 'oc', label: 'OpenClaw agent',      kind: 'agent' },
-    { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
-    { id: 'g',  label: 'defenseclaw-gateway', kind: 'gateway' },
+    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
+    { id: 'p',  label: 'Plugin',   kind: 'connector' },
+    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
   ]}
 >
   <Message from="u"  to="oc" label="prompt" />
@@ -180,7 +178,7 @@ A hash-checked backup of `openclaw.json` is stored before edits; teardown restor
 
 <HookEventsList connector="openclaw" />
 
-OpenClaw is one of the two connectors that supports DefenseClaw approval prompts for tool actions. Approvals reach chat-origin sessions via the bundled plugin instead of living only in the native approval queue.
+OpenClaw supports DefenseClaw approval prompts for tool actions through its bundled plugin. Approvals reach chat-origin sessions directly.
 
 ## Subprocess policy
 

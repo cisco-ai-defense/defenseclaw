@@ -185,20 +185,22 @@ def local_observability(ctx: click.Context) -> None:
         "Before starting the stack, refresh ~/.defenseclaw/observability-stack/ "
         "from the wheel/repo bundle so newly-shipped bridge / compose changes "
         "take effect. Operator-editable surfaces (Grafana dashboards, Prometheus "
-        "rules, Loki/Tempo/OTel-Collector configs) are preserved unless "
-        "--refresh-config is also passed. If the stack is already running, it "
-        "will be stopped, refreshed, and restarted automatically."
+        "rules, Loki/Tempo/OTel-Collector configs) are refreshed by default; "
+        "pass --no-refresh-config to preserve local edits. If the stack is "
+        "already running, it will be stopped, refreshed, and restarted "
+        "automatically."
     ),
 )
 @click.option(
-    "--refresh-config",
+    "--refresh-config/--no-refresh-config",
     "refresh_config",
-    is_flag=True,
-    default=False,
+    default=True,
+    show_default=True,
     help=(
-        "When refreshing the bundle, also overwrite operator-editable surfaces "
-        "(grafana/, prometheus/, loki/, tempo/, otel-collector/). Destructive "
-        "to local dashboard / rule / config edits — opt-in only."
+        "When refreshing the bundle, overwrite operator-editable surfaces "
+        "(grafana/, prometheus/, loki/, tempo/, otel-collector/) with the "
+        "bundled versions. Pass --no-refresh-config to preserve local "
+        "dashboard / rule / config edits."
     ),
 )
 @pass_ctx
@@ -303,10 +305,20 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         from defenseclaw.observability import set_destination_enabled
 
         try:
-            set_destination_enabled("otel", False, app.cfg.data_dir)
-            click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
+            set_destination_enabled("local-observability", False, app.cfg.data_dir)
+            click.echo(
+                f"  {ux.bold('Config updated:')} "
+                "otel.destinations[local-observability].enabled=false"
+            )
         except ValueError as exc:
-            click.echo(f"  warning: could not disable otel block: {exc}")
+            # Configurations created before named fan-out used the flat
+            # ``otel:`` exporter. Preserve the old ``down`` behavior until
+            # the next setup mutation migrates that exporter automatically.
+            try:
+                set_destination_enabled("otel", False, app.cfg.data_dir)
+                click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
+            except ValueError:
+                click.echo(f"  warning: could not disable otel block: {exc}")
 
         # Best-effort: also flip off the matching audit sink we
         # planted in ``up``. We only disable, never delete, so an
@@ -434,8 +446,8 @@ def _refresh_and_maybe_restart_local_observability(
        the operator's history is preserved across the bounce.
     3. Refresh ``~/.defenseclaw/observability-stack/`` from the bundle.
        Operator-editable config surfaces (dashboards, rules, OTel
-       collector config) are preserved by default; pass
-       ``refresh_config=True`` to also overwrite them.
+       collector config) are refreshed by default; pass
+       ``refresh_config=False`` to preserve them.
     4. The caller then runs ``bridge up`` so the freshly refreshed
        bundle is what materializes the next stack.
 
@@ -494,6 +506,18 @@ def _refresh_and_maybe_restart_local_observability(
         click.echo(
             f"  {ux.dim('→')} Bundle refresh: no changes "
             "(seeded copy already matches bundle)"
+        )
+    if result.preserved_paths and not refresh_config:
+        preserved = ", ".join(sorted(result.preserved_paths)[:5])
+        if len(result.preserved_paths) > 5:
+            preserved = f"{preserved}, ..."
+        click.echo(
+            "  "
+            + ux.dim("→")
+            + " Preserved local observability config: "
+            + preserved
+            + ". Omit --no-refresh-config, or pass --refresh-config, to "
+            + "overwrite dashboards/rules/config with the bundled versions."
         )
     return result
 
@@ -609,9 +633,10 @@ def _apply_local_otlp_config(
             # force http here for SDKs that can't speak grpc locally.
             "protocol": protocol,
             "insecure": "true",
+            "service_name": service_name,
         },
         app.cfg.data_dir,
-        name=service_name,
+        name="local-observability",
         enabled=True,
         signals=signals,  # type: ignore[arg-type]
     )

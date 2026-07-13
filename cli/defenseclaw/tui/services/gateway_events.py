@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -130,7 +131,7 @@ def count_recent_silent_bypass(
     return n
 
 
-def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
+def load_gateway_egress(path: Path | str, *, raise_errors: bool = False) -> tuple[EgressEvent, ...]:
     """Read the tail of ``gateway.jsonl`` and return egress rows.
 
     Bounded to the last 512 KiB to match the Go reader's budget; on a
@@ -140,28 +141,23 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
 
     p = Path(path)
     try:
-        size = p.stat().st_size
-    except (OSError, FileNotFoundError):
-        return ()
-    max_bytes = 512 * 1024
-    read_size = min(size, max_bytes)
-    offset = size - read_size
-    try:
-        with p.open("rb") as fh:
-            if offset > 0:
-                fh.seek(offset)
-            chunk = fh.read(read_size)
+        signature = _gateway_file_signature(p)
+        return _load_gateway_egress_cached(str(p), signature)
     except OSError:
+        if raise_errors:
+            raise
         return ()
-    text = chunk.decode("utf-8", errors="replace")
-    if offset > 0:
-        # The first line is almost certainly a half-record; drop it so
-        # ``json.loads`` doesn't reject it.
-        nl = text.find("\n")
-        if nl >= 0:
-            text = text[nl + 1 :]
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_egress_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[EgressEvent, ...]:
+    """Parse egress rows once per immutable file snapshot."""
+
     out: list[EgressEvent] = []
-    for raw in text.splitlines():
+    for raw in _read_tail_event_lines(Path(path), max_lines=None):
         line = raw.strip()
         if not line:
             continue
@@ -195,9 +191,17 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
 
 
 def parse_gateway_event(line: str) -> GatewayEvent:
-    """Parse one gateway JSONL line."""
+    """Parse one gateway JSONL line.
+
+    A well-formed JSONL row is a JSON object. Non-object payloads (a bare
+    number, string, list, or ``null``) are valid JSON but carry no event
+    fields, so they are coerced to an empty mapping and surface as an
+    ``unknown`` event that callers skip rather than crashing on ``.get``.
+    """
 
     payload = json.loads(line)
+    if not isinstance(payload, dict):
+        payload = {}
     event_type = str(payload.get("event_type") or "unknown")
     if event_type not in {"scan", "scan_finding", "activity"}:
         event_type = "unknown"
@@ -260,13 +264,27 @@ def render_verdict_line(event: GatewayEvent) -> str:
     return str(event.raw)
 
 
-def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
+def load_gateway_activity(path: Path, *, raise_errors: bool = False) -> tuple[ActivityMutation, ...]:
     """Load activity events from a gateway JSONL file."""
 
-    if not path.exists():
+    try:
+        signature = _gateway_file_signature(path)
+        return _load_gateway_activity_cached(str(path), signature)
+    except OSError:
+        if raise_errors:
+            raise
         return ()
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_activity_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[ActivityMutation, ...]:
+    """Parse activity mutations once per immutable file snapshot."""
+
     rows: list[ActivityMutation] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_tail_event_lines(Path(path)):
         if not line.strip():
             continue
         try:
@@ -291,49 +309,69 @@ def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
     return tuple(rows)
 
 
-def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
+def load_gateway_scan_blocks(path: Path, *, raise_errors: bool = False) -> tuple[ScanBlock, ...]:
     """Load scan summary blocks and attached findings from gateway JSONL."""
 
-    if not path.exists():
+    try:
+        signature = _gateway_file_signature(path)
+        return _load_gateway_scan_blocks_cached(str(path), signature)
+    except OSError:
+        if raise_errors:
+            raise
         return ()
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_scan_blocks_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[ScanBlock, ...]:
+    """Parse scan blocks once per immutable file snapshot."""
+
     blocks: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_tail_event_lines(Path(path)):
         if not line.strip():
             continue
+        # A single malformed gateway row must never break the Alerts
+        # refresh: tolerate bad JSON, non-numeric counters, and any other
+        # shape surprise by skipping just that row.
         try:
             event = parse_gateway_event(line)
         except json.JSONDecodeError:
             continue
-        if event.event_type == "scan" and event.scan.get("scan_id"):
-            scan_id = str(event.scan["scan_id"])
-            block = blocks.setdefault(scan_id, {"findings": []})
-            block.update(
-                scan_id=scan_id,
-                scanner=str(event.scan.get("scanner") or ""),
-                target=str(event.scan.get("target") or ""),
-                severity=str(event.scan.get("severity_max") or event.severity or "INFO"),
-                verdict=str(event.scan.get("verdict") or ""),
-                duration_ms=int(event.scan.get("duration_ms") or 0),
-                total_count=int(event.scan.get("total_count") or 0),
-                counts=_int_mapping(event.scan.get("counts")),
-                timestamp=event.timestamp,
-            )
-        elif event.event_type == "scan_finding" and event.scan_finding.get("scan_id"):
-            scan_id = str(event.scan_finding["scan_id"])
-            block = blocks.setdefault(
-                scan_id,
-                {
-                    "scan_id": scan_id,
-                    "scanner": str(event.scan_finding.get("scanner") or ""),
-                    "target": str(event.scan_finding.get("target") or ""),
-                    "severity": event.severity or "INFO",
-                    "timestamp": event.timestamp,
-                    "findings": [],
-                },
-            )
-            block["findings"].append(event.scan_finding)
-            if event.timestamp and (block.get("timestamp") is None or event.timestamp > block["timestamp"]):
-                block["timestamp"] = event.timestamp
+        try:
+            if event.event_type == "scan" and event.scan.get("scan_id"):
+                scan_id = str(event.scan["scan_id"])
+                block = blocks.setdefault(scan_id, {"findings": []})
+                block.update(
+                    scan_id=scan_id,
+                    scanner=str(event.scan.get("scanner") or ""),
+                    target=str(event.scan.get("target") or ""),
+                    severity=str(event.scan.get("severity_max") or event.severity or "INFO"),
+                    verdict=str(event.scan.get("verdict") or ""),
+                    duration_ms=_safe_int(event.scan.get("duration_ms")),
+                    total_count=_safe_int(event.scan.get("total_count")),
+                    counts=_int_mapping(event.scan.get("counts")),
+                    timestamp=event.timestamp,
+                )
+            elif event.event_type == "scan_finding" and event.scan_finding.get("scan_id"):
+                scan_id = str(event.scan_finding["scan_id"])
+                block = blocks.setdefault(
+                    scan_id,
+                    {
+                        "scan_id": scan_id,
+                        "scanner": str(event.scan_finding.get("scanner") or ""),
+                        "target": str(event.scan_finding.get("target") or ""),
+                        "severity": event.severity or "INFO",
+                        "timestamp": event.timestamp,
+                        "findings": [],
+                    },
+                )
+                block["findings"].append(event.scan_finding)
+                if event.timestamp and (block.get("timestamp") is None or event.timestamp > block["timestamp"]):
+                    block["timestamp"] = event.timestamp
+        except (AttributeError, TypeError, ValueError):
+            continue
 
     result = [
         ScanBlock(
@@ -342,8 +380,8 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
             target=str(block.get("target") or ""),
             severity=str(block.get("severity") or "INFO"),
             verdict=str(block.get("verdict") or ""),
-            duration_ms=int(block.get("duration_ms") or 0),
-            total_count=int(block.get("total_count") or 0),
+            duration_ms=_safe_int(block.get("duration_ms")),
+            total_count=_safe_int(block.get("total_count")),
             counts=dict(block.get("counts") or {}),
             timestamp=block.get("timestamp"),
             findings=tuple(block.get("findings") or ()),
@@ -360,8 +398,57 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
     )
 
 
+def _read_tail_event_lines(
+    path: Path,
+    *,
+    max_bytes: int = 512 * 1024,
+    max_lines: int | None = 2000,
+) -> tuple[str, ...]:
+    """Return a bounded tail, raising so transient failures are not cached."""
+
+    size = path.stat().st_size
+    read_size = min(size, max_bytes)
+    offset = size - read_size
+    with path.open("rb") as fh:
+        if offset > 0:
+            fh.seek(offset - 1)
+            starts_mid_line = fh.read(1) != b"\n"
+        else:
+            starts_mid_line = False
+        data = fh.read(read_size)
+    if starts_mid_line:
+        _, _, data = data.partition(b"\n")
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return tuple(lines)
+
+
+def _gateway_file_signature(path: Path) -> tuple[int, int, int, int]:
+    """Return a file identity that changes on append, rewrite, or rotation."""
+
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 def _mapping(raw: object) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
+
+
+def _safe_int(raw: object) -> int:
+    """Best-effort integer coercion for gateway counter fields.
+
+    Gateway rows are produced by a separate process and may carry
+    non-numeric values (``"NaN"``, ``null``, objects). Fall back to ``0``
+    instead of raising so one bad row cannot crash the Alerts panel.
+    """
+
+    if raw is None:
+        return 0
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _int_mapping(raw: object) -> dict[str, int]:

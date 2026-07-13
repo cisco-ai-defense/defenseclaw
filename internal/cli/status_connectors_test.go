@@ -11,11 +11,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -203,13 +205,95 @@ func TestPrintConnectors_NoConnector(t *testing.T) {
 	}
 }
 
+func TestPrintHookGuardianStatusManagedMissingState(t *testing.T) {
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	cfg = &config.Config{
+		DataDir:        t.TempDir(),
+		DeploymentMode: "managed_enterprise",
+	}
+
+	out := captureStdout(t, printHookGuardianStatus)
+	if !strings.Contains(out, "Hook guardian") || !strings.Contains(out, "not reconciled") {
+		t.Fatalf("managed enterprise missing-state output should show not reconciled, got:\n%s", out)
+	}
+}
+
+func TestPrintHookGuardianStatusHealthy(t *testing.T) {
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	dir := t.TempDir()
+	cfg = &config.Config{
+		DataDir:        dir,
+		DeploymentMode: "managed_enterprise",
+	}
+	state := `{
+  "version": 1,
+  "updated_at": "2026-06-24T01:00:00Z",
+  "manifest": "/etc/defenseclaw/hook-guardian/targets.yaml",
+  "ok": true,
+  "target_count": 1,
+  "success_count": 1,
+  "failure_count": 0,
+  "results": [
+    {"user": "alice", "connector": "codex", "ok": true}
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "hook_guardian_state.json"), []byte(state), 0o600); err != nil {
+		t.Fatalf("write hook guardian state: %v", err)
+	}
+
+	out := captureStdout(t, printHookGuardianStatus)
+	for _, want := range []string{"Hook guardian", "healthy", "1/1 targets ok", "Codex (codex) for alice", "ok"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q from hook guardian output:\n%s", want, out)
+		}
+	}
+}
+
+func TestIsLocalStatusTarget(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "[::1]", " [::1] ", "0.0.0.0", "::"} {
+		if !isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"gateway.example.test", "192.0.2.20", "2001:db8::20"} {
+		if isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = true, want false", host)
+		}
+	}
+	if hostname, err := os.Hostname(); err == nil && !isLocalStatusTarget(hostname) {
+		t.Errorf("machine hostname %q was not recognized as local", hostname)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("InterfaceAddrs: %v", err)
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch local := addr.(type) {
+		case *net.IPNet:
+			ip = local.IP
+		case *net.IPAddr:
+			ip = local.IP
+		}
+		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			if !isLocalStatusTarget(ip.String()) {
+				t.Fatalf("local interface IP %s was not recognized as local", ip)
+			}
+			return
+		}
+	}
+}
+
 // TestPrintConnectorModes_ListsAll pins the "Connector Mode" fan-out: every
 // active connector's mode/telemetry must render under one section header,
 // not just the primary connector's.
 func TestPrintConnectorModes_ListsAll(t *testing.T) {
 	modes := []connectorModeSummary{
-		{Connector: "codex", Mode: "observability", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
-		{Connector: "openclaw", Mode: "guardrail", Telemetry: []string{"hooks"}, ProxyIntercept: true},
+		{Connector: "codex", Mode: "observability", PolicyMode: "action", EnforcementSurface: "agent_lifecycle_hooks", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
+		{Connector: "openclaw", Mode: "guardrail", PolicyMode: "observe", EnforcementSurface: "llm_proxy", Telemetry: []string{"hooks"}, ProxyIntercept: true},
 	}
 
 	out := captureStdout(t, func() { printConnectorModes(modes) })
@@ -222,9 +306,22 @@ func TestPrintConnectorModes_ListsAll(t *testing.T) {
 			t.Errorf("connector %q missing from Connector Mode section:\n%s", name, out)
 		}
 	}
-	// Both DIFFERING modes must appear — the whole point of fanning out.
-	if !strings.Contains(out, "observability") || !strings.Contains(out, "guardrail") {
-		t.Errorf("expected both per-connector modes rendered, got:\n%s", out)
+	codexStart := strings.Index(out, "Codex (codex)")
+	openClawStart := strings.Index(out, "OpenClaw (openclaw)")
+	if codexStart < 0 || openClawStart < 0 || codexStart >= openClawStart {
+		t.Fatalf("connector blocks missing or out of order:\n%s", out)
+	}
+	codexBlock := out[codexStart:openClawStart]
+	openClawBlock := out[openClawStart:]
+	for _, want := range []string{"direct-to-upstream", "Policy mode:", "action"} {
+		if !strings.Contains(codexBlock, want) {
+			t.Errorf("expected %q in Codex status block, got:\n%s", want, codexBlock)
+		}
+	}
+	for _, want := range []string{"DefenseClaw proxy", "Policy mode:", "observe"} {
+		if !strings.Contains(openClawBlock, want) {
+			t.Errorf("expected %q in OpenClaw status block, got:\n%s", want, openClawBlock)
+		}
 	}
 }
 
@@ -237,6 +334,24 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 	out := captureStdout(t, func() { printConnectorModes(modes) })
 	if !strings.Contains(out, "Connector Mode") || !strings.Contains(out, "codex") {
 		t.Errorf("single-entry Connector Mode render missing header/connector:\n%s", out)
+	}
+}
+
+func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
+	modes := []connectorModeSummary{{
+		Connector:          "omnigent",
+		Mode:               "observability",
+		PolicyMode:         "action",
+		EnforcementSurface: "omnigent_policy_api",
+		Telemetry:          []string{"policy-api"},
+	}}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+
+	for _, want := range []string{"Data path:", "direct-to-upstream", "Policy mode:", "action", "omnigent policy api", "policy-api"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OmniGent status missing %q:\n%s", want, out)
+		}
 	}
 }
 

@@ -34,6 +34,15 @@ Use `<binary> --help` for any command.
 | `setup hermes` / `setup cursor` / `setup windsurf` | Configure hook-first observability aliases |
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
+| `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
+| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; preview or repair the automatic flat-OTel upgrade migration |
+| `setup local-observability up\|down\|status` | Manage the bundled OTel Collector + Grafana stack |
+
+Observability destination names are identities: a new `--name` appends a route;
+reusing a name updates only that route. Use `setup observability list [--json]`
+for target/kind/signal inventory and `--dry-run` before `add`. The TUI exposes
+the runtime-loaded inventory under **Overview → Observability Destinations** and
+the management wizard under **0 Setup → Observability / Galileo**.
 
 ### guardrail
 
@@ -71,7 +80,7 @@ set the global default. `guardrail status` is read-only and takes no
 | Command | Description |
 |---------|-------------|
 | `agent discover [--refresh] [--json]` | Run local agent discovery and best-effort emit sanitized discovery telemetry |
-| `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--show-gone] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups signals by `(state, category, product, vendor, detector)` so wide-net detectors (e.g. `package_dependency` rolling up every `package.json`/`pyproject.toml`/`requirements.txt`) collapse into a single row with a count and sample basenames. `--detail` falls back to the per-signal view (with two-axis confidence and rich evidence columns when the gateway has them); `--state`/`--category`/`--product` filter the table; `gone` signals are hidden by default unless `--show-gone` (or `--state gone`) is passed; `--json` is the unfiltered raw payload for tooling. |
+| `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups repeated observations of the same product, SDK/component, or local model and rolls their categories/detectors into compact list columns. Local-model rows display model ID, installed/loaded status, and format when available. `--detail` falls back to per-signal rows; `--state`/`--category`/`--product` filter the table; `--component` also matches local model IDs by case-insensitive substring; `gone` signals are hidden unless `--show-gone` (or `--state gone`) is passed; `--by-detector` restores detector-level rows; `--json` is the unfiltered raw payload for tooling. |
 | `agent processes [--refresh] [--json] [--limit N]` | List AI processes the sidecar currently observes (PID, PPID, user, uptime, comm, vendor/product). Sourced from the `runtime` block on each process-detector signal. |
 | `agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE] [--min-identity 0..1] [--min-presence 0..1] [--limit N]` | Show the deduped AI components/SDK rollup (one row per `(ecosystem, name)`) with versions, install counts, two-axis confidence (identity + presence) and the detector set. `--min-identity`/`--min-presence` filter on the Bayesian engine output for fast triage. |
 | `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Raw paths only surface when both `privacy.disable_redaction=true` and `ai_discovery.store_raw_local_paths=true`. |
@@ -86,6 +95,37 @@ set the global default. `guardrail status` is read-only and takes no
 | `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
 | `agent discovery scan [--json]` | Trigger one immediate AI discovery scan via the sidecar (`POST /api/v1/ai-usage/scan`) and render a one-line summary. Returns an actionable error when the sidecar is disabled (HTTP 503) pointing at `agent discovery enable`. |
 | `agent signatures list \| validate \| install \| disable \| enable` | Manage AI discovery signature packs |
+
+Continuous scans classify installed or loaded local models as `local_model` and
+place the dynamic identity under a dedicated `model` block rather than the
+bounded product/component fields. For example:
+
+```bash
+defenseclaw agent usage --category local_model
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --category local_model --detail
+```
+
+The built-in [Lemonade Server configuration](https://lemonade-server.ai/docs/guide/configuration/)
+signature recognizes its binaries/processes, app/config metadata, environment
+variable names, and loopback service on port `13305`. Bounded reads of the
+documented [`/v1/models`](https://lemonade-server.ai/docs/api/openai/) metadata
+list downloaded models; `/v1/health` reports loaded models. Filesystem discovery
+also covers GGUF/GGML, MLX, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, Hugging Face
+caches, and Ollama stores. It stats and groups model artifacts but never reads
+model-binary contents; small Ollama manifest JSON is the bounded exception.
+Inference and model-control API routes are never called.
+
+The local usage API retains model IDs for operator display and filtering.
+Outbound gateway events, OTel logs, and webhooks apply the normal redaction
+policy: extended model metadata is omitted unless
+`privacy.disable_redaction=true`, and raw paths additionally require
+`ai_discovery.store_raw_local_paths=true`. Authenticated Lemonade discovery uses
+only `LEMONADE_API_KEY` after the configured origin passes a credential-free
+`/live` check; it never sends `LEMONADE_ADMIN_API_KEY`, and credentials are never
+printed or emitted. The API pass
+caps each decoded response at 1 MiB and each pass at 256 model items; bounded
+per-source cursors continue through larger inventories on later passes.
 
 ### skill
 
@@ -108,8 +148,16 @@ set the global default. `guardrail status` is read-only and takes no
 |---------|-------------|
 | `mcp list` | List MCP servers with enforcement status |
 | `mcp scan <url>` | Scan an MCP server endpoint |
+| `mcp set <name> --command <cmd> [--connector X]` | Add/update an MCP server in the active connector config |
+| `mcp unset <name> [--connector X]` | Remove an MCP server from the active connector config |
 | `mcp block <url>` | Add an MCP server to the block list |
 | `mcp allow <url>` | Add an MCP server to the allow list |
+
+For `--connector opencode`, `mcp set` writes a command that OpenCode will
+execute from `opencode.json`. DefenseClaw refuses commands that resolve
+outside trusted install prefixes unless you add the directory to
+`DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for
+that one write.
 
 ### plugin
 
@@ -149,11 +197,22 @@ output) so they're safe to call from the TUI and CI/CD pipelines.
 
 | Command | Description |
 |---------|-------------|
-| `tool block <name>` | Block a tool (global or scoped with `--source`) |
-| `tool allow <name>` | Allow a tool (skip scan gate) |
-| `tool unblock <name>` | Remove a tool from the block/allow list |
-| `tool list` | List tools in the block/allow list |
-| `tool status <name>` | Show block/allow status of a tool |
+| `tool block <name> [--connector X] [--source S]` | Block a tool globally or for one connector |
+| `tool allow <name> [--connector X] [--source S]` | Allow a tool globally or for one connector (runtime allow bypasses the scan gate for the matching connector scope) |
+| `tool unblock <name> [--connector X]` | Remove a global or connector-scoped tool decision |
+| `tool list [--connector X]` | List global decisions plus decisions that apply to a connector |
+| `tool status <name> [--connector X]` | Show the effective block/allow status globally or for a connector |
+
+`--connector` is the runtime enforcement scope. A scoped `tool block` or
+`tool allow` applies only to calls attributed to that connector; omitting it
+keeps the decision global. `--source` is audit/source metadata that records
+where the decision came from, but it is not used as a runtime enforcement
+selector.
+
+Runtime allow semantics differ by lane. Hook/inspect calls still run CodeGuard
+on allow-listed write tools before returning a clean allow. The sidecar stream
+lane has no CodeGuard payload scanner, so a matching tool allow is a full scan
+bypass on that lane.
 
 ### policy
 
@@ -220,7 +279,7 @@ The Go binary runs the sidecar daemon and provides additional commands.
 | `start` | Start the sidecar as a background daemon |
 | `stop` | Stop the running daemon |
 | `restart` | Restart the daemon |
-| `status` | Show health of the running sidecar's subsystems. On a multi-connector install it also renders a per-connector "Connector Mode" section from the `/status` endpoint's `connector_modes` array (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`). The `/status` payload also keeps the singular `connector_mode` field for the active connector as a back-compat alias. |
+| `status` | Show health of the running sidecar's subsystems. It renders a per-connector "Connector Mode" section from the `/status` endpoint's `connector_modes` array, including the direct/proxy data path, `policy_mode`, `enforcement_surface`, telemetry channels, and proxy interception state. The payload keeps the legacy `mode` data-path value and singular `connector_mode` alias for compatibility. |
 
 ### scan
 
@@ -411,9 +470,10 @@ Displays recent security alerts. Default limit: 25.
 defenseclaw upgrade [flags]
 ```
 
-Downloads the gateway binary and Python CLI wheel from a GitHub release,
-runs version-specific migrations, and restarts services. No source checkout
-or build toolchain required — your configuration is preserved.
+Downloads and verifies the gateway binary and Python CLI wheel from a GitHub
+release, backs up managed state, runs release-manifest migrations, restarts
+services, and verifies gateway health. No source checkout or build toolchain
+is required.
 
 > **Plugin installs are release-specific.** The OpenClaw plugin is installed
 > by `install.sh` as part of the release that ships it (0.3.0+). `upgrade`
@@ -425,8 +485,8 @@ or build toolchain required — your configuration is preserved.
 2. Stop `defenseclaw-gateway`
 3. Download and replace gateway binary from the GitHub release tarball
 4. Download and replace Python CLI from the GitHub release wheel
-5. Run version-specific migrations between the installed and new versions
-6. Start `defenseclaw-gateway` and restart OpenClaw gateway
+5. Run release-required migrations through the durable migration cursor
+6. Start `defenseclaw-gateway`, restart OpenClaw gateway, and poll health
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run automatically even during same-version upgrades. Each migration is
@@ -435,9 +495,32 @@ legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
 
+The upgrade runner also applies configuration schema v7 independently of the
+release cursor: a legacy flat OTel exporter becomes one named
+`otel.destinations[]` route beside any routes already configured. This
+shape-based pass also covers hosts whose published 0.8.x migration cursor was
+already marked. It preserves transport, TLS, batching, signals, and process-wide
+sampling/log policy, and writes a one-time pre-migration backup. The gateway has
+a write-free in-memory fallback so an interrupted migration can still start.
+
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — upgrade to a specific release (default: latest)
+- `--allow-unverified` — unsafe override for releases whose checksum manifest
+  is missing, unsigned, incomplete, or otherwise unverifiable
+
+Signed releases can be upgraded on hosts without `cosign`; the command warns
+and continues with SHA-256 checksum validation only. Install `cosign` to verify
+Sigstore provenance in addition to checksums.
+
+**Known recovery paths:**
+
+| Installed version | Recommendation |
+| --- | --- |
+| `0.8.0` or `0.8.1` | These versions can require local `cosign` before the fixed wheel is installed. Install `cosign` first (`brew install cosign` on macOS) and then run plain `defenseclaw upgrade`, or use `defenseclaw upgrade --allow-unverified` only if you accept the reduced provenance check for that one bridge upgrade. |
+| `0.7.x` | Upgrade directly to the latest release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`. Do not pass `--allow-unverified`; `0.7.x` clients do not know that option. |
+| `0.7.0` release tag | No downloadable release assets were published for this tag, so release-asset smoke cannot cover it. Upgrade from a locally installed `0.7.0` directly to the latest release without `--allow-unverified`. |
+| `0.2.0` | This predates the `defenseclaw upgrade` command. Use the installer documented in `docs/INSTALL.md` to bridge to a modern release. |
 
 **Examples:**
 

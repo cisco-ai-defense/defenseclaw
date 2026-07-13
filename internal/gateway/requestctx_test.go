@@ -297,3 +297,84 @@ func TestRequestIDMiddleware_HonoursIndustryHeader(t *testing.T) {
 		t.Fatalf("response header should use canonical name; got %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEFENSECLAW_TRUSTED_PROXY_CIDRS — opt-in for X-Forwarded-For trust.
+//
+// Default (env unset): X-Forwarded-For is ignored entirely and the socket
+// peer's redacted address is what's logged. This prevents an
+// unauthenticated caller from choosing the `client_ip` recorded for
+// failed-auth alerting and forensics.
+//
+// Opt-in: setting DEFENSECLAW_TRUSTED_PROXY_CIDRS to a CIDR list (or a
+// bare IP) makes the header authoritative only when the socket peer is
+// inside one of the listed networks. Spoofed headers from untrusted
+// peers stay ignored.
+// ---------------------------------------------------------------------------
+
+func newRequestWithForwarded(peer, forwarded string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	r.RemoteAddr = peer
+	if forwarded != "" {
+		r.Header.Set("X-Forwarded-For", forwarded)
+	}
+	return r
+}
+
+func TestClientIPRedacted_DefaultIgnoresForwardedHeader(t *testing.T) {
+	// Env unset: even if X-Forwarded-For claims a different address,
+	// the socket peer must win.
+	t.Setenv("DEFENSECLAW_TRUSTED_PROXY_CIDRS", "")
+	r := newRequestWithForwarded("10.0.0.5:1234", "203.0.113.99")
+	got := ClientIPRedacted(r)
+	// 10.0.0.5 redacted to /24
+	if got != "10.0.0.0/24" {
+		t.Fatalf("default trust: ClientIPRedacted=%q, want 10.0.0.0/24 (socket peer)", got)
+	}
+}
+
+func TestClientIPRedacted_TrustedPeerHonoursForwardedHeader(t *testing.T) {
+	t.Setenv("DEFENSECLAW_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+	r := newRequestWithForwarded("10.0.0.5:1234", "203.0.113.99")
+	got := ClientIPRedacted(r)
+	// Forwarded value 203.0.113.99 redacted to /24
+	if got != "203.0.113.0/24" {
+		t.Fatalf("trusted peer: ClientIPRedacted=%q, want 203.0.113.0/24 (forwarded)", got)
+	}
+}
+
+func TestClientIPRedacted_UntrustedPeerIgnoresForwardedHeader(t *testing.T) {
+	// Peer is outside the trusted CIDR, even though some CIDR is set.
+	t.Setenv("DEFENSECLAW_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+	r := newRequestWithForwarded("198.51.100.7:1234", "203.0.113.99")
+	got := ClientIPRedacted(r)
+	if got != "198.51.100.0/24" {
+		t.Fatalf("untrusted peer: ClientIPRedacted=%q, want 198.51.100.0/24 (socket peer)", got)
+	}
+}
+
+func TestClientIPRedacted_TrustedExactIPShorthand(t *testing.T) {
+	// A bare IP without /32 is shorthand for the exact peer.
+	t.Setenv("DEFENSECLAW_TRUSTED_PROXY_CIDRS", "10.0.0.5")
+	r := newRequestWithForwarded("10.0.0.5:1234", "203.0.113.99")
+	if got := ClientIPRedacted(r); got != "203.0.113.0/24" {
+		t.Fatalf("trusted exact IP: ClientIPRedacted=%q, want 203.0.113.0/24", got)
+	}
+	// Adjacent peer is not in the allow-list.
+	r2 := newRequestWithForwarded("10.0.0.6:1234", "203.0.113.99")
+	if got := ClientIPRedacted(r2); got != "10.0.0.0/24" {
+		t.Fatalf("non-listed peer: ClientIPRedacted=%q, want 10.0.0.0/24", got)
+	}
+}
+
+func TestClientIPRedacted_TrustedPeerDropsUnparseableForwarded(t *testing.T) {
+	// Even from a trusted peer, an unparseable forwarded value must
+	// fall back to the socket peer's redacted address. The legacy
+	// implementation returned the raw header bytes here, which let
+	// a compromised proxy choose arbitrary log strings.
+	t.Setenv("DEFENSECLAW_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+	r := newRequestWithForwarded("10.0.0.5:1234", "not-an-ip")
+	if got := ClientIPRedacted(r); got != "10.0.0.0/24" {
+		t.Fatalf("unparseable forwarded value: ClientIPRedacted=%q, want 10.0.0.0/24", got)
+	}
+}

@@ -405,11 +405,22 @@
       ],
       "config_paths": [
         "~/.gemini/config/hooks.json",
-        "~/.gemini/antigravity-cli/hooks.json",
-        ".antigravitycli/hooks.json"
+        "~/.gemini/config/mcp_config.json",
+        ".agents/mcp_config.json",
+        "~/.gemini/config/skills",
+        ".agents/skills",
+        "~/.gemini/antigravity-cli/skills",
+        "~/.gemini/GEMINI.md",
+        ".agents/rules",
+        "~/.gemini/config/plugins",
+        "~/.gemini/antigravity-cli/plugins",
+        ".agents/plugins"
       ],
       "extension_ids": [],
-      "mcp_paths": [],
+      "mcp_paths": [
+        "~/.gemini/config/mcp_config.json",
+        ".agents/mcp_config.json"
+      ],
       "package_names": [],
       "env_var_names": [],
       "domain_patterns": [
@@ -550,9 +561,9 @@
       "id": "opencode",
       "name": "OpenCode",
       "vendor": "OpenCode",
-      "category": "ai_cli",
-      "confidence": 0.88,
-      "supported_connector": "",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "opencode",
       "binary_names": [
         "opencode"
       ],
@@ -594,6 +605,43 @@
       "domain_patterns": [],
       "history_patterns": [
         "opencode"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "omnigent",
+      "name": "OmniGent",
+      "vendor": "OmniGent",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "omnigent",
+      "binary_names": [
+        "omnigent",
+        "omni"
+      ],
+      "process_names": [
+        "omnigent",
+        "omni"
+      ],
+      "config_paths": [
+        "$OMNIGENT_CONFIG_HOME/config.yaml",
+        "$OMNIGENT_CONFIG_HOME",
+        "~/.omnigent/config.yaml",
+        "~/.omnigent"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "omnigent"
+      ],
+      "env_var_names": [
+        "OMNIGENT_CONFIG_HOME",
+        "OMNIGENT_DATA_DIR"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "omnigent"
       ],
       "application_names": [],
       "local_endpoints": []
@@ -799,6 +847,62 @@
       ],
       "local_endpoints": [
         "http://127.0.0.1:11434/api/tags"
+      ]
+    },
+    {
+      "id": "lemonade",
+      "name": "Lemonade Server",
+      "vendor": "Lemonade",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "supported_connector": "",
+      "binary_names": [
+        "lemonade",
+        "lemond",
+        "lemonade-tray",
+        "LemonadeServer.exe"
+      ],
+      "process_names": [
+        "lemonade",
+        "lemond",
+        "lemonade-tray",
+        "LemonadeServer.exe"
+      ],
+      "application_names": [
+        "Lemonade.app",
+        "Lemonade"
+      ],
+      "config_paths": [
+        "~/.cache/lemonade/config.json",
+        "/Library/Application Support/lemonade/.cache/config.json",
+        "/var/lib/lemonade/.cache/lemonade/config.json",
+        "/opt/var/lib/lemonade/.cache/lemonade/config.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [
+        "LEMONADE_HOST",
+        "LEMONADE_PORT",
+        "LEMONADE_CACHE_DIR",
+        "LEMONADE_API_KEY",
+        "LEMONADE_ADMIN_API_KEY"
+      ],
+      "domain_patterns": [
+        "localhost:13305",
+        "127.0.0.1:13305"
+      ],
+      "history_patterns": [
+        "lemonade",
+        "lemond",
+        "lemonade-server"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:13305/live",
+        "http://127.0.0.1:13305/v1/models",
+        "http://127.0.0.1:13305/api/v1/models",
+        "http://127.0.0.1:13305/v1/health",
+        "http://127.0.0.1:13305/api/v1/health"
       ]
     },
     {

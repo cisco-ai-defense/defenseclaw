@@ -19,7 +19,8 @@ systemd
   └── defenseclaw-sandbox.target       ← groups services for start/stop
 ```
 
-The **DefenseClaw gateway sidecar** (`defenseclaw-gateway run`) is the Go
+The **DefenseClaw gateway sidecar** (`defenseclaw-gateway`, or
+`defenseclaw-gateway start` for background mode) is the Go
 process that connects to the sandbox over WebSocket, watches for new
 skills/plugins via fsnotify, serves the REST API, and optionally runs the
 guardrail proxy. It runs independently — not as a child of the sandbox.
@@ -67,7 +68,7 @@ uses `getaddrinfo()` rather than delegating DNS to the proxy).
 
 To fix this without running a DNS forwarder process:
 
-1. **Custom resolv.conf** — `defenseclaw setup sandbox` generates
+1. **Custom resolv.conf** — `defenseclaw sandbox setup` generates
    `sandbox-resolv.conf` with the configured nameservers (default:
    `8.8.8.8`, `1.1.1.1`). On each start, `start-sandbox.sh` uses
    `unshare --mount` to bind-mount this file over `/etc/resolv.conf`

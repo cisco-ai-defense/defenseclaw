@@ -53,7 +53,7 @@ cancellation.
 | File | Purpose |
 |------|---------|
 | `sidecar.go` | Top-level orchestrator. Creates client, router, watcher; runs all four subsystems; handles watcher verdicts. |
-| `client.go` | WebSocket client. Protocol v3 handshake, read loop, request/response multiplexing, reconnection with backoff. |
+| `client.go` | WebSocket client. OpenClaw protocol v3-v4 handshake range, read loop, request/response multiplexing, reconnection with backoff. |
 | `device.go` | Ed25519 device identity. Key generation, PEM persistence, challenge-response signing. |
 | `frames.go` | Wire format types. Request, response, event frames and all payload structs. |
 | `router.go` | Event dispatcher. Routes gateway events to handlers; dangerous command detection; exec approval gate. |
@@ -70,7 +70,7 @@ cancellation.
 | `provider.go` | `LLMProvider` interface and Bifrost SDK integration. Provider inference from model name/API key prefix. |
 | `dotenv.go` | `loadDotEnv` — loads `~/.defenseclaw/.env` for API key resolution when env vars are not set. |
 
-## WebSocket Protocol (v3)
+## WebSocket Protocol (v4-compatible)
 
 ### Connection Handshake
 
@@ -82,8 +82,9 @@ Client                              Gateway
   │                                    │
   │◄─── event: connect.challenge ──────│  { nonce, ts }
   │                                    │
-  │──── req: connect ─────────────────►│  { protocol, client, role,
-  │     (signed device identity)       │    scopes, auth, device }
+  │──── req: connect ─────────────────►│  { minProtocol, maxProtocol,
+  │     (signed device identity)       │    client, role,
+  │                                    │    scopes, auth, device }
   │                                    │
   │◄─── res: hello-ok ────────────────│  { protocol, features,
   │                                    │    auth, policy }
@@ -95,8 +96,8 @@ Client                              Gateway
 2. Gateway sends a `connect.challenge` event containing a random `nonce`.
 3. Client starts the read loop and enables **handshake event buffering** —
    events received before `hello-ok` are queued in memory (not dropped).
-4. Client builds a connect request with protocol version, role, scopes,
-   auth token, and a device identity block containing the Ed25519 public
+4. Client builds a connect request with `minProtocol: 3`, `maxProtocol: 4`,
+   role, scopes, auth token, and a device identity block containing the Ed25519 public
    key and a signature over a deterministic v3 payload (see below).
 5. Gateway verifies the signature, returns `hello-ok` with negotiated
    features, auth confirmation, and policy (e.g. tick interval).
@@ -142,7 +143,7 @@ equal `lastSeq+1`, the client writes a warning to stderr:
 
 | Method | Params | Description |
 |--------|--------|-------------|
-| `connect` | protocol, client, role, scopes, auth, device | Initial handshake |
+| `connect` | minProtocol, maxProtocol, client, role, scopes, auth, device | Initial handshake |
 | `skills.update` | `{ skillKey, enabled }` | Enable or disable a skill at the gateway |
 | `config.get` | *(none)* | Fetch current gateway configuration |
 | `config.patch` | `{ path, value }` | Apply a partial config update |
@@ -303,8 +304,8 @@ forwards to the upstream LLM provider.
    `127.0.0.1:{port}` (OpenAI-compatible routes and `/health/*`).
 2. **Configuration**: Mode (`observe` | `action`), model aliases, Cisco AI
    Defense, and optional LLM judge settings come from `guardrail` in
-   `~/.defenseclaw/config.yaml` and optional runtime overrides via the local
-   API.
+   `~/.defenseclaw/config.yaml`. The local guardrail config API patches
+   supported guardrail fields back into the same YAML file.
 3. **Health check**: After the server binds, a short grace period elapses;
    then health transitions to `running`. Callers can probe
    `GET http://127.0.0.1:{port}/health/liveliness` as a guardrail proxy
@@ -325,8 +326,8 @@ The sidecar runs LLM inspection entirely in Go: `GuardrailInspector` in
 optional LLM judge, OPA policy via `policy.Engine.EvaluateGuardrail`) is invoked
 from `GuardrailProxy` in `internal/gateway/proxy.go` on each request and
 response (including streaming). Mode and `scanner_mode` come from the loaded
-config and from `guardrail_runtime.json` hot-reload, not from a Python module
-or `DEFENSECLAW_*` env vars.
+`config.yaml` snapshot and subsequent config watcher reloads, not from a Python
+module, `guardrail_runtime.json`, or `DEFENSECLAW_*` env vars.
 
 ### Configuration
 
@@ -455,7 +456,7 @@ Tests are split across two files:
   No external dependencies.
 - `gateway_ws_test.go` — integration tests using a mock WebSocket server
   (`httptest.Server` + gorilla/websocket upgrader) that simulates the full
-  v3 handshake. Covers the connect flow, all RPC methods, approval routing,
+  v4-compatible handshake. Covers the connect flow, all RPC methods, approval routing,
   API success paths, and sidecar admission result handling.
 
 Run with: `make gateway-test` or `go test -race ./internal/gateway/`

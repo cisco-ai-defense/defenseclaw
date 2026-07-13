@@ -274,6 +274,23 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	if len(deltas) > 0 {
 		w.emitDriftAlerts(evt, deltas)
 	}
+
+	// Avarice F-3188: refuse to overwrite a previously-scanned baseline
+	// with an empty scan id. scanAndEmit returns scanID="" when the
+	// scanner is unavailable or crashes; persisting that would rewrite
+	// the trusted baseline to point at the (mutated, unscanned) current
+	// content, and the next cycle would treat the mutation as the
+	// trusted baseline. Leaving the prior baseline in place means the
+	// content hash still differs next cycle, so a recovered scanner
+	// retries and upgrades the baseline. When there is no prior scan id
+	// (first-time/recovery baseline) there is no trust state to lose, so
+	// we fall through and persist.
+	if scanID == "" && baseline.ScanID != "" {
+		fmt.Fprintf(os.Stderr,
+			"[rescan] refusing to overwrite baseline for %s without scanner evidence (F-3188)\n",
+			evt.Path)
+		return rescanScanned
+	}
 	w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
 	return rescanScanned
 }

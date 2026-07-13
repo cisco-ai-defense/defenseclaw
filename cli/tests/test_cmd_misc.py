@@ -97,6 +97,56 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("running", result.output)
 
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("defenseclaw.commands.cmd_status.shutil.which")
+    def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
+        from defenseclaw.commands.cmd_status import status
+
+        def fake_which(binary):
+            if binary == "openshell-sandbox":
+                return "/usr/local/bin/openshell-sandbox"
+            return None
+
+        mock_which.side_effect = fake_which
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Sandbox:", result.output)
+        self.assertIn("available", result.output)
+
+        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["sandbox"]["available"])
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("defenseclaw.commands.cmd_status.shutil.which")
+    def test_status_does_not_replace_explicit_missing_sandbox_binary(
+        self, mock_which, mock_client_cls
+    ):
+        from defenseclaw.commands.cmd_status import status
+
+        self.app.cfg.openshell.binary = "/opt/operator/openshell"
+
+        def fake_which(binary):
+            if binary == "openshell-sandbox":
+                return "/usr/local/bin/openshell-sandbox"
+            return None
+
+        mock_which.side_effect = fake_which
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["sandbox"]["available"])
+        self.assertNotIn("openshell-sandbox", [call.args[0] for call in mock_which.call_args_list])
+
 
 # ---------------------------------------------------------------------------
 # Alerts command
@@ -506,6 +556,40 @@ class TestAIBOMCommand(unittest.TestCase):
         mock_build.assert_called_once()
         self.assertEqual(mock_build.call_args.kwargs.get("connector"), "codex")
 
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_inventory_warning_is_connector_neutral(
+        self, mock_build, mock_to_scan, mock_enrich
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        inv = self._make_inventory()
+        inv["claw_mode"] = "codex"
+        inv["errors"] = [
+            {
+                "command": "codex:agents",
+                "error": "agents are not a first-class concept on this connector",
+            }
+        ]
+        mock_build.return_value = inv
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw",
+            target="x",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--connector", "codex"], obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector inventory command(s) failed", result.output)
+        self.assertNotIn("openclaw command(s) failed", result.output)
+
     def test_scan_all_connectors_flag_removed(self):
         # --all-connectors was removed (a bare scan already covers all), so
         # passing it must be rejected as an unknown option rather than
@@ -911,12 +995,12 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         otel = self.app.cfg.otel
         self.assertTrue(otel.enabled)
-        self.assertEqual(otel.traces.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.traces.protocol, "http")
-        self.assertEqual(otel.traces.url_path, "/v2/trace/otlp")
-        self.assertEqual(otel.metrics.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.metrics.url_path, "/v2/datapoint/otlp")
-        self.assertEqual(otel.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
+        destination = next(d for d in otel.destinations if d.preset == "splunk-o11y")
+        self.assertEqual(destination.endpoint, "ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(destination.protocol, "http")
+        self.assertEqual(destination.traces.url_path, "/v2/trace/otlp")
+        self.assertEqual(destination.metrics.url_path, "/v2/datapoint/otlp")
+        self.assertEqual(destination.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
         self.assertTrue(os.path.exists(dotenv_path))
@@ -999,7 +1083,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
         self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
-        self.assertIn("verify_tls: true", cfg)
+        # production preset relies on the Go sink's secure
+        # default (TLS verification ON) and must not emit any
+        # insecure_skip_verify opt-out. The legacy verify_tls flag is
+        # likewise silent — operators with a real cert do not need
+        # any per-sink override.
+        self.assertNotIn("insecure_skip_verify", cfg)
+        self.assertNotIn("verify_tls", cfg)
 
     def test_setup_splunk_enterprise_skip_test(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1292,9 +1382,10 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         self.assertEqual(contract["hec_token"], "bootstrap-token")
         mock_run.assert_called_once()
+        env_file = os.path.join(self.tmp_dir, "splunk-bridge", "env", ".env")
         self.assertEqual(
             mock_run.call_args.args[0],
-            ["/tmp/fake-splunk-claw-bridge", "up", "--output", "json"],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
         kwargs = mock_run.call_args.kwargs
         self.assertEqual(kwargs["capture_output"], True)
@@ -1591,8 +1682,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(self.app.cfg.otel.enabled)
-        self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
-        self.assertFalse(self.app.cfg.otel.logs.enabled)
+        destination = next(
+            d for d in self.app.cfg.otel.destinations if d.preset == "splunk-o11y"
+        )
+        self.assertEqual(destination.endpoint, "ingest.us1.observability.splunkcloud.com")
+        self.assertFalse(destination.logs.enabled)
         mock_apply_dashboards.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")

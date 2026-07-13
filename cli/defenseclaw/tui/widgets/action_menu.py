@@ -192,18 +192,26 @@ class ActionMenuScreen(ModalScreen[str | None]):
         Binding("escape,q", "cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, title: str, actions: tuple[MenuAction, ...], subtitle: str = "") -> None:
+    def __init__(
+        self,
+        title: str,
+        actions: tuple[MenuAction, ...],
+        subtitle: str = "",
+        *,
+        selected_index: int | None = None,
+    ) -> None:
         super().__init__()
         self.title = title
         self.subtitle = subtitle
         self.actions = actions
+        self.selected_index = selected_index
 
     def compose(self) -> ComposeResult:
         with Vertical(id="action-menu-dialog"):
             yield Static(self.title, id="action-menu-title")
             if self.subtitle:
                 yield Static(self.subtitle, id="action-menu-subtitle")
-            yield ActionMenu(self.actions, id="action-menu")
+            yield ActionMenu(self.actions, selected_index=self.selected_index, id="action-menu")
 
     def action_cursor_up(self) -> None:
         self.query_one(ActionMenu).select_previous()

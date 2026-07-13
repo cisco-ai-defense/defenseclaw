@@ -9,7 +9,16 @@ keywords:
   - DEFENSECLAW_LLM_KEY
 ---
 
-`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw-gateway restart` (or `defenseclaw setup guardrail --restart`). Note `restart` is on the **Go sidecar binary** — the Python `defenseclaw` CLI has no top-level `gateway` group.
+`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit the file. The running gateway watches the active `config.yaml`, validates the full file on change, and reconciles supported updates without a full process restart. Some storage identity fields still require a real `defenseclaw-gateway restart`.
+
+The current Go configuration contract is version 7. Older files may omit
+`config_version` or carry a lower value; the gateway migrates those values in
+memory before validation so an interrupted upgrade can still start. Release
+migrations persist changes that must become durable. In particular, the v7
+upgrade converts a legacy flat OTel exporter into one named
+`otel.destinations[]` route without replacing any destinations already in the
+file. See [Upgrade DefenseClaw](/docs/get-started/upgrade) for the backup,
+migration, and verification flow.
 
 ## On-disk layout
 
@@ -17,7 +26,7 @@ keywords:
   <Folder name="~/.defenseclaw" defaultOpen>
     <File name="config.yaml" />
     <File name="audit.db" />
-    <File name="gateway-token" />
+    <File name=".env" />
     <File name="picked_connector" />
     <Folder name=".venv">
       <File name="…" />
@@ -28,9 +37,17 @@ keywords:
     <Folder name="policies" defaultOpen>
       <Folder name="guardrail">
         <Folder name="default">
-          <File name="shell.yaml" />
-          <File name="secrets.yaml" />
-          <File name="prompt-injection.yaml" />
+          <Folder name="rules">
+            <File name="commands.yaml" />
+            <File name="secrets.yaml" />
+            <File name="sensitive-paths.yaml" />
+          </Folder>
+          <Folder name="judge">
+            <File name="injection.yaml" />
+            <File name="pii.yaml" />
+            <File name="tool-injection.yaml" />
+          </Folder>
+          <File name="suppressions.yaml" />
         </Folder>
         <Folder name="strict" />
         <Folder name="permissive" />
@@ -48,8 +65,10 @@ keywords:
 The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the matching Go structs in `internal/config/`. Every block is optional — `defenseclaw setup *` writes only the fields it needs and the merge keeps your hand-edits intact.
 
 ```yaml
+config_version: 7             # current Go schema; older files are migrated safely
+
 claw:
-  mode: claudecode             # active connector; pinned by setup aliases.
+  mode: claudecode             # single-connector mode; setup aliases select this with --connector.
                                # Set to `multi` automatically when more than one
                                # connector is active (see guardrail.connectors below).
                                # This value is mirrored to the OTel resource attr
@@ -60,15 +79,76 @@ gateway:
   port: 18789                  # gateway proxy port (sidecar -> upstream LLM traffic)
   api_port: 18970              # gateway REST API port (hooks + TUI dial this)
   api_bind: ""                 # optional override for the REST API bind address
+  config_reload:
+    mode: hot                  # hot | restart; omitted means hot
 
-# Top-level OTel exporter — wires the sidecar to a collector. Written by
-# `setup local-observability up` or `setup observability add <preset>`.
+# Named OTel fan-out destinations. The top-level block owns the master switch,
+# resource identity, sampler, and emission policy; each destination has an
+# independent transport and bounded export queue.
 otel:
-  enabled: false
-  protocol: grpc               # grpc | http/protobuf
-  endpoint: ""                 # 127.0.0.1:4317 after local-observability up
-  service_name: defenseclaw
-  signals: [traces, metrics, logs]
+  enabled: true
+  resource:
+    attributes:
+      service.name: defenseclaw
+  traces:
+    sampler: always_on
+    sampler_arg: "1.0"
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      tls: { insecure: true }
+      traces: { enabled: true }
+      metrics: { enabled: true }
+      logs: { enabled: true }
+    - name: galileo
+      preset: galileo
+      enabled: true
+      protocol: http
+      endpoint: https://api.galileo.ai/otel/traces
+      batch: { scheduled_delay_ms: 1000 }
+      headers:
+        Galileo-API-Key: ${GALILEO_API_KEY}
+        project: defenseclaw
+        logstream: production
+      span_filter:
+        operations:
+          - name: chat
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.provider.name
+              - gen_ai.request.model
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: invoke_agent
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.agent.name
+              - gen_ai.provider.name
+              - openinference.span.kind
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: execute_tool
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.tool.name
+              - openinference.span.kind
+              - gen_ai.tool.call.arguments
+              - gen_ai.tool.call.result
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+      traces: { enabled: true }
+      metrics: { enabled: false }
+      logs: { enabled: false }
+
+# `defenseclaw upgrade` persists legacy flat `otel.protocol` / `otel.endpoint`
+# and signal transport blocks as a named destination. Runtime loading also
+# performs the same conversion in memory as an interrupted-upgrade fallback.
+# Preview or repair the persisted conversion with:
+# `defenseclaw setup observability migrate-otel [--apply]`.
+# Sampling remains process-wide and cannot differ by destination.
 
 # Top-level LLM block. Written by `defenseclaw setup llm` (and copied
 # into per-component blocks via the `--inherit-from` machinery). The
@@ -223,6 +303,18 @@ webhooks:
     min_severity: HIGH
 ```
 
+`gateway.config_reload.mode` controls what happens after a valid `config.yaml`
+change:
+
+| Mode | Behavior |
+| --- | --- |
+| `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
+| `restart` | Validate first, then use a fresh gateway process for substantive config edits. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
+
+Live reload rejects storage identity changes such as `data_dir`, audit DB path,
+judge bodies DB path, and `gateway.device_key_file` unless restart mode is
+enabled or the operator restarts the gateway manually.
+
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 
 ## `guardrail.connectors` and `claw.mode: multi`
@@ -355,6 +447,8 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSEC
 | OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json` (global only — the path agy v1.0.x actually evaluates; the marketing-facing `~/.gemini/antigravity-cli/hooks.json` is silently ignored at runtime; agy merges all discovered hooks files, so DefenseClaw never patches workspace-local copies) |
 | Hermes | `~/.hermes/config.yaml` |
+| OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
+| OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, and `defenseclaw_omnigent.pth` in OmniGent's Python environment |
 
 A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
 

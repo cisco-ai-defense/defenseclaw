@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels.ai_discovery import AIUsageSignal, AIUsageSnapshot, AIUsageSummary
+from defenseclaw.tui.panels.ai_discovery import AIUsageModel, AIUsageSignal, AIUsageSnapshot, AIUsageSummary
 from defenseclaw.tui.panels.overview import (
     MAX_AI_DISCOVERY_OVERVIEW_ROWS,
     STALENESS_WINDOW,
@@ -33,6 +33,10 @@ from defenseclaw.tui.panels.overview import (
     live_health_contradicts,
     sort_ai_discovery_signals_for_overview,
     string_detail,
+)
+from defenseclaw.tui.services.overview_state import (
+    format_scanner_overrides_summary,
+    zero_connector_requests_notice,
 )
 
 
@@ -106,6 +110,113 @@ def test_overview_service_cards_agent_detail_and_zero_request_guidance() -> None
     notices = model.build_notices()
     assert any("0 hook events" in notice.message for notice in notices)
     assert not any("gateway port" in notice.message for notice in notices)
+
+
+def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
+    notice = zero_connector_requests_notice("omnigent", timedelta(minutes=2))
+
+    assert "0 policy events" in notice
+    assert "policy setup" in notice
+    assert "hook setup" not in notice
+
+
+def test_overview_telemetry_detail_lists_named_destinations() -> None:
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destination_count": 2,
+                    "destinations": [
+                        {"name": "local-observability", "enabled": True},
+                        {
+                            "name": "galileo",
+                            "enabled": True,
+                            "routing": {
+                                "accepted": 3,
+                                "dropped": 1,
+                                "total": 4,
+                                "accepted_percentage": 75,
+                            },
+                            "delivery": {
+                                "attempted": 3,
+                                "delivered": 3,
+                                "rejected": 0,
+                                "failed": 0,
+                            },
+                        },
+                    ],
+                },
+            )
+        )
+    )
+    cards = {card.key: card for card in model.service_cards()}
+    assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
+
+
+def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destinations": [
+                        {
+                            "name": "galileo",
+                            "preset": "galileo",
+                            "enabled": True,
+                            "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
+                            "signals": "traces",
+                            "headers": {"Galileo-API-Key": "must-not-render"},
+                            "routing": {"accepted": 3, "dropped": 1, "total": 10, "eligibility_percentage": 30},
+                            "delivery": {"attempted": 3, "collector_accepted": 3},
+                        },
+                        {
+                            "name": "local-observability",
+                            "preset": "local-otlp",
+                            "enabled": False,
+                            "endpoint": "127.0.0.1:4317",
+                            "signals": "traces, metrics, logs",
+                        },
+                    ]
+                },
+            ),
+            sinks=SubsystemHealth(
+                state="running",
+                details={
+                    "sinks": [
+                        {
+                            "name": "soc-archive",
+                            "kind": "otlp_logs",
+                            "enabled": True,
+                            "scope": "connector:codex",
+                            "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
+                        }
+                    ]
+                },
+            ),
+        )
+    )
+
+    rows = model.observability_destination_rows()
+    assert [(row.name, row.target) for row in rows] == [
+        ("Galileo", "otel"),
+        ("local-observability", "otel"),
+        ("soc-archive", "audit_sinks"),
+    ]
+    assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
+    assert rows[0].endpoint == "https://api.example.test/otel/traces"
+    assert rows[0].signals == "traces"
+    assert rows[1].state == "disabled"
+    assert rows[2].signals == "audit-events"
+    assert rows[2].scope == "connector:codex"
+    assert rows[2].endpoint == "https://collector.example.test:4317/…"
+    assert "must-not-render" not in repr(rows)
+    assert "user:secret" not in repr(rows)
+    assert "api_key=secret" not in repr(rows)
+    assert "token=secret" not in repr(rows)
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
@@ -371,6 +482,84 @@ def test_overview_ai_discovery_box_states_sort_and_cap() -> None:
     assert box.overflow == 3
 
 
+def test_overview_ai_discovery_box_dedupes_agent_signals_before_cap() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    signals = (
+        AIUsageSignal(
+            name="Claude Code",
+            vendor="Anthropic",
+            supported_connector="claudecode",
+            category="ai_cli",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            name="Claude Code",
+            vendor="Anthropic",
+            supported_connector="claudecode",
+            category="shell_history_match",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            name="Codex",
+            vendor="OpenAI",
+            supported_connector="codex",
+            category="ai_cli",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+    )
+    model.set_ai_usage(
+        AIUsageSnapshot(
+            enabled=True,
+            summary=AIUsageSummary(scanned_at=now, active_signals=len(signals)),
+            signals=signals,
+        )
+    )
+
+    box = model.ai_discovery_box(now=now)
+
+    assert [row.name for row in box.rows] == ["Claude Code", "Codex"]
+    assert box.overflow == 0
+
+
+def test_overview_ai_agents_excludes_local_models_from_rows_and_cap() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    agents = (
+        AIUsageSignal(name="Claude Code", vendor="Anthropic", category="ai_cli", state="seen", last_seen=now),
+        AIUsageSignal(name="Codex", vendor="OpenAI", category="ai_cli", state="seen", last_seen=now),
+    )
+    models = tuple(
+        AIUsageSignal(
+            product="Lemonade Server",
+            vendor="Lemonade",
+            category="local_model",
+            state="seen",
+            last_seen=now,
+            model=AIUsageModel(id=f"model-{index}", status="installed"),
+        )
+        for index in range(MAX_AI_DISCOVERY_OVERVIEW_ROWS + 4)
+    )
+    model.set_ai_usage(
+        AIUsageSnapshot(
+            enabled=True,
+            summary=AIUsageSummary(scanned_at=now, active_signals=len(agents) + len(models)),
+            signals=agents + models,
+        )
+    )
+
+    box = model.ai_discovery_box(now=now)
+    assert [row.name for row in box.rows] == ["Claude Code", "Codex"]
+    assert box.overflow == 0
+    assert "2 active" in box.summary_parts
+
+
 def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
     signals = (
@@ -383,6 +572,24 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
         "Alpha",
         "Bravo",
     ]
+
+    model_signals = (
+        AIUsageSignal(
+            product="Lemonade Server",
+            model=AIUsageModel(id="Qwen3", status="installed"),
+            state="seen",
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            product="Lemonade Server",
+            model=AIUsageModel(id="Qwen3", status="loaded"),
+            state="seen",
+            last_seen=now,
+        ),
+    )
+    ordered = sort_ai_discovery_signals_for_overview(model_signals)
+    assert ordered[0].model is not None
+    assert ordered[0].model.status == "loaded"
 
 
 def test_connector_labels_cover_hook_surface_connectors() -> None:
@@ -401,10 +608,27 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
     assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")
     assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
+    # opencode MCP is now managed by DefenseClaw (read+write via the bridge
+    # path layer), so the source label points at its real config and no longer
+    # advertises "unmanaged in v1".
+    opencode_mcps = connector_source_label("opencode", "mcps")
+    assert ".config/opencode/opencode.json" in opencode_mcps
+    assert "unmanaged" not in opencode_mcps
+    antigravity_mcps = connector_source_label("antigravity", "mcps")
+    assert ".gemini/config/mcp_config.json" in antigravity_mcps
+    assert ".agents/mcp_config.json" in antigravity_mcps
+    assert "hooks-only" not in antigravity_mcps
+    assert "unsupported" not in antigravity_mcps
+    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
+    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
+    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
+    assert "unsupported" in connector_source_label("omnigent", "skills")
 
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
     assert active_connector_name(health, "openclaw") == "codex"
     assert active_connector_name(None, "claudecode") == "claudecode"
+    assert active_connector_name(None, "") == ""
 
 
 def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
@@ -480,3 +704,28 @@ def test_multi_connector_rows_noop_for_single_connector() -> None:
     )
     assert one.multi_connector_rows() == []
     assert OverviewPanelModel(None, version="test").multi_connector_rows() == []
+
+
+def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
+    # N3 state-layer surface: scanner overrides live only in the active policy
+    # YAML / data.json today. The default config has none, so the summary is ""
+    # and the Overview renders nothing until the adapter populates the field.
+    assert format_scanner_overrides_summary(()) == ""
+    assert OverviewPanelModel(None, version="test").scanner_overrides_summary() == ""
+    assert OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test").scanner_overrides_summary() == ""
+
+    overrides = (
+        ("secrets", "high", "file", "block"),
+        ("secrets", "high", "install", "warn"),
+        ("pii", "medium", "runtime", "allow"),
+    )
+    summary = format_scanner_overrides_summary(overrides)
+    assert summary == "secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow"
+
+    # Surfaced through the panel model once the adapter feeds the field.
+    model = OverviewPanelModel(OverviewConfig(claw_mode="codex", scanner_overrides=overrides), version="test")
+    assert model.scanner_overrides_summary() == summary
+
+    # Malformed entries degrade gracefully instead of raising.
+    assert format_scanner_overrides_summary((("", "high", "file", "block"),)) == ""
+    assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity

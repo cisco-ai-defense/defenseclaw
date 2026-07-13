@@ -181,7 +181,15 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
         )
 
     def action_default(self) -> None:
-        self.action_show() if self.resource_kind == "webhooks" else self.action_test()
+        if self.resource_kind == "webhooks":
+            # Webhooks default to a read-only ``show`` — safe on Enter/click.
+            self.action_show()
+            return
+        # Audit sinks: Enter / row-click must NOT fire a live outbound test
+        # (that's a real network call). Activating only selects; testing
+        # stays behind the explicit ``t`` / Test button so a reflexive Enter
+        # can't trigger an outbound request.
+        self._set_status("Press t (or the Test button) to send a test event to the selected sink.")
 
     @on(DataTable.RowHighlighted, "#resource-editor-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:

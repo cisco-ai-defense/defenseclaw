@@ -8,10 +8,10 @@ contract between authors and the engine. Read it before adding a new diagram.
 
 **Default to `direction="TB"`.**
 
-Documentation columns are taller than wide (1168px max width on `xl:`
-breakpoints; ~700px on tablets). A 7-node `direction="LR"` Flow blows past the
-column on every monitor below 1920px. The same graph in `direction="TB"`
-fits on a phone.
+Documentation columns are taller than wide (840px of diagram canvas at the
+required 1536px desktop viewport; ~700px on tablets). A 7-node
+`direction="LR"` Flow blows past the column on common monitors. The same graph
+in `direction="TB"` remains readable and pans safely on a phone.
 
 If you find yourself reaching for `direction="LR"`, ask:
 
@@ -20,13 +20,32 @@ If you find yourself reaching for `direction="LR"`, ask:
 
 If yes, `LR` is fine. Otherwise: `TB`.
 
+The renderer also recognizes a true unbranched chain. A short chain is
+promoted to a horizontal operating rail when it fits the article; a longer
+`TB` chain becomes a wide, numbered process rail. Authors should still choose
+the direction that best communicates the topology rather than laying out the
+cards by hand.
+
+## Visual language
+
+- Use component roles consistently: agent runtime, connector, control plane,
+  policy, evidence store, operator, decision, or system.
+- Every role is expressed with an icon, text label, and restrained color rail;
+  color is never the only differentiator.
+- Use single-ended arrows for direction. Reserve `bidirectional` for a real
+  two-way contract, not a request followed by a response.
+- Keep relationship labels short and unboxed. Explain implementation detail in
+  the caption or surrounding prose.
+- Do not recreate editor chrome, graph paper, gradients, glows, or decorative
+  topology. Diagrams are architecture evidence, not illustrations.
+
 ## Sizing budget
 
 | Width | Effect |
 | --- | --- |
-| ≤1168px | Renders cleanly inside the article column on every viewport down to ~360px. |
-| 1168–1500px | Scales-to-fit on desktop; warning emitted by the build-time width gate. |
-| >1500px | **Build fails** unless `<Flow oversize />` / `<Sequence oversize />` is set. The lightbox affordance becomes the readable path. |
+| ≤840px | Renders at 1:1 inside the article canvas at the required 1536px desktop viewport. |
+| 840–1168px | Scales-to-fit on common desktop widths; warning emitted by the build-time width gate. |
+| >1168px | **Build fails** unless `<Flow oversize />` / `<Sequence oversize />` is set. The lightbox affordance becomes the readable path. |
 
 The build-time gate lives at
 [`scripts/check-diagram-widths.ts`](../../scripts/check-diagram-widths.ts) and
@@ -46,14 +65,18 @@ runs after `next build` via `postbuild`.
 ### Knobs in order of preference
 
 ```mdx
-<Flow direction="TB"> ... </Flow>                      // start here
-<Flow direction="TB" compact> ... </Flow>              // tightens spacing ~15-20%
+<Flow direction="TB"> ... </Flow>                      // dense spacing is automatic
+<Flow direction="LR" compact> ... </Flow>              // opt into dense spacing for wide flows
 <Flow direction="TB" compact oversize> ... </Flow>     // last resort
 ```
 
-`compact` shrinks dagre's `ranksep` (80→50) and `nodesep` (50→30), and drops
-`NODE_MAX_W` (260→220). It buys you the column on graphs that are
+`compact` shrinks dagre's rank and node spacing and drops `NODE_MAX_W`
+(304→264). It buys you the column on graphs that are
 structurally fine but spaced too generously. Negligible legibility cost.
+
+Large branched `TB` trees automatically use a denser 148–172px node range and
+tighter sibling spacing. This is reserved for ten-or-more-node decision trees;
+shorter diagrams keep the roomier default geometry.
 
 `oversize` only suppresses the build-time width gate's hard-fail. The
 diagram is still bigger than the column; readers see it scaled-to-fit
@@ -69,7 +92,7 @@ when the topology genuinely doesn't compress.
       Alias long names (`Gateway` not `defenseclaw-gateway`, `Hook` not
       `beforeShellExecution`) and put the long form in the surrounding
       prose or the diagram caption.
-- [ ] Message labels ≤40 chars. Chips ellipsize past 280px wide; longer
+- [ ] Message labels ≤44 chars. Chips ellipsize past 300px wide; longer
       labels just visually fail.
 - [ ] Use `kind="return"` for response arrows; the engine renders them
       dashed and lower-contrast so the eye reads request/response pairs
@@ -82,8 +105,8 @@ when the topology genuinely doesn't compress.
 `<Sequence>` ships **two** renders in the same SSR HTML:
 
 1. The desktop swimlane SVG (visible at `sm:` and above, ≥640px).
-2. A vertical timeline-list (visible below 640px) — each message as a
-   card with a `from → to` header and the label body.
+2. A vertical timeline-list (visible below 640px) — each message as an open,
+   ruled row with a `from → to` header and the label body.
 
 Both ship as static HTML; CSS toggles which is visible. No JS, no
 hydration cost. The timeline render uses participant *labels*, not ids,

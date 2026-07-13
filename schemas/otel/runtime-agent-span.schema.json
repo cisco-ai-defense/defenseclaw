@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/runtime-agent-span.schema.json",
+  "title": "DefenseClaw Runtime Agent Span",
+  "description": "OTEL INTERNAL span for an agent invocation session. It is the parent of LLM, guardrail, tool, and approval spans.",
+  "type": "object",
+  "required": [
+    "traceId",
+    "spanId",
+    "name",
+    "kind",
+    "startTimeUnixNano",
+    "attributes"
+  ],
+  "x-required-attribute-keys": [
+    "gen_ai.operation.name",
+    "gen_ai.agent.name",
+    "gen_ai.provider.name",
+    "openinference.span.kind",
+    "gen_ai.input.messages",
+    "gen_ai.output.messages"
+  ],
+  "x-optional-attribute-keys": [
+    "defenseclaw.agent.root.id",
+    "defenseclaw.agent.parent.id",
+    "defenseclaw.session.root.id",
+    "defenseclaw.session.parent.id",
+    "defenseclaw.agent.lifecycle.id",
+    "defenseclaw.agent.execution.id",
+    "defenseclaw.agent.lifecycle.event",
+    "defenseclaw.agent.lifecycle.state",
+    "defenseclaw.agent.phase",
+    "defenseclaw.agent.phase.previous",
+    "defenseclaw.agent.phase.code",
+    "defenseclaw.agent.sequence",
+    "defenseclaw.operation.id",
+    "defenseclaw.agent.depth",
+    "defenseclaw.agent.stream.mode",
+    "connector",
+    "defenseclaw.agent.lifecycle.transition",
+    "defenseclaw.session.source",
+    "defenseclaw.session.resumed",
+    "defenseclaw.telemetry.input.reported",
+    "defenseclaw.telemetry.output.reported",
+    "user.id",
+    "defenseclaw.user.name"
+  ],
+  "x-galileo-exported": true,
+  "properties": {
+    "traceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "spanId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "parentSpanId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^invoke_agent(?: .+)?$",
+      "examples": [
+        "invoke_agent codex",
+        "invoke_agent openclaw"
+      ]
+    },
+    "kind": {
+      "type": "integer",
+      "const": 1
+    },
+    "startTimeUnixNano": {
+      "type": "string"
+    },
+    "endTimeUnixNano": {
+      "type": "string"
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "attributes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attribute"
+      }
+    }
+  },
+  "$defs": {
+    "attribute": {
+      "type": "object",
+      "required": [
+        "key",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "object"
+        }
+      }
+    },
+    "attributeDefinitions": {
+      "type": "object",
+      "properties": {
+        "tenant.id": {
+          "type": "string"
+        },
+        "workspace.id": {
+          "type": "string"
+        },
+        "deployment.environment": {
+          "type": "string"
+        },
+        "deployment.mode": {
+          "type": "string"
+        },
+        "discovery.source": {
+          "type": "string"
+        },
+        "defenseclaw.device.id": {
+          "type": "string"
+        },
+        "gen_ai.operation.name": {
+          "type": "string",
+          "const": "invoke_agent"
+        },
+        "gen_ai.provider.name": {
+          "type": "string"
+        },
+        "gen_ai.agent.name": {
+          "type": "string"
+        },
+        "gen_ai.agent.type": {
+          "type": "string"
+        },
+        "gen_ai.agent.id": {
+          "type": "string"
+        },
+        "defenseclaw.agent.root.id": { "type": "string" },
+        "defenseclaw.agent.parent.id": { "type": "string" },
+        "defenseclaw.session.root.id": { "type": "string" },
+        "defenseclaw.session.parent.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.id": { "type": "string" },
+        "defenseclaw.agent.execution.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.event": {
+          "type": "string",
+          "enum": ["session_start", "session_end", "subagent_start", "subagent_stop", "turn_start", "turn_end", "tool_start", "tool_end", "compact_start", "compact_end", "event"]
+        },
+        "defenseclaw.agent.lifecycle.state": {
+          "type": "string",
+          "enum": ["active", "completed", "failed", "interrupted", "observed"]
+        },
+        "defenseclaw.agent.phase": { "type": "string" },
+        "defenseclaw.agent.phase.previous": { "type": "string" },
+        "defenseclaw.agent.phase.code": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "defenseclaw.agent.sequence": { "type": "integer", "minimum": 1 },
+        "defenseclaw.operation.id": { "type": "string" },
+        "defenseclaw.agent.depth": { "type": "integer", "minimum": 0 },
+        "defenseclaw.agent.stream.mode": { "type": "string", "const": "realtime_anchor" },
+        "connector": { "type": "string" },
+        "defenseclaw.agent.lifecycle.transition": { "type": "boolean" },
+        "defenseclaw.session.source": { "type": "string" },
+        "defenseclaw.session.resumed": { "type": "boolean" },
+        "defenseclaw.telemetry.input.reported": { "type": "boolean" },
+        "defenseclaw.telemetry.output.reported": { "type": "boolean" },
+        "user.id": { "type": "string" },
+        "defenseclaw.user.name": { "type": "string" },
+        "gen_ai.conversation.id": {
+          "type": "string"
+        },
+        "openinference.span.kind": {
+          "type": "string",
+          "const": "AGENT"
+        },
+        "gen_ai.input.messages": {
+          "type": "string"
+        },
+        "gen_ai.output.messages": {
+          "type": "string"
+        },
+        "input.value": {
+          "type": "string"
+        },
+        "input.mime_type": {
+          "type": "string",
+          "const": "text/plain"
+        },
+        "output.value": {
+          "type": "string"
+        },
+        "output.mime_type": {
+          "type": "string",
+          "const": "text/plain"
+        },
+        "defenseclaw.run.id": {
+          "type": "string"
+        },
+        "defenseclaw.agent.instance_id": {
+          "type": "string"
+        },
+        "defenseclaw.telemetry.canary": {
+          "type": "boolean",
+          "description": "Marks diagnostic traces that require isolated destination acknowledgement."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

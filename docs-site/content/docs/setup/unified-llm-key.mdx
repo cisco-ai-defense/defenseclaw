@@ -263,7 +263,7 @@ unified key actually pays for:
 
 | Connector class | Examples | What the LLM does |
 | --- | --- | --- |
-| Hook-based | Codex, Claude Code, Hermes, Cursor, Windsurf, Copilot CLI, Gemini CLI | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
+| Hook-based | Codex, Claude Code, Hermes, Cursor, Windsurf, Copilot CLI, Gemini CLI, OpenHands, Antigravity, OpenCode, OmniGent | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
 | Proxy-based | OpenClaw, ZeptoClaw | Outbound LLM traffic is routed through the gateway proxy. The gateway uses the unified key for *both* the upstream LLM (the agent's model) and the optional judge. |
 
 The wizard records the intent on `guardrail.llm_role`:
@@ -304,6 +304,26 @@ defenseclaw setup provider add \
   --request-path-override chat=/openai/v1/chat/completions \
   --ca-cert-file /etc/ssl/acme-root.pem
 ```
+
+### What a custom provider does depends on the connector
+
+A custom provider resolves the same globally, but a binding **enforced on the
+agent** versus **judge/aux only** depends entirely on the connector class:
+
+| Connector class | A bound custom provider… |
+| --- | --- |
+| Proxy (OpenClaw, ZeptoClaw) | **Is enforced.** The agent's model traffic routes through DefenseClaw, so the custom provider can serve the agent's upstream model, the judge, or both. |
+| Hook (Hermes, Cursor, Codex, OpenCode, OmniGent, Claude Code, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. |
+
+<Callout type="warn" title="Hook connectors: a custom provider is judge-only">
+This is the easiest thing to get wrong: attaching a custom provider while
+guarding a hook connector does **not** make the agent run on your private
+model. It only changes the model DefenseClaw uses to *judge*. The CLI states
+this for you — `setup llm` prints an "Enforced" vs "Judge/aux only" note when
+you bind an instance, and `setup provider list` prints the same legend for the
+active connector. Programmatically, `GET /v1/connectors` reports
+`llm_traffic_mode` (`"proxy"` \| `"hooks-only"`) per connector.
+</Callout>
 
 <Callout type="warn" title="Set --domain when you set --base-url">
 The gateway resolves an inbound request to a custom-provider entry by

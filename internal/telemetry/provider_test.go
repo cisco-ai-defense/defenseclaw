@@ -20,22 +20,47 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/log/global"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+type stubSpanExporter struct{ err error }
+
+func (s stubSpanExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error { return s.err }
+func (s stubSpanExporter) Shutdown(context.Context) error                             { return nil }
+
+type canaryRejectingSpanExporter struct {
+	calls [][]sdktrace.ReadOnlySpan
+}
+
+func (e *canaryRejectingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.calls = append(e.calls, append([]sdktrace.ReadOnlySpan(nil), spans...))
+	if len(spans) > 0 && isCanarySpan(spans[0]) {
+		return errors.New("OTLP partial success: canary rejected (2 spans rejected)")
+	}
+	return nil
+}
+
+func (*canaryRejectingSpanExporter) Shutdown(context.Context) error { return nil }
 
 func disabledCfg() *config.Config {
 	return &config.Config{
@@ -51,6 +76,118 @@ func disabledCfg() *config.Config {
 			Port: 18789,
 		},
 		Environment: "test",
+	}
+}
+
+func TestNewProviderInactiveDoesNotReplaceOpenTelemetryGlobals(t *testing.T) {
+	beforeTracer := otel.GetTracerProvider()
+	beforeLogger := global.GetLoggerProvider()
+	beforeMeter := otel.GetMeterProvider()
+
+	provider, err := NewProviderInactive(context.Background(), disabledCfg(), "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	if got := otel.GetTracerProvider(); got != beforeTracer {
+		t.Fatal("inactive provider replaced global tracer provider")
+	}
+	if got := global.GetLoggerProvider(); got != beforeLogger {
+		t.Fatal("inactive provider replaced global logger provider")
+	}
+	if got := otel.GetMeterProvider(); got != beforeMeter {
+		t.Fatal("inactive provider replaced global meter provider")
+	}
+}
+
+func TestActivateProviderNilClearsErrorHandler(t *testing.T) {
+	called := false
+	previous := otel.GetErrorHandler()
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) { called = true }))
+	t.Cleanup(func() { otel.SetErrorHandler(previous) })
+
+	ActivateProvider(nil)
+	otel.Handle(errors.New("after shutdown"))
+	if called {
+		t.Fatal("ActivateProvider(nil) left the previous OpenTelemetry error handler installed")
+	}
+}
+
+func TestDestinationSpanExporterRecordsAcknowledgementFailureAndPartialSuccess(t *testing.T) {
+	tests := []struct {
+		name                                    string
+		err                                     error
+		wantDelivered, wantRejected, wantFailed uint64
+	}{
+		{name: "acknowledged", wantDelivered: 3},
+		{name: "transport failure", err: errors.New("401 unauthorized"), wantFailed: 3},
+		{name: "partial success", err: errors.New("OTLP partial success: invalid schema (2 spans rejected)"), wantDelivered: 1, wantRejected: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &Provider{}
+			exporter := &destinationSpanExporter{
+				next: stubSpanExporter{err: tt.err}, provider: provider, destination: "galileo",
+			}
+			spans := make([]sdktrace.ReadOnlySpan, 3)
+			_ = exporter.ExportSpans(context.Background(), spans)
+			got := provider.DestinationDeliveryStats("galileo")
+			if got.Attempted != 3 || got.Delivered != tt.wantDelivered ||
+				got.Rejected != tt.wantRejected || got.Failed != tt.wantFailed {
+				t.Fatalf("delivery=%+v", got)
+			}
+			if tt.err == nil && (got.LastSuccessAt.IsZero() || got.LastError != "") {
+				t.Fatalf("successful delivery metadata=%+v", got)
+			}
+			if tt.err != nil && got.LastError == "" {
+				t.Fatalf("failed delivery missing last error: %+v", got)
+			}
+		})
+	}
+}
+
+func TestDestinationSpanExporterCanaryAcknowledgementUsesExactTrace(t *testing.T) {
+	span := func(traceID trace.TraceID, spanByte byte, canary bool) sdktrace.ReadOnlySpan {
+		attrs := []attribute.KeyValue(nil)
+		if canary {
+			attrs = append(attrs, attribute.Bool(telemetryCanaryAttribute, true))
+		}
+		var spanID trace.SpanID
+		spanID[0] = spanByte
+		return tracetest.SpanStub{
+			SpanContext: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: traceID, SpanID: spanID,
+			}),
+			Attributes: attrs,
+		}.Snapshot()
+	}
+	var normalTraceID, canaryTraceID trace.TraceID
+	normalTraceID[0] = 1
+	canaryTraceID[0] = 2
+	downstream := &canaryRejectingSpanExporter{}
+	provider := &Provider{}
+	exporter := &destinationSpanExporter{
+		next: downstream, provider: provider, destination: "galileo",
+	}
+
+	err := exporter.ExportSpans(context.Background(), []sdktrace.ReadOnlySpan{
+		span(normalTraceID, 1, false),
+		span(canaryTraceID, 2, true),
+		span(canaryTraceID, 3, true),
+	})
+	if err == nil {
+		t.Fatal("expected canary partial-success error")
+	}
+	if len(downstream.calls) != 2 || len(downstream.calls[0]) != 1 || len(downstream.calls[1]) != 2 {
+		t.Fatalf("export calls=%v want normal batch then isolated canary trace", downstream.calls)
+	}
+	if provider.DestinationAcknowledgedCanaryTrace("galileo", canaryTraceID.String()) {
+		t.Fatal("rejected canary was corrupted by concurrent successful delivery")
+	}
+	stats := provider.DestinationDeliveryStats("galileo")
+	if stats.Delivered != 1 || stats.Rejected != 2 || stats.ExportBatches != 2 {
+		t.Fatalf("delivery=%+v want one normal delivery and two rejected canary spans", stats)
 	}
 }
 
@@ -70,6 +207,29 @@ func TestNewProvider_Disabled(t *testing.T) {
 	}
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Errorf("shutdown disabled: %v", err)
+	}
+}
+
+func TestNewProviderInactiveDoesNotInstallGlobals(t *testing.T) {
+	tracerBefore := otel.GetTracerProvider()
+	loggerBefore := global.GetLoggerProvider()
+	meterBefore := otel.GetMeterProvider()
+	cfg := disabledCfg()
+	cfg.OTel.Enabled = true
+
+	p, err := NewProviderInactive(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	if otel.GetTracerProvider() != tracerBefore {
+		t.Fatal("inactive provider replaced the global tracer provider")
+	}
+	if global.GetLoggerProvider() != loggerBefore {
+		t.Fatal("inactive provider replaced the global logger provider")
+	}
+	if otel.GetMeterProvider() != meterBefore {
+		t.Fatal("inactive provider replaced the global meter provider")
 	}
 }
 
@@ -201,7 +361,7 @@ func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	p, exp := newTracingProvider(t)
 	attachTraceTestResourceContext(t, p)
 
-	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai", "codex")
 	p.EndAgentSpan(span, "")
 
 	spans := exp.GetSpans()
@@ -216,10 +376,14 @@ func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 }
 
 func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
 	p, exp := newTracingProvider(t)
 	attachTraceTestResourceContext(t, p)
 
 	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
+	p.SetGenAIInput(span, "private prompt content")
+	p.SetGenAIOutput(span, "private response content")
 	p.EndLLMSpan(context.Background(), span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex", "")
 
 	spans := exp.GetSpans()
@@ -228,6 +392,38 @@ func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	}
 
 	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+	for _, key := range []string{"gen_ai.input.messages", "gen_ai.output.messages"} {
+		got, ok := attrByKey(spans[0].Attributes, key)
+		if !ok {
+			t.Fatalf("%s missing", key)
+		}
+		var messages []map[string]string
+		if err := json.Unmarshal([]byte(got.AsString()), &messages); err != nil || len(messages) != 1 {
+			t.Fatalf("%s=%q invalid GenAI messages: %v", key, got.AsString(), err)
+		}
+		if !strings.Contains(messages[0]["content"], "<redacted") {
+			t.Fatalf("%s content=%q, want redacted value", key, messages[0]["content"])
+		}
+		if strings.Contains(messages[0]["content"], "private") {
+			t.Fatalf("%s leaked raw content: %q", key, got.AsString())
+		}
+	}
+}
+
+func TestEndLLMSpan_OmitsUnknownTokenCounts(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 0, 0)
+	p.EndLLMSpan(context.Background(), span, "gpt-5.5", 0, 0, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "agent", "session")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	for _, key := range []string{"gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens"} {
+		if _, ok := attrByKey(spans[0].Attributes, key); ok {
+			t.Fatalf("%s should be absent when usage is unknown", key)
+		}
+	}
 }
 
 func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
@@ -277,7 +473,7 @@ func TestStartAgentSpan_EmitsRunID(t *testing.T) {
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
 
 	p, exp := newTracingProvider(t)
-	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai", "codex")
 	p.EndAgentSpan(span, "")
 
 	spans := exp.GetSpans()
@@ -350,11 +546,8 @@ func TestExpandHeaders_MissingEnv(t *testing.T) {
 	}
 }
 
-// TestExpandHeaders_NoAutoInjection enforces the post-decoupling
-// contract: expandHeaders is vendor-neutral. Legacy builds auto-injected
-// X-SF-Token from SPLUNK_ACCESS_TOKEN; that coupling was removed so the
-// telemetry stack is a plain OTLP client. Operators who need a Splunk
-// token now put it in cfg.OTel.Headers or OTEL_EXPORTER_OTLP_HEADERS.
+// TestExpandHeaders_NoAutoInjection enforces that expandHeaders is
+// vendor-neutral and only expands explicitly configured destination headers.
 func TestExpandHeaders_NoAutoInjection(t *testing.T) {
 	t.Setenv("SPLUNK_ACCESS_TOKEN", "should-be-ignored")
 	expanded := expandHeaders(map[string]string{})
@@ -366,41 +559,79 @@ func TestExpandHeaders_NoAutoInjection(t *testing.T) {
 	}
 }
 
-func TestNewProvider_StandardOTLPEnvHTTPLogs(t *testing.T) {
+func TestNewProvider_MultipleTraceDestinationsFanOut(t *testing.T) {
 	type requestInfo struct {
-		path   string
-		header string
+		path    string
+		header  string
+		content string
 	}
-	reqC := make(chan requestInfo, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqC <- requestInfo{
-			path:   r.URL.Path,
-			header: r.Header.Get("X-Test"),
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	localC := make(chan requestInfo, 4)
+	galileoC := make(chan requestInfo, 4)
+	newReceiver := func(ch chan<- requestInfo) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ch <- requestInfo{
+				path:    r.URL.Path,
+				header:  r.Header.Get("Galileo-API-Key"),
+				content: r.Header.Get("Content-Type"),
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+	local := newReceiver(localC)
+	defer local.Close()
+	galileo := newReceiver(galileoC)
+	defer galileo.Close()
 
-	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http")
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-test=env-header")
-
+	t.Setenv("TEST_GALILEO_KEY", "test-key")
 	cfg := disabledCfg()
 	cfg.OTel = config.OTelConfig{
 		Enabled: true,
-		Logs: config.OTelLogsConfig{
-			Enabled: true,
-		},
-		Traces: config.OTelTracesConfig{
-			Enabled: false,
-		},
-		Metrics: config.OTelMetricsConfig{
-			Enabled: false,
+		Traces: config.OTelTracePolicyConfig{
+			Sampler:    "always_on",
+			SamplerArg: "1.0",
 		},
 		Batch: config.OTelBatchConfig{
 			MaxExportBatchSize: 1,
 			ScheduledDelayMs:   10,
 			MaxQueueSize:       8,
+		},
+		Destinations: []config.OTelDestinationConfig{
+			{
+				Name:     "local-observability",
+				Enabled:  true,
+				Protocol: "http",
+				Endpoint: local.URL,
+				Traces: config.OTelTracesConfig{
+					Enabled: true,
+					URLPath: "/v1/traces",
+				},
+			},
+			{
+				Name: "galileo",
+				// Filtering is driven by SpanFilter, not a vendor/preset string.
+				Preset:   "misspelled-on-purpose",
+				Enabled:  true,
+				Protocol: "http",
+				Endpoint: galileo.URL,
+				Headers: map[string]string{
+					"Galileo-API-Key": "${TEST_GALILEO_KEY}",
+					"project":         "defenseclaw-tests",
+					"logstream":       "default",
+				},
+				Traces: config.OTelTracesConfig{
+					Enabled: true,
+					URLPath: "/otel/traces",
+				},
+				SpanFilter: config.OTelSpanFilterConfig{
+					Operations: []config.OTelSpanFilterOperationConfig{{
+						Name: "chat",
+						RequireAttributes: []string{
+							"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+							"gen_ai.input.messages", "gen_ai.output.messages",
+						},
+					}},
+				},
+			},
 		},
 	}
 
@@ -408,30 +639,64 @@ func TestNewProvider_StandardOTLPEnvHTTPLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProvider err=%v", err)
 	}
-
-	p.EmitGatewayEvent(gatewaylog.Event{
-		Timestamp: time.Now().UTC(),
-		EventType: gatewaylog.EventDiagnostic,
-		Severity:  gatewaylog.SeverityInfo,
-		Diagnostic: &gatewaylog.DiagnosticPayload{
-			Component: "telemetry-test",
-			Message:   "env-path",
-		},
-	})
+	_, span := p.StartLLMSpan(
+		context.Background(), "openai", "gpt-4o-mini", "openai", 16, 0,
+	)
+	p.SetGenAIInput(span, "fan-out test input")
+	p.SetGenAIOutput(span, "fan-out test output")
+	p.EndLLMSpan(
+		context.Background(), span, "gpt-4o-mini", 4, 4, []string{"stop"},
+		0, "none", "", "openai", time.Now(), "codex", "codex", "agent-test", "session-test",
+	)
+	_, operationalSpan := p.Tracer().Start(context.Background(), "defenseclaw.test.operational")
+	operationalSpan.End()
+	_, upstreamErrorSpan := p.StartLLMSpan(
+		context.Background(), "openai", "gpt-4o-mini", "openai", 16, 0,
+	)
+	p.SetGenAIInput(upstreamErrorSpan, "request without a response")
+	p.SetGenAIOutput(upstreamErrorSpan, "")
+	p.EndLLMSpan(
+		context.Background(), upstreamErrorSpan, "gpt-4o-mini", 4, 0, []string{"error"},
+		0, "none", "", "openai", time.Now(), "codex", "codex", "agent-test", "session-test",
+	)
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown err=%v", err)
 	}
 
+	assertRequest := func(name string, ch <-chan requestInfo, path, key string) {
+		t.Helper()
+		select {
+		case got := <-ch:
+			if got.path != path {
+				t.Errorf("%s path=%q want %q", name, got.path, path)
+			}
+			if got.header != key {
+				t.Errorf("%s Galileo-API-Key=%q want %q", name, got.header, key)
+			}
+			if got.content != "application/x-protobuf" {
+				t.Errorf("%s Content-Type=%q want application/x-protobuf", name, got.content)
+			}
+		case <-time.After(3 * time.Second):
+			t.Errorf("timed out waiting for %s OTLP request", name)
+		}
+	}
+	assertRequest("local", localC, "/v1/traces", "")
+	assertRequest("galileo", galileoC, "/otel/traces", "test-key")
+	assertRequest("local operational", localC, "/v1/traces", "")
+	assertRequest("local upstream-error GenAI", localC, "/v1/traces", "")
 	select {
-	case got := <-reqC:
-		if got.path != "/v1/logs" {
-			t.Fatalf("request path=%q want /v1/logs", got.path)
-		}
-		if got.header != "env-header" {
-			t.Fatalf("X-Test header=%q want env-header", got.header)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for OTLP logs request")
+	case got := <-galileoC:
+		t.Errorf("Galileo received non-GenAI operational span request: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	stats := p.DestinationRoutingStats("galileo")
+	if stats.Accepted != 1 || stats.Dropped != 2 {
+		t.Fatalf("DestinationRoutingStats=%+v want accepted=1 dropped=2", stats)
+	}
+	delivery := p.DestinationDeliveryStats("galileo")
+	if delivery.Attempted != 1 || delivery.Delivered != 1 ||
+		delivery.Rejected != 0 || delivery.Failed != 0 {
+		t.Fatalf("DestinationDeliveryStats=%+v want attempted=delivered=1", delivery)
 	}
 }
 
@@ -454,6 +719,140 @@ func TestResolveValue(t *testing.T) {
 				t.Errorf("resolveValue(%q, %q) = %q, want %q", tt.signal, tt.global, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveProtocolNormalizesStandardOTELValues(t *testing.T) {
+	if got := resolveProtocol("http/protobuf", ""); got != "http" {
+		t.Fatalf("http/protobuf resolved to %q", got)
+	}
+	if got := resolveProtocol("grpc/protobuf", ""); got != "grpc" {
+		t.Fatalf("grpc/protobuf resolved to %q", got)
+	}
+}
+
+func TestValidateCredentialTransport(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		insecure bool
+		headers  map[string]string
+		wantErr  bool
+	}{
+		{name: "remote plaintext auth", endpoint: "http://collector.example.test/v1/traces", headers: map[string]string{"Authorization": "Bearer secret"}, wantErr: true},
+		{name: "remote insecure grpc token", endpoint: "collector.example.test:4317", insecure: true, headers: map[string]string{"X-SF-Token": "secret"}, wantErr: true},
+		{name: "remote TLS auth", endpoint: "https://collector.example.test/v1/traces", headers: map[string]string{"api-key": "secret"}},
+		{name: "loopback plaintext auth", endpoint: "http://127.0.0.1:4318/v1/traces", headers: map[string]string{"Galileo-API-Key": "secret"}},
+		{name: "metadata only plaintext", endpoint: "http://collector.example.test/v1/traces", headers: map[string]string{"project": "demo"}},
+		{name: "userinfo rejected", endpoint: "https://user:pass@collector.example.test/v1/traces", headers: map[string]string{"Authorization": "secret"}, wantErr: true},
+		{name: "userinfo rejected without headers", endpoint: "https://user:pass@collector.example.test/v1/traces", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCredentialTransport(tt.endpoint, tt.insecure, tt.headers)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateCredentialTransport() error=%v wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSpanMatchesFilterRequiresEveryNonEmptyAttribute(t *testing.T) {
+	filter := config.OTelSpanFilterConfig{
+		RequireOperation: "chat",
+		RequireAttributes: []string{
+			"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+			"gen_ai.input.messages", "gen_ai.output.messages",
+		},
+	}
+	values := map[string]string{
+		"gen_ai.operation.name":  "chat",
+		"gen_ai.provider.name":   "openai",
+		"gen_ai.request.model":   "gpt-5.5",
+		"gen_ai.input.messages":  `[{"role":"user","content":"hi"}]`,
+		"gen_ai.output.messages": `[{"role":"assistant","content":"hello"}]`,
+	}
+	span := func(overrides map[string]string, omitted string) sdktrace.ReadOnlySpan {
+		attrs := make([]attribute.KeyValue, 0, len(values))
+		for key, value := range values {
+			if key == omitted {
+				continue
+			}
+			if override, ok := overrides[key]; ok {
+				value = override
+			}
+			attrs = append(attrs, attribute.String(key, value))
+		}
+		return tracetest.SpanStub{Attributes: attrs}.Snapshot()
+	}
+	if !spanMatchesFilter(span(nil, ""), filter) {
+		t.Fatal("complete GenAI span did not match filter")
+	}
+	for _, missing := range filter.RequireAttributes {
+		if spanMatchesFilter(span(nil, missing), filter) {
+			t.Errorf("span missing %q matched filter", missing)
+		}
+	}
+	if spanMatchesFilter(span(map[string]string{"gen_ai.output.messages": "   "}, ""), filter) {
+		t.Error("span with empty output matched filter")
+	}
+	if spanMatchesFilter(span(map[string]string{"gen_ai.operation.name": "embeddings"}, ""), filter) {
+		t.Error("span with wrong operation matched filter")
+	}
+}
+
+func TestSpanMatchesFilterOperationBranches(t *testing.T) {
+	filter := config.OTelSpanFilterConfig{Operations: []config.OTelSpanFilterOperationConfig{
+		{Name: "chat", RequireAttributes: []string{"gen_ai.operation.name", "gen_ai.request.model"}},
+		{Name: "invoke_agent", RequireAttributes: []string{"gen_ai.operation.name", "gen_ai.agent.name"}},
+		{Name: "execute_tool", RequireAttributes: []string{"gen_ai.operation.name", "gen_ai.tool.name"}},
+	}}
+	span := func(operation, key, value string) sdktrace.ReadOnlySpan {
+		return tracetest.SpanStub{Attributes: []attribute.KeyValue{
+			attribute.String("gen_ai.operation.name", operation),
+			attribute.String(key, value),
+		}}.Snapshot()
+	}
+	for _, tc := range []struct {
+		operation string
+		key       string
+	}{
+		{operation: "chat", key: "gen_ai.request.model"},
+		{operation: "invoke_agent", key: "gen_ai.agent.name"},
+		{operation: "execute_tool", key: "gen_ai.tool.name"},
+	} {
+		if !spanMatchesFilter(span(tc.operation, tc.key, "present"), filter) {
+			t.Errorf("complete %q branch did not match", tc.operation)
+		}
+		if spanMatchesFilter(span(tc.operation, tc.key, " "), filter) {
+			t.Errorf("empty %q branch attribute matched", tc.operation)
+		}
+	}
+	if spanMatchesFilter(span("embeddings", "gen_ai.request.model", "model"), filter) {
+		t.Error("unknown operation matched")
+	}
+}
+
+func TestNewProviderRejectsCredentialBearingRemotePlaintextDestination(t *testing.T) {
+	cfg := disabledCfg()
+	cfg.OTel = config.OTelConfig{
+		Enabled: true,
+		Traces:  config.OTelTracePolicyConfig{Sampler: "always_on", SamplerArg: "1.0"},
+		Batch: config.OTelBatchConfig{
+			MaxExportBatchSize: 1,
+			ScheduledDelayMs:   10,
+			MaxQueueSize:       8,
+		},
+		Destinations: []config.OTelDestinationConfig{{
+			Name: "unsafe", Enabled: true, Protocol: "http",
+			Endpoint: "http://collector.example.test/v1/traces",
+			Headers:  map[string]string{"Authorization": "Bearer secret"},
+			Traces:   config.OTelTracesConfig{Enabled: true},
+		}},
+	}
+	_, err := NewProvider(context.Background(), cfg, "test")
+	if err == nil || !strings.Contains(err.Error(), "must use TLS") {
+		t.Fatalf("NewProvider error=%v, want credential transport rejection", err)
 	}
 }
 
@@ -1464,6 +1863,51 @@ func TestStartEndPolicySpan_RecordsAttributes(t *testing.T) {
 		t.Fatal("EndPolicySpan should also record policy.evaluations metric")
 		return
 	}
+}
+
+func TestEmitGenAICanaryDetachesFilteredHTTPParent(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	exporter := tracetest.NewInMemoryExporter()
+	p, err := NewProviderForTraceTest(reader, exporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+
+	parentCtx, parent := p.Tracer().Start(context.Background(), "POST /api/v1/telemetry/canary")
+	traceID, err := p.EmitGenAICanary(parentCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("spans=%d want root agent + child chat", len(spans))
+	}
+	var agent, chat tracetest.SpanStub
+	for _, span := range spans {
+		switch span.Name {
+		case "invoke_agent defenseclaw":
+			agent = span
+		case "chat gpt-4o-mini":
+			chat = span
+		}
+	}
+	if agent.Name == "" || chat.Name == "" {
+		t.Fatalf("unexpected spans: %+v", spans)
+	}
+	if !isCanarySpan(agent.Snapshot()) || !isCanarySpan(chat.Snapshot()) {
+		t.Fatal("runtime canary spans are missing the isolation marker")
+	}
+	if agent.Parent.IsValid() {
+		t.Fatalf("agent retained filtered HTTP parent %s", agent.Parent.SpanID())
+	}
+	if chat.Parent.SpanID() != agent.SpanContext.SpanID() {
+		t.Fatalf("chat parent=%s want agent=%s", chat.Parent.SpanID(), agent.SpanContext.SpanID())
+	}
+	if chat.SpanContext.TraceID().String() != traceID {
+		t.Fatalf("chat trace=%s returned=%s", chat.SpanContext.TraceID(), traceID)
+	}
+	parent.End()
 }
 
 func TestStartEndPolicySpan_BlockedSetsErrorStatus(t *testing.T) {

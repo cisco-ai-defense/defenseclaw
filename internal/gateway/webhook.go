@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -46,7 +47,22 @@ import (
 // WebhookDispatcher sends structured JSON payloads to configured webhook
 // endpoints when enforcement events occur. Modeled after the SplunkForwarder.
 type WebhookDispatcher struct {
-	endpoints    []webhookEndpoint
+	endpoints []webhookEndpoint
+
+	// connectorEndpoints holds per-connector webhook endpoints (D5b). An
+	// event whose Connector has an override (see connectorOverride) is
+	// dispatched only to these, never to the global endpoints above; events
+	// for connectors absent here inherit the global endpoints. Keyed by
+	// normalized connector name.
+	connectorEndpoints map[string][]webhookEndpoint
+
+	// connectorOverride records connectors with an explicit per-connector
+	// webhooks dimension (a present list, possibly empty). A connector
+	// present here with no connectorEndpoints SUPPRESSES global dispatch for
+	// its events (the tri-state's empty-list case); a connector absent here
+	// INHERITS the global endpoints (the safety default — no silent drop).
+	connectorOverride map[string]bool
+
 	client       *http.Client
 	retryBackoff time.Duration
 	sem          chan struct{} // bounded concurrency
@@ -54,7 +70,9 @@ type WebhookDispatcher struct {
 	debug        bool
 	wg           sync.WaitGroup
 	done         chan struct{}
-	otel         *telemetry.Provider
+	otel         atomic.Pointer[telemetry.Provider]
+	lifecycleMu  sync.Mutex
+	closed       bool
 }
 
 type webhookEndpoint struct {
@@ -91,10 +109,74 @@ var (
 	webhookCircuitOpenDuration     = 60 * time.Second
 )
 
-// NewWebhookDispatcher creates a dispatcher from the config slice.
-// Endpoints with enabled=false, empty URL, or unsafe URLs are skipped.
-func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
+// NewWebhookDispatcher creates a dispatcher from the global webhook config
+// slice. Endpoints with enabled=false, empty URL, or unsafe URLs are skipped.
+//
+// The optional obs argument carries the per-connector observability routing
+// overrides (D5b): for each connector whose webhooks dimension is set, its
+// endpoints are built so that connector's events dispatch only to them
+// (override), and an explicit empty list suppresses the global endpoints for
+// that connector. A connector with no override inherits the global endpoints.
+// obs is variadic so existing call sites that route everything globally keep
+// compiling; pass cfg.Observability to activate per-connector routing.
+//
+// Returns nil only when there are no global endpoints AND no per-connector
+// endpoints — a global-empty install that routes a connector to its own
+// webhook still yields a live dispatcher.
+func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.ObservabilityConfig) *WebhookDispatcher {
 	logger := log.New(os.Stderr, "[webhook] ", 0)
+	endpoints := buildWebhookEndpoints(cfgs, logger)
+
+	var connectorEndpoints map[string][]webhookEndpoint
+	var connectorOverride map[string]bool
+	connEndpointCount := 0
+	if len(obs) > 0 {
+		o := obs[0]
+		for _, name := range o.ConnectorNames() {
+			if !o.HasConnectorWebhooksOverride(name) {
+				continue // webhooks dimension unset → inherit global.
+			}
+			key := normalizeWebhookConnector(name)
+			if key == "" {
+				continue
+			}
+			if connectorOverride == nil {
+				connectorOverride = make(map[string]bool)
+				connectorEndpoints = make(map[string][]webhookEndpoint)
+			}
+			// Mark the override first so the empty-list suppress case holds
+			// even when the override builds zero endpoints.
+			connectorOverride[key] = true
+			eps := buildWebhookEndpoints(o.EffectiveWebhooks(name, nil), logger)
+			if len(eps) > 0 {
+				connectorEndpoints[key] = eps
+				connEndpointCount += len(eps)
+			}
+		}
+	}
+
+	if len(endpoints) == 0 && connEndpointCount == 0 {
+		return nil
+	}
+	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	return &WebhookDispatcher{
+		endpoints:          endpoints,
+		connectorEndpoints: connectorEndpoints,
+		connectorOverride:  connectorOverride,
+		client:             newWebhookHTTPClient(allowLoopback, logger),
+		retryBackoff:       webhookRetryBackoff,
+		sem:                make(chan struct{}, webhookMaxConcurrency),
+		logger:             logger,
+		debug:              os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
+		done:               make(chan struct{}),
+	}
+}
+
+// buildWebhookEndpoints translates a webhook config slice into the runtime
+// endpoint structs, skipping disabled / empty-URL / SSRF-unsafe entries.
+// Shared by the global and per-connector (D5b) construction paths so both
+// apply identical validation, cooldown, and severity handling.
+func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []webhookEndpoint {
 	var endpoints []webhookEndpoint
 	for _, c := range cfgs {
 		if !c.Enabled || c.URL == "" {
@@ -133,19 +215,84 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			lastSent:    make(map[string]time.Time),
 		})
 	}
-	if len(endpoints) == 0 {
-		return nil
+	return endpoints
+}
+
+// normalizeWebhookConnector canonicalizes a connector name for per-connector
+// webhook routing (trim + lowercase + hyphen/underscore alias fold). Mirrors
+// config.normalizeConnectorKey and sinks.normalizeConnector — kept local so
+// the routing key matches whether the operator wrote the canonical name or an
+// alias under observability.connectors.
+func normalizeWebhookConnector(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
 	}
-	return &WebhookDispatcher{
-		endpoints: endpoints,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
+}
+
+// endpointsForConnector returns the endpoint slice an event with the given
+// connector dispatches to, honoring the per-connector tri-state: the global
+// endpoints when the connector has no override (inherit), or the connector's
+// own endpoints (possibly empty = suppress) when it does. The returned slice
+// shares its backing array with the dispatcher's stored endpoints — callers
+// index it by pointer (&eps[i]) exactly like the global path, never copy it.
+func (d *WebhookDispatcher) endpointsForConnector(connector string) []webhookEndpoint {
+	if connector != "" && len(d.connectorOverride) > 0 {
+		key := normalizeWebhookConnector(connector)
+		if d.connectorOverride[key] {
+			return d.connectorEndpoints[key]
+		}
+	}
+	return d.endpoints
+}
+
+// newWebhookHTTPClient builds the http.Client used to deliver webhooks. It
+// installs:
+//
+//   - secureDialContext: every TCP dial re-resolves the destination and
+//     rejects private/loopback/link-local/cloud-metadata addresses. This
+//     defeats the F-1306 DNS-rebinding window where validateWebhookURL
+//     saw a public IP at config time but Go's default dialer later
+//     resolved a private IP.
+//
+//   - CheckRedirect: every redirect target is re-validated through
+//     validateWebhookURL. Pre-fix, an attacker-controlled webhook
+//     endpoint could 302 the dispatcher to http://127.0.0.1:6379/
+//     (Redis) or http://169.254.169.254/ (cloud IMDS) and have Go's
+//     default redirect policy follow it.
+//
+// allowLoopback is wired from DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so dev
+// workflows that intentionally point at 127.0.0.1 still work.
+func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
+	transport := &http.Transport{
+		DialContext:           secureDialContext(allowLoopback, 10*time.Second),
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Conservative cap (Go's default is 10) and cheap.
+			if len(via) >= 5 {
+				return fmt.Errorf("webhook: redirect chain length %d exceeded", len(via))
+			}
+			if err := validateWebhookURL(req.URL.String()); err != nil {
+				if logger != nil {
+					logger.Printf("rejected redirect to %s: %v",
+						req.URL.Redacted(), err)
+				}
+				return fmt.Errorf("webhook redirect rejected: %w", err)
+			}
+			return nil
 		},
-		retryBackoff: webhookRetryBackoff,
-		sem:          make(chan struct{}, webhookMaxConcurrency),
-		logger:       logger,
-		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
-		done:         make(chan struct{}),
 	}
 }
 
@@ -155,7 +302,7 @@ func (d *WebhookDispatcher) BindObservability(p *telemetry.Provider) {
 	if d == nil {
 		return
 	}
-	d.otel = p
+	d.otel.Store(p)
 }
 
 func hashWebhookTargetURL(raw string) string {
@@ -204,8 +351,13 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	action := strings.ToLower(event.Action)
 	eventCategory := categorizeAction(action)
 
-	for i := range d.endpoints {
-		ep := &d.endpoints[i]
+	// Per-connector routing (D5b): an event whose connector has an explicit
+	// webhooks override fires only at that connector's endpoints (empty =
+	// suppress); every other event inherits the global endpoints. Keys off
+	// event.Connector, stamped by the proxy guardrail path / connector glue.
+	endpoints := d.endpointsForConnector(event.Connector)
+	for i := range endpoints {
+		ep := &endpoints[i]
 		if rank < ep.minSeverity {
 			continue
 		}
@@ -218,16 +370,18 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 				event.Target, action, ep.url, ep.cooldown)
 			ctx := context.Background()
 			tHash := hashWebhookTargetURL(ep.url)
-			if d.otel != nil {
-				d.otel.RecordWebhookCooldownSuppressed(ctx, ep.channelType)
-				d.otel.RecordWebhookDispatch(ctx, ep.channelType, "cooldown_suppressed", 0)
-				d.otel.RecordWebhookLatency(ctx, ep.channelType, tHash, 0, 0)
+			if tel := d.otel.Load(); tel != nil {
+				tel.RecordWebhookCooldownSuppressed(ctx, ep.channelType)
+				tel.RecordWebhookDispatch(ctx, ep.channelType, "cooldown_suppressed", 0)
+				tel.RecordWebhookLatency(ctx, ep.channelType, tHash, 0, 0)
 			}
 			emitError(ctx, string(gatewaylog.SubsystemWebhook), string(gatewaylog.ErrCodeWebhookCooldown),
 				"webhook delivery suppressed: duplicate target/action within cooldown window", nil)
 			continue
 		}
-		d.wg.Add(1)
+		if !d.startDelivery() {
+			return
+		}
 		go func(ep *webhookEndpoint, key string) {
 			defer d.wg.Done()
 			d.sem <- struct{}{}
@@ -247,22 +401,34 @@ func (d *WebhookDispatcher) Close() {
 	if d == nil {
 		return
 	}
-	select {
-	case <-d.done:
-	default:
+	d.lifecycleMu.Lock()
+	if !d.closed {
+		d.closed = true
 		close(d.done)
 	}
+	d.lifecycleMu.Unlock()
 	d.wg.Wait()
 }
 
 // closing returns true after Close has been called.
 func (d *WebhookDispatcher) closing() bool {
-	select {
-	case <-d.done:
-		return true
-	default:
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	return d.closed
+}
+
+// startDelivery serializes WaitGroup.Add with Close's transition to closed.
+// sync.WaitGroup does not permit an Add racing a Wait when the counter can be
+// zero; the lifecycle mutex guarantees Close observes every accepted delivery
+// before it begins waiting and that no later delivery can increment the group.
+func (d *WebhookDispatcher) startDelivery() bool {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	if d.closed {
 		return false
 	}
+	d.wg.Add(1)
+	return true
 }
 
 // claimSlot atomically checks the cooldown and reserves the slot so
@@ -337,9 +503,9 @@ func (ep *webhookEndpoint) noteWebhookFailure(d *WebhookDispatcher, targetHash s
 		opened = true
 	}
 	ep.brkMu.Unlock()
-	if opened && d.otel != nil {
+	if tel := d.otel.Load(); opened && tel != nil {
 		ctx := context.Background()
-		d.otel.RecordWebhookCircuitBreaker(ctx, targetHash, "opened")
+		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "opened")
 		emitWebhookCircuitActivity(targetHash, "webhook-circuit-open")
 	}
 }
@@ -351,9 +517,9 @@ func (ep *webhookEndpoint) noteWebhookSuccess(d *WebhookDispatcher, targetHash s
 	ep.circuitOpenUntil = time.Time{}
 	ep.breakerTripped = false
 	ep.brkMu.Unlock()
-	if shouldClose && d.otel != nil {
+	if tel := d.otel.Load(); shouldClose && tel != nil {
 		ctx := context.Background()
-		d.otel.RecordWebhookCircuitBreaker(ctx, targetHash, "closed")
+		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "closed")
 		emitWebhookCircuitActivity(targetHash, "webhook-circuit-closed")
 	}
 }
@@ -362,11 +528,12 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	tctx := context.Background()
 	targetHash := hashWebhookTargetURL(ep.url)
 	record := func(status int, ms float64, outcome string) {
-		if d.otel == nil {
+		tel := d.otel.Load()
+		if tel == nil {
 			return
 		}
-		d.otel.RecordWebhookLatency(tctx, ep.channelType, targetHash, status, ms)
-		d.otel.RecordWebhookDispatch(tctx, ep.channelType, outcome, ms)
+		tel.RecordWebhookLatency(tctx, ep.channelType, targetHash, status, ms)
+		tel.RecordWebhookDispatch(tctx, ep.channelType, outcome, ms)
 	}
 
 	ep.refreshCircuitAfterCooldown()
@@ -551,6 +718,26 @@ func validateWebhookURL(rawURL string) error {
 }
 
 func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// F-1225 (parity): collapse IPv4-mapped IPv6 ("::ffff:127.0.0.1") to
+	// its canonical IPv4 form so the IPv4 private-range checks below
+	// catch it. Without this, an attacker can use the v6-mapped form to
+	// route around the IPv4 ranges via dial syntax like
+	// http://[::ffff:127.0.0.1]/.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	// Use the standard library's classification helpers first — they
+	// reflect the kernel's view of "address class" and are kept current
+	// with new RFCs. The explicit CIDR list below is belt-and-suspenders
+	// in case future Go versions lag.
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsPrivate() {
+		return true
+	}
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",

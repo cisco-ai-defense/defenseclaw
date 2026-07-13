@@ -25,19 +25,20 @@ Tables below tag each row with the binary that owns it.
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw init` | Interactive first-run wizard. Asks about scanner mode, judge, HITL. |
-| `defenseclaw quickstart` | Zero-prompt first-run with safe defaults. See [Quickstart](/docs/get-started/quickstart). |
+| `defenseclaw init` | Interactive first-run wizard. On a TTY, pre-selects installed hook connectors and lets you choose which ones stay observe vs action. Non-interactive multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
+| `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
 | `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
 
 ## Setup
+
+Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the rest) add or reconfigure one connector. On a host with another hook connector already active, choose **Add** to join the active roster; choose **Replace** only when you want to return to one wired connector. Proxy connectors (`openclaw`, `zeptoclaw`) own the traffic plane and do not join the hook-connector roster.
 
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/setup/guardrail). |
 | `defenseclaw setup llm` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`). Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom-provider overlay and `--inherit-from` to seed from a sibling component. Pair with `--ping` for an immediate reachability probe. See [Unified LLM key](/docs/setup/unified-llm-key). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage the `~/.defenseclaw/custom-providers.json` overlay used to route LLM traffic through internal or self-hosted endpoints. `add` accepts `--base-url`, `--domain` (repeatable; required alongside `--base-url` so the gateway can match inbound URLs back to this overlay entry — `defenseclaw doctor` warns when the `base_url` host is not covered), `--base-provider-type`, `--env-key`, `--allowed-request`, `--available-model`, `--request-path-override`, TLS knobs (`--ca-cert-file`, `--insecure-skip-verify`), and provider-typed regional flags: Bedrock — `--bedrock-region`, `--bedrock-auth-mode`, `--bedrock-access-key-env`, `--bedrock-secret-key-env`, `--bedrock-session-token-env`, `--bedrock-profile-name`, `--bedrock-inference-profile`, `--bedrock-deployment alias=model-id` (repeatable); Vertex AI — `--vertex-project-id`, `--vertex-region`, `--vertex-auth-mode`, `--vertex-service-account-json-env`; Azure OpenAI — `--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`, `--azure-deployment-alias model=deployment` (repeatable). Each family is rejected against a mismatched `--base-provider-type`. Omit `--name` interactively for the wizard. |
-| `defenseclaw setup mode <connector>` | Switch the active claw connector with smart guardrail inheritance. See [Switching connectors](/docs/setup/guardrail/switching-connectors). |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
@@ -47,20 +48,37 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
+| `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
-| `defenseclaw setup splunk` | Configure the Splunk audit sink. |
+| `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
+| `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
-| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP telemetry destinations and audit-log sinks. `migrate-otel` previews the upgrade-time configuration migration by default and `--apply` repairs/persists it manually. Distinct from `setup webhook`, which manages notifier webhooks. |
 
-## Guardrail
-
-Per-connector guardrail controls. The **mutating** verbs show the current value when run bare and change it when given an argument. `--connector X` scopes the change to one connector on a **multi-connector** install (writes `guardrail.connectors.<name>`); omit it to set the **global default** every connector inherits. On a single-connector install `--connector` is rejected — there's only one posture. The **read** verb (`guardrail status`) takes no `--connector` and always reports the full active roster. All of these are on the Python `defenseclaw` CLI.
+For observability destinations, `name` is the stable identity: a new name adds,
+and an existing name updates only that destination. Run `list --json` for the
+complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
+The TUI mirrors the runtime-loaded inventory in **Overview → Observability
+Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw guardrail status` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector. There is **no** `--connector` flag — the full roster always prints, one identical layout whether one or N connectors are active. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
+
+<Callout title="Safety gates are intentional">
+Commands that execute local binaries or fetch remote content fail closed when the trust boundary is unclear. Connector version probes only run from trusted path prefixes; registry and scanner fetches reject loopback, link-local, cloud-metadata, and private-network targets unless explicitly allowed; `defenseclaw upgrade` verifies release artifacts before stopping the running gateway.
+</Callout>
+
+## Guardrail
+
+Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture. All of these are on the Python `defenseclaw` CLI.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw guardrail status [--connector X]` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector by default. Pass `--connector X` to narrow the view to one active connector. |
 | `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set the response-layer hook fail mode. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
@@ -68,7 +86,8 @@ Per-connector guardrail controls. The **mutating** verbs show the current value 
 | `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
 
 ```bash
-defenseclaw guardrail status                              # full per-connector roster (no --connector flag)
+defenseclaw guardrail status                              # full per-connector roster
+defenseclaw guardrail status --connector codex            # one connector's resolved posture
 defenseclaw guardrail fail-mode closed --connector codex  # scope to one connector
 defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
@@ -78,44 +97,83 @@ See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the f
 
 ## Multi-connector
 
-One gateway can protect N hook connectors at once (see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector)). That splits the CLI into two contracts:
+One gateway can protect N hook connectors at once (see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector)). That splits the CLI into a few contracts:
 
-- **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list commands (`skill list`, `mcp list`, `plugin list`) all render every active connector. The layout is identical whether one or N connectors are wired — there's no separate single-vs-multi view and no "primary" connector line.
-- **Mutating guardrail commands — single-target via `--connector`.** `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` change one connector when given `--connector X` (default = the active connector) and the global default when omitted. `guardrail status` is read-only and has no `--connector`.
-- **Scan commands — default to all actives, narrow with flags.** `skill scan --all`, `mcp scan --all`, and `aibom scan` cover every active connector; pass a positional target (or `--connector` where supported) to scope to one.
+- **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list/status commands (`skill list`, `mcp list`, `plugin list`, `tool list`, `tool status`, `codeguard status`) render every active connector where applicable. Use `--connector X` on commands that expose it to narrow the view.
+- **Mutating guardrail commands — `--connector` means one connector.** `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` change one connector when given `--connector X`. Omit it for the broad path: enable/disable is global, while fail-mode, HITL, and block-message reconcile active connector posture where supported.
+- **Asset policy/config commands — default broad, `--connector` scoped.** `skill`, `mcp`, `plugin`, and `tool` policy verbs write broad fallback state by default and one connector's scoped state with `--connector X`. Config/install verbs such as `mcp set`, `mcp unset`, `skill install`, `plugin remove`, and `codeguard install` operate across configured/active connectors by default and narrow with `--connector X`.
+- **Scan commands — default to configured/active connectors, narrow with flags.** `skill scan --all`, `mcp scan --all`, `plugin scan --all`, and `aibom scan` cover configured/active connector sources by default; pass a positional target and `--connector X` where supported to scope to one.
 
 These list/inventory verbs read across the full active roster:
 
 | Command | Default scope |
 | --- | --- |
-| `defenseclaw skill list` | All active connectors. |
-| `defenseclaw mcp list` | All active connectors. |
-| `defenseclaw plugin list` | All active connectors. |
+| `defenseclaw skill list [--connector X]` | All active connectors by default; one connector when scoped. |
+| `defenseclaw mcp list [--connector X]` | All configured connector MCP sources by default; one connector when scoped. |
+| `defenseclaw plugin list [--connector X]` | All configured connector plugin sources by default; one connector when scoped. |
+| `defenseclaw tool list/status [--connector X]` | Effective tool policy for all active connectors by default; one connector when scoped. |
+| `defenseclaw codeguard status [--connector X]` | CodeGuard install state across active connectors by default; one connector when scoped. |
 
 ## Audit & alerts
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Interactive Bubbletea dashboard — audit, alerts, logs, inventory panels. The recommended live view. |
-| `defenseclaw alerts` | Snapshot of recent alerts (default 25) as a table. `--limit N` to widen, `--show <n>` for full record. |
+| `defenseclaw tui` | Interactive Textual dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
+| `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
 | `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
 
+## AI discovery
+
+`agent discover` is the fast, gateway-independent connector inventory. The
+continuous scanner is a separate sidecar surface and is the one that inventories
+local model APIs, known model caches, and standalone model files.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
+| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. |
+| `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
+| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
+| `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
+| `defenseclaw agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE]` | Show the deduplicated package/SDK component rollup and confidence scores. |
+
+```bash
+defenseclaw agent usage --refresh --category local_model --detail
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --state seen
+defenseclaw agent usage --show-gone
+```
+
+See [AI Discovery](/docs/ai-discovery) for supported model servers, standalone
+file formats, lifecycle behavior, and privacy boundaries.
+
 ## Scanning
 
-The Python CLI exposes one scan group per asset family — there is no top-level `defenseclaw scan` group. Code-scanning lives on the Go sidecar.
+The Python CLI exposes one scan group per asset family — there is no top-level `scan` group. Code-scanning lives on the Go gateway binary.
 
 | Command | Binary | Use it for |
 | --- | --- | --- |
-| `defenseclaw skill scan [target] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. |
-| `defenseclaw mcp scan [target] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, or every configured server with `--all`. |
-| `defenseclaw plugin scan <name_or_path> [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. |
-| `defenseclaw aibom scan [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) and emit findings. |
+| `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. |
+| `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
+| `defenseclaw plugin scan <name_or_path> [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. `--connector X` narrows duplicate plugin names to one connector. |
+| `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
-| `defenseclaw codeguard {status,install,install-skill}` | `defenseclaw` | Manage the CodeGuard skill/rule install (status, install, install-skill). |
+| `defenseclaw codeguard {status,install,install-skill} [--connector X]` | `defenseclaw` | Manage the CodeGuard skill/rule install across active connectors by default, or one connector when scoped. |
 | `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. Runs the scanner in-process — does **not** require the sidecar daemon to be running. |
+
+## Asset Policy Commands
+
+These commands are connector-aware because the same asset name can exist in more than one connector source. Bare commands keep the broad fallback behavior; `--connector X` writes or reads the connector-scoped state.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw skill block\|allow\|unblock\|disable\|enable\|quarantine\|restore\|install <name> [--connector X]` | Manage skill policy, runtime disablement, quarantine, restore, and install. Without `--connector`, matching configured connector copies are handled together or the unscoped fallback is written; `--connector X` targets one connector copy. |
+| `defenseclaw mcp set\|unset\|block\|allow\|unblock <name> [--connector X]` | Manage connector MCP config and MCP admission policy. `mcp set` / `unset` write every configured connector source by default; `--connector X` writes one connector's MCP source. |
+| `defenseclaw plugin remove\|block\|allow\|unblock\|disable\|enable\|quarantine\|restore\|info <name> [--connector X]` | Manage plugin policy and runtime/file actions across configured connector copies by default, or one connector when scoped. |
+| `defenseclaw tool block\|allow\|unblock\|list\|status <name> [--connector X]` | Manage tool-level block/allow policy. Bare rows are the fallback tier for every configured connector; connector-scoped rows use the runtime-enforceable `@connector/tool` key. |
 
 ## Gateway daemon
 
@@ -135,7 +193,18 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Open the interactive operator UI. Pending-approvals panel, audit stream, settings. |
+| `defenseclaw tui` | Open the interactive operator UI for audit, alerts, logs, inventory, and settings. It does not provide a resumable approval queue for hook calls. |
+
+## Upgrade
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command verifies release provenance/checksums, backs up managed state, installs both artifacts, runs the release migration manifest, restarts services, and checks gateway health. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. Signed releases still upgrade without local `cosign` by warning and continuing with checksum validation only; `--allow-unverified` is an explicit unsafe override when a release manifest is missing, unsigned, incomplete, or otherwise unverifiable. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
+| `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
+| `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
+
+`0.7.x` clients do not support `--allow-unverified`; upgrade them directly to the latest fixed release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`.
 
 ## Uninstall / disable
 

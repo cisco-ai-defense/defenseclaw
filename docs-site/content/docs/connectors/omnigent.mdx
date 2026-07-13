@@ -1,0 +1,98 @@
+---
+title: OmniGent
+description: The OmniGent connector installs a custom Python policy that maps six policy phases to DefenseClaw ALLOW, ASK, and DENY decisions, with optional native OTLP telemetry.
+keywords:
+  - DefenseClaw OmniGent connector
+  - OmniGent custom policy
+  - OmniGent ASK approval
+  - OmniGent OpenTelemetry
+---
+
+The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
+
+## Setup
+
+```bash
+defenseclaw setup omnigent                # observe (default)
+defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
+omnigent server --config ~/.omnigent/config.yaml
+```
+
+Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
+
+- writes an owner-only `defenseclaw_omnigent_policy.py` bridge under its data directory;
+- adds that directory to OmniGent's Python environment with `defenseclaw_omnigent.pth`;
+- registers the module in OmniGent's effective `config.yaml` under `policy_modules`; and
+- enables the `defenseclaw_guardrail` server-wide policy.
+
+When `OMNIGENT_CONFIG_HOME` is set, DefenseClaw and OmniGent both use
+`$OMNIGENT_CONFIG_HOME/config.yaml`; otherwise they use
+`~/.omnigent/config.yaml`.
+
+The connector must write the `.pth` file into the Python environment that owns
+the `omnigent` executable. Use an isolated environment that your user can
+write; setup stops with a clear error instead of attempting a privileged
+system-Python install.
+
+All three managed files are backed up. Teardown restores unchanged files byte-for-byte and removes only DefenseClaw-owned YAML entries when the operator has edited the config.
+
+## Policy phases and decisions
+
+| OmniGent phase | DefenseClaw event | Enforcement |
+| --- | --- | --- |
+| `request` | `UserPromptSubmit` | ALLOW, native ASK, or DENY |
+| `tool_call` | `PreToolUse` | ALLOW, native ASK, or DENY before execution |
+| `tool_result` | `PostToolUse` | scan and block/replace; ASK falls back because execution already occurred |
+| `response` | `AfterAgentResponse` | scan and block/replace; ASK falls back |
+| `llm_request` | `BeforeModel` | ALLOW, native ASK, or DENY |
+| `llm_response` | `AfterModel` | scan and block/replace; ASK falls back |
+
+OmniGent parks only its pre-action `request`, `tool_call`, and `llm_request` phases for approval. DefenseClaw therefore advertises native human approval only for those events. The bridge also honors fail-open or fail-closed behavior when the gateway is unavailable.
+
+## Telemetry
+
+Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
+
+OmniGent also supports native OTLP through standard process environment variables. This channel is **not active after setup**: DefenseClaw does not edit shell startup files or the OmniGent launcher. Export the variables in the process that starts OmniGent. Load the generated gateway token from DefenseClaw's mode-`0600` dotenv file without printing it:
+
+```bash
+set -a
+. ~/.defenseclaw/.env
+set +a
+
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:18970"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_HEADERS="x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel/1.0,x-defenseclaw-token=${DEFENSECLAW_GATEWAY_TOKEN}"
+export OTEL_LOGS_EXPORTER="otlp"
+export OTEL_METRICS_EXPORTER="otlp"
+export OTEL_TRACES_EXPORTER="otlp"
+export OMNIGENT_OTEL_CAPTURE_CONTENT="false"
+omnigent server --config ~/.omnigent/config.yaml
+```
+
+Logs and metrics work with OmniGent's base dependencies; native traces require its optional `tracing` extra. The status API reports only channels configured by DefenseClaw, so it continues to show `hooks`; native OTLP remains a separately documented capability because setup cannot verify another process's environment.
+
+## Local surfaces
+
+<Files>
+  <Folder name="~/.omnigent" defaultOpen>
+    <File name="config.yaml" />
+  </Folder>
+  <Folder name="~/.defenseclaw/hooks" defaultOpen>
+    <File name="defenseclaw_omnigent_policy.py" />
+  </Folder>
+</Files>
+
+DefenseClaw v1 does not modify OmniGent MCP, skill, rule, plugin, or agent-bundle configuration.
+
+## Hook capabilities
+
+<HookEventsList connector="omnigent" />
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```
+
+Restart OmniGent after teardown so its running server drops the removed policy module.

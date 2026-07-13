@@ -67,6 +67,155 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	emptyPath := filepath.Join(dir, "empty-path")
+	if err := os.Mkdir(emptyPath, 0o700); err != nil {
+		t.Fatalf("create empty PATH: %v", err)
+	}
+	cmd := exec.Command("/bin/bash", "-c", `. "$1"; _dc_jq -c '.hook_output // empty'`, "bash", helperPath)
+	cmd.Env = []string{"HOME=" + dir, "PATH=" + emptyPath}
+	cmd.Stdin = strings.NewReader(`{"hook_output":{"permissionDecision":"deny"}}`)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("structured output was accepted without jq or python3")
+	}
+}
+
+func TestHardeningJQFallbackPreservesStringDefault(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{}' | _dc_jq -r '.action//"allow"'
+value="$(printf '{"reason":""}' | _dc_jq -r '.reason // "fallback"')"
+printf '<%s>\n' "$value"
+printf '{}' | _dc_jq -r '.reason // null'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "allow\n<>\nnull" {
+		t.Fatalf("fallback output = %q, want no-space default plus preserved empty string", got)
+	}
+}
+
+func TestHardeningJQFallbackRejectsExplicitNonStringField(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{"action":null}' | _dc_jq -r '.action // "allow"'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("explicit non-string action used the allow default: %q", out)
+	}
+}
+
+func TestHardeningJQFallbackEmptyProducesNoOutput(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{}' | _dc_jq -r '.action // empty'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v: %s", err, out)
+	}
+	if len(out) != 0 {
+		t.Fatalf("empty fallback output = %q, want zero bytes", out)
+	}
+}
+
+func TestHardeningJQFallbackOnlyReadsTopLevelFields(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{"nested":{"action":"allow"},"action":"deny"}' | _dc_jq -r '.action // "allow"'
+printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v: %s", err, out)
+	}
+	if got := string(out); got != "deny\nallow\n" {
+		t.Fatalf("top-level fallback output = %q, want deny then absent-field default", got)
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {
@@ -74,24 +223,17 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		codeGuardTargets []string
 		nativeOTLP       bool
 		pluginsSupported bool
-		// mcpSupported is true for connectors that expose a
-		// documented MCP install surface. Antigravity v1 publishes
-		// only the hooks surface, so MCP is unsupported there until
-		// Google ships an install contract.
+		// mcpSupported is true for connectors that expose a documented
+		// MCP install surface.
 		mcpSupported bool
 	}{
-		// Plugins.Supported is FALSE on every hook-only connector
-		// because DefenseClaw plugins are an OpenClaw-only concept
-		// (G4). The TUI Plugins panel hides itself for these
-		// connectors and `defenseclaw plugin list` prints an
-		// OpenClaw-only notice.
 		{NewHermesConnector(), []string{"skill"}, false, false, true},
 		{NewCursorConnector(), []string{"skill", "rule"}, false, false, true},
 		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
 		{NewGeminiCLIConnector(), []string{"skill"}, true, false, true},
 		{NewCopilotConnector(), []string{"skill", "rule"}, true, false, true},
 		{NewOpenHandsConnector(), []string{"skill"}, false, false, true},
-		{NewAntigravityConnector(), nil, false, false, false},
+		{NewAntigravityConnector(), nil, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -115,6 +257,89 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 				t.Fatalf("Plugins.Supported = %v, want %v", caps.Plugins.Supported, tc.pluginsSupported)
 			}
 		})
+	}
+}
+
+func TestAntigravityConnector_CapabilityContract(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	workspace := filepath.Join(dir, "repo")
+	t.Setenv("HOME", home)
+
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		WorkspaceDir: workspace,
+		APIAddr:      "127.0.0.1:18970",
+	}
+	caps := conn.Capabilities(opts)
+
+	if caps.Hooks.ConfigPath != filepath.Join(home, ".gemini", "config", "hooks.json") {
+		t.Fatalf("Antigravity hook ConfigPath=%q", caps.Hooks.ConfigPath)
+	}
+	if caps.Hooks.Scope != "user" {
+		t.Fatalf("Antigravity hook scope=%q want user", caps.Hooks.Scope)
+	}
+	if caps.Hooks.ConfigPath == filepath.Join(workspace, ".agents", "hooks.json") {
+		t.Fatalf("Antigravity hook config must remain global-write only: %q", caps.Hooks.ConfigPath)
+	}
+
+	wantMCP := []string{
+		filepath.Join(home, ".gemini", "config", "mcp_config.json"),
+		filepath.Join(workspace, ".agents", "mcp_config.json"),
+	}
+	if !caps.MCP.Supported {
+		t.Fatal("Antigravity MCP must be supported")
+	}
+	if !sameStrings(caps.MCP.ConfigPaths, wantMCP) || !sameStrings(caps.MCP.ReadPaths, wantMCP) || !sameStrings(caps.MCP.WritePaths, wantMCP) {
+		t.Fatalf("Antigravity MCP paths drifted: config=%v read=%v write=%v want %v", caps.MCP.ConfigPaths, caps.MCP.ReadPaths, caps.MCP.WritePaths, wantMCP)
+	}
+	for _, path := range append(append([]string{}, caps.MCP.ConfigPaths...), append(caps.MCP.ReadPaths, caps.MCP.WritePaths...)...) {
+		if strings.Contains(path, ".openclaw") || strings.Contains(path, "antigravity-cli") {
+			t.Fatalf("Antigravity MCP path is not the contracted agy config path: %q", path)
+		}
+	}
+
+	wantSkillWrites := []string{
+		filepath.Join(home, ".gemini", "config", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+	}
+	if !caps.Skills.Supported || !sameStrings(caps.Skills.WritePaths, wantSkillWrites) {
+		t.Fatalf("Antigravity skill write paths=%v supported=%v", caps.Skills.WritePaths, caps.Skills.Supported)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "antigravity-cli", "skills"),
+		filepath.Join(workspace, ".agent", "skills"),
+	} {
+		if !stringInSlice(caps.Skills.ReadPaths, want) {
+			t.Fatalf("Antigravity skill read paths missing discovery-only %q: %v", want, caps.Skills.ReadPaths)
+		}
+		if stringInSlice(caps.Skills.WritePaths, want) {
+			t.Fatalf("Antigravity discovery-only skill path appeared as write target %q: %v", want, caps.Skills.WritePaths)
+		}
+	}
+
+	if !caps.Rules.Supported || !caps.Rules.DiscoveryOnly || len(caps.Rules.WritePaths) != 0 {
+		t.Fatalf("Antigravity rules should be discovery-only with no write paths: %+v", caps.Rules)
+	}
+	if !caps.Plugins.Supported || !caps.Plugins.DiscoveryOnly || len(caps.Plugins.WritePaths) != 0 {
+		t.Fatalf("Antigravity plugins should be discovery-only with no write paths: %+v", caps.Plugins)
+	}
+	if !caps.Agents.Supported || !caps.Agents.DiscoveryOnly || len(caps.Agents.WritePaths) != 0 {
+		t.Fatalf("Antigravity plugin-contained agents should be discovery-only with no write paths: %+v", caps.Agents)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "plugins"),
+		filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
+		filepath.Join(workspace, ".agents", "plugins"),
+		filepath.Join(workspace, "_agents", "plugins"),
+	} {
+		if !stringInSlice(caps.Plugins.ReadPaths, want) {
+			t.Fatalf("Antigravity plugin read paths missing %q: %v", want, caps.Plugins.ReadPaths)
+		}
+		if !stringInSlice(caps.Agents.ReadPaths, want) {
+			t.Fatalf("Antigravity agent read paths missing plugin root %q: %v", want, caps.Agents.ReadPaths)
+		}
 	}
 }
 
@@ -173,6 +398,109 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHermesSetup_WritesFullLifecycleAndAutoAccept pins the
+// hermes-hooks-v1 setup contract: Setup must register every lifecycle
+// event in the cli-config.yaml `hooks:` block AND set hooks_auto_accept
+// so the hooks actually register on non-TTY/gateway runs (Hermes
+// silently skips un-accepted hooks there). Teardown must heal a
+// previously-missing config back to absent.
+func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
+	prev := HermesConfigPathOverride
+	HermesConfigPathOverride = cfgPath
+	t.Cleanup(func() { HermesConfigPathOverride = prev })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readYAMLObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read hermes config after setup: %v", err)
+	}
+	if v, _ := cfg["hooks_auto_accept"].(bool); !v {
+		t.Fatalf("hooks_auto_accept not set true after setup: %#v", cfg["hooks_auto_accept"])
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks block missing or wrong type: %#v", cfg["hooks"])
+	}
+	for _, event := range []string{
+		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
+		"on_session_start", "on_session_end", "on_session_finalize", "on_session_reset",
+		"subagent_start", "subagent_stop",
+	} {
+		if _, ok := hooks[event]; !ok {
+			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))
+		}
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); err == nil {
+		t.Fatalf("config still exists after teardown of previously-missing config")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat after teardown: %v", err)
+	}
+}
+
+// TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig asserts
+// two coupled behaviors: (1) Setup does NOT override an operator's
+// explicit hooks_auto_accept:false, and (2) Teardown heals a
+// pre-existing config back to its pristine bytes (managed-file backup),
+// preserving the user's own hook and their auto-accept choice.
+func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pristine := "hooks_auto_accept: false\nhooks:\n  pre_tool_call:\n    - command: /usr/local/bin/my-own-hook.sh\n"
+	if err := os.WriteFile(cfgPath, []byte(pristine), 0o600); err != nil {
+		t.Fatalf("write pristine config: %v", err)
+	}
+	prev := HermesConfigPathOverride
+	HermesConfigPathOverride = cfgPath
+	t.Cleanup(func() { HermesConfigPathOverride = prev })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readYAMLObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read after setup: %v", err)
+	}
+	if v, ok := cfg["hooks_auto_accept"].(bool); !ok || v {
+		t.Fatalf("explicit hooks_auto_accept:false was overridden: %#v", cfg["hooks_auto_accept"])
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read after teardown: %v", err)
+	}
+	if string(got) != pristine {
+		t.Fatalf("teardown did not heal config to pristine bytes\n got: %q\nwant: %q", string(got), pristine)
+	}
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // TestAntigravitySetup_WritesClaudeCodeNestedSchema pins the

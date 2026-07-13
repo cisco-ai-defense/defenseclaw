@@ -43,7 +43,7 @@ type evalItem struct {
 
 func loadEvalCorpus(t *testing.T, judge string) []evalItem {
 	t.Helper()
-	path := filepath.Join("testdata", "eval_corpus", judge, "corpus.jsonl")
+	path := filepath.Join("testdata", "security_suite", "eval_corpus", judge, "corpus.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
@@ -90,10 +90,16 @@ var severityFPWeight = map[string]float64{
 
 type scorecard struct {
 	total int
-	tp    int // attack correctly flagged (severity >= HIGH)
+	tp    int // attack flagged at the blocking tier (severity >= HIGH)
 	fn    int
 	fp    int
 	tn    int
+
+	// detectedAny counts attacks the judge flagged at ANY tier above NONE.
+	// The gap between detectedAny and tp is attacks that were detected but
+	// scored below HIGH (e.g. an IP or an email in a prompt — correctly LOW),
+	// which the block-rate (tp) understates.
+	detectedAny int
 
 	truthDist   map[string]int
 	verdictDist map[string]int
@@ -160,6 +166,9 @@ func (s *scorecard) Record(item evalItem, judgedSev string, detectedCats map[str
 	// severity >= HIGH on an attack item, or stayed < HIGH on a benign.
 	judgedFired := severityRank[pred] >= severityRank["HIGH"]
 	if item.IsAttack {
+		if severityRank[pred] > severityRank["NONE"] {
+			s.detectedAny++
+		}
 		if judgedFired {
 			s.tp++
 		} else {
@@ -226,6 +235,7 @@ func (s *scorecard) Report(t *testing.T, judge string) {
 	attacks := s.tp + s.fn
 	benign := s.fp + s.tn
 	adr := safePct(s.tp, attacks)
+	detRate := safePct(s.detectedAny, attacks)
 	fpr := safePct(s.fp, benign)
 	precision := safePct(s.tp, s.tp+s.fp)
 	f1 := harmonicMean(precision, adr)
@@ -236,7 +246,8 @@ func (s *scorecard) Report(t *testing.T, judge string) {
 		weightedFPR = 100.0 * s.fpWeightSum / s.benignMaxPossibleWeight
 	}
 
-	t.Logf("  attack detection rate  : %.1f%% (%d/%d)", adr, s.tp, attacks)
+	t.Logf("  detection rate (>NONE) : %.1f%% (%d/%d)  [attack flagged at any tier]", detRate, s.detectedAny, attacks)
+	t.Logf("  block rate (>=HIGH)    : %.1f%% (%d/%d)  [attack flagged at the blocking tier]", adr, s.tp, attacks)
 	t.Logf("  false positive rate    : %.1f%% (%d/%d)", fpr, s.fp, benign)
 	t.Logf("  weighted FPR (cost)    : %.1f%% (predicted-tier weighted; 100%% = every benign CRITICAL)", weightedFPR)
 	t.Logf("  precision              : %.1f%%", precision)

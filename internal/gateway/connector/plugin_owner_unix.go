@@ -29,6 +29,27 @@ import (
 // the running process. The default delegates to os.Getuid().
 var pluginGetUID = os.Getuid
 
+// pluginOwnerUID extracts the owner UID from a FileInfo. ok is false on a
+// filesystem that does not expose a unix stat (should not happen on unix).
+func pluginOwnerUID(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
+}
+
+// pluginInodeIdentity returns the device and inode numbers for a FileInfo so
+// the open-then-Fstat path can detect a directory entry that was swapped
+// between Lstat and Open. ok is false on a non-unix filesystem.
+func pluginInodeIdentity(info os.FileInfo) (dev, ino uint64, ok bool) {
+	stat, k := info.Sys().(*syscall.Stat_t)
+	if !k {
+		return 0, 0, false
+	}
+	return uint64(stat.Dev), uint64(stat.Ino), true
+}
+
 // validatePluginOwner verifies the plugin file is owned by the same UID as
 // the running process. This prevents a hostile user on a shared host from
 // dropping a plugin that gets loaded with the daemon's privileges.
@@ -37,13 +58,22 @@ func validatePluginOwner(soPath string) error {
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", soPath, err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
+	return validatePluginOwnerFromInfo(soPath, info)
+}
+
+// validatePluginOwnerFromInfo is the FileInfo-driven variant of
+// validatePluginOwner. The TOCTOU-hardened load path already holds an
+// authoritative FileInfo from the open fd's Fstat, so it verifies ownership
+// against that rather than re-stating the path (which could observe a
+// different inode after a swap).
+func validatePluginOwnerFromInfo(soPath string, info os.FileInfo) error {
+	uid, ok := pluginOwnerUID(info)
 	if !ok {
 		return errors.New("could not extract owner UID from FileInfo (non-unix FS?)")
 	}
 	want := uint32(pluginGetUID())
-	if stat.Uid != want {
-		return fmt.Errorf("%s owner uid=%d does not match running process uid=%d", soPath, stat.Uid, want)
+	if uid != want {
+		return fmt.Errorf("%s owner uid=%d does not match running process uid=%d", soPath, uid, want)
 	}
 	return nil
 }

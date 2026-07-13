@@ -22,6 +22,23 @@ from defenseclaw.tui.services.gateway_events import parse_timestamp, timestamp_l
 
 AuditIntentKind = Literal["export"]
 AuditCommonFilter = Literal["", "risk", "blocks", "scans", "credentials"]
+AUDIT_ACTIONABLE_SEVERITIES = {"CRITICAL", "HIGH", "ERROR"}
+AUDIT_LOW_SIGNAL_SEVERITIES = {"INFO", "LOW", "MEDIUM", "WARNING", ""}
+AUDIT_ACTIONABLE_TOKENS = (
+    "block",
+    "blocked",
+    "deny",
+    "denied",
+    "reject",
+    "rejected",
+    "quarantine",
+    "fail",
+    "failed",
+    "failure",
+    "error",
+    "fatal",
+    "panic",
+)
 AUDIT_TABLE_COLUMNS: tuple[str, ...] = ("TIME", "ACTION", "TYPE", "TARGET", "SEVERITY", "RUN", "DETAILS")
 # Multi-connector variant: a CONNECTOR column is inserted after TYPE so the
 # operator can attribute each event without opening the detail pane.
@@ -204,6 +221,7 @@ class AuditPanelModel:
         self.filter_text = ""
         self.filtering = False
         self.common_filter: AuditCommonFilter = ""
+        self.show_all_events = False
         self.correlation_target = ""
         self.correlation_run_id = ""
         self.detail_open = False
@@ -332,7 +350,14 @@ class AuditPanelModel:
         if self.store is None:
             return
         try:
-            self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
+            if not self.show_all_events and not self.filter_text and not self.common_filter and hasattr(
+                self.store, "list_actionable_event_summaries"
+            ):
+                self.items = list(self.store.list_actionable_event_summaries(500))  # type: ignore[attr-defined]
+            elif hasattr(self.store, "list_event_summaries"):
+                self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
+            else:
+                self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - store failures are panel error state.
             self.error_message = f"Audit refresh failed: {exc}"
             self.items = []
@@ -370,20 +395,28 @@ class AuditPanelModel:
 
     def set_filter(self, text: str) -> None:
         self.filter_text = text
+        if text:
+            self.show_all_events = True
         self.apply_filter()
 
     def clear_filter(self) -> None:
         self.filter_text = ""
         self.filtering = False
         self.common_filter = ""
+        self.show_all_events = True
         self.correlation_target = ""
         self.correlation_run_id = ""
         self.apply_filter()
 
     def set_common_filter(self, preset: AuditCommonFilter) -> None:
         self.common_filter = preset
+        if preset:
+            self.show_all_events = True
         self.correlation_target = ""
         self.correlation_run_id = ""
+        if preset and self.store is not None:
+            self.refresh()
+            return
         self.apply_filter()
 
     def filter_same_target(self) -> bool:
@@ -487,10 +520,11 @@ class AuditPanelModel:
         if self._detail_cache is not None and self._detail_cache_cursor == self.cursor:
             return self._detail_cache
 
-        findings = _list_findings_by_run_id(self.store, selected.run_id)
-        related = _list_related_events(self.store, selected, 12)
-        action = _get_current_action(self.store, selected)
-        info = AuditDetailInfo(event=selected, findings=findings, related=related, action=action)
+        event = _get_event_by_id(self.store, selected.id) or selected
+        findings = _list_findings_by_run_id(self.store, event.run_id)
+        related = _list_related_events(self.store, event, 12)
+        action = _get_current_action(self.store, event)
+        info = AuditDetailInfo(event=event, findings=findings, related=related, action=action)
         self._detail_cache = info
         self._detail_cache_cursor = self.cursor
         return info
@@ -584,13 +618,19 @@ class AuditPanelModel:
         if key == "/":
             self.filtering = True
             self.filter_text = ""
+            self.show_all_events = True
+            if self.store is not None:
+                self.refresh()
             self.apply_filter()
             return AuditPanelAction(
                 True,
                 hint="Type search. Use field:value like severity:HIGH, action:block, target:skill.",
             )
         if key == "1":
+            self.show_all_events = True
             self.set_common_filter("")
+            if self.store is not None:
+                self.refresh()
             return AuditPanelAction(True, hint="Showing all audit events.")
         if key == "2":
             self.set_common_filter("risk")
@@ -715,6 +755,8 @@ class AuditPanelModel:
         self._detail_cache_cursor = -1
 
     def _matches_active_filters(self, event: Event) -> bool:
+        if not self.show_all_events and not self.common_filter and not self.filter_text and _is_low_signal_event(event):
+            return False
         if self.common_filter and not _matches_common_filter(event, self.common_filter):
             return False
         if self.correlation_target and event.target != self.correlation_target:
@@ -808,6 +850,16 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
     return tuple(_event_from_row(row) for row in rows)
 
 
+def _get_event_by_id(store: object | None, event_id: str) -> Event | None:
+    if store is None or not event_id or not hasattr(store, "get_event"):
+        return None
+    try:
+        event = store.get_event(event_id)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - detail hydration is best-effort.
+        return None
+    return event if isinstance(event, Event) else None
+
+
 def _list_events_by_run_id(store: object | None, run_id: str, limit: int) -> tuple[Event, ...]:
     if store is None or not run_id:
         return ()
@@ -889,6 +941,16 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
     if preset == "credentials":
         return any(token in haystack for token in ("credential", "api key", "apikey", "token", "secret", "key"))
     return True
+
+
+def _is_low_signal_event(event: Event) -> bool:
+    severity = event.severity.strip().upper()
+    if severity in AUDIT_ACTIONABLE_SEVERITIES:
+        return False
+    if severity not in AUDIT_LOW_SIGNAL_SEVERITIES:
+        return False
+    haystack = _event_haystack(event)
+    return not any(token in haystack for token in AUDIT_ACTIONABLE_TOKENS)
 
 
 def _matches_search_query(event: Event, query: str) -> bool:

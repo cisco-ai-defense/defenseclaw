@@ -1,6 +1,6 @@
 ---
 title: Overview
-description: DefenseClaw is the Cisco governance layer for AI coding agents — scan capabilities before they run, inspect runtime traffic, and export durable audit evidence across nine first-class connectors.
+description: DefenseClaw is the Cisco governance layer for AI coding agents — scan capabilities before they run, inspect runtime traffic, and export durable audit evidence across thirteen first-class connectors.
 keywords:
   - DefenseClaw overview
   - Cisco
@@ -12,6 +12,12 @@ keywords:
 ---
 
 DefenseClaw is the **Cisco** governance layer for AI coding agents. It enforces one rule: untrusted agent capabilities are scanned, governed, logged, and blocked when policy says they are unsafe.
+
+<DefenseClawDemo scenario="modes-same-event" variant="hitl" />
+
+## What you just saw
+
+The same synthetic Claude Code `PreToolUse` event produces three deliberately different results. **Observe** allows execution and records evidence. **Action** blocks at the configured HIGH threshold. **Action + HITL** returns a native pause because Claude Code exposes an approval-capable pre-execution hook. CRITICAL findings always block, regardless of HITL.
 
 <Cards>
   <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, pick a connector, watch a guardrail block a destructive command." />
@@ -53,7 +59,7 @@ DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an
 ## What's in the box
 
 <Cards>
-  <Card title="10 connectors" href="/docs/connectors" description="OpenClaw, ZeptoClaw, Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands." />
+  <Card title="13 connectors" href="/docs/connectors" description="OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent." />
   <Card title="Observe → Action → HITL" href="/docs/hitl" description="Three operating modes that compose. Start safe, earn enforcement, escalate to a human only when needed." />
   <Card title="OpenClaw integration" href="/docs/openclaw" description="The reference proxy connector. Fetch interceptor, before_tool_call hook, plugin-mediated approvals." />
   <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files, environment variables." />

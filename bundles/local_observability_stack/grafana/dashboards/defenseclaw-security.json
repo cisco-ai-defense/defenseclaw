@@ -1,18 +1,69 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "description": "Hook guardrail evaluations — verdict funnel, severity breakdown, runtime alerts, and inspect latency. All panels source from defenseclaw_inspect_evaluations_total which fires on every hook connector.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
   "links": [
-    {"title": "Overview",           "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                  "icon": "external link", "targetBlank": false},
-    {"title": "Hook Connectors",    "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",                                "icon": "external link", "targetBlank": false},
-    {"title": "Connector detail",   "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",  "icon": "external link", "targetBlank": false},
-    {"title": "HITL",               "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}",                                      "icon": "external link", "targetBlank": false},
-    {"title": "Findings",           "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}&${severity:queryparam}",           "icon": "external link", "targetBlank": false},
-    {"title": "Policy decisions",   "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",                          "icon": "external link", "targetBlank": false},
-    {"title": "Proxy & LLM Guard",  "type": "link", "url": "/d/defenseclaw-traffic?${__url_time_range}",                                   "icon": "external link", "targetBlank": false}
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Hook Connectors",
+      "type": "link",
+      "url": "/d/defenseclaw-connectors?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Connector detail",
+      "type": "link",
+      "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "HITL",
+      "type": "link",
+      "url": "/d/defenseclaw-hitl?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Findings",
+      "type": "link",
+      "url": "/d/defenseclaw-findings?${__url_time_range}&${severity:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Policy decisions",
+      "type": "link",
+      "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Proxy & LLM Guard",
+      "type": "link",
+      "url": "/d/defenseclaw-traffic?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
   ],
   "templating": {
     "list": [
@@ -21,15 +72,29 @@
         "label": "Connector",
         "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too — defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
         "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
-        "query": {"query": "label_values(defenseclaw_connector_hook_invocations_total, connector)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
         "refresh": 2,
         "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
         "skipUrlSync": false,
         "hide": 0
       },
@@ -38,15 +103,29 @@
         "label": "Hook event",
         "description": "Filter by hook event type (tool label on inspect evaluations)",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
         "definition": "label_values(defenseclaw_inspect_evaluations_total, tool)",
-        "query": {"query": "label_values(defenseclaw_inspect_evaluations_total, tool)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "query": {
+          "query": "label_values(defenseclaw_inspect_evaluations_total, tool)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
         "refresh": 2,
         "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
         "skipUrlSync": false,
         "hide": 0
       },
@@ -58,14 +137,41 @@
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
         "options": [
-          {"text": "All", "value": "$__all", "selected": true},
-          {"text": "allow", "value": "allow"},
-          {"text": "warn", "value": "warn"},
-          {"text": "alert", "value": "alert"},
-          {"text": "confirm", "value": "confirm"},
-          {"text": "block", "value": "block"}
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "allow",
+            "value": "allow"
+          },
+          {
+            "text": "warn",
+            "value": "warn"
+          },
+          {
+            "text": "alert",
+            "value": "alert"
+          },
+          {
+            "text": "confirm",
+            "value": "confirm"
+          },
+          {
+            "text": "block",
+            "value": "block"
+          }
         ],
         "skipUrlSync": false,
         "hide": 0
@@ -78,15 +184,45 @@
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
         "options": [
-          {"text": "All", "value": "$__all", "selected": true},
-          {"text": "CRITICAL", "value": "CRITICAL"},
-          {"text": "HIGH", "value": "HIGH"},
-          {"text": "MEDIUM", "value": "MEDIUM"},
-          {"text": "LOW", "value": "LOW"},
-          {"text": "INFO", "value": "INFO"},
-          {"text": "NONE", "value": "NONE"}
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "CRITICAL",
+            "value": "CRITICAL"
+          },
+          {
+            "text": "HIGH",
+            "value": "HIGH"
+          },
+          {
+            "text": "MEDIUM",
+            "value": "MEDIUM"
+          },
+          {
+            "text": "LOW",
+            "value": "LOW"
+          },
+          {
+            "text": "INFO",
+            "value": "INFO"
+          },
+          {
+            "text": "NONE",
+            "value": "NONE"
+          }
         ],
         "skipUrlSync": false,
         "hide": 0
@@ -94,181 +230,706 @@
     ]
   },
   "panels": [
-    {"type": "row", "title": "Verdict KPIs", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Verdict KPIs",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "stat",
       "title": "Verdicts (1h)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)", "refId": "A"}],
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value"
+      }
     },
     {
       "type": "stat",
       "title": "Block rate (1h)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.25}]}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Confirm rate (1h)",
       "description": "Fraction of verdicts requesting human approval.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Warn+Alert rate (1h)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Inspect latency p95 (5m)",
       "description": "95th percentile guardrail evaluation latency across all hook events.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[5m])) by (le)) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ms", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 50}, {"color": "red", "value": 200}]}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[5m])) by (le)) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          }
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Alerts / min (5m)",
       "description": "Runtime security alerts fired in the last 5 minutes.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"alert|warn\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      }
     },
-
-    {"type": "row", "title": "Verdict funnel (hook event x action)", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Verdict funnel (hook event x action)",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "bargauge",
       "title": "Funnel: hook event -> action (1h)",
       "description": "Total verdicts (1h) for each (hook event, action) pair. Long bars on action=block show where traffic is being denied.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 8},
-      "targets": [{"expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])))", "instant": true, "format": "time_series", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
-      "options": {"displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "orientation": "horizontal"}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])))",
+          "instant": true,
+          "format": "time_series",
+          "legendFormat": "{{tool}} -> {{action}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "orientation": "horizontal"
+      }
     },
     {
       "type": "timeseries",
       "title": "Action mix over time (stacked)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"$severity\"}[$__rate_interval]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Verdicts by hook event (stacked)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{tool}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\", tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
-
-    {"type": "row", "title": "Severity breakdown", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Severity breakdown",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
       "title": "Verdicts by severity",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Non-allow evaluations by hook event",
-      "description": "Evaluations that resulted in alert/block/confirm, broken by which hook event triggered them.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (tool, action) (rate(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "description": "Evaluations that resulted in warn/alert/block/confirm, broken by which hook event triggered them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool, action, severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action!~\"allow|none\", severity=~\"$severity\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{tool}} -> {{action}} [{{severity}}]",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
-
-    {"type": "row", "title": "Runtime alerts", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Runtime alerts",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
       "title": "Alerts / sec by type x severity",
       "description": "Runtime alerts from all detection engines (local-pattern, local-guardrail, ai-defense, opa-policy, codeguard).",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (alert_type, alert_severity) (rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[$__rate_interval]))", "legendFormat": "{{alert_type}} [{{alert_severity}}]", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"fillOpacity": 20}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{action}} [{{severity}}]",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 20
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Inspect latency p50/p95/p99 by hook event",
       "description": "Per-hook-event guardrail evaluation latency quantiles.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p50", "refId": "p50"},
-        {"expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p95", "refId": "p95"},
-        {"expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p99", "refId": "p99"}
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} p50",
+          "refId": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} p95",
+          "refId": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} p99",
+          "refId": "p99"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
     },
-
-    {"type": "row", "title": "Connector breakdown", "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Connector breakdown",
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
       "title": "Evaluations / sec by connector",
-      "description": "Guardrail evaluations split by connector. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`, e.g. claudecode:PreToolUse), so the connector dimension is derived with label_replace to strip the `:<event>` suffix and re-aggregate. Filtered by $connector.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (connector) (label_replace(rate(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[$__rate_interval]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))", "legendFormat": "{{connector}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+      "description": "Guardrail evaluations split by the canonical connector label and filtered by $connector.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "legendFormat": "{{connector}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 20
+          }
+        }
+      }
     },
     {
       "type": "table",
       "title": "Per-connector verdict summary (1h)",
-      "description": "Snapshot: total verdicts, blocks, alerts, and confirm per connector in the last hour. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`), so the connector is derived with label_replace and re-aggregated so each row is a real connector, not a hook event. Filtered by $connector.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
+      "description": "Snapshot: total verdicts, blocks, would-blocks, alerts, and confirms per connector in the last hour. would-block/1h counts observe-mode shadow blocks (would_block=true on defenseclaw_connector_hook_outcome_total). Filtered by $connector.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        {"refId": "TOTAL", "instant": true, "format": "table", "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"},
-        {"refId": "BLOCKS", "instant": true, "format": "table", "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"},
-        {"refId": "ALERTS", "instant": true, "format": "table", "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"alert\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"},
-        {"refId": "CONFIRM", "instant": true, "format": "table", "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"}
+        {
+          "refId": "TOTAL",
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[1h]))"
+        },
+        {
+          "refId": "BLOCKS",
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"block\", connector=~\"$connector\"}[1h]))"
+        },
+        {
+          "refId": "WOULDBLOCK",
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (connector) (increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[1h]))"
+        },
+        {
+          "refId": "ALERTS",
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"alert\", connector=~\"$connector\"}[1h]))"
+        },
+        {
+          "refId": "CONFIRM",
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", connector=~\"$connector\"}[1h]))"
+        }
       ],
       "transformations": [
-        {"id": "renameByRegex", "options": {"regexp": "Value #(\\w+)", "renamePattern": "$1"}},
-        {"id": "merge"},
-        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"connector": "connector", "TOTAL": "total/1h", "BLOCKS": "blocks/1h", "ALERTS": "alerts/1h", "CONFIRM": "confirms/1h"}}}
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regexp": "Value #(\\w+)",
+            "renamePattern": "$1"
+          }
+        },
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "connector": "connector",
+              "TOTAL": "total/1h",
+              "BLOCKS": "blocks/1h",
+              "WOULDBLOCK": "would-block/1h",
+              "ALERTS": "alerts/1h",
+              "CONFIRM": "confirms/1h"
+            }
+          }
+        }
       ]
     },
-
-    {"type": "row", "title": "Recent verdict events (Loki)", "gridPos": {"x": 0, "y": 49, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Judge reliability",
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Judge errors/hour by reason",
+      "description": "Rolling one-hour LLM judge provider and parse errors, grouped by bounded judge kind and reason labels. Zero is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (judge_kind, judge_reason) (increase(defenseclaw_gateway_judge_errors_total[1h])) or on() vector(0)",
+          "legendFormat": "{{judge_kind}} · {{judge_reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Recent verdict events (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "logs",
       "title": "Recent guardrail events",
       "description": "Gateway log records for verdict and scan events.",
-      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 12},
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 24,
+        "h": 12
+      },
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=\"ai-governance\"} | json | __error__=\"\" | event_type=~\"verdict|scan|scan_finding|error\" | connector=~\"$connector\"", "refId": "A"}],
-      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=~\"tool_invocation|scan|scan_finding|llm_prompt|llm_response|error\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
     }
   ],
   "preload": false,
   "refresh": "15s",
   "schemaVersion": 39,
-  "tags": ["defenseclaw", "security", "guardrail", "hook"],
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "defenseclaw",
+    "security",
+    "guardrail",
+    "hook"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "DefenseClaw — Guardrail Evaluations",

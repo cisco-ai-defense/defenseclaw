@@ -61,11 +61,22 @@ type ConnectorSignals struct {
 
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
-	DataDir     string // ~/.defenseclaw/
-	ProxyAddr   string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
-	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken    string // gateway bearer token; baked into hook curl -H
-	Interactive bool
+	DataDir   string // ~/.defenseclaw/
+	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
+	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken  string // gateway bearer token; baked into hook curl -H
+	// HookAPIToken is the least-privilege credential written beside generated
+	// hook artifacts. Proxy connectors keep APIToken as the master credential
+	// for their in-process/plugin integration while their generic shell hooks
+	// receive this connector-scoped token instead.
+	HookAPIToken       string
+	HookAPITokenScoped bool
+	Interactive        bool
+	// ManagedEnterprise marks hook scripts installed by the privileged
+	// enterprise guardian. Managed scripts ignore user-controlled home and
+	// disable-sentinel overrides and derive their data directory from the
+	// verified script location instead.
+	ManagedEnterprise bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -106,6 +117,16 @@ type SetupOpts struct {
 	// contract marks the profile incompatible instead of silently using a
 	// different hook surface.
 	HookContractID string
+
+	// CodexEnforcement signals that the operator turned on hard
+	// enforcement for the codex connector (see avarice F-0681).
+	// When true, an empty HookFailMode upgrades to "closed" instead
+	// of using the legacy "open" default — without overriding an
+	// explicit operator-supplied value.
+	CodexEnforcement bool
+
+	// ClaudeCodeEnforcement is the parallel flag for claudecode.
+	ClaudeCodeEnforcement bool
 }
 
 // Connector is the contract every agent framework adapter implements.
@@ -237,14 +258,41 @@ type TelemetryCapability struct {
 // doctor, API metadata, and future installer flows. HookCapabilityProvider
 // remains as a compatibility shim for the verdict mapper.
 type ConnectorCapabilities struct {
-	Hooks     HookCapability      `json:"hooks"`
-	MCP       SurfaceCapability   `json:"mcp"`
-	Skills    SurfaceCapability   `json:"skills"`
-	Rules     SurfaceCapability   `json:"rules"`
-	Plugins   SurfaceCapability   `json:"plugins"`
-	Agents    SurfaceCapability   `json:"agents"`
-	CodeGuard CodeGuardCapability `json:"codeguard"`
-	Telemetry TelemetryCapability `json:"telemetry"`
+	// LLMTrafficMode states whether DefenseClaw sits in the agent's LLM
+	// data path ("proxy") or only attaches to lifecycle hooks
+	// ("hooks-only"). It is the single honest signal for what a custom
+	// provider actually does when bound to this connector: on a proxy
+	// connector a custom provider can be the agent's enforced upstream
+	// model; on a hooks-only connector it can only be DefenseClaw's
+	// judge/aux model — the agent's own model traffic is never seen.
+	LLMTrafficMode string              `json:"llm_traffic_mode"`
+	Hooks          HookCapability      `json:"hooks"`
+	MCP            SurfaceCapability   `json:"mcp"`
+	Skills         SurfaceCapability   `json:"skills"`
+	Rules          SurfaceCapability   `json:"rules"`
+	Plugins        SurfaceCapability   `json:"plugins"`
+	Agents         SurfaceCapability   `json:"agents"`
+	CodeGuard      CodeGuardCapability `json:"codeguard"`
+	Telemetry      TelemetryCapability `json:"telemetry"`
+}
+
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
+// ConnectorCapabilities.LLMTrafficMode.
+const (
+	LLMTrafficModeProxy     = "proxy"
+	LLMTrafficModeHooksOnly = "hooks-only"
+)
+
+// LLMTrafficModeForConnector returns the traffic mode for a connector
+// name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
+// that interpose on the LLM data path, "hooks-only" for every hook
+// connector. This is the authoritative classifier the API and CLI use
+// to describe custom-provider enforcement per connector.
+func LLMTrafficModeForConnector(name string) string {
+	if IsProxyConnector(normalizeConnectorName(name)) {
+		return LLMTrafficModeProxy
+	}
+	return LLMTrafficModeHooksOnly
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their
@@ -312,6 +360,19 @@ type HookProfile struct {
 	NormalizedAgentVersion  string
 	CompatibilityStatus     string
 	CompatibilityReason     string
+
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes nests prompt /
+	// result text under "extra"). When set, the generic decoder —
+	// after every top-level content lookup misses — opens exactly
+	// this one declared sub-object and re-runs the expected
+	// content-key search inside it. Empty for flat-payload
+	// connectors, which therefore never take that path. Deliberately
+	// a single declared key, not a recursive scan: tool inputs /
+	// results carry attacker-influenced nested JSON, so the only
+	// sub-object ever opened is the one declared in the audited
+	// contract.
+	ContentEnvelopeKey string
 
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present
@@ -469,6 +530,19 @@ type AgentPaths struct {
 	// PatchedFiles.
 	HookScripts []string
 
+	// GeneratedFiles are DefenseClaw-owned non-executable files written
+	// under opts.DataDir at Setup time that are not backups. They are
+	// declared separately so privileged enterprise repair can preflight
+	// an existing file before writing through it.
+	GeneratedFiles []string
+
+	// GeneratedExecutables are DefenseClaw-owned executable files written
+	// under opts.DataDir at Setup time that are not native hook scripts
+	// under hooks/. For example Codex's notify bridge is invoked by
+	// Codex's notify integration, not by the hook event bus, but still
+	// carries hook credentials and must be preflighted/hardened.
+	GeneratedExecutables []string
+
 	// CreatedDirs are directories the connector creates and owns
 	// (e.g. ~/.openclaw/extensions/defenseclaw/). Distinct from
 	// PatchedFiles because the entire directory is owned by
@@ -542,6 +616,16 @@ type HookScriptProvider interface {
 	HookScripts(opts SetupOpts) []string
 }
 
+// HookRuntimeArtifactProvider is implemented by connectors whose installed
+// hook runtime is not made up of the generic shell scripts. The returned
+// absolute paths are persisted in the hook-contract lock and hashed for drift
+// detection. This keeps policy modules, import shims, and similar runtime
+// artifacts visible to doctor without asking the generic hook writer to own
+// them.
+type HookRuntimeArtifactProvider interface {
+	HookRuntimeArtifacts(opts SetupOpts) []string
+}
+
 // HookScriptOwner — plan C2 / S2.5: optional, connectors that own a
 // per-vendor hook template implement this to advertise the BASENAMES
 // (not absolute paths) of the scripts they need written into hookDir.
@@ -558,6 +642,28 @@ type HookScriptProvider interface {
 // never silently no-ops.
 type HookScriptOwner interface {
 	HookScriptNames(opts SetupOpts) []string
+}
+
+// HookConfigReferenceOwner is implemented by connectors whose managed hook
+// runtime is a policy module or other non-shell artifact. The returned values
+// are exact references written into the connector's native config and are used
+// by the enterprise guardian to verify and repair that integration without
+// pretending the connector owns a shell script.
+type HookConfigReferenceOwner interface {
+	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// OwnsManagedHookRuntime reports whether the enterprise guardian can install
+// and verify this connector's native enforcement surface.
+func OwnsManagedHookRuntime(conn Connector) bool {
+	if conn == nil {
+		return false
+	}
+	if _, ok := conn.(HookScriptOwner); ok {
+		return true
+	}
+	_, ok := conn.(HookConfigReferenceOwner)
+	return ok
 }
 
 // ProviderProbe — optional, connectors that can self-diagnose whether

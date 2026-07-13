@@ -1,6 +1,6 @@
 ---
 title: Setup skill scanner
-description: Scan every Claude Code, Cursor, Codex, OpenClaw, or ZeptoClaw skill before an agent can execute it. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
@@ -15,16 +15,17 @@ Agents are getting comfortable installing skills. A "skill" is a small bundle �
 
 DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so every skill on disk gets a deterministic + LLM-assisted review before an agent is allowed to use it. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves.
 
-<Video
-  src="skill"
-  caption="Skill Scanner demo: defenseclaw skill scan flagging a malicious skill before the agent picks it up."
-/>
+<DefenseClawDemo scenario="skill-quarantine" variant="critical" />
+
+## What you just saw
+
+The watcher moved a new skill out of the agent-visible path **before** scanning it. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which `skill_actions` mapped to retained quarantine, disabled runtime, blocked installation, and an audit event.
 
 ## What it scans
 
 The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes — all **positional**. URL fetches in particular take the URL itself as the positional target (no `--remote` involved). The `--remote` flag does exist, but for a different scenario: it forwards the scan request to a sidecar API for a skill installed on a remote host (see the "Remote sidecar" tab below).
 
-- **Local skill name** (`my-skill`) — resolves through every connector's skill directory: `~/.claude/skills`, `~/.openclaw/skills`, `~/.cursor/skills`, `~/.codex/skills`, `~/.zeptoclaw/skills`.
+- **Local skill name** (`my-skill`) — resolves through configured connector skill directories. On a multi-connector install, a bare name checks matching connector copies; pass `--connector <name>` to force one connector's skill source.
 - **`--path <dir>`** — scan a directory you specify, useful inside a skill repo's pre-commit hook.
 - **`https://...`** — fetch a remote skill bundle into a temp dir, scan, then clean up. The downloaded bytes never touch your skill directory.
 - **`clawhub://author/skill@version`** — same fetch-to-temp flow, but resolves through the configured Clawhub registry source.
@@ -43,7 +44,7 @@ For each skill it runs:
 defenseclaw skill scan --all
 ```
 
-Walks every connector's skill directory, scans each bundle, prints a table of findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI.
+Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
   </Tab>
   <Tab value="Specific path">
 ```bash
@@ -187,15 +188,20 @@ If the SDK is missing when you run a scan, DefenseClaw prints the install hint a
 The watcher's verdict is the default. Operators always have manual override:
 
 ```bash
-defenseclaw skill list                              # on-disk skills + state, across ALL active connectors (not just OpenClaw)
-defenseclaw skill block <name> --reason "untrusted publisher"
-defenseclaw skill quarantine <name> --reason "review pending"
-defenseclaw skill restore <name>                    # un-quarantine
-defenseclaw skill allow <name> --reason "vetted"
-defenseclaw skill disable <name>                    # runtime off, file untouched
-defenseclaw skill enable <name>
-defenseclaw skill info <name>                       # detailed view
+defenseclaw skill list                              # on-disk skills + state, across ALL active connectors
+defenseclaw skill list --connector codex            # one connector
+defenseclaw skill scan my-skill --connector codex   # scan Codex's matching copy
+defenseclaw skill block my-skill --reason "untrusted publisher"
+defenseclaw skill block my-skill --connector codex --reason "Codex-only override"
+defenseclaw skill quarantine my-skill --reason "review pending"
+defenseclaw skill restore my-skill                    # un-quarantine
+defenseclaw skill allow my-skill --reason "vetted"
+defenseclaw skill disable my-skill                    # runtime off, file untouched
+defenseclaw skill enable my-skill
+defenseclaw skill info my-skill                       # detailed view
 ```
+
+Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
 
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 

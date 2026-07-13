@@ -85,6 +85,35 @@ type InspectVerdict = {
   approval_timeout_ms?: number;
 };
 
+// when the sidecar cannot deliver a verdict we MUST
+// fail closed instead of returning {allow,observe}. The legacy
+// {allow,observe} fallback turned every sidecar outage, non-2xx
+// response, malformed JSON body, or fetch rejection into a tool-call
+// allow, because the caller only blocked on action==block && mode==action.
+//
+// Operators that explicitly opt into the legacy fail-open behavior can
+// set DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN=1; the default is fail closed.
+function failClosedVerdict(reason: string): InspectVerdict {
+  const failOpen =
+    (process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN || "")
+      .trim()
+      .toLowerCase() === "1";
+  if (failOpen) {
+    return {
+      action: "allow",
+      severity: "NONE",
+      reason: `${reason} (fail-open opt-in)`,
+      mode: "observe",
+    };
+  }
+  return {
+    action: "block",
+    severity: "HIGH",
+    reason: `defenseclaw failing closed: ${reason}`,
+    mode: "action",
+  };
+}
+
 function approvalSeverity(severity: string): "info" | "warning" | "critical" {
   return severity.toUpperCase() === "CRITICAL" ? "critical" : severity.toUpperCase() === "NONE" ? "info" : "warning";
 }
@@ -365,10 +394,14 @@ export default function (api: DefenseClawPluginHost) {
         duration_ms,
       });
       if (!res.ok) {
-        return { action: "allow", severity: "NONE", reason: `sidecar returned ${res.status}`, mode: "observe" };
+        return failClosedVerdict(`sidecar returned ${res.status}`);
       }
-      return (await res.json()) as InspectVerdict;
-    } catch {
+      try {
+        return (await res.json()) as InspectVerdict;
+      } catch {
+        return failClosedVerdict("sidecar returned malformed verdict");
+      }
+    } catch (err) {
       const duration_ms = Math.round(performance.now() - started);
       logOutboundRequest({
         runId: toolCtx?.runId,
@@ -377,7 +410,8 @@ export default function (api: DefenseClawPluginHost) {
         status_code: 0,
         duration_ms,
       });
-      return { action: "allow", severity: "NONE", reason: "sidecar unreachable", mode: "observe" };
+      const msg = err instanceof Error ? err.message : String(err);
+      return failClosedVerdict(`sidecar unreachable: ${msg}`);
     } finally {
       clearTimeout(timer);
     }

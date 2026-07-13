@@ -79,6 +79,35 @@ class TestSettingsSave(unittest.TestCase):
         self.assertIn("Saved configuration", result.output)
         self.assertTrue(app.logger.log_activity.called)
 
+    def test_settings_save_reports_managed_permission_error_without_traceback(self) -> None:
+        from defenseclaw.commands.cmd_settings import settings_cmd
+        from defenseclaw.config import default_config
+        from defenseclaw.context import AppContext
+
+        app = AppContext()
+        app.cfg = default_config()
+        app.cfg.data_dir = tempfile.mkdtemp(prefix="dc9-")
+        app.cfg.save = MagicMock(
+            side_effect=PermissionError(
+                "managed_enterprise config changes require operating-system "
+                "administrator privileges"
+            )
+        )
+        app.logger = MagicMock()
+
+        result = CliRunner().invoke(
+            settings_cmd,
+            ["save"],
+            obj=app,
+            catch_exceptions=False,
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Failed to save config", result.output)
+        self.assertIn("administrator privileges", result.output)
+        self.assertNotIn("Traceback", result.output)
+        app.logger.log_activity.assert_not_called()
+
 
 class TestAibomProvenance(unittest.TestCase):
     def test_aibom_json_has_provenance(self) -> None:

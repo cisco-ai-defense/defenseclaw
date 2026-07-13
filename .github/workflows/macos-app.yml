@@ -1,0 +1,104 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: macOS App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - "scripts/build-macos-app-release.sh"
+      - "scripts/check-macos-upstream.py"
+      - "scripts/export-uv-overrides.py"
+      - "scripts/macos_license_headers.py"
+      - "scripts/stamp-version.sh"
+      - "scripts/update-macos-app.sh"
+      - "scripts/verify-macos-app-release.sh"
+      - "Makefile"
+      - "pyproject.toml"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "extensions/defenseclaw/**"
+      - ".github/workflows/macos-app.yml"
+  pull_request:
+    paths:
+      - "macos/**"
+      - "scripts/build-macos-app-release.sh"
+      - "scripts/check-macos-upstream.py"
+      - "scripts/export-uv-overrides.py"
+      - "scripts/macos_license_headers.py"
+      - "scripts/stamp-version.sh"
+      - "scripts/update-macos-app.sh"
+      - "scripts/verify-macos-app-release.sh"
+      - "Makefile"
+      - "pyproject.toml"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "extensions/defenseclaw/**"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  license-headers:
+    name: Cisco License Headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - run: make macos-app-license-check
+
+  build-and-test:
+    name: Build and Test (arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - name: Test connector onboarding
+        run: macos/DefenseClawMac/script/test_connector_onboarding.sh
+      - name: Build unified ad-hoc release artifact
+        run: make macos-app-release
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: DefenseClawMac-ci-macos-arm64-unverified
+          path: |
+            dist/DefenseClawMac-*-macos-arm64-unverified.dmg
+            dist/DefenseClawMac-*-macos-arm64-unverified.zip
+          if-no-files-found: error

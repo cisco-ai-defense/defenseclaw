@@ -51,8 +51,10 @@ func TestLethalTrifecta_FiresOnAllThreeAxes(t *testing.T) {
 	set, _ := DefaultCorrelationPatterns()
 	pattern := mustFindPattern(t, set, "LETHAL-TRIFECTA")
 
+	// Newest-first window (as ListRecentFindingsInSession returns); the
+	// temporal order is ingress (oldest) -> sensitive -> egress (newest),
+	// which is the exfil direction LETHAL-TRIFECTA now requires.
 	window := []CorrelationFinding{
-		// Newest first (as ListRecentFindingsInSession returns)
 		{ID: "f-003", DataAxis: []DataAxis{AxisEgressExternal}, Severity: "HIGH"},
 		{ID: "f-002", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "HIGH"},
 		{ID: "f-001", DataAxis: []DataAxis{AxisIngressUntrusted}, Severity: "HIGH"},
@@ -61,6 +63,10 @@ func TestLethalTrifecta_FiresOnAllThreeAxes(t *testing.T) {
 	contributing := pattern.Match(window)
 	if len(contributing) != 3 {
 		t.Fatalf("expected 3 contributing findings, got %d", len(contributing))
+	}
+	// Contributing is returned in temporal (oldest-first) order.
+	if contributing[0].ID != "f-001" || contributing[1].ID != "f-002" || contributing[2].ID != "f-003" {
+		t.Errorf("expected temporal order f-001,f-002,f-003; got %+v", contributing)
 	}
 }
 
@@ -76,6 +82,49 @@ func TestLethalTrifecta_DoesNotFireWithoutAllAxes(t *testing.T) {
 
 	if got := pattern.Match(window); got != nil {
 		t.Errorf("expected no match, got %+v", got)
+	}
+}
+
+func TestMatchOrderedAllOf(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "LETHAL-TRIFECTA")
+	if !pattern.Ordered {
+		t.Fatalf("LETHAL-TRIFECTA expected to be ordered")
+	}
+
+	// In temporal order: ingress (oldest) -> sensitive -> egress (newest).
+	// Window is newest-first, so egress is at index 0.
+	inOrder := []CorrelationFinding{
+		{ID: "f-003", DataAxis: []DataAxis{AxisEgressExternal}, Severity: "HIGH"},
+		{ID: "f-002", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "HIGH"},
+		{ID: "f-001", DataAxis: []DataAxis{AxisIngressUntrusted}, Severity: "HIGH"},
+	}
+	contributing := pattern.Match(inOrder)
+	if len(contributing) != 3 {
+		t.Fatalf("in-order window: expected 3 contributing, got %d: %+v", len(contributing), contributing)
+	}
+	if contributing[0].ID != "f-001" || contributing[1].ID != "f-002" || contributing[2].ID != "f-003" {
+		t.Errorf("in-order window: expected temporal order f-001,f-002,f-003; got %+v", contributing)
+	}
+
+	// Same three axes, reversed temporal order: egress (oldest) ->
+	// sensitive -> ingress (newest). The exfil direction is violated,
+	// so an ordered pattern must NOT fire even though all axes present.
+	reversed := []CorrelationFinding{
+		{ID: "f-003", DataAxis: []DataAxis{AxisIngressUntrusted}, Severity: "HIGH"},
+		{ID: "f-002", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "HIGH"},
+		{ID: "f-001", DataAxis: []DataAxis{AxisEgressExternal}, Severity: "HIGH"},
+	}
+	if got := pattern.Match(reversed); got != nil {
+		t.Errorf("reversed-order window: expected no match for ordered pattern, got %+v", got)
+	}
+
+	// Sanity: the same reversed window WOULD match if the pattern were
+	// unordered, confirming the order constraint is what rejects it.
+	unordered := *pattern
+	unordered.Ordered = false
+	if got := unordered.Match(reversed); len(got) != 3 {
+		t.Errorf("reversed-order window: unordered variant should match all 3, got %+v", got)
 	}
 }
 

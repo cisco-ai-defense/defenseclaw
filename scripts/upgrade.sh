@@ -83,6 +83,27 @@ validate_version() {
         || die "Invalid release version: ${version}. Expected MAJOR.MINOR.PATCH."
 }
 
+preflight_python_wheel() {
+    local wheel="$1"
+    local uv_bin
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    [[ -z "${uv_bin}" ]] \
+        && die "uv not found on PATH — cannot update Python CLI. Install uv, then re-run the upgrade."
+
+    local preflight_python="${DEFENSECLAW_VENV}/bin/python"
+    if [[ ! -x "${preflight_python}" ]]; then
+        local preflight_venv="${STAGING_DIR}/wheel-preflight-venv"
+        "${uv_bin}" --no-config venv "${preflight_venv}" --python 3.12 --quiet \
+            || die "Could not create Python CLI preflight environment; no services changed."
+        preflight_python="${preflight_venv}/bin/python"
+    fi
+
+    step "Resolving Python CLI dependencies ..."
+    "${uv_bin}" --no-config pip install --python "${preflight_python}" --dry-run --quiet "${wheel}" \
+        || die "Python CLI wheel dependencies are unsatisfiable; no services changed."
+    ok "Python CLI dependency preflight passed"
+}
+
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
 YES=0
@@ -492,6 +513,71 @@ whl_name="${WHL_NAME}"
 fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${whl_name}"
 verify_checksum "${STAGING_DIR}/${whl_name}" "${whl_name}"
 ok "Python CLI wheel downloaded"
+preflight_python_wheel "${STAGING_DIR}/${whl_name}"
+
+# a download alone is not proof of integrity. The
+# legacy upgrade flow extracted the tarball and pip-installed the
+# wheel without ever comparing the artifact bytes to a published
+# checksum or signature. We now require either:
+#
+#  1) a `<artifact>.sha256` sidecar published alongside each artifact
+#     in the same GitHub release, OR
+#  2) operator-provided pinned digests via the env vars
+#     DEFENSECLAW_UPGRADE_TARBALL_SHA256 and
+#     DEFENSECLAW_UPGRADE_WHL_SHA256.
+#
+# When neither is supplied, the upgrade aborts. Operators that
+# explicitly accept the unverified path can opt back into the legacy
+# behavior with DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.
+verify_artifact_sha256() {
+    local file="$1" name="$2" pinned_env="$3"
+    local pinned="${!pinned_env:-}"
+    local sidecar_url="${4}"
+    local actual
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "${file}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+    else
+        die "no sha256sum/shasum available — refusing to install unverified ${name}"
+    fi
+    if [[ -n "${pinned}" ]]; then
+        if [[ "${pinned,,}" != "${actual,,}" ]]; then
+            die "checksum mismatch for ${name}: expected ${pinned} got ${actual}"
+        fi
+        ok "${name}: pinned sha256 match"
+        return 0
+    fi
+    # Try sidecar.
+    if curl -sSfL --head "${sidecar_url}" -o /dev/null 2>/dev/null; then
+        local sidecar_dest="${STAGING_DIR}/$(basename "${file}").sha256"
+        if curl -sSfL "${sidecar_url}" -o "${sidecar_dest}"; then
+            local published
+            published="$(awk '{print $1; exit}' "${sidecar_dest}" | tr -d '[:space:]')"
+            if [[ -n "${published}" && "${published,,}" == "${actual,,}" ]]; then
+                ok "${name}: published .sha256 sidecar match"
+                return 0
+            fi
+            die "checksum mismatch for ${name}: published ${published} got ${actual}"
+        fi
+    fi
+    if [[ "${DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+        warn "${name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — proceeding without verification"
+        return 0
+    fi
+    die "no published .sha256 for ${name} and no pinned ${pinned_env}; refusing to install unverified artifact
+  Set DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 to proceed anyway (NOT recommended)."
+}
+
+verify_artifact_sha256 \
+    "${STAGING_DIR}/gateway.tar.gz" "gateway tarball" \
+    DEFENSECLAW_UPGRADE_TARBALL_SHA256 "${TARBALL_URL}.sha256"
+verify_artifact_sha256 \
+    "${STAGING_DIR}/${whl_name}" "python wheel" \
+    DEFENSECLAW_UPGRADE_WHL_SHA256 "${WHL_URL}.sha256"
+
+# Only extract after verification succeeds.
+tar -xzf "${STAGING_DIR}/gateway.tar.gz" -C "${STAGING_DIR}"
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
 
@@ -591,11 +677,11 @@ UV_BIN="$(command -v uv 2>/dev/null || true)"
 
 if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
     step "Creating venv at ${DEFENSECLAW_VENV} ..."
-    "${UV_BIN}" venv "${DEFENSECLAW_VENV}" --python 3.12
+    "${UV_BIN}" --no-config venv "${DEFENSECLAW_VENV}" --python 3.12
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-"${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
     || die "Failed to install CLI wheel"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI installed"

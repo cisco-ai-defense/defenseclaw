@@ -26,6 +26,7 @@ users who want something different should use ``defenseclaw init`` or
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import click
@@ -118,13 +119,17 @@ import click
             "copilot",
             "openhands",
             "antigravity",
+            "opencode",
+            "omnigent",
         ],
         case_sensitive=False,
     ),
     default=None,
     help="Agent framework connector (alias: --agent). "
-    "Defaults to <data_dir>/picked_connector when set by the installer, "
-    "else codex.",
+    "Quickstart configures one connector: an explicit value wins, otherwise "
+    "the single configured/detected connector is used. A picked_connector hint "
+    "is used only when no configured/detected connector exists. Bare quickstart "
+    "errors when the connector choice is ambiguous.",
 )
 @click.option(
     "--skip-gateway",
@@ -156,14 +161,56 @@ def quickstart_cmd(
     from defenseclaw import config as cfg_mod
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.commands.cmd_init import _render_first_run_report
-    from defenseclaw.commands.cmd_setup import _read_picked_connector
+    from defenseclaw.commands.cmd_setup import (
+        _detect_installed_connectors,
+        _read_picked_connector,
+    )
     from defenseclaw.ux import CLIRenderer
 
+    connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
     else:
         data_dir = str(cfg_mod.default_data_path())
-        connector = _read_picked_connector(data_dir) or "codex"
+        picked_path = os.path.join(data_dir, "picked_connector")
+        picked = _read_picked_connector(data_dir)
+        detected = _detect_installed_connectors()
+        configured = _configured_quickstart_connectors(cfg_mod)
+        candidates = sorted({name for name in [*configured, *detected] if name})
+        if len(candidates) > 1:
+            click.echo(
+                "  ✗ Multiple connectors detected/configured: "
+                f"{', '.join(candidates)}.\n"
+                "    Quickstart configures one connector.\n"
+                "    Re-run with --connector <name>.",
+                err=True,
+            )
+            sys.exit(2)
+        if len(candidates) == 1:
+            connector = candidates[0]
+            if picked and picked != connector:
+                click.echo(
+                    "  ✗ Connector choice is ambiguous.\n"
+                    f"    picked_connector says {picked}, but the active/detected connector is {connector}.\n"
+                    "    Re-run with --connector <name>.",
+                    err=True,
+                )
+                sys.exit(2)
+        elif picked:
+            connector = picked
+            connector_source = {
+                "type": "picked_connector",
+                "connector": connector,
+                "path": picked_path,
+            }
+        else:
+            click.echo(
+                "  ✗ Could not detect an agent framework on this host.\n"
+                "    Re-run with an explicit connector, e.g. "
+                "`defenseclaw quickstart --connector hermes`.",
+                err=True,
+            )
+            sys.exit(2)
 
     profile = mode or "observe"
 
@@ -189,8 +236,34 @@ def quickstart_cmd(
         )
     )
     if json_summary:
-        click.echo(json.dumps(report.to_dict(), indent=2))
+        payload = report.to_dict()
+        if connector_source:
+            payload["connector_source"] = connector_source
+        click.echo(json.dumps(payload, indent=2))
     else:
+        if connector_source:
+            click.echo(
+                f"  Using picked connector hint: {connector} from {connector_source['path']}"
+            )
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)
+
+
+def _configured_quickstart_connectors(cfg_mod) -> list[str]:
+    """Return meaningful active connectors from an existing config, if any."""
+    try:
+        config_file = cfg_mod.config_path()
+        if not os.path.exists(config_file):
+            return []
+        cfg = cfg_mod.load()
+    except Exception:
+        return []
+
+    try:
+        if getattr(cfg.guardrail, "connectors", None):
+            return list(cfg.active_connectors())
+        active = cfg.active_connector()
+    except Exception:
+        return []
+    return [] if active == "openclaw" else [active]

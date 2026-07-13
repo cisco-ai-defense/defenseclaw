@@ -47,6 +47,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_WEBHOOK
+from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import (
     DispatchResult,
@@ -66,6 +67,8 @@ from defenseclaw.webhooks.writer import (
     VALID_EVENT_CATEGORIES,
     VALID_SEVERITIES,
     VALID_TYPES,
+    _normalize_events,
+    redact_webhook_url,
 )
 
 _WEBHOOK_TYPES = list(VALID_TYPES)
@@ -115,6 +118,10 @@ def webhook() -> None:
               help="Override dedup cooldown (omit=runtime default 300s; 0=disabled)")
 @click.option("--enabled/--disabled", "enabled", default=True,
               help="Mark webhook enabled (default) or disabled")
+@click.option("--connector", default=None,
+              help="Scope this webhook to a connector (omit = global). A "
+                   "connector's events route to its per-connector webhooks "
+                   "when set, falling back to the global webhooks otherwise.")
 @click.option("--dry-run", is_flag=True, help="Preview YAML changes without writing")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts; use flags only")
 @pass_ctx
@@ -130,6 +137,7 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
     timeout_seconds: int | None,
     cooldown_seconds: int | None,
     enabled: bool,
+    connector: str | None,
     dry_run: bool,
     non_interactive: bool,
 ) -> None:
@@ -192,32 +200,51 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
     if events is not None:
         events_list = [e.strip() for e in events.split(",") if e.strip()]
 
+    connector_name = (connector or "").strip()
     try:
-        result = apply_webhook(
-            name=name,
-            type_=wt,
-            url=url,
-            data_dir=app.cfg.data_dir,
-            secret_env=secret_env,
-            room_id=room_id,
-            min_severity=min_severity,
-            events=events_list,
-            timeout_seconds=timeout_seconds,
-            cooldown_seconds=cooldown_seconds,
-            enabled=enabled,
-            dry_run=dry_run,
-        )
+        if connector_name:
+            result = _apply_webhook_to_connector(
+                app.cfg.data_dir,
+                connector_name,
+                name=name,
+                type_=wt,
+                url=url,
+                secret_env=secret_env,
+                room_id=room_id,
+                min_severity=min_severity,
+                events=events_list,
+                timeout_seconds=timeout_seconds,
+                cooldown_seconds=cooldown_seconds,
+                enabled=enabled,
+                dry_run=dry_run,
+            )
+        else:
+            result = apply_webhook(
+                name=name,
+                type_=wt,
+                url=url,
+                data_dir=app.cfg.data_dir,
+                secret_env=secret_env,
+                room_id=room_id,
+                min_severity=min_severity,
+                events=events_list,
+                timeout_seconds=timeout_seconds,
+                cooldown_seconds=cooldown_seconds,
+                enabled=enabled,
+                dry_run=dry_run,
+            )
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
 
-    _print_write_result(result)
+    _print_write_result(result, connector=connector_name)
 
     if app.logger and not dry_run:
         app.logger.log_action(
             ACTION_SETUP_WEBHOOK,
             "config",
-            f"action=add type={result.type} name={result.name}",
+            f"action=add type={result.type} name={result.name}"
+            + (f" connector={connector_name}" if connector_name else ""),
         )
 
 
@@ -228,10 +255,27 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
 
 @webhook.command("list")
 @click.option("--json", "emit_json", is_flag=True, help="Emit machine-readable JSON")
+@click.option("--connector", default=None,
+              help="List a connector's per-connector webhooks (omit = global). "
+                   "When the connector has no per-connector webhooks it inherits "
+                   "the global list.")
 @pass_ctx
-def list_cmd(app: AppContext, emit_json: bool) -> None:
+def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
     """List configured webhooks (secrets are referenced, never printed)."""
-    entries = list_webhooks(app.cfg.data_dir)
+    connector_name = (connector or "").strip()
+    if connector_name:
+        entries = _connector_webhook_views(app.cfg.data_dir, connector_name)
+        if entries is None:
+            if emit_json:
+                click.echo("[]")
+                return
+            ux.subhead(
+                f"No per-connector webhooks for {connector_name!r} — "
+                "inherits the global webhooks."
+            )
+            return
+    else:
+        entries = list_webhooks(app.cfg.data_dir)
     if emit_json:
         click.echo(_json.dumps([_view_to_dict(v) for v in entries], indent=2))
         return
@@ -244,7 +288,8 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     click.echo(f"  {'NAME':<32} {'TYPE':<10} {'ENABLED':<8} {'SEVERITY':<10} URL")
     click.echo(f"  {'-' * 32} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 40}")
     for v in entries:
-        u = v.url if len(v.url) <= 60 else v.url[:57] + "..."
+        safe_url = redact_webhook_url(v.url)
+        u = safe_url if len(safe_url) <= 60 else safe_url[:57] + "..."
         click.echo(
             f"  {v.name:<32} {v.type:<10} {('yes' if v.enabled else 'no'):<8} "
             f"{v.min_severity:<10} {u}",
@@ -274,7 +319,7 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     click.echo()
     state = ux._style("enabled", fg="green") if v.enabled else ux.dim("disabled")
     click.echo(f"  {ux.bold(v.name)} [{v.type}] {state}")
-    click.echo(f"    {ux.dim('URL:')}            {v.url}")
+    click.echo(f"    {ux.dim('URL:')}            {redact_webhook_url(v.url)}")
     if v.secret_env:
         click.echo(f"    {ux.dim('Secret env:')}     {v.secret_env} (value not shown)")
     if v.room_id:
@@ -298,28 +343,38 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
 
 @webhook.command("enable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector webhook")
 @pass_ctx
-def enable_cmd(app: AppContext, name: str) -> None:
+def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Enable a webhook."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_webhook_enabled(name, True, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_webhook_enabled(app.cfg.data_dir, connector_name, name, True)
+        else:
+            result = set_webhook_enabled(name, True, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result)
+    _print_write_result(result, connector=connector_name)
 
 
 @webhook.command("disable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector webhook")
 @pass_ctx
-def disable_cmd(app: AppContext, name: str) -> None:
+def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Disable a webhook (preserves the entry)."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_webhook_enabled(name, False, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_webhook_enabled(app.cfg.data_dir, connector_name, name, False)
+        else:
+            result = set_webhook_enabled(name, False, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result)
+    _print_write_result(result, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -329,19 +384,25 @@ def disable_cmd(app: AppContext, name: str) -> None:
 
 @webhook.command("remove")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector webhook")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @pass_ctx
-def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
+def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> None:
     """Delete a webhook entry."""
-    if not yes and not click.confirm(f"  Remove webhook {name!r}?", default=False):
+    connector_name = (connector or "").strip()
+    label = f"{name!r}" + (f" (connector {connector_name})" if connector_name else "")
+    if not yes and not click.confirm(f"  Remove webhook {label}?", default=False):
         click.echo("  Aborted.")
         return
     try:
-        result = remove_webhook(name, app.cfg.data_dir)
+        if connector_name:
+            result = _remove_connector_webhook(app.cfg.data_dir, connector_name, name)
+        else:
+            result = remove_webhook(name, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result)
+    _print_write_result(result, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +556,9 @@ def _view_to_dict(v: WebhookView) -> dict[str, Any]:
     return {
         "name": v.name,
         "type": v.type,
-        "url": v.url,
+        # Webhook URLs embed the bearer secret in their path/query; redact
+        # so ``list``/``show`` (and their ``--json``) never print it (F-0181).
+        "url": redact_webhook_url(v.url),
         "secret_env": v.secret_env,
         "room_id": v.room_id,
         "min_severity": v.min_severity,
@@ -506,10 +569,11 @@ def _view_to_dict(v: WebhookView) -> dict[str, Any]:
     }
 
 
-def _print_write_result(result: WebhookWriteResult) -> None:
+def _print_write_result(result: WebhookWriteResult, *, connector: str = "") -> None:
     click.echo()
     mode = f"{ux.dim('(dry-run)')} " if result.dry_run else ""
-    click.echo(f"  {mode}{ux.bold('Webhook')} {result.name!r} [{result.type}]")
+    scope = f" {ux.dim('@' + connector)}" if connector else ""
+    click.echo(f"  {mode}{ux.bold('Webhook')} {result.name!r} [{result.type}]{scope}")
     if result.yaml_changes:
         click.echo(f"  {ux.bold('YAML changes:')}")
         for line in result.yaml_changes:
@@ -519,3 +583,289 @@ def _print_write_result(result: WebhookWriteResult) -> None:
         for w in result.warnings:
             ux.warn(w, indent="    ")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# Per-connector webhooks (D5b)
+#
+# These commands write a SURGICAL slice of ``config.yaml`` —
+# ``observability.connectors[<name>].webhooks`` — under the shared config
+# lock, mirroring the sibling ``defenseclaw.webhooks.writer`` (which writes
+# the top-level ``webhooks:`` list). They deliberately do NOT route through
+# ``Config.save()``: that would re-serialize the whole (possibly stale)
+# dataclass and could clobber a concurrently-written global ``webhooks:``
+# block. The ``observability.connectors`` schema is round-tripped by
+# ``config.ObservabilityConfig`` so any *fully-loaded* ``cfg.save()`` (a
+# setup wizard, the TUI) preserves these entries.
+#
+# Validation (SSRF guard, type/severity/env-name checks, name derivation) is
+# reused from the writer's public ``apply_webhook`` via a ``dry_run`` probe,
+# so the per-connector path never drifts from the global path.
+# ---------------------------------------------------------------------------
+
+
+def _wh_load_raw(path: str) -> dict[str, Any]:
+    import yaml
+
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping at top level")
+    return data
+
+
+def _connector_webhook_list(
+    raw: dict[str, Any], connector: str, *, create: bool,
+) -> list[Any] | None:
+    """Return the ``observability.connectors[connector].webhooks`` list.
+
+    With ``create=True`` the nested path is materialised and the list
+    returned for mutation. With ``create=False`` a missing path yields
+    ``None`` ("no per-connector webhooks — inherit global").
+    """
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        if not create:
+            return None
+        obs = {}
+        raw["observability"] = obs
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        if not create:
+            return None
+        conns = {}
+        obs["connectors"] = conns
+    entry = conns.get(connector)
+    if not isinstance(entry, dict):
+        if not create:
+            return None
+        entry = {}
+        conns[connector] = entry
+    whs = entry.get("webhooks")
+    if not isinstance(whs, list):
+        if not create:
+            return None
+        whs = []
+        entry["webhooks"] = whs
+    return whs
+
+
+def _prune_observability(raw: dict[str, Any], connector: str) -> None:
+    """Drop now-empty per-connector dimensions / connector / block.
+
+    Called after a remove so deleting the last per-connector webhook
+    restores global inheritance (key absent = inherit) and leaves the
+    config tidy.
+    """
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        return
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        return
+    entry = conns.get(connector)
+    if isinstance(entry, dict):
+        if entry.get("webhooks") == []:
+            entry.pop("webhooks", None)
+        if entry.get("audit_sinks") == []:
+            entry.pop("audit_sinks", None)
+        if not entry:
+            conns.pop(connector, None)
+    if not conns:
+        obs.pop("connectors", None)
+    if not obs:
+        raw.pop("observability", None)
+
+
+def _apply_webhook_to_connector(
+    data_dir: str,
+    connector: str,
+    *,
+    name: str | None,
+    type_: str,
+    url: str | None,
+    secret_env: str | None,
+    room_id: str | None,
+    min_severity: str | None,
+    events: list[str] | None,
+    timeout_seconds: int | None,
+    cooldown_seconds: int | None,
+    enabled: bool,
+    dry_run: bool,
+) -> WebhookWriteResult:
+    """Insert/update a per-connector webhook (D5b)."""
+    # Reuse the writer's full validation + name derivation via a dry-run
+    # apply against the global surface (validates, never writes).
+    probe = apply_webhook(
+        name=name,
+        type_=type_,
+        url=url or "",
+        data_dir=data_dir,
+        secret_env=secret_env,
+        room_id=room_id,
+        min_severity=min_severity,
+        events=events,
+        timeout_seconds=timeout_seconds,
+        cooldown_seconds=cooldown_seconds,
+        enabled=enabled,
+        dry_run=True,
+    )
+    derived_name = probe.name
+    severity = (min_severity or DEFAULT_MIN_SEVERITY).upper()
+    timeout = int(timeout_seconds) if timeout_seconds is not None else DEFAULT_TIMEOUT_SECONDS
+    entry: dict[str, Any] = {
+        "name": derived_name,
+        "url": (url or "").strip(),
+        "type": type_,
+        "min_severity": severity,
+        "events": list(_normalize_events(events)),
+        "timeout_seconds": timeout,
+        "enabled": bool(enabled),
+    }
+    if cooldown_seconds is not None:
+        entry["cooldown_seconds"] = int(cooldown_seconds)
+    if secret_env:
+        entry["secret_env"] = secret_env
+    if room_id:
+        entry["room_id"] = room_id
+
+    warnings = list(probe.warnings)
+    if not dry_run:
+        cfg_path = str(config_path_for_data_dir(data_dir))
+        with locked_config_yaml(cfg_path):
+            raw = _wh_load_raw(cfg_path)
+            whs = _connector_webhook_list(raw, connector, create=True)
+            idx = next(
+                (i for i, w in enumerate(whs)
+                 if isinstance(w, dict) and w.get("name") == derived_name),
+                -1,
+            )
+            if idx >= 0:
+                warnings.append(
+                    f"observability.connectors[{connector}].webhooks[{derived_name}] "
+                    "already existed — fields overwritten (other keys preserved)",
+                )
+                merged = dict(whs[idx]) if isinstance(whs[idx], dict) else {}
+                # Preserve a prior cooldown when the caller did not set one.
+                if cooldown_seconds is None and "cooldown_seconds" in merged:
+                    entry["cooldown_seconds"] = merged["cooldown_seconds"]
+                merged.update(entry)
+                whs[idx] = merged
+            else:
+                whs.append(entry)
+            write_config_yaml_secure(cfg_path, raw)
+    return WebhookWriteResult(
+        name=derived_name,
+        type=type_,
+        yaml_changes=[
+            f"observability.connectors[{connector}].webhooks[{derived_name}] "
+            f"type={type_} enabled={bool(enabled)} severity={severity}",
+        ],
+        warnings=warnings,
+        dry_run=dry_run,
+    )
+
+
+def _view_from_dict(entry: dict[str, Any]) -> WebhookView:
+    """Build a WebhookView from a raw per-connector webhook dict.
+
+    Mirrors ``webhooks.writer.list_webhooks`` field handling so rendering
+    (and ``--json`` redaction) is identical to the global list.
+    """
+    url = str(entry.get("url", "") or "")
+    cd_raw = entry.get("cooldown_seconds")
+    if cd_raw is None:
+        cooldown: int | None = None
+    else:
+        try:
+            cooldown = int(cd_raw)
+        except (TypeError, ValueError):
+            cooldown = None
+    return WebhookView(
+        name=str(entry.get("name", "") or ""),
+        type=str(entry.get("type", "generic") or "generic"),
+        url=url,
+        secret_env=str(entry.get("secret_env", "") or ""),
+        room_id=str(entry.get("room_id", "") or ""),
+        min_severity=str(entry.get("min_severity", "") or DEFAULT_MIN_SEVERITY).upper(),
+        events=[str(e) for e in (entry.get("events") or [])],
+        timeout_seconds=int(entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
+        cooldown_seconds=cooldown,
+        enabled=bool(entry.get("enabled", False)),
+    )
+
+
+def _connector_webhook_views(data_dir: str, connector: str) -> list[WebhookView] | None:
+    """Return a connector's per-connector webhooks, or None if unset."""
+    raw = _wh_load_raw(str(config_path_for_data_dir(data_dir)))
+    whs = _connector_webhook_list(raw, connector, create=False)
+    if whs is None:
+        return None
+    return [_view_from_dict(w) for w in whs if isinstance(w, dict) and w.get("url")]
+
+
+def _set_connector_webhook_enabled(
+    data_dir: str, connector: str, name: str, enabled: bool,
+) -> WebhookWriteResult:
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    with locked_config_yaml(cfg_path):
+        raw = _wh_load_raw(cfg_path)
+        whs = _connector_webhook_list(raw, connector, create=False)
+        idx = next(
+            (i for i, w in enumerate(whs or [])
+             if isinstance(w, dict) and w.get("name") == name),
+            -1,
+        )
+        if idx < 0:
+            raise ValueError(
+                f"no per-connector webhook named {name!r} for connector {connector!r}"
+            )
+        whs[idx]["enabled"] = bool(enabled)
+        type_ = str(whs[idx].get("type", "") or "")
+        write_config_yaml_secure(cfg_path, raw)
+    return WebhookWriteResult(
+        name=name,
+        type=type_,
+        yaml_changes=[
+            f"observability.connectors[{connector}].webhooks[{name}].enabled = {bool(enabled)}",
+        ],
+        warnings=[],
+        dry_run=False,
+    )
+
+
+def _remove_connector_webhook(
+    data_dir: str, connector: str, name: str,
+) -> WebhookWriteResult:
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    with locked_config_yaml(cfg_path):
+        raw = _wh_load_raw(cfg_path)
+        whs = _connector_webhook_list(raw, connector, create=False)
+        if whs is None:
+            raise ValueError(
+                f"no per-connector webhooks for connector {connector!r}"
+            )
+        removed = None
+        kept = []
+        for w in whs:
+            if isinstance(w, dict) and w.get("name") == name and removed is None:
+                removed = w
+                continue
+            kept.append(w)
+        if removed is None:
+            raise ValueError(
+                f"no per-connector webhook named {name!r} for connector {connector!r}"
+            )
+        whs[:] = kept
+        _prune_observability(raw, connector)
+        write_config_yaml_secure(cfg_path, raw)
+    return WebhookWriteResult(
+        name=name,
+        type=str(removed.get("type", "") or ""),
+        yaml_changes=[f"observability.connectors[{connector}].webhooks[{name}] removed"],
+        warnings=[],
+        dry_run=False,
+    )

@@ -21,7 +21,7 @@ systemd
                           └── openclaw       ← agent runtime (inside sandbox)
 
 defenseclaw-gateway start                ← separate process (not systemd)
-  └── defenseclaw-gateway run            ← Go binary, runs as user
+  └── defenseclaw-gateway            ← Go binary, runs as user
         ├── WebSocket → connects to sandbox OpenClaw
         ├── fsnotify → watches skill/plugin dirs
         ├── REST API → :18970
@@ -63,7 +63,7 @@ The sandbox network namespace has no DNS resolver by default. OpenShell blocks a
 
 To fix this without running a DNS forwarder process:
 
-1. **Custom resolv.conf** — `defenseclaw setup sandbox` generates `sandbox-resolv.conf` with the configured nameservers (default: `8.8.8.8`, `1.1.1.1`). On each start, `start-sandbox.sh` uses `unshare --mount` to bind-mount this file over `/etc/resolv.conf` inside the sandbox. The host's resolv.conf is never modified.
+1. **Custom resolv.conf** — `defenseclaw sandbox setup` generates `sandbox-resolv.conf` with the configured nameservers (default: `8.8.8.8`, `1.1.1.1`). On each start, `start-sandbox.sh` uses `unshare --mount` to bind-mount this file over `/etc/resolv.conf` inside the sandbox. The host's resolv.conf is never modified.
 
 2. **iptables allow rules** — `post-sandbox.sh` injects UDP 53 allow rules scoped to only those specific nameservers (not a blanket UDP 53 allow). This limits DNS exfiltration to abusing the configured resolvers.
 
@@ -141,7 +141,7 @@ What happens:
 ### Step 2: Configure
 
 ```bash
-sudo defenseclaw sandbox setup [OPTIONS]
+sudo defenseclaw sandbox setup --help
 ```
 
 Options (all have sensible defaults):
@@ -323,14 +323,14 @@ sudo iptables -t nat -L -n | grep 10.200.0
 
 ### Audit Trail
 
-All scan results, admission decisions, and enforcement actions are logged to the SQLite database at `~/.defenseclaw/defenseclaw.db`.
+All scan results, admission decisions, and enforcement actions are logged to the SQLite database at `~/.defenseclaw/audit.db`.
 
 ```bash
-# Recent events
-defenseclaw audit list --limit 20
+# Recent alerts
+defenseclaw alerts --limit 20
 
-# Export
-defenseclaw audit export --format json
+# Export audit events as JSONL
+defenseclaw-gateway audit export --limit 20 --output -
 ```
 
 Optional Splunk HEC forwarding can be configured for real-time SIEM integration. See [SPLUNK_APP.md](SPLUNK_APP.md).
@@ -440,7 +440,7 @@ cat /home/sandbox/.openclaw/openclaw.json | jq .plugins
 | Symptom | Fix |
 |---|---|
 | Watcher shows `error` | ACL issue. Run `sudo scripts/fix-sandbox-acls.sh`. |
-| Skill blocked | Check block list: `defenseclaw block list`. Remove if false positive: `defenseclaw block remove <key>`. |
+| Skill blocked | Check installed skills with `defenseclaw skill list`. Remove a false-positive policy entry with `defenseclaw skill unblock <name>`. |
 | Plugin not in list | Not registered in `openclaw.json`. Re-run `defenseclaw sandbox setup`. |
 
 ### Guardrail Proxy Issues

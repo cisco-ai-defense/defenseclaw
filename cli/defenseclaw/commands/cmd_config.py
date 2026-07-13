@@ -38,6 +38,7 @@ import yaml
 from defenseclaw import config as config_module
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
 # suffixed form (``virustotal_api_key``). We deliberately exclude any
@@ -218,6 +219,12 @@ def validate_config() -> ValidationResult:
             res.warnings.append(
                 f"gateway.port ({gw.port}) equals gateway.api_port ({gw.api_port}) — one will fail to bind"
             )
+        reload_mode = getattr(getattr(gw, "config_reload", None), "mode", "hot") or "hot"
+        if str(reload_mode).strip().lower() not in ("hot", "restart"):
+            res.errors.append(
+                "gateway.config_reload.mode must be 'hot' or 'restart' "
+                f"(got '{reload_mode}')"
+            )
 
     # Legacy plain-text secrets: already emitted as logger warnings on
     # load. We surface the same info in the validate report for
@@ -248,7 +255,11 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _convert(value):
         if is_dataclass(value):
-            return {f.name: _convert(getattr(value, f.name)) for f in fields(value)}
+            return {
+                f.name: _convert(getattr(value, f.name))
+                for f in fields(value)
+                if not f.name.startswith("_")
+            }
         if isinstance(value, dict):
             return {k: _convert(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -259,9 +270,20 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
+            # Header maps (named OTel routes, audit-sink HTTP headers, …)
+            # carry bearer/API tokens under non-secret-looking keys such
+            # as ``Authorization`` and ``x-honeycomb-team``; redact every
+            # header value so none slips through (F-0221).
+            in_headers = key_hint.lower() == "headers"
+            # Webhook entries store the bearer secret inside ``url``.
+            in_webhook = key_hint.lower() == "webhooks"
             for k, v in list(node.items()):
                 if _is_secret_field(k) and isinstance(v, str) and v:
                     node[k] = mask(v) if reveal else "***"
+                elif in_headers and isinstance(v, str) and v:
+                    node[k] = mask(v) if reveal else "***"
+                elif in_webhook and k.lower() == "url" and isinstance(v, str) and v:
+                    node[k] = v if reveal else redact_webhook_url(v)
                 else:
                     _walk(v, k)
         elif isinstance(node, list):

@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
     AZURE_AUTH_MODES,
@@ -33,6 +34,7 @@ from defenseclaw.tui.services.cli_choices import (
     LLM_ROLES,
     REGIONAL_PROVIDERS,
     VERTEX_AUTH_MODES,
+    supported_connector_choices,
 )
 from defenseclaw.tui.services.cli_choices import (
     CONNECTORS as _CHOICE_CONNECTORS,
@@ -103,6 +105,8 @@ class SetupWizard(IntEnum):
     NOTIFICATIONS_ROUTING = 15
     AI_DISCOVERY = 16
     SPLUNK_DASHBOARDS = 17
+    TRUSTED_PATHS = 18
+    GUARDRAIL_ACTIONS = 19
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -117,13 +121,15 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Gateway",
     "Guardrail",
     "Splunk",
-    "Observability",
+    "Observability / Galileo",
     "Webhooks",
     "Sandbox",
     "Registries",
     "Notifications Routing",
     "AI Discovery",
     "Splunk Dashboards",
+    "Trusted Paths",
+    "Guardrail Actions",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -155,6 +161,8 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     # arg-build time. The dashboards subgroup is mounted under
     # ``setup splunk`` (see cmd_setup.add_command(splunk_o11y_dashboards)).
     SetupWizard.SPLUNK_DASHBOARDS: ("setup", "splunk", "dashboards", "apply"),
+    SetupWizard.TRUSTED_PATHS: ("setup", "trusted-paths", "list"),
+    SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
 }
 
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
@@ -179,13 +187,15 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Configure gateway host, ports, TLS, and auth.",
     "Configure the LLM guardrail proxy and judge.",
     "Configure Splunk HEC or local Splunk integration.",
-    "Add unified OTel and audit sink presets.",
+    "Add and manage Galileo, unified OTel, and audit sink destinations.",
     "Add chat or incident notifier webhooks.",
     "Initialize and configure OpenShell sandbox policy.",
     "Register an external skill or MCP catalog source.",
     "Toggle notification categories and event sources.",
     "Enable or tune the sidecar AI Discovery service.",
     "Apply or destroy Splunk O11y dashboards.",
+    "Manage trusted connector-binary discovery prefixes.",
+    "Run connector-scoped guardrail status and policy quick actions.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -201,13 +211,16 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup gateway. Need host, ports, TLS posture, and optional token source.",
     "Runs: defenseclaw setup guardrail. Need mode, scanner mode, optional judge model, and remote scanner credentials.",
     "Runs: defenseclaw setup splunk. Need HEC endpoint/token or local Docker and license acceptance.",
-    "Runs: defenseclaw setup observability add <preset>. Need vendor preset, endpoint/realm, token, and signals.",
+    "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
+    "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
     "Runs: defenseclaw sandbox setup. Need OpenShell policy choices and optional sandbox home/network settings.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",
     "Runs: defenseclaw setup splunk dashboards apply|destroy --yes. Requires the Splunk O11y realm + API token.",
+    "Runs: defenseclaw setup trusted-paths list|add|remove. Need a directory for add/remove.",
+    "Runs: defenseclaw guardrail status|enable|disable|fail-mode|hilt|block-message with optional --connector.",
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -218,6 +231,7 @@ OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
     ("honeycomb", "Honeycomb"),
     ("newrelic", "New Relic"),
     ("grafana-cloud", "Grafana Cloud"),
+    ("galileo", "Galileo Cloud / Self-hosted"),
     ("local-otlp", "Local Observability Stack"),
     ("otlp", "Generic OTLP"),
     ("webhook", "Generic HTTP JSONL"),
@@ -1132,7 +1146,8 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
-        return "defenseclaw " + " ".join(args) if args else "defenseclaw"
+        masked = mask_wizard_secret_values(self.form_fields, args)
+        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
 
     def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
@@ -1183,6 +1198,16 @@ class SetupPanelModel:
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        # Credentials "set" feeds the secret over stdin (hidden prompt) so
+        # it never lands in the child's argv. See F-0801.
+        secret_stdin: str | None = None
+        if (
+            self.active_wizard == SetupWizard.CREDENTIALS
+            and wizard_field_value(self.form_fields, "Action") == "set"
+        ):
+            secret_value = wizard_field_value(self.form_fields, "Secret Value", raw=True)
+            if secret_value:
+                secret_stdin = secret_value + "\n"
         follow_up: tuple[SetupCommandIntent, ...] = ()
         if self.active_wizard == SetupWizard.REGISTRIES:
             follow_up = registry_wizard_follow_up_intents(self.form_fields)
@@ -1205,12 +1230,21 @@ class SetupPanelModel:
                 category="setup",
                 origin="setup-wizard",
                 follow_up=follow_up,
+                secret_stdin=secret_stdin,
             ),
         )
 
 
-def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigSection, ...]:
-    """Return the Go Setup config section/field catalog."""
+def build_setup_sections(
+    cfg: object | Mapping[str, Any] | None, os_name: str | None = None
+) -> tuple[ConfigSection, ...]:
+    """Return the Go Setup config section/field catalog.
+
+    ``os_name`` (defaulting to the host OS) drops connectors the platform
+    can't run from the editable "Mode" choice, so a Windows operator is
+    never offered the proxy connectors (openclaw/zeptoclaw) that only
+    exist on macOS/Linux.
+    """
 
     sections: list[ConfigSection] = [
         ConfigSection(
@@ -1320,7 +1354,14 @@ def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[Config
         ConfigSection(
             "Claw",
             (
-                _field(cfg, "Mode", "claw.mode", "choice", CONNECTORS, "Active agent framework."),
+                _field(
+                    cfg,
+                    "Mode",
+                    "claw.mode",
+                    "choice",
+                    supported_connector_choices(os_name),
+                    "Active agent framework.",
+                ),
                 _field(cfg, "Home Dir", "claw.home_dir", hint="Override for connector home directory."),
                 _field(cfg, "Config File", "claw.config_file", hint="Connector primary config file."),
             ),
@@ -1334,7 +1375,7 @@ def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[Config
         ConfigSection(
             "Connector Hooks",
             tuple(_connector_hook_map_fields(cfg)),
-            "Advanced connector_hooks map for current and future agent connectors.",
+            "Advanced connector_hooks map for configured and future agent connectors.",
         ),
         ConfigSection(
             "Gateway",
@@ -1411,6 +1452,12 @@ def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[Config
             "Cisco AI Defense", tuple(_cisco_ai_defense_fields(cfg)), "Cloud-hosted prompt/response moderation."
         ),
         ConfigSection("Firewall", tuple(_firewall_fields(cfg)), "Host firewall anchor paths. Read-only in the TUI."),
+        ConfigSection(
+            "Trusted Paths",
+            tuple(_trusted_paths_summary_fields(cfg)),
+            "Binary locations trusted for connector discovery. Read-only here; "
+            "manage via 'defenseclaw setup trusted-paths'.",
+        ),
     ]
     return tuple(sections)
 
@@ -1460,7 +1507,7 @@ def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) ->
     return tuple(out)
 
 
-def connector_setup_command_for_mode(wire: str) -> tuple[tuple[str, ...], str]:
+def connector_setup_command(wire: str) -> tuple[tuple[str, ...], str]:
     alias = _connector_setup_alias(wire)
     if not alias:
         return (), ""
@@ -1512,6 +1559,72 @@ def _token_rotation_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField("Connector", "choice", value="", default="", options=("", *CONNECTORS)),
         WizardFormField("Refresh Hooks", "bool", value="yes", default="yes"),
+    )
+
+
+def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
+    return (
+        WizardFormField(
+            "Action",
+            "choice",
+            value="list",
+            default="list",
+            options=("list", "add", "remove"),
+            hint="List, add, or remove trusted connector-binary prefixes.",
+        ),
+        WizardFormField("Directory", "string", hint="Directory prefix to trust or remove."),
+        WizardFormField("Force", "bool", value="no", default="no", hint="Allow add even if checks warn."),
+        WizardFormField("JSON Output", "bool", value="no", default="no", hint="Emit machine-readable JSON."),
+    )
+
+
+def _guardrail_actions_wizard_fields() -> tuple[WizardFormField, ...]:
+    return (
+        WizardFormField(
+            "Connector",
+            "choice",
+            "--connector",
+            value="",
+            default="",
+            options=("", *CONNECTORS),
+            hint="Optional: scope this guardrail action to one connector; blank keeps CLI global/all-active behavior.",
+        ),
+        WizardFormField(
+            "Action",
+            "choice",
+            value="status",
+            default="status",
+            options=("status", "enable", "disable", "fail-mode", "hilt", "block-message"),
+            hint="Guardrail command to run.",
+        ),
+        WizardFormField(
+            "Fail Mode",
+            "choice",
+            value="open",
+            default="open",
+            options=("open", "closed"),
+            hint="For guardrail fail-mode.",
+        ),
+        WizardFormField(
+            "HITL State",
+            "choice",
+            value="on",
+            default="on",
+            options=("on", "off"),
+            hint="For guardrail hilt.",
+        ),
+        WizardFormField(
+            "Approval Min Severity",
+            "choice",
+            "--min-severity",
+            value="HIGH",
+            default="HIGH",
+            options=("CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            hint="For guardrail hilt.",
+        ),
+        WizardFormField("Block Message", "string", hint="For guardrail block-message."),
+        WizardFormField("Clear Message", "bool", value="no", default="no", hint="Clear the custom block message."),
+        WizardFormField("Restart Gateway", "bool", "--restart", "--no-restart", value="yes", default="yes"),
     )
 
 
@@ -1790,6 +1903,8 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.NOTIFICATIONS_ROUTING: lambda cfg=None: notifications_routing_wizard_fields(cfg),
     SetupWizard.AI_DISCOVERY: lambda cfg=None: ai_discovery_wizard_fields(cfg),
     SetupWizard.SPLUNK_DASHBOARDS: lambda cfg=None: splunk_dashboards_wizard_fields(),
+    SetupWizard.TRUSTED_PATHS: lambda cfg=None: _trusted_paths_wizard_fields(),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(),
 }
 
 
@@ -1812,9 +1927,9 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
 # ---------------------------------------------------------------------------
 # Goal-first wizard entry points. Every setup wizard gets a short "what do you
 # want to do?" menu whose entries seed preset values and narrow the form to
-# the rows that matter for that intent. ``wizard_goals`` always appends an
-# "Advanced — show all settings" goal that reproduces today's full form, so
-# power users keep the flat editor and the menu never traps anyone.
+# the rows that matter for that intent. Most wizards append an "Advanced —
+# show all settings" goal that reproduces today's full form, so power users
+# keep the flat editor and the menu never traps anyone.
 # ---------------------------------------------------------------------------
 
 
@@ -1823,6 +1938,7 @@ _ADVANCED_GOAL = WizardGoal(
     label="Advanced — show all settings",
     summary="Open the full form with every field (the flat editor).",
 )
+_NO_ADVANCED_GOAL_WIZARDS = frozenset({SetupWizard.CONNECTOR_SETUP})
 
 # LLM conditional section headers. Listing them in a goal keeps the matching
 # provider's auth rows (Bedrock/Vertex/Azure/TLS) when the operator picks a
@@ -1844,6 +1960,28 @@ def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:
     return _cfg_str(cfg, "claw.mode", "").lower()
 
 
+def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    method = getattr(cfg, "active_connectors", None)
+    if callable(method):
+        try:
+            names = method()
+        except Exception:  # noqa: BLE001 - a bad config object must not hide setup workflows.
+            names = None
+        if isinstance(names, (list, tuple)):
+            resolved = [str(name).strip().lower() for name in names if str(name).strip()]
+            if resolved:
+                return resolved
+
+    connectors_map = get_config_value(cfg, "guardrail.connectors", None)
+    if isinstance(connectors_map, Mapping):
+        keys = sorted({str(key).strip().lower() for key in connectors_map if str(key).strip()})
+        if keys:
+            return keys
+
+    singular = _active_connector(cfg)
+    return [singular] if singular else []
+
+
 def _connector_is_proxy(connector: str) -> bool:
     """True for proxy-backed connectors that host both judge AND agent LLMs."""
 
@@ -1856,6 +1994,10 @@ def _connector_is_proxy(connector: str) -> bool:
         return connector_llm_role(name) == "judge_and_agent"
     except Exception:  # noqa: BLE001 - degrade to the static proxy set.
         return name in GUARDRAIL_CONNECTORS
+
+
+def _any_active_connector_is_proxy(cfg: object | Mapping[str, Any] | None) -> bool:
+    return any(_connector_is_proxy(connector) for connector in _active_connector_names_for_setup(cfg))
 
 
 def _guardrail_enabled(cfg: object | Mapping[str, Any] | None) -> bool:
@@ -1881,7 +2023,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             summary="Configure a dedicated judge model for guardrail verdicts.",
             presets={"--role": "judge", "--inherit-from": "llm"},
             fields=("Provider", "Model", "API Key Env", "API Key", "Inherit From", *_LLM_PROVIDER_SECTIONS),
-            available_when=lambda c: _guardrail_enabled(c) or _connector_is_proxy(_active_connector(c)),
+            available_when=lambda c: _guardrail_enabled(c) or _any_active_connector_is_proxy(c),
         ),
         WizardGoal(
             "agent",
@@ -1889,7 +2031,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             summary="Set the agent-side model (proxy connectors only).",
             presets={"--role": "agent"},
             fields=("Provider", "Model", "API Key", "API Key Env", *_LLM_PROVIDER_SECTIONS),
-            available_when=lambda c: _connector_is_proxy(_active_connector(c)),
+            available_when=lambda c: _any_active_connector_is_proxy(c),
         ),
         WizardGoal(
             "regional",
@@ -1963,23 +2105,46 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
     del cfg
     return (
         WizardGoal(
-            "switch",
-            "Switch to a different connector",
-            summary="Re-point DefenseClaw at another agent framework.",
-            fields=("Connector", "Restart Gateway"),
+            "add",
+            "Add or configure a connector",
+            summary="Add a connector peer, or replace the configured set when requested.",
+            presets={"@Action": "setup"},
+            fields=("Connector", "Action", "Replace Existing", "Restart Gateway"),
         ),
         WizardGoal(
             "proxy-stack",
             "Set up a proxy connector with the local stack",
             summary="Bring up the local guardrail/scanner stack for a proxy.",
-            presets={"@Local Stack": "yes"},
+            presets={"@Action": "setup", "@Local Stack": "yes"},
             fields=("Connector", "Guardrail Mode", "Scanner Mode", "Local Stack"),
         ),
         WizardGoal(
+            "bulk",
+            "Set active connectors",
+            summary="Run bare setup to choose the active hook connector set.",
+            presets={"@Action": "batch"},
+            fields=(
+                "Connectors (CSV)",
+                "Detected Connectors",
+                "All Supported Connectors",
+                "Action",
+                "Guardrail Mode",
+                "Restart Gateway",
+            ),
+        ),
+        WizardGoal(
             "rerun",
-            "Re-run setup for my current connector",
-            summary="Re-apply guardrail/scanner settings and verify.",
-            fields=("Guardrail Mode", "Scanner Mode", "Verify After Setup"),
+            "Re-run setup for a connector",
+            summary="Re-apply guardrail/scanner settings and verify one connector.",
+            presets={"@Action": "setup"},
+            fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode", "Verify After Setup"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove a connector",
+            summary="Drop a connector from the active set; force is required for the last connector.",
+            presets={"@Action": "remove"},
+            fields=("Connector", "Action", "Restart Gateway", "Force Last Connector Removal"),
         ),
     )
 
@@ -2071,14 +2236,14 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
     return (
         WizardGoal(
             "auto",
-            "Rotate the gateway token (auto-detect connector)",
-            summary="Rotate and refresh hooks for the detected connector.",
+            "Rotate shared token for active connectors",
+            summary="Rotate the gateway token and refresh every active connector hook.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(
             "specific",
-            "Rotate for a specific connector",
-            summary="Rotate the token for a named connector.",
+            "Rotate shared token with connector hint",
+            summary="Token storage is shared; connector only narrows the hook refresh path.",
             fields=("Connector", "Refresh Hooks"),
         ),
     )
@@ -2243,6 +2408,34 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
     del cfg
     return (
         WizardGoal(
+            "list",
+            "List destinations",
+            summary="List global destinations or one connector's per-connector sinks.",
+            presets={"@Action": "list"},
+            fields=("Action", "Connector", "JSON Output"),
+        ),
+        WizardGoal(
+            "enable",
+            "Enable a destination",
+            summary="Enable a global or per-connector audit sink by name.",
+            presets={"@Action": "enable"},
+            fields=("Action", "Name", "Connector"),
+        ),
+        WizardGoal(
+            "disable",
+            "Disable a destination",
+            summary="Disable a global or per-connector audit sink by name.",
+            presets={"@Action": "disable"},
+            fields=("Action", "Name", "Connector"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove a destination",
+            summary="Remove a global or per-connector audit sink by name.",
+            presets={"@Action": "remove"},
+            fields=("Action", "Name", "Connector"),
+        ),
+        WizardGoal(
             "splunk-o11y",
             "Splunk Observability Cloud",
             summary="Add the Splunk Observability Cloud preset.",
@@ -2273,6 +2466,12 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
             presets={"@Preset": "grafana-cloud"},
         ),
         WizardGoal(
+            "galileo",
+            "Galileo Cloud / Self-hosted",
+            summary="Send GenAI OTLP traces to a Galileo project and Log stream.",
+            presets={"@Preset": "galileo"},
+        ),
+        WizardGoal(
             "otlp",
             "Generic OTLP endpoint",
             summary="Add a generic OTLP exporter preset.",
@@ -2284,6 +2483,34 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
 def _webhooks_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
     del cfg
     return (
+        WizardGoal(
+            "list",
+            "List webhooks",
+            summary="List global webhooks or one connector's per-connector webhooks.",
+            presets={"@Action": "list"},
+            fields=("Action", "Connector", "JSON Output"),
+        ),
+        WizardGoal(
+            "enable",
+            "Enable a webhook",
+            summary="Enable a global or per-connector webhook by name.",
+            presets={"@Action": "enable"},
+            fields=("Action", "Name", "Connector"),
+        ),
+        WizardGoal(
+            "disable",
+            "Disable a webhook",
+            summary="Disable a global or per-connector webhook by name.",
+            presets={"@Action": "disable"},
+            fields=("Action", "Name", "Connector"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove a webhook",
+            summary="Remove a global or per-connector webhook by name.",
+            presets={"@Action": "remove"},
+            fields=("Action", "Name", "Connector"),
+        ),
         WizardGoal(
             "slack",
             "Add a Slack alert webhook",
@@ -2461,6 +2688,81 @@ def _splunk_dashboards_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wi
     )
 
 
+def _trusted_paths_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "list",
+            "List trusted prefixes",
+            summary="Show built-in and operator-added binary-prefix trust roots.",
+            presets={"@Action": "list"},
+            fields=("Action", "JSON Output"),
+        ),
+        WizardGoal(
+            "add",
+            "Trust a connector binary directory",
+            summary="Add a directory prefix used for connector binary discovery.",
+            presets={"@Action": "add"},
+            fields=("Action", "Directory", "Force"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove an operator-added prefix",
+            summary="Remove a trusted prefix from the operator-managed list.",
+            presets={"@Action": "remove"},
+            fields=("Action", "Directory"),
+        ),
+    )
+
+
+def _guardrail_actions_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "status",
+            "Show guardrail status",
+            summary="Show the full active connector roster, or narrow to one connector.",
+            presets={"@Action": "status"},
+            fields=("Connector", "Action"),
+        ),
+        WizardGoal(
+            "enable",
+            "Enable guardrail",
+            summary="Enable globally or re-enable one connector override.",
+            presets={"@Action": "enable"},
+            fields=("Connector", "Action", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "disable",
+            "Disable guardrail",
+            summary="Disable globally or disable one connector override.",
+            presets={"@Action": "disable"},
+            fields=("Connector", "Action", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "fail-mode",
+            "Set fail mode",
+            summary="Set fail-open/fail-closed globally or for one connector.",
+            presets={"@Action": "fail-mode"},
+            fields=("Connector", "Action", "Fail Mode", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "hilt",
+            "Set human approval",
+            summary="Toggle HILT and severity globally or for one connector.",
+            presets={"@Action": "hilt"},
+            fields=("Connector", "Action", "HITL State", "Approval Min Severity", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "block-message",
+            "Set block message",
+            summary="Set or clear the custom block message globally or for one connector.",
+            presets={"@Action": "block-message"},
+            fields=("Connector", "Action", "Block Message", "Clear Message", "Restart Gateway"),
+        ),
+    )
+
+
 # Per-wizard goal builders. Each returns the *contextual* goals (without the
 # trailing Advanced entry, which ``wizard_goals`` always appends). Lambdas keep
 # resolution lazy so builders can live anywhere in the module.
@@ -2483,6 +2785,8 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.NOTIFICATIONS_ROUTING: _notifications_routing_goals,
     SetupWizard.AI_DISCOVERY: _ai_discovery_goals,
     SetupWizard.SPLUNK_DASHBOARDS: _splunk_dashboards_goals,
+    SetupWizard.TRUSTED_PATHS: _trusted_paths_goals,
+    SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
 }
 
 
@@ -2492,8 +2796,9 @@ def wizard_goals(
     """Resolve the goal menu for ``wizard``.
 
     Goals whose ``available_when`` predicate is False for the current config
-    are dropped, and an "Advanced — show all settings" goal is always appended
-    so the flat editor stays reachable and the menu is never empty.
+    are dropped. Most wizards append an "Advanced — show all settings" goal so
+    the flat editor stays reachable; lifecycle-only wizards intentionally keep
+    the menu curated.
     """
 
     wizard = SetupWizard(wizard)
@@ -2504,6 +2809,8 @@ def wizard_goals(
             goals = tuple(goal for goal in builder(cfg) if goal.is_available(cfg))
         except Exception:  # noqa: BLE001 - a bad builder must not break the menu.
             goals = ()
+    if wizard in _NO_ADVANCED_GOAL_WIZARDS:
+        return goals
     return (*goals, _ADVANCED_GOAL)
 
 
@@ -2544,17 +2851,18 @@ def wizard_state_summary(
         model = _cfg_str(cfg, "llm.model")
         main = f"{provider}/{model}" if (provider and model) else (model or provider or "not set")
         judge = _cfg_str(cfg, "guardrail.judge.model") or "not set"
-        connector = _active_connector(cfg) or "none"
-        role = "judge+agent" if _connector_is_proxy(connector) else "judge"
-        return f"Main: {main}  ·  Judge: {judge}  ·  Connector: {connector} ({role})"
+        connectors = _active_connector_names_for_setup(cfg)
+        connector_summary = ", ".join(connectors) if connectors else "none"
+        role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
+        return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.GUARDRAIL:
         mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
         enabled = "on" if _guardrail_enabled(cfg) else "off"
         strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
         return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {strategy}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
-        connector = _active_connector(cfg) or "not set"
-        return f"Active connector: {connector}"
+        connectors = _active_connector_names_for_setup(cfg)
+        return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
     if wizard == SetupWizard.AI_DISCOVERY:
         enabled = "on" if bool(get_config_value(cfg, "ai_discovery.enabled", True)) else "off"
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
@@ -2944,6 +3252,144 @@ def _build_token_rotation_args(fields: Sequence[WizardFormField]) -> tuple[str, 
     return tuple(args)
 
 
+def _build_trusted_paths_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    action = wizard_field_value(fields, "Action") or "list"
+    args = ["setup", "trusted-paths", action]
+    if action in {"add", "remove"}:
+        if directory := wizard_field_value(fields, "Directory", raw=True):
+            args.append(directory.strip())
+    if action == "add" and wizard_bool_value(fields, "Force", "no") == "yes":
+        args.append("--force")
+    if wizard_bool_value(fields, "JSON Output", "no") == "yes":
+        args.append("--json")
+    return tuple(args)
+
+
+def _build_observability_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    action = wizard_field_value(fields, "Action") or "add"
+    connector = wizard_field_value(fields, "Connector")
+    if action == "list":
+        args = ["setup", "observability", "list"]
+        if connector:
+            args.extend(("--connector", connector))
+        if wizard_bool_value(fields, "JSON Output", "no") == "yes":
+            args.append("--json")
+        return tuple(args)
+    if action in {"enable", "disable", "remove"}:
+        args = ["setup", "observability", action]
+        if name := wizard_field_value(fields, "Name", raw=True):
+            args.append(name.strip())
+        if connector:
+            args.extend(("--connector", connector))
+        if action == "remove":
+            args.append("--yes")
+        return tuple(args)
+
+    preset = next((field.value for field in fields if field.kind == "preset"), "")
+    args = ["setup", "observability", "add"]
+    if preset:
+        args.append(preset)
+    args.append("--non-interactive")
+    for field in fields:
+        if field.kind in {"section", "preset"} or field.label in {"Action", "JSON Output"}:
+            continue
+        if field.kind == "bool":
+            if field.value == field.default:
+                continue
+            if field.value == "yes" and field.flag:
+                args.append(field.flag)
+            elif field.value == "no" and field.no_flag:
+                args.append(field.no_flag)
+            continue
+        if field.kind in {"string", "int", "choice", "password"}:
+            value = field.value.strip()
+            if value and field.flag:
+                args.extend((field.flag, value))
+    return tuple(args)
+
+
+def _build_webhook_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    action = wizard_field_value(fields, "Action") or "add"
+    connector = wizard_field_value(fields, "Connector")
+    if action == "list":
+        args = ["setup", "webhook", "list"]
+        if connector:
+            args.extend(("--connector", connector))
+        if wizard_bool_value(fields, "JSON Output", "no") == "yes":
+            args.append("--json")
+        return tuple(args)
+    if action in {"enable", "disable", "remove"}:
+        args = ["setup", "webhook", action]
+        if name := wizard_field_value(fields, "Name", raw=True):
+            args.append(name.strip())
+        if connector:
+            args.extend(("--connector", connector))
+        if action == "remove":
+            args.append("--yes")
+        return tuple(args)
+
+    channel = next((field.value for field in fields if field.kind == "whtype"), "")
+    args = ["setup", "webhook", "add"]
+    if channel:
+        args.append(channel)
+    args.append("--non-interactive")
+    hmac_disabled = wizard_bool_value(fields, "Enable HMAC Signing", "yes") == "no"
+    for field in fields:
+        if field.kind in {"section", "whtype"} or field.label in {"Action", "JSON Output", "Enable HMAC Signing"}:
+            continue
+        if hmac_disabled and field.label == "HMAC secret env (optional)":
+            continue
+        if field.kind == "bool":
+            if field.value == field.default:
+                continue
+            if field.value == "yes" and field.flag:
+                args.append(field.flag)
+            elif field.value == "no" and field.no_flag:
+                args.append(field.no_flag)
+            continue
+        if field.kind in {"string", "int", "choice", "password"}:
+            value = field.value.strip()
+            if value and field.flag:
+                args.extend((field.flag, value))
+    return tuple(args)
+
+
+def _build_guardrail_actions_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    action = wizard_field_value(fields, "Action") or "status"
+    connector = wizard_field_value(fields, "Connector")
+    restart = wizard_bool_value(fields, "Restart Gateway", "yes")
+
+    if action == "status":
+        args = ["guardrail", "status"]
+        if connector:
+            args.extend(("--connector", connector))
+        return tuple(args)
+
+    if action in {"enable", "disable"}:
+        args = ["guardrail", action, "--yes"]
+    elif action == "fail-mode":
+        args = ["guardrail", "fail-mode", wizard_field_value(fields, "Fail Mode") or "open", "--yes"]
+    elif action == "hilt":
+        args = ["guardrail", "hilt", wizard_field_value(fields, "HITL State") or "on", "--yes"]
+        if severity := wizard_field_value(fields, "Approval Min Severity"):
+            args.extend(("--min-severity", severity))
+    elif action == "block-message":
+        args = ["guardrail", "block-message"]
+        if wizard_bool_value(fields, "Clear Message", "no") == "yes":
+            args.append("--clear")
+        elif message := wizard_field_value(fields, "Block Message", raw=True):
+            args.append(message.strip())
+        args.append("--yes")
+    else:
+        return ("guardrail", "status")
+
+    if connector:
+        args.extend(("--connector", connector))
+    if restart == "no":
+        args.append("--no-restart")
+    return tuple(args)
+
+
 def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     intents = notifications_routing_intents(fields)
     if intents:
@@ -3095,9 +3541,13 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.LOCAL_OBSERVABILITY: lambda fields: _build_local_observability_args(fields),
     SetupWizard.TOKEN_ROTATION: lambda fields: _build_token_rotation_args(fields),
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
+    SetupWizard.OBSERVABILITY: lambda fields: _build_observability_args(fields),
+    SetupWizard.WEBHOOKS: lambda fields: _build_webhook_args(fields),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda fields: _build_notifications_routing_args(fields),
     SetupWizard.AI_DISCOVERY: lambda fields: _build_ai_discovery_args(fields),
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
+    SetupWizard.TRUSTED_PATHS: lambda fields: _build_trusted_paths_args(fields),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
 }
 
 
@@ -3121,7 +3571,37 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             and not wizard_field_value(fields, "Base URL")
         ):
             missing.append("Domains or Base URL")
+    if wizard == SetupWizard.TRUSTED_PATHS:
+        action = wizard_field_value(fields, "Action")
+        if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
+            missing.append("Directory")
+    if wizard == SetupWizard.CONNECTOR_SETUP:
+        action = wizard_field_value(fields, "Action") or "setup"
+        if action in {"setup", "remove"} and not wizard_field_value(fields, "Connector"):
+            missing.append("Connector")
+        if (
+            action == "batch"
+            and not wizard_field_value(fields, "Connectors (CSV)")
+            and wizard_bool_value(fields, "Detected Connectors", "no") != "yes"
+            and wizard_bool_value(fields, "All Supported Connectors", "no") != "yes"
+        ):
+            missing.append("Connectors (CSV) or Detected/All")
+    if (
+        wizard == SetupWizard.GUARDRAIL_ACTIONS
+        and wizard_field_value(fields, "Action") == "block-message"
+        and not wizard_field_value(fields, "Block Message", raw=True)
+        and wizard_bool_value(fields, "Clear Message", "no") != "yes"
+    ):
+        missing.append("Block Message or Clear Message")
+    if wizard in {SetupWizard.OBSERVABILITY, SetupWizard.WEBHOOKS}:
+        action = wizard_field_value(fields, "Action") or "add"
+        if action in {"enable", "disable", "remove"} and not wizard_field_value(fields, "Name", raw=True):
+            missing.append("Name")
     for field in fields:
+        if wizard in {SetupWizard.OBSERVABILITY, SetupWizard.WEBHOOKS}:
+            action = wizard_field_value(fields, "Action") or "add"
+            if action != "add":
+                continue
         if not field.required or field.kind in {"section", "preset", "whtype", "regid", "bool"}:
             continue
         if not field.value.strip():
@@ -3135,6 +3615,35 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     if reveal:
         return field.value or "(empty)"
     return mask_secret(field.value)
+
+
+def mask_wizard_secret_values(
+    fields: Sequence[WizardFormField], args: Sequence[str]
+) -> tuple[str, ...]:
+    """Redact password-field values from a rendered wizard command preview.
+
+    The wizard header echoes the exact ``defenseclaw …`` argv it will run.
+    Password fields (API keys, tokens, secrets, credentials) emit their
+    value verbatim as an argv token, so any token that equals a non-empty
+    password value — or whose ``flag=value`` tail equals one — is replaced
+    with ``<redacted>`` before display. See F-0481.
+    """
+
+    secret_values = {field.value for field in fields if field.kind == "password" and field.value}
+    if not secret_values:
+        return tuple(args)
+    masked: list[str] = []
+    for arg in args:
+        if arg in secret_values:
+            masked.append("<redacted>")
+            continue
+        if "=" in arg:
+            flag, value = arg.split("=", 1)
+            if value in secret_values:
+                masked.append(f"{flag}=<redacted>")
+                continue
+        masked.append(arg)
+    return tuple(masked)
 
 
 def redaction_desired_action(currently_disabled: bool) -> str:
@@ -3209,19 +3718,73 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
-def connector_setup_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+def connector_setup_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None, os_name: str | None = None
+) -> tuple[WizardFormField, ...]:
+    choices = supported_connector_choices(os_name)
     connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip() or "openclaw"
+    # The stored ``claw.mode`` can name a proxy connector that this OS can't
+    # run (e.g. a config copied from macOS opened on Windows); fall back to
+    # the first supported connector rather than offering an unusable default.
+    if connector not in choices:
+        connector = choices[0] if choices else connector
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     return (
-        WizardFormField("Connector", "choice", value=connector, default=connector, options=CONNECTORS, required=True),
+        WizardFormField("Connector", "choice", value=connector, default=connector, options=choices),
+        WizardFormField(
+            "Connectors (CSV)",
+            "string",
+            hint="Batch setup only: comma-separated active connector names, e.g. codex,hermes,antigravity.",
+        ),
+        WizardFormField(
+            "Action",
+            "choice",
+            value="setup",
+            default="setup",
+            options=("setup", "batch", "remove"),
+            hint="Set up/add one connector, choose the active connector set, or remove one.",
+        ),
         WizardFormField("Guardrail Mode", "choice", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
             "Scanner Mode", "choice", value=scanner_mode, default=scanner_mode, options=("local", "remote", "both")
         ),
+        WizardFormField(
+            "Replace Existing",
+            "bool",
+            value="no",
+            default="no",
+            hint="Replace the configured connector set instead of adding this connector as a peer.",
+        ),
+        WizardFormField(
+            "Workspace Dir",
+            "string",
+            hint="Optional workspace-scoped connector config directory.",
+        ),
         WizardFormField("Restart Gateway", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Detected Connectors",
+            "bool",
+            value="no",
+            default="no",
+            hint="Batch setup only: include every locally detected hook connector.",
+        ),
+        WizardFormField(
+            "All Supported Connectors",
+            "bool",
+            value="no",
+            default="no",
+            hint="Batch setup only: include every supported hook connector.",
+        ),
         WizardFormField("Local Stack", "bool", value="no", default="no"),
         WizardFormField("Verify After Setup", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Force Last Connector Removal",
+            "bool",
+            value="no",
+            default="no",
+            hint="Allow removing the final connector and fully unconfiguring enforcement.",
+        ),
     )
 
 
@@ -3310,6 +3873,14 @@ def llm_model_candidates(
 def _provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
     targets = {n.strip().lower() for n in names}
     return lambda dv: (dv.get("provider", "") or "").strip().lower() in targets
+
+
+def _bedrock_auth_mode_is(*modes: str) -> Callable[[Mapping[str, str]], bool]:
+    targets = {mode.strip().lower() for mode in modes}
+    return lambda dv: (
+        (dv.get("provider", "") or "").strip().lower() == "bedrock"
+        and (dv.get("bedrock_auth_mode", "") or "api_key").strip().lower() in targets
+    )
 
 
 def _provider_regional_or_custom(dv: Mapping[str, str]) -> bool:
@@ -3456,7 +4027,11 @@ def _llm_wizard_fields_for(
     model_default = str(get_config_value(cfg, "llm.model", "") or "")
     base_url_default = str(get_config_value(cfg, "llm.base_url", "") or "")
     region_opts = _llm_catalog_regions(provider)
+    bedrock_auth_mode = str(get_config_value(cfg, "llm.bedrock.auth_mode", "api_key") or "api_key").strip().lower()
+    bedrock_auth_mode = (overrides.get("--bedrock-auth-mode") or bedrock_auth_mode).strip().lower() or "api_key"
     is_bedrock = _provider_is("bedrock")
+    is_bedrock_iam = _bedrock_auth_mode_is("iam_credentials")
+    is_bedrock_profile = _bedrock_auth_mode_is("profile")
     is_vertex = _provider_is("vertex_ai")
     is_azure = _provider_is("azure")
 
@@ -3495,12 +4070,18 @@ def _llm_wizard_fields_for(
             visible_when=is_bedrock,
         ),
         WizardFormField(
-            "Auth Mode", "choice", "--bedrock-auth-mode", options=BEDROCK_AUTH_MODES, visible_when=is_bedrock
+            "Auth Mode",
+            "choice",
+            "--bedrock-auth-mode",
+            value=bedrock_auth_mode,
+            default=bedrock_auth_mode,
+            options=BEDROCK_AUTH_MODES,
+            visible_when=is_bedrock,
         ),
-        WizardFormField("Access Key Env", "string", "--bedrock-access-key-env", visible_when=is_bedrock),
-        WizardFormField("Secret Key Env", "string", "--bedrock-secret-key-env", visible_when=is_bedrock),
-        WizardFormField("Session Token Env", "string", "--bedrock-session-token-env", visible_when=is_bedrock),
-        WizardFormField("Profile Name", "string", "--bedrock-profile-name", visible_when=is_bedrock),
+        WizardFormField("Access Key Env", "string", "--bedrock-access-key-env", visible_when=is_bedrock_iam),
+        WizardFormField("Secret Key Env", "string", "--bedrock-secret-key-env", visible_when=is_bedrock_iam),
+        WizardFormField("Session Token Env", "string", "--bedrock-session-token-env", visible_when=is_bedrock_iam),
+        WizardFormField("Profile Name", "string", "--bedrock-profile-name", visible_when=is_bedrock_profile),
         WizardFormField("Inference Profile", "string", "--bedrock-inference-profile", visible_when=is_bedrock),
         WizardFormField(
             "Deployment Aliases (CSV)",
@@ -3566,7 +4147,7 @@ def _llm_wizard_fields_for(
             hint="Send a one-shot reachability probe after saving.",
         ),
     )
-    driver = {"provider": provider, "role": role}
+    driver = {"provider": provider, "role": role, "bedrock_auth_mode": bedrock_auth_mode}
     return _apply_dynamic_fields(candidates, overrides, driver)
 
 
@@ -3620,9 +4201,12 @@ def _guardrail_wizard_fields_for(
     cfg: object | Mapping[str, Any] | None = None,
 ) -> tuple[WizardFormField, ...]:
     overrides = overrides or {}
+    active_connectors = _guardrail_connector_keys(cfg)
     connector = str(get_config_value(cfg, "guardrail.connector", "") or "")
     if not connector:
-        connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw")
+        connector = str(get_config_value(cfg, "claw.mode", "") or "")
+    if len(active_connectors) > 1 and "--connector" not in overrides:
+        connector = ""
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
@@ -3641,6 +4225,16 @@ def _guardrail_wizard_fields_for(
         if provider := str(get_config_value(cfg, "llm.provider", "") or ""):
             judge_provider = provider
             judge_provider_default = provider
+    # Mirror the CLI's server-side promotion (cmd_setup ``_apply...`` ~ the
+    # ``gc.judge.enabled`` branch): once a dedicated judge model is set the
+    # judge actually runs, so leaving the wizard on ``regex_only`` would
+    # silently keep it off. Surface ``regex_judge`` so the displayed strategy
+    # matches what saving the form will write. Only a dedicated
+    # ``guardrail.judge.model`` triggers this — a value merely inherited from
+    # ``llm.model`` is not emitted as ``--judge-model`` and must not promote.
+    if judge and strategy in ("", "regex_only"):
+        strategy = "regex_judge"
+    strategy = (overrides.get("--detection-strategy") or strategy).strip() or "regex_only"
     # A live provider change (driver) wins so the conditional Bedrock /
     # Vertex / Azure judge groups re-derive against the new selection.
     judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
@@ -3654,11 +4248,33 @@ def _guardrail_wizard_fields_for(
     if not judge_base:
         judge_base = str(get_config_value(cfg, "llm.base_url", "") or "")
         judge_base_default = judge_base
+    judge_bedrock_auth_mode = (
+        str(get_config_value(cfg, "guardrail.judge.llm.bedrock.auth_mode", "api_key") or "api_key").strip().lower()
+    )
+    judge_bedrock_auth_mode = (
+        overrides.get("--judge-bedrock-auth-mode") or judge_bedrock_auth_mode
+    ).strip().lower() or "api_key"
     hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
     redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
-    j_bedrock = _provider_is("bedrock")
-    j_vertex = _provider_is("vertex_ai", "vertex")
-    j_azure = _provider_is("azure")
+    def j_strategy(dv: Mapping[str, str]) -> bool:
+        return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
+
+    def j_provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
+        provider_visible = _provider_is(*names)
+        return lambda dv: j_strategy(dv) and provider_visible(dv)
+
+    def j_bedrock_auth_mode_is(*modes: str) -> Callable[[Mapping[str, str]], bool]:
+        auth_visible = _bedrock_auth_mode_is(*modes)
+        return lambda dv: j_strategy(dv) and auth_visible(dv)
+
+    def j_provider_regional_or_custom(dv: Mapping[str, str]) -> bool:
+        return j_strategy(dv) and _provider_regional_or_custom(dv)
+
+    j_bedrock = j_provider_is("bedrock")
+    j_bedrock_iam = j_bedrock_auth_mode_is("iam_credentials")
+    j_bedrock_profile = j_bedrock_auth_mode_is("profile")
+    j_vertex = j_provider_is("vertex_ai", "vertex")
+    j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Core", "section"),
@@ -3668,7 +4284,9 @@ def _guardrail_wizard_fields_for(
             "--connector",
             value=connector,
             default=connector,
-            options=CONNECTORS,
+            options=("", *CONNECTORS),
+            required=True,
+            hint="Choose the connector peer this guardrail setup should update.",
         ),
         WizardFormField("Mode", "choice", "--mode", value=mode, default="observe", options=("observe", "action")),
         WizardFormField(
@@ -3680,12 +4298,6 @@ def _guardrail_wizard_fields_for(
             options=("local", "remote", "both"),
         ),
         WizardFormField("Proxy Port", "int", "--port", value=str(get_config_value(cfg, "guardrail.port", "") or "")),
-        WizardFormField(
-            "Block Message",
-            "string",
-            "--block-message",
-            value=str(get_config_value(cfg, "guardrail.block_message", "") or ""),
-        ),
         WizardFormField("Detection", "section"),
         WizardFormField(
             "Strategy",
@@ -3694,6 +4306,7 @@ def _guardrail_wizard_fields_for(
             value=strategy,
             default="regex_only",
             options=("regex_only", "regex_judge", "judge_first"),
+            hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
         ),
         WizardFormField(
             "Rule Pack",
@@ -3703,24 +4316,46 @@ def _guardrail_wizard_fields_for(
             default="default",
             options=("default", "strict", "permissive"),
         ),
-        WizardFormField("LLM Judge", "section"),
+        WizardFormField("LLM Judge", "section", visible_when=j_strategy),
         WizardFormField(
             "Provider",
             "choice",
             value=judge_provider,
             default=judge_provider_default,
             options=_llm_catalog_provider_choices(),
+            visible_when=j_strategy,
         ),
         WizardFormField(
-            "Model", "string", "--judge-model", value=judge_model, default=judge_model_default, picker="llm"
+            "Model",
+            "string",
+            "--judge-model",
+            value=judge_model,
+            default=judge_model_default,
+            picker="llm",
+            visible_when=j_strategy,
         ),
-        WizardFormField("API Key Env", "string", "--judge-api-key-env", value=judge_key_env, default=judge_key_default),
-        WizardFormField("API Base URL", "string", "--judge-api-base", value=judge_base, default=judge_base_default),
+        WizardFormField(
+            "API Key Env",
+            "string",
+            "--judge-api-key-env",
+            value=judge_key_env,
+            default=judge_key_default,
+            visible_when=j_strategy,
+        ),
+        WizardFormField(
+            "API Base URL",
+            "string",
+            "--judge-api-base",
+            value=judge_base,
+            default=judge_base_default,
+            visible_when=j_strategy,
+        ),
         WizardFormField(
             "Instance Name",
             "string",
             "--judge-instance-name",
             hint="Custom-provider instance for the judge (optional).",
+            visible_when=j_strategy,
         ),
         WizardFormField(
             "LLM Role",
@@ -3730,6 +4365,7 @@ def _guardrail_wizard_fields_for(
             default="judge_only",
             options=GUARDRAIL_JUDGE_LLM_ROLES,
             hint="judge_only=hook connectors; judge_and_agent=proxy connectors.",
+            visible_when=j_strategy,
         ),
         WizardFormField(
             "Inherit From",
@@ -3739,6 +4375,7 @@ def _guardrail_wizard_fields_for(
             default="",
             options=GUARDRAIL_JUDGE_INHERIT_PATHS,
             hint="Copy a sibling LLM block onto the judge before flags (optional).",
+            visible_when=j_strategy,
         ),
         WizardFormField("Judge: Bedrock", "section", visible_when=j_bedrock),
         WizardFormField(
@@ -3750,12 +4387,18 @@ def _guardrail_wizard_fields_for(
             visible_when=j_bedrock,
         ),
         WizardFormField(
-            "Auth Mode", "choice", "--judge-bedrock-auth-mode", options=BEDROCK_AUTH_MODES, visible_when=j_bedrock
+            "Auth Mode",
+            "choice",
+            "--judge-bedrock-auth-mode",
+            value=judge_bedrock_auth_mode,
+            default=judge_bedrock_auth_mode,
+            options=BEDROCK_AUTH_MODES,
+            visible_when=j_bedrock,
         ),
-        WizardFormField("Access Key Env", "string", "--judge-bedrock-access-key-env", visible_when=j_bedrock),
-        WizardFormField("Secret Key Env", "string", "--judge-bedrock-secret-key-env", visible_when=j_bedrock),
-        WizardFormField("Session Token Env", "string", "--judge-bedrock-session-token-env", visible_when=j_bedrock),
-        WizardFormField("Profile Name", "string", "--judge-bedrock-profile-name", visible_when=j_bedrock),
+        WizardFormField("Access Key Env", "string", "--judge-bedrock-access-key-env", visible_when=j_bedrock_iam),
+        WizardFormField("Secret Key Env", "string", "--judge-bedrock-secret-key-env", visible_when=j_bedrock_iam),
+        WizardFormField("Session Token Env", "string", "--judge-bedrock-session-token-env", visible_when=j_bedrock_iam),
+        WizardFormField("Profile Name", "string", "--judge-bedrock-profile-name", visible_when=j_bedrock_profile),
         WizardFormField("Inference Profile", "string", "--judge-bedrock-inference-profile", visible_when=j_bedrock),
         WizardFormField(
             "Deployment Aliases (CSV)",
@@ -3789,13 +4432,13 @@ def _guardrail_wizard_fields_for(
             hint="model=deployment pairs, comma-separated (repeatable).",
             visible_when=j_azure,
         ),
-        WizardFormField("Judge: TLS", "section", visible_when=_provider_regional_or_custom),
+        WizardFormField("Judge: TLS", "section", visible_when=j_provider_regional_or_custom),
         WizardFormField(
             "TLS CA Cert File",
             "string",
             "--judge-tls-ca-cert-file",
             hint="PEM CA bundle for self-signed judge endpoints.",
-            visible_when=_provider_regional_or_custom,
+            visible_when=j_provider_regional_or_custom,
         ),
         WizardFormField(
             "Insecure Skip Verify",
@@ -3804,7 +4447,7 @@ def _guardrail_wizard_fields_for(
             value="no",
             default="no",
             hint="Disable TLS verification for the judge (lab use only).",
-            visible_when=_provider_regional_or_custom,
+            visible_when=j_provider_regional_or_custom,
         ),
         WizardFormField("Cisco AI Defense", "section"),
         WizardFormField(
@@ -3843,7 +4486,15 @@ def _guardrail_wizard_fields_for(
         WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
     )
-    return _apply_dynamic_fields(candidates, overrides, {"provider": judge_provider})
+    return _apply_dynamic_fields(
+        candidates,
+        overrides,
+        {
+            "provider": judge_provider,
+            "bedrock_auth_mode": judge_bedrock_auth_mode,
+            "strategy": strategy,
+        },
+    )
 
 
 def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
@@ -3918,14 +4569,32 @@ def splunk_wizard_follow_up_intents(
 def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
     fields: list[WizardFormField] = [
         WizardFormField(
+            "Action",
+            "choice",
+            value="add",
+            default="add",
+            options=("add", "list", "enable", "disable", "remove"),
+            hint="Add a destination, list destinations, or manage an existing destination.",
+        ),
+        WizardFormField(
             "Preset",
             "preset",
             value=preset_id,
             default=preset_id,
             options=tuple(preset for preset, _ in OBSERVABILITY_PRESETS),
         ),
-        WizardFormField("Name (optional)", "string", "--name"),
+        WizardFormField("Name", "string", "--name", hint="Optional for add; required for enable/disable/remove."),
         WizardFormField("Enabled", "bool", "--enabled", "--disabled", value="yes", default="yes"),
+        WizardFormField(
+            "Connector",
+            "choice",
+            "--connector",
+            value="",
+            default="",
+            options=("", *CONNECTORS),
+            hint="Optional: scope this audit sink to one connector; blank keeps the CLI default/global behavior.",
+        ),
+        WizardFormField("JSON Output", "bool", value="no", default="no", hint="For list actions."),
         WizardFormField("Dry Run", "bool", "--dry-run", value="no", default="no"),
     ]
     if preset_id == "splunk-o11y":
@@ -4004,6 +4673,30 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
                 WizardFormField("OTLP Token", "password", "--token"),
             ),
         )
+    elif preset_id == "galileo":
+        fields.extend(
+            (
+                WizardFormField(
+                    "Trace Endpoint",
+                    "string",
+                    "--endpoint",
+                    value="https://api.galileo.ai/otel/traces",
+                    default="https://api.galileo.ai/otel/traces",
+                    required=True,
+                    hint="Cloud default or exact self-hosted /otel/traces endpoint.",
+                ),
+                WizardFormField("Project", "string", "--project", required=True),
+                WizardFormField(
+                    "Log Stream", "string", "--logstream", value="default", default="default", required=True
+                ),
+                WizardFormField(
+                    "API Key",
+                    "password",
+                    "--token",
+                    hint="Required unless GALILEO_API_KEY is already configured in the environment or .env.",
+                ),
+            ),
+        )
     elif preset_id == "otlp":
         fields.extend(
             (
@@ -4034,11 +4727,29 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
 def webhook_wizard_fields(channel_type: str) -> tuple[WizardFormField, ...]:
     fields: list[WizardFormField] = [
         WizardFormField(
+            "Action",
+            "choice",
+            value="add",
+            default="add",
+            options=("add", "list", "enable", "disable", "remove"),
+            hint="Add a webhook, list webhooks, or manage an existing webhook.",
+        ),
+        WizardFormField(
             "Type", "whtype", value=channel_type, default=channel_type, options=tuple(kind for kind, _ in WEBHOOK_TYPES)
         ),
-        WizardFormField("Name (optional)", "string", "--name"),
+        WizardFormField("Name", "string", "--name", hint="Optional for add; required for enable/disable/remove."),
         WizardFormField("URL", "string", "--url", required=True),
         WizardFormField("Enabled", "bool", "--enabled", "--disabled", value="yes", default="yes"),
+        WizardFormField(
+            "Connector",
+            "choice",
+            "--connector",
+            value="",
+            default="",
+            options=("", *CONNECTORS),
+            hint="Optional: scope this webhook to one connector; blank keeps the CLI default/global behavior.",
+        ),
+        WizardFormField("JSON Output", "bool", value="no", default="no", hint="For list actions."),
         WizardFormField(
             "Min Severity",
             "choice",
@@ -4192,9 +4903,31 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     connector = wizard_field_value(fields, "Connector") or "openclaw"
-    args, _display = connector_setup_command_for_mode(connector)
+    action = wizard_field_value(fields, "Action") or "setup"
+    if action == "batch":
+        out = ["setup", "--yes"]
+        for name in split_csv(wizard_field_value(fields, "Connectors (CSV)")):
+            out.extend(("--connector", name))
+        if wizard_bool_value(fields, "Detected Connectors", "no") == "yes":
+            out.append("--detected")
+        if wizard_bool_value(fields, "All Supported Connectors", "no") == "yes":
+            out.append("--all")
+        if mode := wizard_field_value(fields, "Guardrail Mode"):
+            out.extend(("--mode", mode))
+        if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
+            out.append("--no-restart")
+        return tuple(out)
+    if action == "remove":
+        out = ["setup", "remove", connector, "--yes"]
+        if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
+            out.append("--no-restart")
+        if wizard_bool_value(fields, "Force Last Connector Removal", "no") == "yes":
+            out.append("--force")
+        return tuple(out)
+
+    args, _display = connector_setup_command(connector)
     if not args:
-        args, _display = connector_setup_command_for_mode("openclaw")
+        args, _display = connector_setup_command("openclaw")
         connector = "openclaw"
     out = list(args)
     # ``--mode`` and ``--no-restart`` apply to every connector (proxy and
@@ -4213,6 +4946,10 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
         if wizard_bool_value(fields, "Verify After Setup", "yes") == "no":
             out.append("--no-verify")
         return tuple(out)
+    if wizard_bool_value(fields, "Replace Existing", "no") == "yes":
+        out.append("--replace")
+    if workspace_dir := wizard_field_value(fields, "Workspace Dir"):
+        out.extend(("--workspace", workspace_dir))
     if wizard_bool_value(fields, "Local Stack", "no") == "yes":
         out.append("--with-local-stack")
     return tuple(out)
@@ -4231,8 +4968,10 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
             args.append(env_name)
-        if secret := wizard_field_value(fields, "Secret Value", raw=True):
-            args.extend(("--value", secret))
+        # The secret value is intentionally NOT placed in argv (it would be
+        # visible in process listings). ``keys set`` reads it from a hidden
+        # stdin prompt instead; the value is carried on the intent's
+        # ``secret_stdin`` and written by the executor. See F-0801.
         return tuple(args)
     return ("keys", "list", "--json")
 
@@ -4320,6 +5059,293 @@ def _build_custom_provider_args(fields: Sequence[WizardFormField]) -> tuple[str,
     if wizard_bool_value(fields, "Reload Sidecar", "yes") == "no":
         args.append("--no-reload")
     return tuple(args)
+
+
+def _guardrail_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    """Active connectors to render per-connector guardrail groups for (B4).
+
+    Prefers the live ``Config.active_connectors()`` (multi-connector aware,
+    R1-clean) so every active hook connector gets an editable override group;
+    falls back to the ``guardrail.connectors`` map keys for dict-backed configs.
+    Connectors with an existing override are always included even when the
+    active set can't be resolved, so a configured override never becomes
+    invisible/uneditable.
+    """
+
+    names: list[str] = []
+    method = getattr(cfg, "active_connectors", None)
+    if callable(method):
+        try:
+            names = [str(n).strip() for n in method() if str(n).strip()]
+        except Exception:  # noqa: BLE001 - degrade to the map keys below.
+            names = []
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    override_keys = (
+        [str(k).strip() for k in overrides.keys() if str(k).strip()]
+        if isinstance(overrides, Mapping)
+        else []
+    )
+    # Merge, preserving active-set order then any override-only keys.
+    seen: set[str] = set()
+    merged: list[str] = []
+    for name in (*names, *override_keys):
+        if name and name not in seen:
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
+def _effective_guardrail_value(
+    cfg: object | Mapping[str, Any] | None, connector: str, method_name: str, fallback_path: str
+) -> str:
+    """Resolve a connector's *effective* guardrail value for display (B4).
+
+    Calls the matching ``GuardrailConfig.effective_*(connector)`` resolver so
+    the editor shows what the connector actually uses (its override, or the
+    inherited global). Falls back to the raw global path for dict-backed
+    configs that don't expose the resolver.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return str(resolver(connector) or "")
+        except Exception:  # noqa: BLE001 - degrade to the raw global value.
+            pass
+    return str(get_config_value(cfg, fallback_path, "") or "")
+
+
+def _effective_guardrail_bool(
+    cfg: object | Mapping[str, Any] | None,
+    connector: str,
+    method_name: str,
+    fallback_path: str,
+    *,
+    default: bool,
+) -> str:
+    """Resolve a connector's effective *boolean* guardrail value for display (B4).
+
+    The boolean sibling of :func:`_effective_guardrail_value`: calls the matching
+    ``GuardrailConfig.effective_*(connector)`` resolver and returns the canonical
+    ``"true"``/``"false"`` string the ``bool`` :class:`ConfigField` renders, so a
+    connector shows what it actually uses (its override, or the inherited
+    default). Falls back to the raw global path (then *default*) for dict-backed
+    configs that don't expose the resolver.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return "true" if resolver(connector) else "false"
+        except Exception:  # noqa: BLE001 - degrade to the raw global value.
+            pass
+    if fallback_path:
+        return "true" if get_config_value(cfg, fallback_path, default) else "false"
+    return "true" if default else "false"
+
+
+def _effective_hilt_block(cfg: object | Mapping[str, Any] | None, connector: str) -> object | None:
+    """Resolve a connector's effective HILT (human-approval) block (B4/E4d).
+
+    Returns the connector's override block when present, else the inherited
+    global block, via ``GuardrailConfig.effective_hilt(connector)`` — so the
+    editor shows the approval state the connector actually uses. Degrades to the
+    raw global ``guardrail.hilt`` (then ``None``) for dict-backed configs.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, "effective_hilt", None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return resolver(connector)
+        except Exception:  # noqa: BLE001 - degrade to the raw global block.
+            pass
+    return getattr(guardrail, "hilt", None) if guardrail is not None else None
+
+
+def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connector: str) -> str:
+    """Effective hook-lane judge state for *connector* (B4 — Flag #2 judge half).
+
+    Per-connector judge is membership in the ``guardrail.judge.hook_connectors``
+    gate list, not a :class:`PerConnectorGuardrailConfig` field. Returns
+    ``"true"`` when the gate covers this connector — either via the ``"*"``
+    every-connector sentinel or an explicit (fold/whitespace-tolerant) entry,
+    matching the Go gate (``JudgeConfig.HookConnectorEnabled``) the gateway
+    enforces and the CLI's ``_gate_is_all``/``_gate_contains``.
+    """
+
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
+    if not isinstance(gate, (list, tuple)):
+        return "false"
+    name = connector.strip().lower()
+    for entry in gate:
+        token = str(entry or "").strip()
+        if token == "*" or token.lower() == name:
+            return "true"
+    return "false"
+
+
+def _judge_hook_connectors_wizard_value(cfg: object | Mapping[str, Any] | None) -> str:
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
+    if not isinstance(gate, (list, tuple)):
+        return ""
+    tokens = [str(entry or "").strip() for entry in gate if str(entry or "").strip()]
+    if tokens == ["*"]:
+        return "all"
+    return ",".join(tokens)
+
+
+def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
+    """Build per-connector guardrail override groups for the config editor (B4).
+
+    One header + editable rows per active connector covering every per-connector
+    guardrail control: ``mode``, ``rule_pack_dir``, ``enabled`` (E4c),
+    ``hook_fail_mode``, ``hilt`` enable + min-severity, ``block_message`` (E4d),
+    and the hook-lane judge toggle (membership in
+    ``guardrail.judge.hook_connectors``). Each row displays the *effective* value
+    (the connector's override, or the inherited global) and is wired to the raw
+    per-connector path so editing it pins an override for that connector only —
+    the apply path (``setup_state._apply_per_connector_guardrail_field`` /
+    ``_apply_judge_hook_connector_toggle``) writes a typed override so the
+    boot-loop ``effective_*`` resolvers keep working.
+    """
+
+    keys = _guardrail_connector_keys(cfg)
+    if not keys:
+        return []
+    # Single-connector installs with no existing overrides have nothing to
+    # disambiguate — the global fields above already cover them — so skip the
+    # extra groups. (``guardrail.connectors`` defaults to an empty dict, so
+    # test for actual entries, not just "is a map".)
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    has_overrides = isinstance(overrides, Mapping) and len(overrides) > 0
+    if len(keys) < 2 and not has_overrides:
+        return []
+    rows: list[ConfigField] = [_header(".. Per-Connector Overrides ..")]
+    for connector in keys:
+        label = friendly_connector_name(connector) or connector
+        rows.append(_header(f".. {label} ({connector}) .."))
+        mode_field = _field(
+            cfg,
+            "Mode",
+            f"guardrail.connectors.{connector}.mode",
+            "choice",
+            ("observe", "action"),
+            f"Per-connector mode for {connector} (blank inherits the global mode).",
+        )
+        rows.append(
+            _field_with_original(
+                mode_field, _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+            )
+        )
+        pack_field = _field(
+            cfg,
+            "Rule Pack Dir",
+            f"guardrail.connectors.{connector}.rule_pack_dir",
+            hint=f"Per-connector rule pack for {connector} (blank inherits the global pack).",
+        )
+        rows.append(
+            _field_with_original(
+                pack_field,
+                _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir"),
+            )
+        )
+        # E4c: per-connector guardrail enable/disable. ``effective_enabled``
+        # defaults to True (an unset override inherits "enabled"), so there is
+        # no global path to fall back to — the default IS enabled.
+        enabled_field = _field(
+            cfg,
+            "Enabled",
+            f"guardrail.connectors.{connector}.enabled",
+            "bool",
+            hint=f"Per-connector guardrail switch for {connector} (off tears down its hooks; on by default).",
+        )
+        rows.append(
+            _field_with_original(
+                enabled_field,
+                _effective_guardrail_bool(cfg, connector, "effective_enabled", "", default=True),
+            )
+        )
+        # E4d: hook-response fail mode (open=allow on failure, closed=block).
+        fail_field = _field(
+            cfg,
+            "Hook Fail Mode",
+            f"guardrail.connectors.{connector}.hook_fail_mode",
+            "choice",
+            ("open", "closed"),
+            f"Per-connector hook fail mode for {connector} (inherits the global mode when unset).",
+        )
+        rows.append(
+            _field_with_original(
+                fail_field,
+                _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
+            )
+        )
+        # E4d: human-in-the-loop approval. A per-connector hilt block fully
+        # replaces the global one (see GuardrailConfig.effective_hilt), so show
+        # the effective block's enable + min-severity.
+        hilt_block = _effective_hilt_block(cfg, connector)
+        hilt_field = _field(
+            cfg,
+            "Human Approval",
+            f"guardrail.connectors.{connector}.hilt.enabled",
+            "bool",
+            hint=f"Ask before supported high-risk actions for {connector}.",
+        )
+        rows.append(
+            _field_with_original(
+                hilt_field,
+                "true" if getattr(hilt_block, "enabled", False) else "false",
+            )
+        )
+        sev_field = _field(
+            cfg,
+            "Approval Min Severity",
+            f"guardrail.connectors.{connector}.hilt.min_severity",
+            "choice",
+            ("HIGH", "MEDIUM", "LOW", "CRITICAL"),
+            f"Minimum severity for {connector} approval prompts.",
+        )
+        rows.append(
+            _field_with_original(
+                sev_field,
+                str(getattr(hilt_block, "min_severity", "") or ""),
+            )
+        )
+        # E4d: per-connector block message returned when a request is blocked.
+        block_field = _field(
+            cfg,
+            "Block Message",
+            f"guardrail.connectors.{connector}.block_message",
+            hint=f"Per-connector block message for {connector} (blank inherits the global message).",
+        )
+        rows.append(
+            _field_with_original(
+                block_field,
+                _effective_guardrail_value(cfg, connector, "effective_block_message", "guardrail.block_message"),
+            )
+        )
+        # Flag #2 (judge half): per-connector judge is membership in the
+        # guardrail.judge.hook_connectors LIST, not a PerConnectorGuardrailConfig
+        # field. The synthetic ``guardrail.judge.hook_connectors.<c>`` key routes
+        # to _apply_judge_hook_connector_toggle, which adds/removes this one name
+        # surgically (mirrors the CLI --judge-hook-connectors).
+        judge_field = _field(
+            cfg,
+            "LLM Judge (hook lane)",
+            f"guardrail.judge.hook_connectors.{connector}",
+            "bool",
+            hint=f"Add/remove {connector} from the hook-lane judge gate (guardrail.judge.hook_connectors).",
+        )
+        rows.append(
+            _field_with_original(
+                judge_field,
+                _effective_judge_hook_state(cfg, connector),
+            )
+        )
+    return rows
 
 
 def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
@@ -4442,6 +5468,11 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             cfg, "Tool Injection", "guardrail.judge.tool_injection", "bool", hint="Detect payloads in tool-call args."
         ),
     ]
+    # B4: per-connector override groups (mode, rule-pack, enabled, fail-mode,
+    # hilt, block-message, judge) so the connectors[...] map the boot loop
+    # actually reads is fully visible + editable, not just the singular/global
+    # fields above.
+    fields.extend(_per_connector_guardrail_fields(cfg))
     return ConfigSection("Guardrail", tuple(fields), "LLM-egress proxy and judge settings.")
 
 
@@ -4632,15 +5663,9 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
 
 def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     return (
-        _header(".. Globals .."),
+        _header(".. Process-wide policy .."),
         _field(cfg, "Enabled", "otel.enabled", "bool", hint="Master OpenTelemetry export switch."),
-        _field(cfg, "Protocol", "otel.protocol", "choice", ("grpc", "http/protobuf"), "Default OTLP transport."),
-        _field(cfg, "Endpoint", "otel.endpoint", hint="Default collector URL."),
-        _field(cfg, "TLS Insecure", "otel.tls.insecure", "bool", hint="Skip TLS verification."),
-        _field(cfg, "TLS CA Cert", "otel.tls.ca_cert", hint="Path to CA bundle."),
-        _field(cfg, "Headers", "otel.headers", hint="CSV key=value headers; values redacted in summaries."),
         _header(".. Traces .."),
-        _field(cfg, "Enabled", "otel.traces.enabled", "bool", hint="Export spans."),
         _field(
             cfg,
             "Sampler",
@@ -4657,18 +5682,7 @@ def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, .
             "Trace sampler.",
         ),
         _field(cfg, "Sampler Arg", "otel.traces.sampler_arg", hint="Trace sampler argument."),
-        _field(cfg, "Endpoint override", "otel.traces.endpoint", hint="Traces-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.traces.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Traces-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.traces.url_path", hint="HTTP path suffix."),
         _header(".. Logs .."),
-        _field(cfg, "Enabled", "otel.logs.enabled", "bool", hint="Export OTel log records."),
         _field(
             cfg,
             "Emit individual findings",
@@ -4676,34 +5690,13 @@ def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, .
             "bool",
             hint="One record per finding.",
         ),
-        _field(cfg, "Endpoint override", "otel.logs.endpoint", hint="Logs-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.logs.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Logs-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.logs.url_path", hint="HTTP path suffix."),
         _header(".. Metrics .."),
-        _field(cfg, "Enabled", "otel.metrics.enabled", "bool", hint="Export metrics."),
         _field(
             cfg, "Export interval (s)", "otel.metrics.export_interval_s", "int", hint="Seconds between metric pushes."
         ),
         _field(
             cfg, "Temporality", "otel.metrics.temporality", "choice", ("delta", "cumulative"), "Metric temporality."
         ),
-        _field(cfg, "Endpoint override", "otel.metrics.endpoint", hint="Metrics-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.metrics.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Metrics-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.metrics.url_path", hint="HTTP path suffix."),
         _header(".. Batch .."),
         _field(
             cfg, "Max export batch size", "otel.batch.max_export_batch_size", "int", hint="Max records per request."
@@ -4773,7 +5766,115 @@ def _asset_policy_fields(cfg: object | Mapping[str, Any] | None) -> tuple[Config
                     ),
                 ),
             )
+    fields.extend(_per_connector_asset_policy_fields(cfg))
     return tuple(fields)
+
+
+def _asset_policy_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    names = _active_connector_names_for_setup(cfg)
+    overrides = get_config_value(cfg, "asset_policy.connectors", None)
+    override_keys = (
+        [str(key).strip().lower() for key in overrides if str(key).strip()]
+        if isinstance(overrides, Mapping)
+        else []
+    )
+    seen: set[str] = set()
+    merged: list[str] = []
+    for name in (*names, *override_keys):
+        normalized = name.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            merged.append(normalized)
+    return merged
+
+
+def _effective_asset_policy_mode(cfg: object | Mapping[str, Any] | None, connector: str) -> str:
+    asset_policy = get_config_value(cfg, "asset_policy", None)
+    effective = getattr(asset_policy, "effective_mode", None)
+    if callable(effective):
+        try:
+            return str(effective(connector) or "observe")
+        except Exception:  # noqa: BLE001 - fall back to mapping-style lookup.
+            pass
+    override = str(get_config_value(cfg, f"asset_policy.connectors.{connector}.mode", "") or "").strip()
+    return override or str(get_config_value(cfg, "asset_policy.mode", "observe") or "observe")
+
+
+def _effective_asset_policy_value(
+    cfg: object | Mapping[str, Any] | None,
+    connector: str,
+    asset_type: str,
+    leaf: str,
+) -> str:
+    asset_policy = get_config_value(cfg, "asset_policy", None)
+    effective = getattr(asset_policy, "effective_asset_type_policy", None)
+    if callable(effective):
+        try:
+            policy = effective(connector, asset_type)
+            value = getattr(policy, leaf, "") if policy is not None else ""
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return str(value or "")
+        except Exception:  # noqa: BLE001 - fall back to mapping-style lookup.
+            pass
+    if leaf == "registry_required":
+        override = get_config_value(cfg, f"asset_policy.connectors.{connector}.{asset_type}.{leaf}", None)
+        if isinstance(override, bool):
+            return "true" if override else "false"
+        base = bool(get_config_value(cfg, f"asset_policy.{asset_type}.{leaf}", False))
+        return "true" if base else "false"
+    override = str(get_config_value(cfg, f"asset_policy.connectors.{connector}.{asset_type}.{leaf}", "") or "")
+    if override:
+        return override
+    default = "deny" if leaf == "registry_empty_action" else "allow"
+    return str(get_config_value(cfg, f"asset_policy.{asset_type}.{leaf}", default) or default)
+
+
+def _per_connector_asset_policy_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
+    keys = _asset_policy_connector_keys(cfg)
+    if not keys:
+        return []
+    overrides = get_config_value(cfg, "asset_policy.connectors", None)
+    has_overrides = isinstance(overrides, Mapping) and len(overrides) > 0
+    if len(keys) < 2 and not has_overrides:
+        return []
+
+    rows: list[ConfigField] = [_header(".. Per-Connector Overrides ..")]
+    for connector in keys:
+        label = friendly_connector_name(connector) or connector
+        rows.append(_header(f".. {label} ({connector}) .."))
+        rows.append(
+            ConfigField(
+                "Mode",
+                f"asset_policy.connectors.{connector}.mode",
+                "choice",
+                _effective_asset_policy_mode(cfg, connector),
+                _effective_asset_policy_mode(cfg, connector),
+                ("", "observe", "action"),
+                f"Per-connector asset-policy mode for {connector}; blank inherits the global mode.",
+            )
+        )
+        for asset_type in ("skill", "mcp", "plugin"):
+            asset_label = asset_type.upper() if asset_type == "mcp" else asset_type.title()
+            rows.append(_header(f".. {label} {asset_label} .."))
+            for field_label, leaf, options in (
+                ("Default", "default", ("", "allow", "deny")),
+                ("Registry Required", "registry_required", ("", "true", "false")),
+                ("Empty Registry Action", "registry_empty_action", ("", "deny", "warn", "allow", "block")),
+            ):
+                value = _effective_asset_policy_value(cfg, connector, asset_type, leaf)
+                rows.append(
+                    ConfigField(
+                        field_label,
+                        f"asset_policy.connectors.{connector}.{asset_type}.{leaf}",
+                        "choice",
+                        value,
+                        value,
+                        options,
+                        f"{asset_label} override for {connector}; blank inherits the global {asset_type} policy.",
+                    )
+                )
+    return rows
 
 
 def _agent_hook_fields(cfg: object | Mapping[str, Any] | None, label: str, prefix: str) -> tuple[ConfigField, ...]:
@@ -4888,6 +5989,71 @@ def _webhook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[Con
     return tuple(out)
 
 
+def _trusted_paths_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """Read-only summary of the binary-discovery trusted-prefix allow-list.
+
+    Mutations go through the CLI (``defenseclaw setup trusted-paths ...``) so
+    the TUI, the inline setup prompt, and the discovery gate all share a single
+    persistence path and can't drift. We reuse ``_collect_trusted_prefixes`` —
+    the exact view the CLI renders — so the panel can never disagree with it.
+    """
+    from defenseclaw.commands.cmd_setup import _collect_trusted_prefixes  # noqa: PLC0415
+
+    data_dir = ""
+    for attr in ("data_dir", "config_dir", "home"):
+        val = getattr(cfg, attr, "")
+        if isinstance(val, str) and val:
+            data_dir = val
+            break
+    if not data_dir:
+        data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
+
+    try:
+        rows = _collect_trusted_prefixes(data_dir)
+    except Exception:
+        rows = []
+
+    defaults = [r for r in rows if r.get("source") == "default"]
+    operator = [r for r in rows if r.get("source") != "default"]
+    present = sum(1 for r in defaults if r.get("status") == "ok")
+
+    # NOTE: the *proactive* "which connectors are in an untrusted dir" highlight
+    # lives in the interactive editor (TrustedPathsEditorScreen), opened from
+    # this section. We deliberately do NOT run connector discovery here — this
+    # builder feeds the static Setup panel that re-renders on every refresh, so
+    # a subprocess discovery pass would be both slow and host-dependent.
+    out: list[ConfigField] = [
+        _header(
+            "Built-in defaults",
+            "trusted_paths.defaults",
+            f"{len(defaults)} default prefixes, {present} present on this host",
+        )
+    ]
+    if operator:
+        for index, row in enumerate(operator):
+            # Escape the opening bracket so Rich renders ``[src/status]`` as
+            # literal text rather than parsing it as a style tag (which would
+            # crash the panel — see the webhook summary note above).
+            summary = f"\\[{row.get('source')}/{row.get('status')}] {row.get('resolved')}"
+            out.append(_header(f"Operator path {index + 1}", f"trusted_paths.op.{index}", summary))
+    else:
+        out.append(
+            _header(
+                "Operator-added",
+                "trusted_paths.operator",
+                "none — all trust comes from built-in defaults",
+            )
+        )
+    out.append(
+        _header(
+            "How to edit",
+            "trusted_paths.hint",
+            "defenseclaw setup trusted-paths add|remove <dir>",
+        )
+    )
+    return tuple(out)
+
+
 def _cisco_ai_defense_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     return (
         _field(cfg, "Endpoint", "cisco_ai_defense.endpoint", hint="Cisco AI Defense API endpoint."),
@@ -4959,18 +6125,13 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}:
+    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}:
         return normalized
     return ""
 
 
 def _connector_hook_label(name: str) -> str:
-    return {
-        "codex": "Codex",
-        "claudecode": "Claude Code",
-        "zeptoclaw": "ZeptoClaw",
-        "openclaw": "OpenClaw",
-    }.get(name, name[:1].upper() + name[1:] if name else "Connector")
+    return friendly_connector_name(name) if name else "Connector"
 
 
 def _bifrost_providers() -> tuple[str, ...]:

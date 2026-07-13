@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -28,6 +29,7 @@ from defenseclaw.registries.ssrf import (
     SSRFError,
     guard_git_url,
     guard_url,
+    pinned_getaddrinfo,
     resolve_and_pin,
 )
 
@@ -104,12 +106,28 @@ class TestPrivateRanges(unittest.TestCase):
                         resolver=stub({"loop.example": [ip]}),
                     )
 
+    def test_loopback_allowed_when_opted_in(self):
+        for ip in ("127.0.0.1", "::1"):
+            with self.subTest(ip=ip):
+                guard_url(
+                    "https://loop.example/m",
+                    allow_private=True,
+                    resolver=stub({"loop.example": [ip]}),
+                )
+
     def test_link_local_blocked(self):
         with self.assertRaises(SSRFError):
             guard_url(
                 "https://ll.example/m",
                 resolver=stub({"ll.example": ["169.254.169.254"]}),
             )
+
+    def test_link_local_allowed_when_opted_in(self):
+        guard_url(
+            "https://ll.example/m",
+            allow_private=True,
+            resolver=stub({"ll.example": ["fe80::1"]}),
+        )
 
     def test_rfc1918_blocked_by_default(self):
         for ip in ("10.0.0.1", "192.168.1.1", "172.16.0.1"):
@@ -145,6 +163,78 @@ class TestPrivateRanges(unittest.TestCase):
             guard_url(
                 "https://zero.example/m",
                 resolver=stub({"zero.example": ["0.0.0.0"]}),
+            )
+
+    # --- CGNAT / RFC 6598 ----------------------------------------------
+    # Python's ``ipaddress.is_private`` predates RFC 6598 and does NOT
+    # cover 100.64.0.0/10, so the previous implementation accepted CGNAT
+    # webhook URLs at config-time even though the Go-side dial guard
+    # blocks them at runtime. These tests pin the validator-parity fix:
+    # CGNAT is rejected by default, the existing ``--allow-private``
+    # opt-in still wins, and a CGNAT-aware operator can flip the
+    # dedicated ``DEFENSECLAW_ALLOW_CGNAT=1`` env switch the Go side
+    # honours.
+
+    def test_cgnat_blocked_by_default(self):
+        for ip in ("100.64.0.5", "100.99.42.7", "100.127.255.254"):
+            with self.subTest(ip=ip):
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+                    with self.assertRaises(SSRFError) as cm:
+                        guard_url(
+                            "https://tail.example/m",
+                            resolver=stub({"tail.example": [ip]}),
+                        )
+                    self.assertIn("CGNAT", str(cm.exception))
+
+    def test_cgnat_allowed_with_env_optin(self):
+        with patch.dict(os.environ, {"DEFENSECLAW_ALLOW_CGNAT": "1"}):
+            guard_url(
+                "https://tail.example/m",
+                resolver=stub({"tail.example": ["100.64.0.5"]}),
+            )
+
+    def test_cgnat_allowed_with_allow_private(self):
+        # --allow-private already meant "yes I know this looks
+        # internal" — CGNAT should ride along with it so operators
+        # don't have to set two flags to authorise one decision.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            guard_url(
+                "https://corp.example/m",
+                allow_private=True,
+                resolver=stub({"corp.example": ["100.64.0.5"]}),
+            )
+
+    def test_cgnat_boundary_addresses(self):
+        # First and last address of 100.64.0.0/10 (100.64.0.0 .. 100.127.255.255).
+        # 100.63.255.255 sits one octet below the block and must NOT be
+        # treated as CGNAT.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            for ip in ("100.64.0.0", "100.127.255.255"):
+                with self.subTest(ip=ip, expected="blocked"):
+                    with self.assertRaises(SSRFError):
+                        guard_url(
+                            "https://b.example/m",
+                            resolver=stub({"b.example": [ip]}),
+                        )
+            # 100.63.255.255 is just outside CGNAT and is globally
+            # routable; the guard must let it through.
+            guard_url(
+                "https://just-below.example/m",
+                resolver=stub({"just-below.example": ["100.63.255.255"]}),
+            )
+
+    def test_cgnat_check_v4_only(self):
+        # 64:ff9b::/96 is NAT64; it isn't CGNAT and must not get caught
+        # by the v4 CGNAT regex masquerading as a v6 address.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            # Pure public IPv6 must still pass.
+            guard_url(
+                "https://v6.example/m",
+                resolver=stub({"v6.example": ["2606:4700::1"]}),
             )
 
 
@@ -216,6 +306,58 @@ class TestGitGuard(unittest.TestCase):
     def test_file_url_rejected(self):
         with self.assertRaises(SSRFError):
             guard_git_url("file:///srv/registry.git")
+
+
+class TestPinnedGetaddrinfo(unittest.TestCase):
+    """F-0344: the getaddrinfo pin closes the DNS-rebind TOCTOU window for
+    clients (e.g. the async-httpx MCP scanner SDK) that re-resolve the host
+    at connect time instead of honouring a urllib3-level connect pin."""
+
+    def test_pinned_host_resolves_to_vetted_ip(self):
+        import socket
+
+        # Inside the pin, a lookup for the vetted host returns the pinned
+        # IP — NOT whatever a (rebinding) DNS would now answer.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo("rebind.example", 443)
+        addrs = {info[4][0] for info in infos}
+        self.assertEqual(addrs, {"93.184.216.34"})
+
+    def test_unexpected_host_is_refused(self):
+        import socket
+
+        # A side-channel lookup for a *different* host during the pinned
+        # operation is refused, so a library cannot escape to an unvetted
+        # (and possibly internal) destination mid-request.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            with self.assertRaises(SSRFError):
+                socket.getaddrinfo("evil.internal", 443)
+
+    def test_getaddrinfo_restored_after_block(self):
+        import socket
+
+        original = socket.getaddrinfo
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            pass
+        self.assertIs(socket.getaddrinfo, original)
+
+    def test_getaddrinfo_restored_on_exception(self):
+        import socket
+
+        original = socket.getaddrinfo
+        with self.assertRaises(RuntimeError):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                raise RuntimeError("boom")
+        self.assertIs(socket.getaddrinfo, original)
+
+    def test_ip_literal_matching_pin_is_allowed(self):
+        import socket
+
+        # A client that pre-resolves and re-calls getaddrinfo with the IP
+        # literal equal to the pin is allowed through.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo("93.184.216.34", 443)
+        self.assertTrue(infos)
 
 
 if __name__ == "__main__":

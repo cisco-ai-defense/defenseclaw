@@ -27,6 +27,7 @@ import re
 from datetime import datetime, timezone
 
 from defenseclaw.scanner.plugin_scanner.rules import (
+    BINARY_EXTENSIONS,
     DEPRIORITIZED_PATH_PATTERNS,
     TAXONOMY_MAP,
 )
@@ -129,8 +130,13 @@ def downgrade(severity: str) -> str:
 
 # Directories that are always safe to skip (build artifacts, VCS, IDE config,
 # and Python virtual environments).
+# `dist/` was previously skipped unconditionally, but
+# many npm plugins point `package.json.main` at `dist/index.js` and
+# malicious shipped JavaScript can hide there while the source
+# analyzer sees nothing. We no longer skip `dist/` so source rules
+# apply to runtime entrypoints.
 _SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules", "dist", "coverage",
+    "node_modules", "coverage",
     ".git", ".svn", ".hg",
     ".vscode", ".idea",
     ".tox", "__pycache__", ".mypy_cache",
@@ -250,6 +256,160 @@ def collect_files(
             continue
 
     return files
+
+
+def audit_skipped_dirs_for_native(
+    directory: str,
+    max_depth: int = _MAX_DEPTH,
+    _depth: int = 0,
+    *,
+    _scan_root: str | None = None,
+    _in_skipped: bool = False,
+) -> list[Finding]:
+    """Flag native/binary payloads hidden under normally-skipped directories.
+
+    F-1907: :func:`collect_files` (and the directory-structure scanner)
+    blanket-skip ``node_modules``/``.git`` and the other ``_SKIP_DIRS``.
+    That blind spot let a malicious plugin stash a native addon under one
+    of them (e.g. a dependency loader in ``node_modules`` that ``require``s
+    a ``.node``/``.so`` payload kept in ``.git``) and evade BOTH source and
+    binary scanning.
+
+    Rather than fully un-skipping those trees (which would explode cost and
+    false positives on legitimate dependency source), this walks INTO each
+    skipped directory and reports ONLY files whose extension is in
+    :data:`BINARY_EXTENSIONS` (``.exe``/``.so``/``.dylib``/``.wasm``/``.dll``/
+    ``.node``). A compiled native module never legitimately lives inside a
+    VCS object store or build cache, so the signal is high and the
+    false-positive surface tiny. Findings use a dedicated
+    ``STRUCT-NATIVE-IN-SKIPDIR`` rule so the historical "skip VCS/cache dirs
+    for ordinary structure checks" behaviour (and the
+    ``STRUCT-BINARY``-based tests) is preserved.
+
+    Symlinks are never followed (containment / cycle safety) and the same
+    depth cap as the collector bounds traversal cost.
+    """
+    if _scan_root is None:
+        _scan_root = os.path.realpath(directory)
+    if _depth >= max_depth:
+        return []
+
+    findings: list[Finding] = []
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return findings
+
+    for entry in entries:
+        full_path = os.path.join(directory, entry)
+        try:
+            if os.path.islink(full_path):
+                continue
+            if os.path.isdir(full_path):
+                # Descend once we are inside (or entering) a skipped dir;
+                # outside skipped dirs we only recurse looking for the next
+                # skipped dir so we don't re-walk the entire source tree.
+                entering_skipped = _in_skipped or entry in _SKIP_DIRS
+                if not _in_skipped and entry not in _SKIP_DIRS:
+                    # Keep hunting for a skipped dir nested deeper (e.g.
+                    # ``a/b/node_modules``) without auditing ordinary files.
+                    findings.extend(
+                        audit_skipped_dirs_for_native(
+                            full_path, max_depth, _depth + 1, _scan_root=_scan_root, _in_skipped=False
+                        )
+                    )
+                    continue
+                findings.extend(
+                    audit_skipped_dirs_for_native(
+                        full_path, max_depth, _depth + 1, _scan_root=_scan_root, _in_skipped=entering_skipped
+                    )
+                )
+                continue
+            if not _in_skipped:
+                continue
+            dot_idx = entry.rfind(".")
+            ext = entry[dot_idx:] if dot_idx >= 0 else ""
+            if ext in BINARY_EXTENSIONS:
+                rel = full_path.replace(_scan_root + os.sep, "").replace(os.sep, "/")
+                findings.append(
+                    make_finding(
+                        len(findings) + 1,
+                        rule_id="STRUCT-NATIVE-IN-SKIPDIR",
+                        severity="HIGH",
+                        confidence=0.85,
+                        title=f"Native payload hidden in skipped directory: {entry}",
+                        evidence=f"File: {rel}",
+                        description=(
+                            f'Plugin hides a native/binary file "{entry}" inside a directory the scanner '
+                            "normally skips (node_modules, .git, etc.). Stashing a native addon under a "
+                            "skipped directory and loading it from a dependency is a known way to evade "
+                            "both source and binary scanning (F-1907)."
+                        ),
+                        location=rel,
+                        remediation=(
+                            "Remove native binaries from node_modules/.git and other build/VCS directories. "
+                            "Plugins should contain only auditable source code."
+                        ),
+                        tags=["supply-chain"],
+                    )
+                )
+        except OSError:
+            continue
+
+    return findings
+
+
+def resolve_entrypoint_files(directory: str, entrypoints: list[str] | None) -> list[str]:
+    """Resolve declared manifest entrypoints to existing files in *directory*.
+
+    ``package.json`` ``main``/``bin`` (and connector-manifest entrypoints)
+    routinely point at extensionless launchers (e.g. ``bin/cli``) or files
+    under directories that :func:`collect_files` skips (e.g. a ``main`` under
+    ``node_modules``). Those runtime files must still be scanned, so callers
+    use this to force-include the specific resolved files in source / LLM
+    analysis regardless of extension allow-lists or ``_SKIP_DIRS``.
+
+    Each entrypoint is treated as a path relative to the plugin directory.
+    Resolved paths that escape the plugin root (via ``..`` or symlinks) are
+    dropped for containment. Returned paths are anchored under *directory*
+    (so callers can derive a stable relative path), de-duplicated by their
+    real path.
+    """
+    if not entrypoints:
+        return []
+
+    scan_root = os.path.realpath(directory)
+    resolved: list[str] = []
+    seen_real: set[str] = set()
+
+    for raw in entrypoints:
+        if not isinstance(raw, str):
+            continue
+        rel = raw.strip()
+        if not rel:
+            continue
+        # Strip a leading "./" and any leading separators so the entry can
+        # never be interpreted as an absolute path that escapes the plugin.
+        rel = rel.lstrip("/")
+        candidate = os.path.join(directory, rel)
+        try:
+            real = os.path.realpath(candidate)
+        except OSError:
+            continue
+        # Containment: resolved file must stay inside the plugin root.
+        if real != scan_root and not real.startswith(scan_root + os.sep):
+            continue
+        try:
+            if not os.path.isfile(candidate):
+                continue
+        except OSError:
+            continue
+        if real in seen_real:
+            continue
+        seen_real.add(real)
+        resolved.append(candidate)
+
+    return resolved
 
 
 def check_lockfile_presence(directory: str) -> bool:

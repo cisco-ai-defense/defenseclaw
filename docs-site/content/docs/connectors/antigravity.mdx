@@ -1,6 +1,6 @@
 ---
 title: Antigravity
-description: Antigravity (`agy`) connector wires DefenseClaw into Google's Antigravity CLI via all five 2.0 lifecycle hooks (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) in ~/.gemini/config/hooks.json, with native ask/deny decisions that override --dangerously-skip-permissions.
+description: Antigravity (`agy`) connector registers all five 2.0 lifecycle hooks in ~/.gemini/config/hooks.json; the empirically verified PreToolUse event provides native ask/deny decisions that override --dangerously-skip-permissions.
 keywords:
   - DefenseClaw Antigravity connector
   - Antigravity hooks
@@ -46,7 +46,7 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 
-Pinned by the alias regardless of flags: `claw.mode=antigravity`, `guardrail.connector=antigravity`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. `claw.workspace_dir` is always cleared — Antigravity setup is global by design. `guardrail.mode` defaults to `observe` and changes to `action` only when `--mode action` is passed. To tune the broader guardrail matrix after install, use [`defenseclaw setup guardrail --connector antigravity`](/docs/setup/guardrail).
+`setup antigravity` is shorthand for `setup guardrail --connector antigravity`: it adds or reconfigures Antigravity, defaults the connector to observe mode, and can join an existing hook-connector roster when you choose **Add**. `claw.workspace_dir` is always cleared — Antigravity setup is global by design. `guardrail.mode` changes to `action` only when `--mode action` is passed. To tune Antigravity after install, keep using [`defenseclaw setup guardrail --connector antigravity`](/docs/setup/guardrail).
 
 #### Version contract
 
@@ -56,17 +56,17 @@ The current contract is `antigravity-hooks-v2` (hook script `v7`), which expande
 
 ## Lifecycle events
 
-DefenseClaw participates in the full Antigravity 2.0 hook lifecycle. Each event maps to a different DefenseClaw inspection role and a different wire response shape:
+DefenseClaw registers the full Antigravity 2.0 hook lifecycle. Only `PreToolUse` is currently advertised through the runtime capability gate as block/ask-capable; the remaining registrations preserve spec parity and telemetry without claiming enforcement that has not been verified.
 
 | Event | When it fires | DefenseClaw role | Action verdict → wire shape |
 | --- | --- | --- | --- |
-| `PreInvocation` | Just before the agent calls the LLM | Inspect prompt + transcript before the model sees them; can block harmful prompts | `block` → `{decision: "deny"}`, `confirm` → `{decision: "ask"}`, `alert` → `{systemMessage}` |
-| `PreToolUse` | Right before a tool (`run_command`, `replace_file_content`, etc.) executes | Validate / transform tool args; intercept risky commands | Same as `PreInvocation`. Empirically verified end-to-end on agy v1.0.1. |
+| `PreInvocation` | Just before the agent calls the LLM | Registered for spec parity and telemetry; not currently advertised as block/ask-capable | Non-blocking until upstream event behavior is empirically verified |
+| `PreToolUse` | Right before a tool (`run_command`, `replace_file_content`, etc.) executes | Validate tool args; intercept risky commands | `block` → `{decision: "deny"}`, `confirm` → `{decision: "ask"}`, `alert` → `{systemMessage}`; empirically verified on agy v1.0.1 |
 | `PostToolUse` | Immediately after a tool finishes execution | Capture diagnostics; flag PII / secrets in tool output. **Cannot block** — tool already ran. | `alert` → `{additionalContext: "..."}` for next-turn ingestion |
 | `PostInvocation` | After the LLM call + all associated tool calls finish | Post-process model output; flag policy violations in the response. **Cannot block** — response already generated. | `alert` → `{additionalContext: "..."}` |
-| `Stop` | When the agent's main execution loop is about to terminate | Final repository validation; spec phrasing: "block-terminating the agent if validation checks fail." | `block` → `{decision: "block"}` (distinct verb from Pre* events; agy's Claude-Code lineage uses "block" for stop hooks), `alert` → `{systemMessage}` |
+| `Stop` | When the agent's main execution loop is about to terminate | Registered for spec parity and telemetry | Non-blocking until upstream Stop behavior is empirically verified |
 
-`Post*` events never emit `deny` or `ask` because the inspected action has already executed at the agent layer; instead, findings surface as `additionalContext`, which Antigravity injects into the next LLM call as model-readable context.
+`Post*` events never emit `deny` or `ask` because the inspected action has already executed at the agent layer. If agy emits those registered events, DefenseClaw's response shaper uses `additionalContext` for the next turn.
 
 ## Hook schema
 
@@ -102,23 +102,42 @@ DefenseClaw writes the Claude-Code-compatible nested schema agy v1.0.x evaluates
 }
 ```
 
-The `command` field is a **bare absolute path** — agy v1.0.x invokes hooks via direct `exec()` (not through a shell), so any embedded quote characters would be interpreted as literal path bytes and the hook would silently no-fire. Operators with whitespace in their `$DEFENSECLAW_HOME` should override the data dir to a whitespace-free path.
+The `command` field is a **bare absolute path** — agy v1.0.x invokes hooks via direct `exec()` (not through a shell), so any embedded quote characters would be interpreted as literal path bytes and the hook would silently no-fire. Operators with whitespace in their home path should set `DEFENSECLAW_HOME` to a whitespace-free directory before setup.
 
-When DefenseClaw blocks on a Pre* event, the hook script returns a flat JSON envelope on stdout:
+When DefenseClaw blocks on the verified `PreToolUse` event, the hook script returns a flat JSON envelope on stdout:
 
 ```json
 { "decision": "deny", "reason": "policy denied" }
 ```
 
-Antigravity also recognizes a native `"ask"` decision that pauses the agent and prompts the operator. A returned `"ask"` decision **bypasses `--dangerously-skip-permissions`**, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. DefenseClaw maps confirm verdicts to `{"decision":"ask"}` for that reason. The literal string `"force_ask"` is intentionally not emitted on the wire because `agy` v1.0.0 does not recognize it; the conceptual `force_ask` distinction is preserved in the internal `raw_action` audit field for telemetry only.
+On the verified `PreToolUse` surface, Antigravity recognizes a native `"ask"` decision that pauses the agent and prompts the operator. A returned `"ask"` decision **bypasses `--dangerously-skip-permissions`**. DefenseClaw maps eligible confirm verdicts to `{"decision":"ask"}` on that event. The literal string `"force_ask"` is intentionally not emitted because `agy` v1.0.0 does not recognize it; the conceptual distinction is preserved in internal `raw_action` telemetry only.
 
-For Stop events, DefenseClaw emits `{"decision":"block","reason":"..."}` per the spec's "block-terminating the agent if validation checks fail" phrasing — the wire verb differs from the Pre* events' `"deny"` because Stop's block prevents loop termination rather than preventing an action.
+The response shaper contains the spec-conformant Stop `{"decision":"block"}` form, but the current capability gate does not classify Stop as blockable. That keeps the docs and advertised enforcement contract pinned to empirically verified behavior.
 
 ## Local surfaces
 
 <Files>
   <Folder name="~/.gemini/config" defaultOpen>
     <File name="hooks.json" />
+    <File name="mcp_config.json" />
+    <Folder name="skills">
+      <Folder name="<skill>">
+        <File name="SKILL.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+  <Folder name="<workspace>/.agents">
+    <File name="mcp_config.json" />
+    <Folder name="skills">
+      <Folder name="<skill>">
+        <File name="SKILL.md" />
+      </Folder>
+    </Folder>
+    <Folder name="plugins">
+      <Folder name="<plugin>">
+        <File name="plugin.json" />
+      </Folder>
+    </Folder>
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
@@ -127,9 +146,9 @@ For Stop events, DefenseClaw emits `{"decision":"block","reason":"..."}` per the
   </Folder>
 </Files>
 
-Antigravity v1 publishes only the hooks surface in its documented configuration. MCP servers, skills, rules, plugins, and agent assets are not exposed as documented local-install surfaces yet, so DefenseClaw treats those as unsupported for Antigravity and hides the corresponding panels while `claw.mode=antigravity`. If Google publishes additional install contracts, DefenseClaw will surface them through a contract bump.
+Antigravity now publishes MCP, skills, rules, and plugin customization surfaces in addition to hooks. DefenseClaw writes hooks only to the global `~/.gemini/config/hooks.json` path, reads and writes MCP servers from `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`, and supports the AgentSkills folder form under `skills/<skill>/SKILL.md`. CLI direct-markdown skills, rules, plugins, and plugin-contained agents are treated as discovery/scan surfaces until Google publishes enough install and lifecycle semantics for DefenseClaw to mutate them safely.
 
-`claw.workspace_dir` is intentionally not honored by Antigravity setup. Antigravity merges discovered `hooks.json` files from the global, project, and legacy locations, so layering DefenseClaw across multiple files would cause duplicate hook firings.
+`claw.workspace_dir` is intentionally not honored by Antigravity hook setup. Antigravity merges discovered `hooks.json` files from the global, project, and legacy locations, so layering DefenseClaw hooks across multiple files would cause duplicate hook firings. Workspace MCP and asset discovery still use the workspace paths above when a workspace is explicitly selected.
 
 The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook location it is using.
 
@@ -138,7 +157,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="antigravity" />
 
 <Callout>
-Antigravity is the first DefenseClaw connector with a native unbypassable user-prompt primitive. Returning `decision=ask` from a hook overrides Antigravity's `--dangerously-skip-permissions` flag, so high-severity confirm verdicts cannot be silently auto-approved. Lower-severity confirm verdicts still surface as `raw_action: "confirm"` in the audit log.
+Antigravity's verified `PreToolUse` event has a native unbypassable ask primitive. Returning `decision=ask` there overrides `--dangerously-skip-permissions`, so eligible confirm verdicts cannot be silently auto-approved. Do not assume that guarantee for the other four registered lifecycle events until their upstream behavior is verified.
 </Callout>
 
 ## Disable

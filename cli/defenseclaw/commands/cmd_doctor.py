@@ -23,9 +23,13 @@ misconfiguration before the user discovers them at runtime.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
+import re
+import shlex
 import shutil
+import ssl
 import subprocess
 import urllib.error
 import urllib.parse
@@ -35,7 +39,10 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.connector_paths import omnigent_config_path
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.envvars import active_security_overrides
+from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -57,7 +64,7 @@ def _doctor_subsection(title: str) -> None:
 
     Format: blank line, then ``  ── <title> ──`` with the title bold
     and the box-drawing dashes dimmed in TTY mode. Plain mode keeps
-    the legacy uncolored layout so cron logs and log shippers see
+    The legacy uncolored layout so cron logs and log shippers see
     the same byte stream they always have.
     """
     click.echo()
@@ -195,6 +202,21 @@ _label_suffix = ""
 
 
 @contextlib.contextmanager
+def _capture_stdout_when_json():
+    """Keep third-party probe chatter from corrupting ``--json-output``.
+
+    Some optional provider SDKs print helper text directly to stdout instead
+    of returning it to us. In JSON mode stdout is the machine-readable result
+    channel, so the final ``json.dumps`` below must be the only stdout write.
+    """
+    if not _json_mode:
+        yield
+        return
+    with contextlib.redirect_stdout(io.StringIO()):
+        yield
+
+
+@contextlib.contextmanager
 def _doctor_label_suffix(suffix: str):
     """Append ``suffix`` to every :func:`_emit` row label within the block."""
     global _label_suffix
@@ -277,13 +299,185 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
+_GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
+    "codex": {
+        "codex-hook.sh": ("defenseclaw_response_failure_reason",),
+        "_hardening.sh": (
+            "defenseclaw_response_failure_reason",
+            "possible token drift",
+        ),
+    },
+    "claudecode": {
+        "claude-code-hook.sh": ("defenseclaw_response_failure_reason",),
+        "_hardening.sh": (
+            "defenseclaw_response_failure_reason",
+            "possible token drift",
+        ),
+    },
+}
+
+
+_GENERATED_HOOK_REGEN_COMMANDS: dict[str, str] = {
+    "codex": "defenseclaw setup codex --yes --restart",
+    "claudecode": "defenseclaw setup claude-code --yes --restart",
+}
+
+
+def _registered_hook_script_paths(
+    settings: dict,
+    script_name: str,
+) -> list[str]:
+    """Extract registered hook script paths from an agent settings object."""
+    paths: list[str] = []
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return paths
+
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
+            if not isinstance(hook_list, list):
+                continue
+            for hook in hook_list:
+                cmd = hook.get("command", "") if isinstance(hook, dict) else ""
+                if not isinstance(cmd, str) or script_name not in cmd:
+                    continue
+                try:
+                    tokens = shlex.split(cmd)
+                except ValueError:
+                    tokens = [cmd]
+                match = next((tok for tok in tokens if script_name in tok), cmd)
+                paths.append(os.path.abspath(os.path.expanduser(match)))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            deduped.append(path)
+    return deduped
+
+
+def _stale_generated_hook_reasons(
+    cfg,
+    connector: str,
+    *,
+    hook_script_paths: list[str] | None = None,
+) -> list[str]:
+    """Return stale/missing generated-hook diagnostics for *connector*.
+
+    Generated hooks live outside the package in ``cfg.data_dir/hooks``.
+    When a user updates the source/venv but the gateway has not been
+    restarted yet, Codex/Claude can still execute an older script. This
+    check intentionally looks for tiny, non-secret template sentinels
+    rather than comparing whole files, because setup renders runtime
+    values into the scripts.
+    """
+    connector = (connector or "").lower()
+    sentinels = _GENERATED_HOOK_SENTINELS.get(connector)
+    if not sentinels:
+        return []
+
+    hook_dir = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks")
+    reasons: list[str] = []
+
+    expected_script_paths = {
+        filename: os.path.abspath(os.path.join(hook_dir, filename))
+        for filename in sentinels
+        if filename.endswith(".sh") and filename != "_hardening.sh"
+    }
+    script_path_overrides = [os.path.abspath(p) for p in (hook_script_paths or []) if p]
+
+    for filename, needles in sentinels.items():
+        expected_path = os.path.abspath(os.path.join(hook_dir, filename))
+        if filename in expected_script_paths and script_path_overrides:
+            paths = script_path_overrides
+        elif filename == "_hardening.sh" and script_path_overrides:
+            paths = [os.path.join(os.path.dirname(path), filename) for path in script_path_overrides]
+        else:
+            paths = [expected_path]
+
+        for path in paths:
+            path = os.path.abspath(path)
+            display = filename if path == expected_path else f"{filename} at {path}"
+            if filename in expected_script_paths and path != expected_path:
+                reasons.append(f"{filename} registered at {path}; expected {expected_path}")
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except FileNotFoundError:
+                reasons.append(f"{display} missing")
+                continue
+            except OSError as exc:
+                reasons.append(f"{display} unreadable: {exc}")
+                continue
+
+            missing = [needle for needle in needles if needle not in text]
+            if missing:
+                reasons.append(f"{display} missing {', '.join(missing)}")
+    return reasons
+
+
+def _check_generated_hook_freshness(
+    cfg,
+    connector: str,
+    label: str,
+    r: _DoctorResult,
+    *,
+    hook_script_paths: list[str] | None = None,
+) -> None:
+    reasons = _stale_generated_hook_reasons(cfg, connector, hook_script_paths=hook_script_paths)
+    if not reasons:
+        _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
+        return
+
+    detail = "; ".join(reasons[:2])
+    if len(reasons) > 2:
+        detail += f"; +{len(reasons) - 2} more"
+    regen = _GENERATED_HOOK_REGEN_COMMANDS.get(
+        (connector or "").lower(),
+        "defenseclaw-gateway restart",
+    )
+    _emit(
+        "warn",
+        f"{label} freshness",
+        f"stale generated script ({detail}); run `{regen}` to regenerate "
+        "and re-register hooks",
+        r=r,
+    )
+
+
 def _http_probe(
-    url: str, *, method: str = "GET", headers: dict | None = None, body: bytes | None = None, timeout: float = 10.0
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: float = 10.0,
+    verify_tls: bool = True,
 ) -> tuple[int, str]:
-    """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure."""
+    """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
+
+    Redirects are NOT followed. Several probes attach credential-bearing
+    headers (Cisco AI-Defense ``X-Cisco-AI-Defense-API-Key``, Splunk HEC
+    ``Authorization: Splunk ...``, LLM API keys). Python's default opener
+    transparently replays those headers to a 30x redirect target, so a
+    hostile or misconfigured endpoint could harvest the secret simply by
+    returning a redirect. We route through ``build_no_redirect_opener`` and
+    surface a refused redirect as a non-following ``(0, message)`` result —
+    the same shape callers already treat as "could not complete the probe".
+    """
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+    context = None
+    if not verify_tls and url.lower().startswith("https://"):
+        context = ssl._create_unverified_context()
+    # Preserve the verify_tls / SSL-context behavior by passing an
+    # HTTPSHandler carrying the (possibly unverified) context to the opener.
+    opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
     except urllib.error.HTTPError as exc:
         body_text = ""
@@ -292,6 +486,10 @@ def _http_probe(
         except Exception:
             pass
         return exc.code, body_text
+    except NoRedirectError as exc:
+        # Refused redirect: report as an unreachable probe so the caller warns
+        # instead of leaking the auth header to the redirect target.
+        return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return 0, str(exc)
 
@@ -302,8 +500,11 @@ def _http_probe(
 
 
 def _check_config(cfg, r: _DoctorResult) -> None:
-    if os.path.isfile(os.path.join(cfg.data_dir, "config.yaml")):
-        _emit("pass", "Config file", cfg.data_dir + "/config.yaml", r=r)
+    from defenseclaw.config import config_path_for_data_dir
+
+    cfg_path = str(config_path_for_data_dir(cfg.data_dir))
+    if os.path.isfile(cfg_path):
+        _emit("pass", "Config file", cfg_path, r=r)
     else:
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
 
@@ -333,7 +534,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
     mode = mode_src.lower()
     if mode != "action":
-        _emit("warn", "Human approval", f"enabled at {min_sev}, but guardrail.mode is observe", r=r)
+        _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
         return
 
     if connector == "openclaw":
@@ -358,7 +559,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "ZeptoClaw has no native ask surface; confirm verdicts alert with raw_action preserved",
             r=r,
         )
-    elif connector in {"hermes", "windsurf", "geminicli", "openhands"}:
+    elif connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         _emit(
             "warn",
             "Human approval",
@@ -370,6 +571,13 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "pass",
             "Human approval",
             "Antigravity supports native PreToolUse ask; decision=ask overrides --dangerously-skip-permissions",
+            r=r,
+        )
+    elif connector == "omnigent":
+        _emit(
+            "pass",
+            "Human approval",
+            "OmniGent supports native ASK on request, tool_call, and llm_request; post-action confirms use fallback",
             r=r,
         )
     else:
@@ -509,6 +717,20 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
+def _openclaw_active(cfg) -> bool:
+    """True only when OpenClaw is positively among the active connectors.
+
+    Drives the connector-aware token-env messaging (D1): the legacy
+    ``OPENCLAW_GATEWAY_TOKEN`` var is "the configured var" only on a genuine
+    OpenClaw install; on a hook install it is stale drift. Reuses
+    :func:`_doctor_active_connectors`, so an ambiguous/legacy config that
+    floors to the singular ``openclaw`` path default still reads as active —
+    conservative on purpose: we treat OpenClaw as *inactive* only when we can
+    see a real, OpenClaw-free active set.
+    """
+    return "openclaw" in _doctor_active_connectors(cfg)
+
+
 def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
     """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
 
@@ -575,9 +797,28 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    # Both vars empty — no token configured anywhere. Other checks
-    # (sidecar /health probe) will catch the downstream effect; we
-    # just report the local config state.
+    # Both vars empty — no token configured anywhere. When token_env still
+    # carries the legacy ``OPENCLAW_GATEWAY_TOKEN`` default on an install that
+    # is NOT running OpenClaw, don't present that var as the one the operator
+    # must set (D1): the gateway auto-generates the canonical
+    # ``DEFENSECLAW_GATEWAY_TOKEN`` on first boot, so the only real action is
+    # to repoint the stale token_env. Only when OpenClaw is genuinely active is
+    # ``OPENCLAW_GATEWAY_TOKEN`` the legitimate var to set.
+    if configured_env == "OPENCLAW_GATEWAY_TOKEN" and not _openclaw_active(cfg):
+        _emit(
+            "warn",
+            "Gateway token env",
+            "the gateway auto-generates DEFENSECLAW_GATEWAY_TOKEN on first "
+            "boot, but cfg.gateway.token_env still points at legacy "
+            "OPENCLAW_GATEWAY_TOKEN on a non-OpenClaw install — run "
+            "`defenseclaw doctor --fix` to repoint it.",
+            r=r,
+        )
+        return
+
+    # Generic "no token anywhere" state (custom token_env, or OpenClaw is
+    # genuinely active). Other checks (sidecar /health probe) catch the
+    # downstream effect; we just report the local config state.
     _emit(
         "warn",
         "Gateway token env",
@@ -809,6 +1050,110 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _gateway_listener_pid(port: int) -> int:
+    """Best-effort PID of whatever is listening on the local API *port*.
+
+    Uses ``lsof`` (present on macOS and most Linux installs). Returns 0
+    when the listener can't be determined — callers degrade to "can't
+    tell" rather than guessing, so an absent ``lsof`` never produces a
+    false alarm.
+    """
+    if port <= 0:
+        return 0
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    for token in proc.stdout.split():
+        try:
+            return int(token)
+        except ValueError:
+            continue
+    return 0
+
+
+def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
+    """Warn when a gateway from a DIFFERENT home is holding the API port.
+
+    Each home's hook scripts (under ``cfg.data_dir/hooks``) post to the
+    API port with that home's token. If a gateway started from another
+    ``DEFENSECLAW_HOME`` — typically a sandbox under ``/tmp`` left over
+    from testing — is squatting on that single port, every hook call
+    fails auth (401) even though each half looks healthy on its own.
+    This is invisible to :func:`_check_gateway_token_drift`, which only
+    compares process-vs-dotenv WITHIN one home.
+
+    To avoid false alarms we only warn on a POSITIVELY identified
+    foreign home: the API answers, this config's ``gateway.pid`` is not
+    a live process, AND the actual listener reports a data dir that
+    differs from ``cfg.data_dir``. When the listener can't be introspected
+    (no ``lsof``, perms, no env var) we stay silent — "can't tell" is not
+    a mismatch, same discipline as the token-drift check.
+    """
+    bind = "127.0.0.1"
+    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
+        bind = getattr(cfg.guardrail, "host", None) or bind
+    api_port = cfg.gateway.api_port
+    code, _ = _http_probe(f"http://{bind}:{api_port}/health", timeout=5.0)
+    if code != 200:
+        # Nothing answering — `_check_sidecar` already reports "down".
+        return
+
+    # Is the gateway THIS config tracks the one that's actually alive?
+    if _read_pid_from_file(os.path.join(cfg.data_dir, "gateway.pid")):
+        _emit(
+            "pass",
+            "Gateway home",
+            f"sidecar on :{api_port} belongs to this config ({cfg.data_dir})",
+            r=r,
+        )
+        return
+
+    # The port is served, but not by the gateway this config started
+    # (our pid file is stale/dead). Try to identify the squatter's home.
+    listener_pid = _gateway_listener_pid(api_port)
+    foreign_home = ""
+    if listener_pid:
+        foreign_home = (
+            _read_process_env_var(listener_pid, "DEFENSECLAW_DATA_DIR")
+            or _read_process_env_var(listener_pid, "DEFENSECLAW_HOME")
+            or ""
+        )
+    if not foreign_home:
+        # Couldn't positively identify a foreign home — stay silent
+        # rather than nag (the listener may simply be this home's
+        # gateway with a stale pid file and no data-dir env var).
+        return
+    if os.path.normpath(foreign_home) == os.path.normpath(cfg.data_dir):
+        # Same home after all; the pid file was just stale.
+        _emit(
+            "pass",
+            "Gateway home",
+            f"sidecar on :{api_port} serves this config ({cfg.data_dir})",
+            r=r,
+        )
+        return
+
+    _emit(
+        "warn",
+        "Gateway home",
+        f"a gateway from {foreign_home} is holding port {api_port}, but this "
+        f"config is {cfg.data_dir} — hooks here will get HTTP 401. It is a "
+        "leftover sandbox gateway; restart from a clean shell "
+        "(`unset DEFENSECLAW_HOME DEFENSECLAW_DATA_DIR`), then "
+        "`defenseclaw-gateway restart`.",
+        r=r,
+    )
+
+
 def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
     settings_path = os.path.expanduser("~/.claude/settings.json")
     if not os.path.isfile(settings_path):
@@ -824,6 +1169,7 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
     if not hooks:
         _emit("fail", "Claude Code hooks", "no hooks registered in settings.json", r=r)
         return
+    hook_script_paths = _registered_hook_script_paths(settings, "claude-code-hook.sh")
     dc_hooks = 0
     for _event, entries in hooks.items():
         if not isinstance(entries, list):
@@ -836,6 +1182,13 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
                     dc_hooks += 1
     if dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
+        _check_generated_hook_freshness(
+            cfg,
+            "claudecode",
+            "Claude Code hooks",
+            r,
+            hook_script_paths=hook_script_paths,
+        )
     else:
         _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
 
@@ -845,8 +1198,228 @@ def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
     if os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
+        _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     else:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+
+
+# ---------------------------------------------------------------------------
+# Generic per-connector hook-health (D4)
+# ---------------------------------------------------------------------------
+
+# Connectors whose hooks live in an agent config file but that lack a bespoke
+# Services check above. Each maps to (home-relative fallback path(s), marker
+# substrings). The fallback paths mirror the Go source of truth in
+# ``internal/gateway/connector/hook_only.go`` (hermesConfigPath / cursorHooksPath
+# / windsurfHooksPath / geminiSettingsPath / opencodePluginPath); the gateway's
+# hook_contract_lock.json is consulted first and these are only the offline
+# fallback. Markers are matched as raw substrings (see _file_references_marker)
+# so the check stays format-agnostic: hermes is YAML, cursor/windsurf/geminicli
+# are JSON, opencode is a flat ``.js`` plugin (existence + substring).
+_HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "hermes": (
+        (os.path.join(".hermes", "config.yaml"),),
+        ("hermes-hook.sh", "hook --connector hermes", "defenseclaw"),
+    ),
+    "cursor": (
+        (os.path.join(".cursor", "hooks.json"),),
+        ("cursor-hook.sh", "hook --connector cursor", "defenseclaw"),
+    ),
+    "windsurf": (
+        (os.path.join(".codeium", "windsurf", "hooks.json"),),
+        ("windsurf-hook.sh", "hook --connector windsurf", "defenseclaw"),
+    ),
+    "geminicli": (
+        (os.path.join(".gemini", "settings.json"),),
+        ("geminicli-hook.sh", "hook --connector geminicli", "defenseclaw"),
+    ),
+    "opencode": (
+        (os.path.join(".config", "opencode", "plugins", "defenseclaw.js"),),
+        ("defenseclaw",),
+    ),
+    "omnigent": (
+        (os.path.join(".omnigent", "config.yaml"),),
+        ("defenseclaw_omnigent_policy", "defenseclaw_guardrail"),
+    ),
+}
+
+_HOOK_HEALTH_LABELS = {
+    "hermes": "Hermes hooks",
+    "cursor": "Cursor hooks",
+    "windsurf": "Windsurf hooks",
+    "geminicli": "Gemini CLI hooks",
+    "opencode": "OpenCode hooks",
+    "omnigent": "OmniGent policy",
+}
+
+
+def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
+    """Report whether the file at ``path`` contains any ``markers`` substring.
+
+    Deliberately format-agnostic — no JSON/YAML parse — because the five
+    connectors this serves store hook entries in different shapes (hermes
+    YAML, cursor/windsurf/geminicli JSON, opencode a flat ``.js`` plugin).
+    Mirrors the Go self-heal guard's ``configFileReferencesHook`` (raw-bytes
+    substring match) so doctor and the guard agree on what "the hook is
+    installed" means. A missing/unreadable file reports ``False``.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return False
+    return any(m and m in data for m in markers)
+
+
+def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
+    """Return the hook config path(s) the gateway actually wrote for
+    ``connector``, read from ``hook_contract_lock.json``.
+
+    This is the authoritative source — exactly what Setup patched, captured
+    from ``HookConfigPathsForConnector`` / ``ResolvedConnectorLocations`` on
+    the Go side — so doctor watches the real files rather than guessing.
+    Returns ``[]`` when the lock file is absent/unreadable or carries no path
+    for the connector; the caller then falls back to the static map.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    entry = (lock.get("connectors") or {}).get(connector) or {}
+    locations = entry.get("locations") or {}
+    if not isinstance(locations, dict):
+        return []
+    return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+
+
+def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
+    """Return the installed runtime artifacts recorded for a hook connector."""
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    entry = (lock.get("connectors") or {}).get(connector) or {}
+    locations = entry.get("locations") or {}
+    if not isinstance(locations, dict):
+        return []
+    return [str(p) for p in (locations.get("hook_script_paths") or []) if p]
+
+
+def _omnigent_runtime_paths_from_backups(cfg) -> list[str]:
+    """Recover OmniGent runtime targets when the hook lock is absent."""
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    paths: list[str] = []
+    for logical in ("module", "pth"):
+        backup_path = os.path.join(
+            data_dir,
+            "connector_backups",
+            "omnigent",
+            f"{logical}.json",
+        )
+        try:
+            with open(backup_path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if record.get("connector") != "omnigent" or record.get("logical_name") != logical:
+            continue
+        target = str(record.get("path") or "").strip()
+        if target and target not in paths:
+            paths.append(target)
+    return paths
+
+
+def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
+    """Verify the config, policy module, and Python import shim as one unit."""
+    config_paths = _hook_health_paths_from_lock(cfg, "omnigent") or [
+        omnigent_config_path()
+    ]
+    config_path = next((p for p in config_paths if os.path.isfile(p)), "")
+    config_ok = bool(config_path) and all(
+        _file_references_marker(config_path, (marker,))
+        for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+    )
+    if not config_ok:
+        _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
+        return
+
+    runtime_paths = (
+        _hook_runtime_paths_from_lock(cfg, "omnigent")
+        or _omnigent_runtime_paths_from_backups(cfg)
+    )
+    module_path = next((p for p in runtime_paths if p.endswith(".py")), "")
+    pth_path = next((p for p in runtime_paths if p.endswith(".pth")), "")
+    if not module_path or not pth_path:
+        _emit(
+            "fail",
+            "OmniGent policy",
+            "hook contract lock does not record both the policy module and .pth import shim",
+            r=r,
+        )
+        return
+    if not os.path.isfile(module_path) or not all(
+        _file_references_marker(module_path, (marker,))
+        for marker in ("POLICY_REGISTRY", "defenseclaw_policy")
+    ):
+        _emit("fail", "OmniGent policy", f"policy module is missing or invalid: {module_path}", r=r)
+        return
+    try:
+        with open(pth_path, encoding="utf-8") as fh:
+            import_path = fh.read().strip()
+    except (OSError, UnicodeError):
+        import_path = ""
+    if not import_path or os.path.realpath(import_path) != os.path.realpath(os.path.dirname(module_path)):
+        _emit("fail", "OmniGent policy", f".pth import shim is missing or points elsewhere: {pth_path}", r=r)
+        return
+    _emit("pass", "OmniGent policy", f"config={config_path}; module={module_path}; import={pth_path}", r=r)
+
+
+def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
+    """Generic "is this connector's hook installed and reachable?" row.
+
+    Covers hermes / cursor / windsurf / geminicli / opencode — active
+    connectors that previously got NO Services hook row at all, so an operator
+    could not tell from doctor whether their hooks were installed (D4).
+    Resolves the hook file from ``hook_contract_lock.json`` first (what the
+    gateway actually wrote), then the static fallback map, and
+    raw-substring-checks it for a DefenseClaw marker. (The Connectors section's
+    ``_check_hook_contract_lock`` validates contract/version drift — a
+    different concern from "does the hook file exist and reference us".)
+    """
+    fallback = _HOOK_HEALTH_FALLBACK.get(connector)
+    if fallback is None:
+        return  # not a generic-hook connector — nothing to check
+    rel_candidates, markers = fallback
+    label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
+    home = os.path.expanduser("~")
+    # Prefer the lock-file's recorded paths; fall back to the static map.
+    candidates = _hook_health_paths_from_lock(cfg, connector) or [
+        os.path.join(home, rel) for rel in rel_candidates
+    ]
+    present = [p for p in candidates if os.path.isfile(p)]
+    if not present:
+        _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
+        return
+    for path in present:
+        if _file_references_marker(path, markers):
+            _emit("pass", label, f"reachable at {path}", r=r)
+            return
+    _emit(
+        "fail",
+        label,
+        "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
+        r=r,
+    )
 
 
 def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
@@ -870,6 +1443,12 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_openhands_hooks(cfg, r)
     elif connector == "antigravity":
         _check_antigravity_hooks(cfg, r)
+    elif connector == "omnigent":
+        _check_omnigent_policy_health(cfg, r)
+    elif connector in _HOOK_HEALTH_FALLBACK:
+        # hermes / cursor / windsurf / geminicli / opencode — generic
+        # lock-file-driven hook-health row (D4).
+        _check_hook_health(cfg, connector, r)
 
 
 def _workspace_dir(cfg) -> str:
@@ -1126,20 +1705,12 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
-def _guardrail_proxy_intentionally_closed(cfg) -> str:
-    """Return a detail string when the proxy port is expected to be closed.
-
-    Hook-enforced connectors feed DefenseClaw through the agent's
-    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
-    while the agent talks directly to its upstream provider. Port
-    4000 is deliberately unbound in that topology, so doctor must
-    not report a hard proxy failure. Action mode IS supported on
-    this surface — enforcement happens via the PreToolUse deny
-    verdict, not the proxy.
-    """
-    connector = _active_connector(cfg)
-    gc = cfg.guardrail
-    if connector in {
+# Connectors that enforce in-process via an agent-native lifecycle surface
+# (hook bus or OmniGent's custom policy API) and talk directly to their
+# upstream provider. They do NOT bind the guardrail proxy listener on port
+# 4000. Proxy connectors (openclaw, zeptoclaw) are deliberately absent.
+_HOOK_ENFORCED_CONNECTORS = frozenset(
+    {
         "codex",
         "claudecode",
         "hermes",
@@ -1149,12 +1720,80 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         "copilot",
         "openhands",
         "antigravity",
-    }:
-        mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+        "opencode",
+        "omnigent",
+    }
+)
+
+
+def _guardrail_proxy_intentionally_closed(cfg) -> str:
+    """Return a detail string when the proxy port is expected to be closed.
+
+    Hook/policy-enforced connectors feed DefenseClaw through the agent's
+    native lifecycle surface
+    while the agent talks directly to its upstream provider. Port
+    4000 is deliberately unbound in that topology, so doctor must
+    not report a hard proxy failure. Action mode IS supported on
+    this surface — enforcement happens via the PreToolUse deny
+    verdict, not the proxy.
+
+    Evaluated over the FULL active set, not just the primary connector
+    (D6): the port is only "intentionally closed" when EVERY active
+    connector is hook-enforced. If ANY active connector is a proxy type
+    (openclaw/zeptoclaw) — or an unknown connector that may bind the
+    listener — this returns ``""`` so :func:`_check_guardrail_proxy` runs
+    the real ``/health/liveliness`` probe. Previously the singular primary
+    decided this alone, so a hook-enforced primary masked a proxy peer that
+    genuinely needed port 4000 up and the probe was wrongly skipped.
+    """
+    gc = cfg.guardrail
+    connectors = _doctor_active_connectors(cfg)
+    if not connectors:
+        return ""
+    if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
+        return ""
+    modes = {c: _doctor_effective_guardrail_mode(gc, c) for c in sorted(connectors)}
+    # Preserve the exact single-connector wording; aggregate (sorted, stable)
+    # for a multi-connector all-hook-enforced fan-out.
+    label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
+    if len(connectors) == 1:
+        mode = modes.get(connectors[0], "observe")
+        if connectors[0] == "omnigent":
+            if mode == "action":
+                return (
+                    "policy-enforced for omnigent "
+                    "(mode=action via ALLOW/ASK/DENY) — proxy port intentionally closed"
+                )
+            return "policy-driven for omnigent (mode=observe) — proxy port intentionally closed"
         if mode == "action":
-            return f"hook-enforced for {connector} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-        return f"hook-driven for {connector} (mode=observe) — proxy port intentionally closed"
-    return ""
+            return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
+        return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
+    if "omnigent" not in modes and all(mode == "action" for mode in modes.values()):
+        return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
+    if "omnigent" not in modes and all(mode != "action" for mode in modes.values()):
+        return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
+    parts = []
+    for connector, mode in modes.items():
+        if connector == "omnigent" and mode == "action":
+            parts.append("omnigent (mode=action via ALLOW/ASK/DENY)")
+        elif connector == "omnigent":
+            parts.append("omnigent (mode=observe via custom policy API)")
+        elif mode == "action":
+            parts.append(f"{connector} (mode=action via PreToolUse deny)")
+        else:
+            parts.append(f"{connector} (mode=observe)")
+    prefix = "enforced" if all(mode == "action" for mode in modes.values()) else "native-driven"
+    return f"{prefix} for {', '.join(parts)} — proxy port intentionally closed"
+
+
+def _doctor_effective_guardrail_mode(gc, connector: str) -> str:
+    mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+    if hasattr(gc, "effective_mode"):
+        try:
+            mode = (gc.effective_mode(connector) or mode).strip().lower()
+        except Exception:  # noqa: BLE001 — keep the global fallback.
+            pass
+    return "action" if mode == "action" else "observe"
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
@@ -1176,6 +1815,22 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     gc = cfg.guardrail
     if not gc.enabled:
         _emit("skip", "LLM API key", "guardrail disabled", r=r)
+        return
+
+    # Hook/policy-only connectors do not route LLM traffic through the
+    # guardrail provider. When the optional judge is also off, requiring a
+    # guardrail LLM key is a false failure: local regex/Cisco-AID policy lanes
+    # remain fully functional without one.
+    judge = getattr(gc, "judge", None)
+    if _guardrail_proxy_intentionally_closed(cfg) and not bool(
+        getattr(judge, "enabled", False)
+    ):
+        _emit(
+            "skip",
+            "LLM API key",
+            "not required by hook/policy enforcement while the LLM judge is disabled",
+            r=r,
+        )
         return
 
     llm = cfg.resolve_llm("guardrail")
@@ -1273,7 +1928,8 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     except Exception as exc:
         _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
         return
-    ok, msg = _llm.ping(llm, timeout=5)
+    with _capture_stdout_when_json():
+        ok, msg = _llm.ping(llm, timeout=5)
     if ok:
         _emit("pass", "LLM reachable", msg, r=r)
     else:
@@ -1986,6 +2642,7 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
     # Warn if the token is stored inline rather than via token_env.
     _check_splunk_token_posture(cfg, d, label, r)
 
+    verify_tls = _splunk_hec_tls_verify_enabled(cfg, d)
     http_code, body = _http_probe(
         endpoint,
         method="POST",
@@ -1995,6 +2652,7 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         },
         body=json.dumps({"event": "defenseclaw-doctor-probe", "sourcetype": "_json"}).encode(),
         timeout=10.0,
+        verify_tls=verify_tls,
     )
 
     if http_code == 200:
@@ -2038,12 +2696,49 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
 
     if http_code == 0:
         if any(kw in body.lower() for kw in ("ssl", "certificate", "tls")):
-            _emit("fail", label, f"TLS error — check verify_tls setting and endpoint certificate: {body[:120]}", r=r)
+            _emit(
+                "fail",
+                label,
+                f"TLS error — check insecure_skip_verify setting and endpoint certificate: {body[:120]}",
+                r=r,
+            )
         else:
             _emit("warn", label, f"unreachable: {body[:120]}", r=r)
         return
 
     _emit("warn", label, f"HTTP {http_code}: {hec_msg or body[:120]}", r=r)
+
+
+def _truthy_config_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _splunk_hec_tls_verify_enabled(cfg, d) -> bool:
+    """Resolve effective TLS verification for a Splunk HEC doctor probe."""
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
+
+    try:
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
+    except Exception:
+        doc = {}
+
+    for sink in doc.get("audit_sinks") or []:
+        if not isinstance(sink, dict) or sink.get("name") != d.name:
+            continue
+        sub = sink.get("splunk_hec") or {}
+        if isinstance(sub, dict):
+            return not _truthy_config_bool(sub.get("insecure_skip_verify", False))
+        break
+
+    splunk_cfg = getattr(cfg, "splunk", None)
+    if hasattr(splunk_cfg, "tls_verify_enabled"):
+        return bool(splunk_cfg.tls_verify_enabled())
+    return True
 
 
 def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
@@ -2054,12 +2749,11 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     doctor so operators are nudged toward token_env before it becomes a
     security finding.
     """
-    import os
-
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
 
     try:
-        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
     except Exception:
         return
     sinks = doc.get("audit_sinks") or []
@@ -2148,11 +2842,12 @@ def _resolve_audit_sink_endpoint_and_token(cfg, d) -> tuple[str, str]:
     # Late import: this module is loaded on every CLI invocation, but
     # the YAML read only matters for operators who have audit sinks.
     # _load_yaml takes a full file path, not a data_dir — mirror the
-    # writer's layout (CONFIG_FILE_NAME under data_dir).
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    # writer's layout, respecting explicit managed config overrides.
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
 
     try:
-        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
     except Exception:
         return d.endpoint, ""
 
@@ -2276,13 +2971,96 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Security-overrides check (env-var registry-driven)
+# ---------------------------------------------------------------------------
+
+# Severity → doctor-tag mapping. Anything we surface in doctor is at
+# minimum a 'warn' because the operator made a deliberate choice; we
+# don't want to FAIL on legitimate dev/test overrides. High-impact
+# overrides still warn loudly so they stand out in the summary line.
+_OVERRIDE_TAG_BY_IMPACT = {
+    "high": "warn",
+    "medium": "warn",
+    "low": "warn",
+}
+
+
+def _check_security_overrides(cfg, r: _DoctorResult) -> None:
+    """Surface DEFENSECLAW_* env vars that weaken security defaults.
+
+    Reads the centralized registry (``cli/defenseclaw/envvars.py``) and
+    emits one warn per active opt-out so operators can see at a glance
+    which bypasses are in effect. Idle installs see a single PASS row
+    ("none active") — typical for production deployments.
+
+    Why this matters: the codebase has ~70 ``DEFENSECLAW_*`` env vars
+    and several of them (``DEFENSECLAW_DISABLE_REDACTION``,
+    ``DEFENSECLAW_CODEX_LOOPBACK_TRUST``,
+    ...) materially weaken security defaults. Without this check an
+    operator has no way to spot a forgotten override left over from a
+    debugging session.
+    """
+    try:
+        active = active_security_overrides()
+    except (FileNotFoundError, ValueError) as exc:
+        # Registry load failure is a programmer error (malformed JSON,
+        # missing file) — surface it loudly without bringing down the
+        # rest of doctor.
+        _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
+        return
+
+    if not active:
+        _emit("pass", "Security overrides", "none active", r=r)
+        return
+
+    for entry in active:
+        tag = _OVERRIDE_TAG_BY_IMPACT.get(entry.security_impact, "warn")
+        # Detail format: "<name>: <purpose-headline> | impact=<level> | <security-note> | fix: <hint>"
+        # Split on a true sentence boundary (period + whitespace + capital
+        # letter) so that internal periods inside IP literals
+        # ("100.64.0.0/10"), filenames (".aws/credentials"), and common
+        # abbreviations ("e.g.", "i.e.", "etc.") don't truncate the headline
+        # mid-thought.
+        sentence_break = re.search(r"\.\s+(?=[A-Z])", entry.purpose)
+        purpose_one_liner = (
+            entry.purpose[: sentence_break.start()] if sentence_break else entry.purpose
+        ).strip()
+        if len(purpose_one_liner) > 100:
+            purpose_one_liner = purpose_one_liner[:97] + "..."
+        bits = [purpose_one_liner, f"impact={entry.security_impact}"]
+        if entry.security_note:
+            note = entry.security_note
+            if len(note) > 90:
+                note = note[:87] + "..."
+            bits.append(note)
+        if entry.replacement_hint:
+            # Truncated replacement hint; full text lives in the
+            # auto-generated docs page.
+            hint = entry.replacement_hint
+            if len(hint) > 80:
+                hint = hint[:77] + "..."
+            bits.append(f"fix: {hint}")
+        detail = f"{entry.name}: " + " | ".join(bits)
+        _emit(tag, "Security override", detail, r=r)
+
+
+# ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
 
 
 @click.command()
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
-@click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
+@click.option(
+    "--fix",
+    "do_fix",
+    is_flag=True,
+    help=(
+        "Auto-repair safe issues (stale PID files, token-env drift, dotenv "
+        "perms). NOTE: the token-drift fixer may RESTART the gateway sidecar "
+        "to reconcile a stale token — preview the full set with --dry-run."
+    ),
+)
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
 @click.option(
     "--dry-run",
@@ -2310,10 +3088,14 @@ def doctor(
     connector (each row tagged ``[<connector>]``), not just the primary.
 
     Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
-    OpenClaw gateway token drift, missing .env file, and unpatched
-    openclaw.json when the guardrail is enabled). Destructive or
-    ambiguous fixes still require the operator to run the relevant
-    setup command explicitly.
+    gateway token-env drift, dotenv permissions, pristine config backups).
+    One fixer — gateway token *drift* — may **restart the gateway sidecar**
+    to reconcile a stale in-memory token, which briefly interrupts in-flight
+    requests; preview the full set first with ``--fix --dry-run``. Doctor no
+    longer tears connectors down as part of ``--fix`` (it only *reports*
+    inactive-connector residue); run ``defenseclaw-gateway connector teardown
+    --connector <name>`` to remove a specific connector. Other destructive or
+    ambiguous fixes still require the relevant setup command explicitly.
 
     Exit codes: 0 = all pass, 1 = any failure.
     """
@@ -2340,21 +3122,39 @@ def doctor(
         _doctor_subsection("Connectors")
     active_connector = _active_connector(cfg)
     # Inventory EVERY active connector uniformly — there is no separate
-    # "single" vs "multi" rendering. ``active_connectors()`` returns one
+    # "single" vs "multi" rendering. ``_doctor_active_connectors`` returns one
     # name on a single-connector install and N on a fan-out install, so the
     # same loop covers both: each connector gets its own block tagged
     # "[<connector>]" carrying its paths, effective policy, rule pack, and
-    # hook contract. The operator never has to reason about connector count
-    # — they just read down the list of whatever is active.
-    try:
-        _actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [active_connector]
-    except Exception:  # noqa: BLE001 — fall back to the primary connector.
-        _actives = [active_connector]
-    _inventory_order: list[str] = []
-    for _c in [active_connector, *_actives]:
-        if _c and _c not in _inventory_order:
-            _inventory_order.append(_c)
-    for _c in _inventory_order:
+    # hook contract. On a genuinely unconfigured install it returns ``[]`` and
+    # we render an explicit empty state instead of fabricating a phantom
+    # "openclaw" row (D3) — the operator should read "nothing is set up", not a
+    # never-configured OpenClaw install reported as broken.
+    inventory_connectors = _doctor_active_connectors(cfg)
+    if not inventory_connectors:
+        _emit(
+            "skip",
+            "Connectors",
+            "no connector configured — run 'defenseclaw setup <connector>'",
+            r=r,
+        )
+    for _c in inventory_connectors:
+        if not _connector_enabled(cfg, _c):
+            # Operator-disabled (guardrail disable --connector X): the Go boot
+            # loop drops it from the active set and tears its hooks down, so
+            # the inventory/contract probes below would read as active and the
+            # missing hook artifacts would FAIL spuriously. Surface it once,
+            # explicitly disabled, and skip the active-enforcement checks
+            # (mirrors cmd_status's DISABLED row). (N1)
+            with _doctor_label_suffix(f"[{_c}]"):
+                _emit(
+                    "skip",
+                    "Connector",
+                    f"{_CONNECTOR_LABELS.get(_c, _c)} — operator-disabled "
+                    f"(guardrail disable --connector {_c}); hooks torn down",
+                    r=r,
+                )
+            continue
         with _doctor_label_suffix(f"[{_c}]"):
             _check_connector_inventory(cfg, _c, r)
             _check_hook_contract_lock(cfg, _c, r)
@@ -2365,6 +3165,10 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    # Surface a dead-end asset_policy.plugin.registry_required flag, which can
+    # only ever deny (no plugin-registry pipeline exists in v1) and silently
+    # blocks all plugins under enforcement. (OTHER-5)
+    _check_plugin_registry_required(cfg, r)
 
     if not json_out:
         _doctor_subsection("Scanners")
@@ -2376,24 +3180,36 @@ def doctor(
     _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     _check_gateway_token_drift(cfg, r)
+    _check_gateway_home_mismatch(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
-    # not just the primary. active_connectors() returns [active_connector]
-    # on single-connector installs, so their Services output is unchanged
-    # (no label suffix is applied when only one connector is active). On
-    # multi-connector installs each row is tagged "[<connector>]" so the
-    # codex/claudecode/antigravity rows are individually attributable.
-    try:
-        _hook_connectors = (
-            list(cfg.active_connectors())
-            if hasattr(cfg, "active_connectors")
-            else []
-        )
-    except Exception:
-        _hook_connectors = []
-    if not _hook_connectors:
-        _hook_connectors = [active_connector]
-    _multi_hooks = len(_hook_connectors) > 1
-    for _conn in _hook_connectors:
+    # not just the primary. ``_doctor_active_connectors`` returns the single
+    # active connector on single-connector installs (no label suffix applied,
+    # so their Services output is unchanged), N on a fan-out install (each row
+    # tagged "[<connector>]" so the codex/claudecode/antigravity rows are
+    # individually attributable), and ``[]`` when nothing is configured — in
+    # which case the loop emits no hook rows rather than probing a phantom
+    # "openclaw" gateway (D3).
+    hook_connectors = _doctor_active_connectors(cfg)
+    # Single-vs-multi label suffix is decided over the ENABLED set: an
+    # operator-disabled connector is reported separately (below) and must not
+    # flip a genuinely single-connector install into multi-connector "[name]"
+    # labeling. (N1)
+    _enabled_hook_connectors = [c for c in hook_connectors if _connector_enabled(cfg, c)]
+    _multi_hooks = len(_enabled_hook_connectors) > 1
+    for _conn in hook_connectors:
+        if not _connector_enabled(cfg, _conn):
+            # Disabled connector: hooks were torn down, so probing hook health
+            # / HILT would FAIL spuriously. Mark it disabled and move on,
+            # mirroring the inventory loop and cmd_status. (N1)
+            with _doctor_label_suffix(f"[{_conn}]"):
+                _emit(
+                    "skip",
+                    "Connector hooks",
+                    f"{_CONNECTOR_LABELS.get(_conn, _conn)} — operator-disabled; "
+                    "hooks torn down",
+                    r=r,
+                )
+            continue
         with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
             _check_connector_hooks(cfg, _conn, r)
             # Human-approval (HILT) support is per-connector: each connector
@@ -2418,9 +3234,21 @@ def doctor(
         _doctor_subsection("Webhooks")
     _check_webhooks(cfg, r)
 
+    # Surface any DEFENSECLAW_* env-var bypass that's currently active.
+    # The registry at internal/envvars/registry.json is the single
+    # source of truth; operators with no overrides set see a single
+    # PASS row here.
+    if not json_out:
+        _doctor_subsection("Security Overrides")
+    _check_security_overrides(cfg, r)
+
     if do_fix:
         if not json_out:
             _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
+            # Blast-radius banner (D8): one fixer restarts the sidecar, so make
+            # the cost of a real --fix run explicit before it runs, and point
+            # at --dry-run as the safe preview.
+            _emit_hint(_auto_fix_hint(dry_run))
         _run_fixers(
             cfg,
             r,
@@ -2510,6 +3338,23 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 # --fix auto-repair
 # ---------------------------------------------------------------------------
 
+_AUTO_FIX_DRY_RUN_HINT = (
+    "dry-run: previewing fixers; nothing on disk changes. A real --fix --yes "
+    "may restart the gateway sidecar for token drift; doctor never runs "
+    "connector teardown."
+)
+
+_AUTO_FIX_REAL_HINT = (
+    "blast radius: the token-drift fixer may RESTART the gateway sidecar "
+    "(interrupts in-flight requests); teardown is never run. Re-run with "
+    "--dry-run to preview without mutating."
+)
+
+
+def _auto_fix_hint(dry_run: bool) -> str:
+    return _AUTO_FIX_DRY_RUN_HINT if dry_run else _AUTO_FIX_REAL_HINT
+
+
 def _run_fixers(
     cfg,
     r: _DoctorResult,
@@ -2520,16 +3365,30 @@ def _run_fixers(
 ) -> None:
     """Run each fixer in sequence, narrating what changed.
 
-    Fixers are intentionally *small* and independent — none of them
-    restart the sidecar or mutate connector configs beyond what setup
-    already would. Anything that needs a full re-patch is deferred to
-    the human.
+    Fixers are intentionally *small* and independent. All but one are
+    non-disruptive; the lone exception is ``gateway token drift``, which may
+    **restart the gateway sidecar** to reconcile a stale in-memory token (it
+    prompts first unless ``--yes``, and briefly interrupts in-flight
+    requests). That blast radius is surfaced to the operator by the banner at
+    the Auto-fix section and the ``--fix`` help text (D8). Anything that needs
+    a full re-patch — or that would tear a connector down — is deferred to the
+    human.
 
     With ``dry_run=True`` we *list* each fixer instead of invoking it.
     The reported tag is always ``"skip"`` and the detail explains the
     fixer would run; this lets a TUI / CI caller render a preview
     before granting an explicit ``--yes`` to mutate anything.
     """
+    # NOTE (D7): the connector-teardown fixer was deliberately REMOVED from
+    # this list. Doctor is a diagnostic — it *reports* inactive-connector
+    # residue (a WARN from _check_connector_residue) but must never run
+    # ``connector teardown`` as a side effect of ``--fix``, which on a
+    # multi-connector install could destroy a live connector. The
+    # _fix_connector_residue helper is retained (and still excludes the full
+    # active set) for the tracked follow-up that promotes teardown to a
+    # first-class ``defenseclaw connector teardown`` CLI surface; until then,
+    # operators run ``defenseclaw-gateway connector teardown --connector
+    # <name>`` explicitly.
     fixers = [
         ("stale gateway PID file", _fix_stale_pid),
         ("gateway token", _fix_gateway_token),
@@ -2537,7 +3396,7 @@ def _run_fixers(
         ("gateway token drift", _fix_gateway_token_drift),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
-        ("connector residue", _fix_connector_residue),
+        ("plugin registry dead-end", _fix_plugin_registry_required),
     ]
 
     for title, fn in fixers:
@@ -2573,6 +3432,63 @@ def _active_connector(cfg) -> str:
     return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "openclaw").lower()
 
 
+def _doctor_active_connectors(cfg) -> list[str]:
+    """Return the connectors doctor should inventory / probe, in stable order.
+
+    Prefers ``Config.active_connectors()`` — the authoritative set that the
+    rest of the CLI fans out over. Crucially that resolver returns ``[]`` on a
+    genuinely unconfigured install (every connector marker cleared, e.g. after
+    ``setup remove`` drops the last one); doctor must honor that empty signal
+    and render an explicit "no connector configured" state rather than
+    flooring to the singular :func:`_active_connector`, whose ``"openclaw"``
+    path-resolution default would fabricate a phantom OpenClaw connector on an
+    install that never used OpenClaw (D3).
+
+    Only legacy configs that predate ``active_connectors()`` fall back to the
+    singular primary, preserving their single-connector behavior. Names are
+    lowercased and de-duplicated; the empty list is returned verbatim so
+    callers can distinguish "nothing configured" from "one connector".
+    """
+    getter = getattr(cfg, "active_connectors", None)
+    if callable(getter):
+        try:
+            ordered: list[str] = []
+            for c in getter():
+                name = str(c).strip().lower()
+                if name and name not in ordered:
+                    ordered.append(name)
+            return ordered
+        except Exception:  # noqa: BLE001 — fall back to the singular primary.
+            pass
+    primary = _active_connector(cfg)
+    return [primary] if primary else []
+
+
+def _connector_enabled(cfg, connector: str) -> bool:
+    """Whether *connector* is effectively enabled (not operator-disabled).
+
+    ``Config.active_connectors()`` returns every key in
+    ``guardrail.connectors`` regardless of its ``enabled`` flag, so a
+    connector turned off via ``guardrail disable --connector X`` still shows
+    up in :func:`_doctor_active_connectors`. The Go boot loop drops a
+    ``enabled: false`` connector from the active set and tears its hooks down,
+    so doctor must not render it as active — its inventory/contract/hook rows
+    would read as live enforcement and its (intentionally) missing hook
+    artifacts would FAIL spuriously.
+
+    Mirrors ``cmd_status._is_enabled`` (the sibling fix): default ``True`` so
+    single-connector installs and any never-disabled connector keep reading as
+    active; only an explicit ``enabled: false`` resolves to ``False``. (N1)
+    """
+    gc = getattr(cfg, "guardrail", None)
+    if gc is None or not hasattr(gc, "effective_enabled"):
+        return True
+    try:
+        return bool(gc.effective_enabled(connector))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
     "claudecode": "Claude Code",
@@ -2585,7 +3501,44 @@ _CONNECTOR_LABELS = {
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
+    "opencode": "OpenCode",
+    "omnigent": "OmniGent",
 }
+
+
+def _emit_rule_pack_row(path: str, kind: str, r: _DoctorResult) -> None:
+    """Validate a resolved rule-pack directory and emit one doctor row.
+
+    *kind* is a human label for the source of the path (``"configured
+    rule_pack_dir"`` or ``"built-in default rule pack"``). A directory that is
+    missing — or present but empty — silently degrades guardrail enforcement
+    because the gateway loads zero rule packs from it, so both cases WARN; a
+    populated directory passes. (D9)
+    """
+    if not os.path.isdir(path):
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} not found on disk: {path} — guardrail enforcement would "
+            "run with no rule packs",
+            r=r,
+        )
+        return
+    try:
+        with os.scandir(path) as entries:
+            has_contents = any(True for _ in entries)
+    except OSError:
+        has_contents = False
+    if not has_contents:
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} is empty: {path} — guardrail enforcement would run with "
+            "no rule packs",
+            r=r,
+        )
+        return
+    _emit("pass", "Rule pack", f"{path} ({kind})", r=r)
 
 
 def _check_connector_inventory(
@@ -2682,25 +3635,76 @@ def _check_connector_inventory(
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
     # Effective rule pack for this connector (falls back to built-in
-    # defaults when no rule_pack_dir is configured). Warn when a configured
-    # directory is missing on disk — that silently degrades enforcement.
+    # defaults when no rule_pack_dir is configured). Warn when the resolved
+    # directory is missing/empty on disk — that silently degrades enforcement.
     if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
         try:
             rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
         if rule_pack_dir:
-            if os.path.isdir(rule_pack_dir):
-                _emit("pass", "Rule pack", rule_pack_dir, r=r)
+            _emit_rule_pack_row(rule_pack_dir, "configured rule_pack_dir", r)
+        else:
+            # No explicit rule_pack_dir → the gateway resolves the built-in
+            # default to <data_dir>/policies/guardrail/default and loads packs
+            # from there (Go: config.go cfg.Guardrail.RulePackDir fallback +
+            # the viper default). Validate THAT resolved path rather than
+            # emitting a benign "no dir set" skip: if it is unseeded or has
+            # been deleted, enforcement silently runs with no rule packs while
+            # doctor would otherwise show green. (D9)
+            data_dir = getattr(cfg, "data_dir", "") or ""
+            if data_dir:
+                default_dir = os.path.join(
+                    data_dir, "policies", "guardrail", "default"
+                )
+                _emit_rule_pack_row(
+                    default_dir, "built-in default rule pack", r
+                )
             else:
                 _emit(
-                    "warn",
+                    "skip",
                     "Rule pack",
-                    f"configured rule_pack_dir not found on disk: {rule_pack_dir}",
+                    "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    # Detection strategy + judge gating for this connector (read-only). This
+    # is root #4 in the doctor fix-plan made visible: the judge can be
+    # configured globally yet silently NOT run for a given connector, so
+    # surface what actually fires rather than what's merely configured.
+    # ``detection_strategy`` is a global guardrail field
+    # (regex_only | regex_judge | judge_first); the judge ADDITIONALLY has to
+    # be enabled, and — for hook-enforced connectors — this connector must be
+    # listed in ``guardrail.judge.hook_connectors`` (or "*") for the hook lane
+    # to forward content to the LLM judge (Go: JudgeConfig.HookConnectorEnabled).
+    # Proxy connectors (openclaw/zeptoclaw) run the judge via the proxy lane
+    # whenever it is enabled. Report-only: this does NOT touch the judge
+    # wiring. (N3)
+    if gc is not None:
+        strategy = (getattr(gc, "detection_strategy", "") or "").strip() or "regex_judge"
+        judge = getattr(gc, "judge", None)
+        judge_enabled = bool(getattr(judge, "enabled", False)) if judge is not None else False
+        detail = f"strategy={strategy}"
+        if not judge_enabled:
+            detail += "; judge disabled (regex/Cisco-AID lanes only)"
+        elif connector not in _HOOK_ENFORCED_CONNECTORS:
+            # Proxy connector: the judge runs in the proxy lane.
+            detail += "; judge active (proxy lane)"
         else:
-            _emit("skip", "Rule pack", "built-in defaults (no rule_pack_dir set)", r=r)
+            hook_conns = list(getattr(judge, "hook_connectors", []) or [])
+            gated_on = any(
+                entry.strip() == "*" or entry.strip().lower() == connector.lower()
+                for entry in hook_conns
+            )
+            if gated_on:
+                detail += "; judge active (hook lane)"
+            else:
+                detail += (
+                    "; judge enabled but NOT gated for this connector's hook "
+                    "lane (regex/Cisco-AID lanes only) — add it to "
+                    "guardrail.judge.hook_connectors to forward content to the judge"
+                )
+        _emit("pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
@@ -2740,10 +3744,13 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
+        runtime_paths = [str(v) for v in locations.get("hook_script_paths", []) if v]
         if workspace_dir:
             detail += f" workspace={workspace_dir}"
         if hook_paths:
             detail += f" hook_path={hook_paths[0]}"
+        if runtime_paths:
+            detail += f" runtime_path={runtime_paths[0]}"
 
     current_version = _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
@@ -2798,6 +3805,103 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
 _OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),)
 
 
+def _residue_active_set(cfg, active: str) -> set[str]:
+    """Return every connector that is genuinely active (never residue).
+
+    On a multi-connector install each active connector's backups are
+    legitimate state, so the residue sweep must exclude the FULL
+    ``active_connectors()`` set — not just the singular primary. Scoping to
+    the primary alone made all-but-one connector look like residue, which
+    raised a false WARN and (through the fixer) shelled
+    ``connector teardown`` against a live connector (D7).
+
+    The singular ``active`` argument is unioned in so older configs / tests
+    that pass a primary but expose no ``active_connectors()`` keep their
+    exact single-connector behavior.
+    """
+    out = {(active or "").strip().lower()}
+    getter = getattr(cfg, "active_connectors", None)
+    if callable(getter):
+        try:
+            for c in getter():
+                name = str(c).strip().lower()
+                if name:
+                    out.add(name)
+        except Exception:  # noqa: BLE001 — keep the singular primary.
+            pass
+    out.discard("")
+    return out
+
+
+def _plugin_registry_required_offenders(cfg) -> list[str]:
+    """Return where ``asset_policy.plugin.registry_required`` is explicitly on.
+
+    Labels are ``"global"`` for the top-level per-type policy and
+    ``"connector:<name>"`` for each per-connector override that sets it to a
+    literal ``True`` (the per-connector field is tri-state — ``None`` means
+    inherit, so only an explicit ``True`` is an offender; an inherited-from-
+    global require is already covered by the ``"global"`` label). Shared by the
+    OTHER-5 check and fixer.
+    """
+    ap = getattr(cfg, "asset_policy", None)
+    if ap is None:
+        return []
+    offenders: list[str] = []
+    plugin = getattr(ap, "plugin", None)
+    if plugin is not None and bool(getattr(plugin, "registry_required", False)):
+        offenders.append("global")
+    connectors = getattr(ap, "connectors", None) or {}
+    for name, pc in connectors.items():
+        pc_plugin = getattr(pc, "plugin", None) if pc is not None else None
+        if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
+            offenders.append(f"connector:{name}")
+    return offenders
+
+
+def _check_plugin_registry_required(cfg, r: _DoctorResult) -> None:
+    """Flag a dead-end ``asset_policy.plugin.registry_required=true``.
+
+    There is no plugin-registry pipeline in v1 — nothing can populate
+    ``asset_policy.plugin.registry`` (``registry sync``/``promote``/``approve``
+    are skill+mcp only, and ``registry require --type`` no longer offers
+    ``plugin``). So a leftover ``plugin.registry_required: true`` is a
+    dead-end: with the default ``registry_empty_action: deny`` and asset-policy
+    enforcement on, the gateway blocks EVERY plugin (``required + empty
+    registry + default-deny`` → ``registry-required-empty``) with no operator
+    recovery path but hand-editing config.
+
+    Surfaces it (WARN) so ``doctor --fix`` can clear it. Checks the global
+    per-type policy AND every per-connector override. Report-only here; the
+    matching fixer does the clearing. (OTHER-5, doctor half)
+    """
+    ap = getattr(cfg, "asset_policy", None)
+    if ap is None:
+        return
+    offenders = _plugin_registry_required_offenders(cfg)
+    if not offenders:
+        _emit(
+            "pass",
+            "Plugin registry policy",
+            "no dead-end plugin.registry_required flag set",
+            r=r,
+        )
+        return
+    enforcing = bool(getattr(ap, "enabled", False))
+    where = ", ".join(offenders)
+    impact = (
+        "blocks ALL plugins (the plugin registry can never be populated in v1)"
+        if enforcing
+        else "would block ALL plugins once asset-policy enforcement is enabled"
+    )
+    _emit(
+        "warn",
+        "Plugin registry policy",
+        f"plugin.registry_required=true [{where}] is a dead-end — {impact}; "
+        "run 'doctor --fix' to clear it",
+        r=r,
+    )
+
+
 def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     """Detect leftover artifacts from connectors that aren't active.
 
@@ -2808,20 +3912,22 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     (or the gateway crashes mid-handoff), we end up with the *prior*
     connector's residue on disk.
 
-    This check walks every known connector that isn't the active one
-    and emits a WARN listing any artifact still present. The matching
-    fixer (``fix: connector residue``) calls
-    ``defenseclaw-gateway connector teardown --connector <name>`` for
-    each residual connector to clean it up via the canonical sentinel.
+    This check walks every known connector that isn't the active one and emits
+    a WARN listing any artifact still present. Operators should clean each
+    residual connector directly with
+    ``defenseclaw-gateway connector teardown --connector <name>``.
     """
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
         _emit("skip", "Connector residue", "no data dir configured", r=r)
         return
 
-    # Build the inactive set explicitly so unknown active connectors
-    # (plugins) don't accidentally suppress residue detection.
-    inactive = [name for name in _CONNECTOR_RESIDUE_ARTIFACTS if name != active.lower()]
+    # Exclude the FULL active set, not just the singular primary (D7): an
+    # active connector can never be its own residue. Build the inactive set
+    # explicitly so unknown active connectors (plugins) don't accidentally
+    # suppress residue detection.
+    active_set = _residue_active_set(cfg, active)
+    inactive = [name for name in _CONNECTOR_RESIDUE_ARTIFACTS if name not in active_set]
 
     found: list[tuple[str, str]] = []  # (connector_name, full_path)
     for name in inactive:
@@ -2832,8 +3938,8 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
     # OpenClaw's pristine backup is its only residue marker and lives
     # next to openclaw.json, not under data_dir. Only flag it when
-    # OpenClaw is *not* the active connector.
-    if active.lower() != "openclaw":
+    # OpenClaw is *not* among the active connectors.
+    if "openclaw" not in active_set:
         for filename in _OPENCLAW_RESIDUE_ARTIFACTS:
             full = os.path.join(data_dir, filename)
             if os.path.isfile(full):
@@ -2864,8 +3970,9 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         paths = ", ".join(by_conn[name])
         parts.append(f"{name}: {paths}")
     detail = (
-        "found residue from inactive connectors — " + "; ".join(parts) + ". Run 'defenseclaw doctor --fix' to invoke "
-        "'defenseclaw-gateway connector teardown' for each, or "
+        "found residue from inactive connectors — " + "; ".join(parts)
+        + ". Run 'defenseclaw-gateway connector teardown --connector <name>' "
+        "for each residual connector, or "
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
@@ -3194,6 +4301,47 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
 
 
+def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Clear a dead-end ``asset_policy.plugin.registry_required=true``.
+
+    Companion to :func:`_check_plugin_registry_required`. Resets the flag to
+    ``False`` (global) / ``None`` (per-connector inherit) everywhere it is
+    explicitly on, then saves config.yaml. No plugin-registry pipeline exists
+    in v1, so the flag can only ever deny — clearing it is always safe and
+    non-disruptive (config write only; no sidecar restart).
+
+    Returns ``("skip", …)`` when nothing is set, ``("pass", …)`` on a
+    successful rewrite, ``("fail", …)`` on write error. (OTHER-5)
+    """
+    offenders = _plugin_registry_required_offenders(cfg)
+    if not offenders:
+        return ("skip", "no plugin.registry_required flag set")
+
+    if not assume_yes and not click.confirm(
+        f"    Clear the dead-end plugin.registry_required flag for "
+        f"[{', '.join(offenders)}] in config.yaml?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    ap = getattr(cfg, "asset_policy", None)
+    try:
+        plugin = getattr(ap, "plugin", None)
+        if plugin is not None and bool(getattr(plugin, "registry_required", False)):
+            plugin.registry_required = False
+        for pc in (getattr(ap, "connectors", None) or {}).values():
+            pc_plugin = getattr(pc, "plugin", None) if pc is not None else None
+            if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
+                # Tri-state per-connector field: None = inherit the (now
+                # cleared) global value, so reset to None rather than False.
+                pc_plugin.registry_required = None
+        cfg.save()
+    except (OSError, AttributeError) as exc:
+        return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
+
+    return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
+
+
 def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     """Run ``defenseclaw-gateway connector teardown`` for every inactive
     connector that still has artifacts on disk.
@@ -3211,15 +4359,17 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not data_dir:
         return ("skip", "no data dir configured")
 
-    active = _active_connector(cfg)
+    # Exclude the FULL active set so the teardown sentinel can never fire
+    # against a live connector (D7) — the same rule the residue *check* uses.
+    active_set = _residue_active_set(cfg, _active_connector(cfg))
     inactive_residue: list[str] = []
     for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
-        if name == active:
+        if name in active_set:
             continue
         if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
             inactive_residue.append(name)
 
-    if active != "openclaw":
+    if "openclaw" not in active_set:
         if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
             inactive_residue.append("openclaw")
         oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""

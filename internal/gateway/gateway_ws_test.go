@@ -67,7 +67,7 @@ func newLocalTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 }
 
 // startMockGW creates an httptest server that simulates the gateway WebSocket.
-// It performs the v3 challenge-response handshake, then calls afterHandshake.
+// It performs the challenge-response handshake, then calls afterHandshake.
 func startMockGW(t *testing.T, afterHandshake func(t *testing.T, conn *websocket.Conn)) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{}
@@ -88,10 +88,11 @@ func startMockGW(t *testing.T, afterHandshake func(t *testing.T, conn *websocket
 		}
 		var req RequestFrame
 		json.Unmarshal(raw, &req)
+		assertConnectProtocolRange(t, req)
 
 		helloData, _ := json.Marshal(HelloOK{
 			Type:     "hello-ok",
-			Protocol: 3,
+			Protocol: openClawMaxProtocol,
 			Features: &HelloFeatures{
 				Methods: []string{"skills.update", "config.patch", "config.set", "config.get", "status", "tools.catalog", "exec.approval.resolve"},
 				Events:  []string{"tool_call", "tool_result", "exec.approval.requested", "tick"},
@@ -105,6 +106,29 @@ func startMockGW(t *testing.T, afterHandshake func(t *testing.T, conn *websocket
 		}
 	}))
 	return srv
+}
+
+func assertConnectProtocolRange(t *testing.T, req RequestFrame) {
+	t.Helper()
+	if req.Method != "connect" {
+		t.Fatalf("first request method = %q, want connect", req.Method)
+	}
+
+	var params struct {
+		MinProtocol int `json:"minProtocol"`
+		MaxProtocol int `json:"maxProtocol"`
+	}
+	rawParams, err := json.Marshal(req.Params)
+	if err != nil {
+		t.Fatalf("marshal connect params: %v", err)
+	}
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		t.Fatalf("parse connect params: %v", err)
+	}
+	if params.MinProtocol != openClawMinProtocol || params.MaxProtocol != openClawMaxProtocol {
+		t.Fatalf("connect protocol range = %d..%d, want %d..%d",
+			params.MinProtocol, params.MaxProtocol, openClawMinProtocol, openClawMaxProtocol)
+	}
 }
 
 func rpcEchoLoop(t *testing.T, conn *websocket.Conn) {
@@ -200,6 +224,9 @@ func assertPluginConfigPatch(t *testing.T, rawParams json.RawMessage, pluginName
 	if params.BaseHash == "" {
 		t.Error("baseHash should not be empty")
 	}
+	if len(params.ReplacePaths) != 1 || params.ReplacePaths[0] != "plugins.allow" {
+		t.Errorf("ReplacePaths = %v, want [plugins.allow]", params.ReplacePaths)
+	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(params.Raw), &nested); err != nil {
 		t.Fatalf("Raw JSON parse: %v (raw=%q)", err, params.Raw)
@@ -245,8 +272,8 @@ func TestClientConnectSuccess(t *testing.T) {
 		t.Fatal("Hello() should not be nil after connect")
 		return
 	}
-	if hello.Protocol != 3 {
-		t.Errorf("Protocol = %d, want 3", hello.Protocol)
+	if hello.Protocol != openClawMaxProtocol {
+		t.Errorf("Protocol = %d, want %d", hello.Protocol, openClawMaxProtocol)
 	}
 	if hello.Features == nil {
 		t.Fatal("Features should not be nil")
@@ -349,6 +376,7 @@ func TestConnectHandshakeApprovalEventBeforeOK(t *testing.T) {
 		}
 		var connectReq RequestFrame
 		json.Unmarshal(raw, &connectReq)
+		assertConnectProtocolRange(t, connectReq)
 
 		apPayload, _ := json.Marshal(ApprovalRequestPayload{
 			ID: "early-approval",
@@ -364,7 +392,7 @@ func TestConnectHandshakeApprovalEventBeforeOK(t *testing.T) {
 
 		helloData, _ := json.Marshal(HelloOK{
 			Type:     "hello-ok",
-			Protocol: 3,
+			Protocol: openClawMaxProtocol,
 			Features: &HelloFeatures{
 				Methods: []string{"exec.approval.resolve"},
 				Events:  []string{"exec.approval.requested"},
@@ -876,7 +904,12 @@ func TestRouteApprovalNoAutoApprove(t *testing.T) {
 	}
 }
 
-func TestRouteApprovalNoPlan(t *testing.T) {
+// an approval frame with no SystemRunPlan, nested
+// request, raw command, OR argv carries no command context for the
+// dangerous-pattern scanner. Pre-fix the autoApprove branch returned
+// allow-once for that case ("empty rawCmd is not dangerous"). The
+// new contract is fail-closed: empty context -> deny.
+func TestRouteApprovalEmptyContextDenied(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
@@ -891,12 +924,11 @@ func TestRouteApprovalNoPlan(t *testing.T) {
 		Payload: payload,
 	})
 
-	// Empty rawCmd is not dangerous, so auto-approve fires
 	rpc := drainRPC(t, received)
 	var params ApprovalResolveParams
 	json.Unmarshal(rpc.Params, &params)
-	if params.Decision != "allow-once" {
-		t.Errorf("Decision = %q, want allow-once", params.Decision)
+	if params.Decision != "deny" {
+		t.Errorf("Decision = %q, want deny (fail-closed on empty context)", params.Decision)
 	}
 }
 
@@ -1083,7 +1115,7 @@ func TestSidecarAccessors(t *testing.T) {
 func TestSidecarLogHelloWithFeatures(t *testing.T) {
 	s := &Sidecar{}
 	s.logHello(&HelloOK{
-		Protocol: 3,
+		Protocol: openClawMaxProtocol,
 		Features: &HelloFeatures{
 			Methods: []string{"skills.update", "config.patch"},
 			Events:  []string{"tool_call", "tool_result"},
@@ -1093,7 +1125,7 @@ func TestSidecarLogHelloWithFeatures(t *testing.T) {
 
 func TestSidecarLogHelloWithoutFeatures(t *testing.T) {
 	s := &Sidecar{}
-	s.logHello(&HelloOK{Protocol: 3})
+	s.logHello(&HelloOK{Protocol: openClawMaxProtocol})
 }
 
 func TestHandleAdmissionResultBlocked(t *testing.T) {

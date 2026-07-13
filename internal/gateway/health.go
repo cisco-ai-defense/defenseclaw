@@ -48,6 +48,7 @@ type SubsystemHealth struct {
 type ConnectorHealth struct {
 	Name               string                       `json:"name"`
 	State              SubsystemState               `json:"state"`
+	Source             string                       `json:"source,omitempty"`
 	Since              time.Time                    `json:"since"`
 	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
 	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
@@ -59,19 +60,25 @@ type ConnectorHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt   time.Time       `json:"started_at"`
-	UptimeMs    int64           `json:"uptime_ms"`
-	Gateway     SubsystemHealth `json:"gateway"`
-	Watcher     SubsystemHealth `json:"watcher"`
-	API         SubsystemHealth `json:"api"`
-	Guardrail   SubsystemHealth `json:"guardrail"`
-	Telemetry   SubsystemHealth `json:"telemetry"`
-	AIDiscovery SubsystemHealth `json:"ai_discovery"`
+	StartedAt             time.Time       `json:"started_at"`
+	UptimeMs              int64           `json:"uptime_ms"`
+	Gateway               SubsystemHealth `json:"gateway"`
+	Watcher               SubsystemHealth `json:"watcher"`
+	Config                SubsystemHealth `json:"config"`
+	API                   SubsystemHealth `json:"api"`
+	Guardrail             SubsystemHealth `json:"guardrail"`
+	Telemetry             SubsystemHealth `json:"telemetry"`
+	AIDiscovery           SubsystemHealth `json:"ai_discovery"`
+	ApplicationProtection SubsystemHealth `json:"application_protection"`
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.
 	Sinks   SubsystemHealth  `json:"sinks"`
 	Sandbox *SubsystemHealth `json:"sandbox,omitempty"`
+	// Managed reports the local UDS gRPC server (internal/ipc) that
+	// serves the DefenseClaw ↔ AVC contract. Present only when the
+	// server has been started (managed_enterprise or managed.enabled).
+	Managed *SubsystemHealth `json:"managed,omitempty"`
 	// Connector is the primary/active connector, retained for back-compat
 	// with single-connector clients. Connectors lists every active
 	// connector with its own live counters (multi-connector view).
@@ -80,16 +87,28 @@ type HealthSnapshot struct {
 }
 
 type SidecarHealth struct {
-	mu          sync.RWMutex
-	gateway     SubsystemHealth
-	watcher     SubsystemHealth
-	api         SubsystemHealth
-	guardrail   SubsystemHealth
-	telemetry   SubsystemHealth
-	aiDiscovery SubsystemHealth
-	sinks       SubsystemHealth
-	sandbox     *SubsystemHealth
-	startedAt   time.Time
+	mu                    sync.RWMutex
+	gateway               SubsystemHealth
+	watcher               SubsystemHealth
+	config                SubsystemHealth
+	api                   SubsystemHealth
+	guardrail             SubsystemHealth
+	telemetry             SubsystemHealth
+	aiDiscovery           SubsystemHealth
+	applicationProtection SubsystemHealth
+	sinks                 SubsystemHealth
+	sandbox               *SubsystemHealth
+	managed               *SubsystemHealth
+	startedAt             time.Time
+
+	// subscribers receive a non-blocking notification after every Set*
+	// call, so long-lived consumers (like the IPC GetHealth stream)
+	// can react to state changes without polling Snapshot() on a
+	// ticker. The channel buffer is size 1: writes are non-blocking
+	// and coalesce naturally into a single wake-up when a subscriber
+	// hasn't yet drained the previous notification.
+	subMu sync.Mutex
+	subs  []chan struct{}
 
 	// Per-connector health + counters. In multi-connector mode every active
 	// connector gets its own ConnectorHealth so live counters are truthful
@@ -108,6 +127,7 @@ type SidecarHealth struct {
 type connectorStats struct {
 	name               string
 	state              SubsystemState
+	source             string
 	since              time.Time
 	toolInspectionMode connector.ToolInspectionMode
 	subprocessPolicy   connector.SubprocessPolicy
@@ -123,6 +143,7 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 	return ConnectorHealth{
 		Name:               s.name,
 		State:              s.state,
+		Source:             s.source,
 		Since:              s.since,
 		ToolInspectionMode: s.toolInspectionMode,
 		SubprocessPolicy:   s.subprocessPolicy,
@@ -144,81 +165,113 @@ func NewSidecarHealth() *SidecarHealth {
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
-		gateway:     initial,
-		watcher:     initial,
-		api:         initial,
-		guardrail:   disabled,
-		telemetry:   disabled,
-		aiDiscovery: disabled,
-		sinks:       disabled,
-		startedAt:   now,
+		gateway:               initial,
+		watcher:               initial,
+		config:                initial,
+		api:                   initial,
+		guardrail:             disabled,
+		telemetry:             disabled,
+		aiDiscovery:           disabled,
+		applicationProtection: disabled,
+		sinks:                 disabled,
+		startedAt:             now,
 	}
+}
+
+func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.config = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetGateway(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.gateway = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetWatcher(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.watcher = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetAPI(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.api = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.guardrail = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.telemetry = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.aiDiscovery = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.applicationProtection = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 // SetSinks reports the aggregate audit-sink health. Details should
@@ -226,23 +279,97 @@ func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, det
 // ([]map) with per-sink rows for richer rendering.
 func (h *SidecarHealth) SetSinks(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.sinks = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.sandbox = &SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// SetManaged records the current state of the local UDS gRPC server
+// (internal/ipc) that serves the DefenseClaw ↔ AVC contract. Called
+// from the IPC package as it moves through Starting → Running → Stopped
+// / Error.
+func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.managed = &SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// Subscribe returns a channel that receives a non-blocking notification
+// (a single struct{} value, buffered depth 1) after every Set* call.
+// Consumers coalesce multiple rapid changes naturally: the channel
+// stays at depth 1, so a subscriber that hasn't drained the previous
+// wake-up simply sees one more pending event when they next read.
+//
+// The returned cancel closes and unregisters the channel; call it
+// exactly once when the subscriber exits so the internal slice does
+// not grow with dead entries.
+func (h *SidecarHealth) Subscribe() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.subMu.Lock()
+	h.subs = append(h.subs, ch)
+	h.subMu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			// Hold subMu across both the slice mutation and the
+			// close so a concurrent notifySubscribers cannot pick
+			// up this channel from a stale snapshot and send on
+			// it after close. Allocating a fresh backing array
+			// also prevents a reader that already copied the
+			// slice header from seeing the removed entry mutated
+			// underneath them.
+			h.subMu.Lock()
+			next := make([]chan struct{}, 0, len(h.subs))
+			for _, existing := range h.subs {
+				if existing != ch {
+					next = append(next, existing)
+				}
+			}
+			h.subs = next
+			close(ch)
+			h.subMu.Unlock()
+		})
+	}
+	return ch, cancel
+}
+
+// notifySubscribers fans out a non-blocking wake-up to every current
+// subscriber. Never blocks: a full 1-element buffer means the
+// subscriber already has a pending notification, so we drop the
+// extra. Held under subMu so a concurrent cancel cannot close a
+// channel between our decision to send and the send itself.
+func (h *SidecarHealth) notifySubscribers() {
+	h.subMu.Lock()
+	defer h.subMu.Unlock()
+	for _, ch := range h.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -251,17 +378,21 @@ func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details
 // field. Counters for an already-registered connector are preserved across
 // re-registration (e.g. a connector hot-swap) so live totals are not reset.
 func (h *SidecarHealth) SetConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
-	h.registerConnector(name, mode, policy, true)
+	h.registerConnector(name, mode, policy, "manual", true)
 }
 
 // RegisterConnector registers (or updates) a connector's health entry WITHOUT
 // changing which connector is primary. The multi-connector boot loop calls
 // this for every active connector so each appears with its own live counters.
 func (h *SidecarHealth) RegisterConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
-	h.registerConnector(name, mode, policy, false)
+	h.registerConnector(name, mode, policy, "manual", false)
 }
 
-func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, primary bool) {
+func (h *SidecarHealth) RegisterConnectorWithSource(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, source string) {
+	h.registerConnector(name, mode, policy, source, false)
+}
+
+func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, source string, primary bool) {
 	key := connName(name)
 	if key == "" {
 		return
@@ -277,11 +408,38 @@ func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspec
 		h.connStats[key] = s
 	}
 	s.state = StateRunning
+	if strings.TrimSpace(source) == "" {
+		source = "manual"
+	}
+	s.source = strings.ToLower(strings.TrimSpace(source))
 	s.toolInspectionMode = mode
 	s.subprocessPolicy = policy
 	if primary {
 		h.primaryConn = key
 	}
+}
+
+func (h *SidecarHealth) HasConnector(name string) bool {
+	key := connName(name)
+	if key == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s := h.connStats[key]
+	return s != nil && s.state == StateRunning
+}
+
+func (h *SidecarHealth) HasConnectorSource(name, source string) bool {
+	key := connName(name)
+	wantSource := strings.ToLower(strings.TrimSpace(source))
+	if key == "" || wantSource == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s := h.connStats[key]
+	return s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource)
 }
 
 // statsFor returns the counter bucket for a connector, lazily creating it so
@@ -347,16 +505,19 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	defer h.mu.RUnlock()
 
 	snap := HealthSnapshot{
-		StartedAt:   h.startedAt,
-		UptimeMs:    time.Since(h.startedAt).Milliseconds(),
-		Gateway:     h.gateway,
-		Watcher:     h.watcher,
-		API:         h.api,
-		Guardrail:   h.guardrail,
-		Telemetry:   h.telemetry,
-		AIDiscovery: h.aiDiscovery,
-		Sinks:       h.sinks,
-		Sandbox:     h.sandbox,
+		StartedAt:             h.startedAt,
+		UptimeMs:              time.Since(h.startedAt).Milliseconds(),
+		Gateway:               h.gateway,
+		Watcher:               h.watcher,
+		Config:                h.config,
+		API:                   h.api,
+		Guardrail:             h.guardrail,
+		Telemetry:             h.telemetry,
+		AIDiscovery:           h.aiDiscovery,
+		ApplicationProtection: h.applicationProtection,
+		Sinks:                 h.sinks,
+		Sandbox:               h.sandbox,
+		Managed:               h.managed,
 	}
 
 	if len(h.connStats) > 0 {

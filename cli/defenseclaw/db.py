@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS actions (
     source_path TEXT,
     actions_json TEXT NOT NULL DEFAULT '{}',
     reason TEXT,
-    updated_at DATETIME NOT NULL
+    updated_at DATETIME NOT NULL,
+    connector TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS network_egress_events (
@@ -109,10 +111,17 @@ CREATE TABLE IF NOT EXISTS target_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_events(action, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
+CREATE INDEX IF NOT EXISTS idx_scan_timestamp ON scan_results(timestamp);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+-- The actions uniqueness index is connector-aware (target_type, target_name,
+-- connector) and is created/migrated in _ensure_connector_column(). It is
+-- deliberately NOT declared here: executescript(SCHEMA) runs on every init(),
+-- so a 2-column UNIQUE index declared here would be recreated each open and
+-- would reject per-connector rows (SK-4).
 CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
 CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
@@ -179,6 +188,7 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "file": {"", "quarantine", "none"},
     "runtime": {"", "disable", "enable"},
 }
+_SUMMARY_DETAILS_BYTES = 4096
 
 
 def _validate(field: str, value: str) -> None:
@@ -191,15 +201,71 @@ def _validate(field: str, value: str) -> None:
 
 class Store:
     def __init__(self, db_path: str) -> None:
+        newly_created = self._db_will_be_created(db_path)
         self.db = sqlite3.connect(
             db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
         )
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        # The audit DB stores audit events, scan results, findings, raw
+        # scanner JSON, target paths, and action decisions, so it must be
+        # private to the operator / service account. sqlite3.connect()
+        # honours the process umask, which can leave a freshly created DB
+        # world- or group-readable (F-0083). Pin the file to owner-only
+        # (0600) and, for a DB we just created, drop world access on the
+        # parent directory so a different local user cannot traverse to it.
+        self._harden_permissions(db_path, newly_created)
+
+    @staticmethod
+    def _is_disk_path(db_path: str) -> bool:
+        """True for an on-disk DB path (not an in-memory database)."""
+        if not db_path or db_path == ":memory:":
+            return False
+        if db_path.startswith("file:") and "mode=memory" in db_path:
+            return False
+        return True
+
+    @classmethod
+    def _db_will_be_created(cls, db_path: str) -> bool:
+        """True when ``sqlite3.connect`` will create a brand-new DB file."""
+        return cls._is_disk_path(db_path) and not os.path.exists(db_path)
+
+    def _harden_permissions(self, db_path: str, newly_created: bool) -> None:
+        if not self._is_disk_path(db_path):
+            return
+        # Always tighten the DB file itself to owner read/write only.
+        # This is functionally safe for pre-existing DBs (the owner keeps
+        # full access) while closing the world/group-readable hole.
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
+        # Only adjust the parent directory when we just created the DB,
+        # so we never mutate an unrelated directory a caller pointed us
+        # at (e.g. a shared temp root holding a pre-existing file).
+        if not newly_created:
+            return
+        parent = os.path.dirname(os.path.abspath(db_path))
+        if not parent:
+            return
+        try:
+            current = stat.S_IMODE(os.stat(parent).st_mode)
+            hardened = current & ~stat.S_IRWXO
+            if hardened != current:
+                os.chmod(parent, hardened)
+        except OSError:
+            pass
 
     def init(self) -> None:
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
+        self._ensure_audit_connector_columns()
+        # Add the per-connector column + swap the actions uniqueness index to
+        # (target_type, target_name, connector) BEFORE migrating the legacy
+        # block/allow lists, so the INSERT OR REPLACE block-last-wins ordering
+        # in _migrate_old_lists resolves conflicts against the new index and
+        # the migrated rows pick up connector='' (global).
+        self._ensure_connector_column()
         self._migrate_old_lists()
         self._ensure_v7_tables()
 
@@ -221,19 +287,26 @@ class Store:
         if not block_exists and not allow_exists:
             return
 
-        if block_exists:
-            self.db.execute(
-                """INSERT OR REPLACE INTO actions
-                   (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-                   SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at
-                   FROM block_list"""
-            )
+        # BLOCK precedence: ``actions`` has a UNIQUE index on
+        # (target_type, target_name), so when the same target appears in
+        # both legacy tables the INSERT OR REPLACE that runs LAST wins.
+        # We therefore migrate allow rows first and block rows last so a
+        # conflicting blocked target can never be silently downgraded to
+        # an allow entry during migration (F-0082). This matches the
+        # admission ordering where explicit blocks override allows.
         if allow_exists:
             self.db.execute(
                 """INSERT OR REPLACE INTO actions
                    (id, target_type, target_name, source_path, actions_json, reason, updated_at)
                    SELECT id, target_type, target_name, NULL, '{"install":"allow"}', reason, created_at
                    FROM allow_list"""
+            )
+        if block_exists:
+            self.db.execute(
+                """INSERT OR REPLACE INTO actions
+                   (id, target_type, target_name, source_path, actions_json, reason, updated_at)
+                   SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at
+                   FROM block_list"""
             )
         self.db.execute("DROP TABLE IF EXISTS block_list")
         self.db.execute("DROP TABLE IF EXISTS allow_list")
@@ -256,6 +329,63 @@ class Store:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
+        self.db.commit()
+
+    def _ensure_audit_connector_columns(self) -> None:
+        """Mirror Go's additive audit_events connector columns and indexes."""
+
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        for column, ddl in (
+            ("connector", "ALTER TABLE audit_events ADD COLUMN connector TEXT"),
+            ("step_idx", "ALTER TABLE audit_events ADD COLUMN step_idx INTEGER"),
+            ("enforced", "ALTER TABLE audit_events ADD COLUMN enforced INTEGER"),
+            ("rule_pack_dir", "ALTER TABLE audit_events ADD COLUMN rule_pack_dir TEXT"),
+        ):
+            if column not in columns:
+                self.db.execute(ddl)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
+            "ON audit_events(action, connector, timestamp DESC)"
+        )
+        self.db.commit()
+
+    def _ensure_connector_column(self) -> None:
+        """Add the per-connector column on ``actions`` and connector-scope its
+        uniqueness index (SK-4 foundation).
+
+        Idempotent and PRAGMA-guarded, following the same pattern as
+        :meth:`_ensure_run_id_columns`. Mirrors the Go migration
+        "multi-connector: per-connector column on actions + 3-col unique index"
+        in ``internal/audit/store.go`` so the two stores share one schema.
+
+        Existing rows keep ``connector=''`` — meaning **global / applies to
+        every connector** — so every pre-existing block/allow stays in force
+        after the upgrade (the back-compat anchor). The uniqueness key moves
+        from ``(target_type, target_name)`` to
+        ``(target_type, target_name, connector)`` so a target can carry one
+        global entry plus one entry per connector without colliding.
+        """
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(actions)").fetchall()
+        }
+        if "connector" not in columns:
+            self.db.execute(
+                "ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''"
+            )
+        # Swap the legacy 2-column uniqueness index for the connector-aware one.
+        # DROP first so an upgraded DB cannot keep both (the old one would
+        # reject per-connector rows). Both statements are guarded so re-running
+        # init() on an already-migrated DB is a no-op.
+        self.db.execute("DROP INDEX IF EXISTS idx_actions_type_name")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name_conn "
+            "ON actions(target_type, target_name, connector)"
+        )
         self.db.commit()
 
     def _ensure_v7_tables(self) -> None:
@@ -342,35 +472,194 @@ class Store:
         if not event.run_id:
             event.run_id = _current_run_id()
         structured_json = json.dumps(event.structured, separators=(",", ":")) if event.structured else None
+        connector = _event_connector_value(event)
         self.db.execute(
             """INSERT INTO audit_events (
                 id, timestamp, action, target, actor, details,
-                structured_json, severity, run_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                structured_json, severity, run_id, connector
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
-             structured_json, event.severity or None, event.run_id or None),
+             structured_json, event.severity or None, event.run_id or None,
+             connector or None),
         )
         self.db.commit()
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
-               FROM audit_events ORDER BY timestamp DESC LIMIT ?""",
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    def list_event_summaries(self, limit: int = 100) -> list[Event]:
+        """List recent audit rows without loading large structured payloads."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_actionable_event_summaries(self, limit: int = 100) -> list[Event]:
+        """List high-signal audit rows for the default TUI view."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+        """List recent connector-hook rows without the actionable filter."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events
+               WHERE action = 'connector-hook'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
+        """Return all-time connector-hook counters grouped by connector.
+
+        The Overview chart still uses a bounded event window for sparklines
+        and target breakdowns, but the CONNECTORS table's ``CALLS`` column
+        must not look frozen just because that window is full. Newer sidecar
+        schemas populate ``audit_events.connector`` and index it, so use a
+        grouped aggregate instead of loading every hook row into the TUI.
+        """
+
+        details_expr = "' ' || COALESCE(details, '') || ' '"
+        cur = self.db.execute(
+            f"""SELECT connector AS connector_name,
+                       COUNT(*) AS calls,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=block %'
+                               OR {details_expr} LIKE '% action=deny %'
+                             THEN 1 ELSE 0
+                           END) AS blocks,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=alert %'
+                               OR {details_expr} LIKE '% action=warn %'
+                             THEN 1 ELSE 0
+                           END) AS alerts,
+                       MAX(timestamp) AS newest
+                FROM audit_events
+                WHERE action = 'connector-hook'
+                  AND connector <> ''
+                GROUP BY connector"""
+        )
+        stats: dict[str, dict[str, Any]] = {}
+        for connector, calls, blocks, alerts, newest in cur.fetchall():
+            key = str(connector or "").strip().lower()
+            if not key:
+                continue
+            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
+            entry["calls"] = int(entry["calls"]) + int(calls or 0)
+            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
+            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
+            if newest and str(newest) > str(entry["newest"]):
+                entry["newest"] = newest
+        return stats
+
+    def count_scan_results_since(self, since: datetime | None) -> int:
+        """Count scan results in the active Overview session window."""
+
+        if since is None:
+            return int(
+                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
+            )
+        return int(
+            self.db.execute(
+                "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
+                (since.isoformat(),),
+            ).fetchone()[0]
+            or 0
+        )
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
-               ORDER BY timestamp DESC LIMIT ?""",
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_alert_summaries(self, limit: int = 100) -> list[Event]:
+        """List alert rows without loading large structured payloads."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events
+               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+                 AND action NOT LIKE 'dismiss%'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_actionable_alert_summaries(self, limit: int = 100) -> list[Event]:
+        """List high-signal alert rows for the default TUI view."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
+                 AND action NOT LIKE 'dismiss%'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def get_event(self, event_id: str) -> Event | None:
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+               FROM audit_events WHERE id = ?""",
+            (event_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_event(row)
 
     def acknowledge_alerts(self, severity_filter: str = "all") -> int:
         """Mirror internal/audit/store.go AcknowledgeAlerts — rows updated."""
@@ -497,30 +786,44 @@ class Store:
         ]
 
     # -- Actions --
+    #
+    # Connector scoping (SK-4): every method below takes a ``connector``
+    # argument that defaults to ``""`` (global — applies to every connector),
+    # so existing callers are unchanged. Lookups and writes are **exact-match**
+    # on connector: the actions table is unique on
+    # (target_type, target_name, connector), so a target can hold one global
+    # entry plus one entry per connector and they never collide. The store is
+    # deliberately a storage primitive — it does NOT implement most-specific-
+    # wins resolution (connector then global fallback); the enforcement /
+    # admission layer composes the two exact-match lookups it needs.
 
     def set_action(
         self, target_type: str, target_name: str,
         source_path: str, state: ActionState, reason: str,
+        connector: str = "",
     ) -> None:
         actions_json = json.dumps(state.to_dict())
         aid = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(target_type, target_name) DO UPDATE SET
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = excluded.actions_json,
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
             (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now),
+             actions_json, reason, now, connector),
         )
         self.db.commit()
 
     def set_action_field(
         self, target_type: str, target_name: str,
         field: str, value: str, reason: str,
+        connector: str = "",
     ) -> None:
         _validate(field, value)
         aid = str(uuid.uuid4())
@@ -528,71 +831,86 @@ class Store:
         init_json = json.dumps({field: value})
         path = f"$.{field}"
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-               VALUES (?, ?, ?, NULL, ?, ?, ?)
-               ON CONFLICT(target_type, target_name) DO UPDATE SET
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
+               VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = json_set(actions_json, ?, ?),
                  reason = excluded.reason,
                  updated_at = excluded.updated_at""",
-            (aid, target_type, target_name, init_json, reason, now, path, value),
+            (aid, target_type, target_name, init_json, reason, now, connector, path, value),
         )
         self.db.commit()
 
-    def clear_action_field(self, target_type: str, target_name: str, field: str) -> None:
+    def clear_action_field(
+        self, target_type: str, target_name: str, field: str,
+        connector: str = "",
+    ) -> None:
         _validate(field, "")
         path = f"$.{field}"
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
             """UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
-               WHERE target_type = ? AND target_name = ?""",
-            (path, now, target_type, target_name),
+               WHERE target_type = ? AND target_name = ? AND connector = ?""",
+            (path, now, target_type, target_name, connector),
         )
         self.db.execute(
-            """DELETE FROM actions WHERE target_type = ? AND target_name = ?
+            """DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?
                AND actions_json IN ('{}', 'null', '')""",
-            (target_type, target_name),
+            (target_type, target_name, connector),
         )
         self.db.commit()
 
-    def set_source_path(self, target_type: str, target_name: str, path: str) -> None:
+    def set_source_path(
+        self, target_type: str, target_name: str, path: str,
+        connector: str = "",
+    ) -> None:
         self.db.execute(
-            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ?",
-            (path, target_type, target_name),
+            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ? AND connector = ?",
+            (path, target_type, target_name, connector),
         )
         self.db.commit()
 
-    def remove_action(self, target_type: str, target_name: str) -> None:
+    def remove_action(
+        self, target_type: str, target_name: str, connector: str = "",
+    ) -> None:
         self.db.execute(
-            "DELETE FROM actions WHERE target_type = ? AND target_name = ?",
-            (target_type, target_name),
+            "DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?",
+            (target_type, target_name, connector),
         )
         self.db.commit()
 
-    def get_action(self, target_type: str, target_name: str) -> ActionEntry | None:
+    def get_action(
+        self, target_type: str, target_name: str, connector: str = "",
+    ) -> ActionEntry | None:
         cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
-               FROM actions WHERE target_type = ? AND target_name = ?""",
-            (target_type, target_name),
+            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+               FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?""",
+            (target_type, target_name, connector),
         )
         row = cur.fetchone()
         if row is None:
             return None
         return self._row_to_action(row)
 
-    def has_action(self, target_type: str, target_name: str, field: str, value: str) -> bool:
+    def has_action(
+        self, target_type: str, target_name: str, field: str, value: str,
+        connector: str = "",
+    ) -> bool:
         _validate(field, value)
         cur = self.db.execute(
             f"""SELECT COUNT(*) FROM actions
-                WHERE target_type = ? AND target_name = ?
+                WHERE target_type = ? AND target_name = ? AND connector = ?
                 AND json_extract(actions_json, '$.{field}') = ?""",
-            (target_type, target_name, value),
+            (target_type, target_name, connector, value),
         )
         return cur.fetchone()[0] > 0
 
     def list_by_action(self, field: str, value: str) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                 FROM actions WHERE json_extract(actions_json, '$.{field}') = ?
                 ORDER BY updated_at DESC""",
             (value,),
@@ -604,24 +922,40 @@ class Store:
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                 FROM actions WHERE json_extract(actions_json, '$.{field}') = ? AND target_type = ?
                 ORDER BY updated_at DESC""",
             (value, target_type),
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
-    def list_actions_by_type(self, target_type: str) -> list[ActionEntry]:
-        cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
-               FROM actions WHERE target_type = ? ORDER BY updated_at DESC""",
-            (target_type,),
-        )
+    def list_actions_by_type(
+        self, target_type: str, connector: str | None = None,
+    ) -> list[ActionEntry]:
+        """List action entries for a target type.
+
+        ``connector=None`` (default) returns entries across **all** connectors
+        — every returned :class:`ActionEntry` carries its own ``.connector`` so
+        callers can group/resolve in Python. A concrete value (``""`` for
+        global, ``"hermes"`` for a peer) filters to exactly that connector.
+        """
+        if connector is None:
+            cur = self.db.execute(
+                """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+                   FROM actions WHERE target_type = ? ORDER BY updated_at DESC""",
+                (target_type,),
+            )
+        else:
+            cur = self.db.execute(
+                """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+                   FROM actions WHERE target_type = ? AND connector = ? ORDER BY updated_at DESC""",
+                (target_type, connector),
+            )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_all_actions(self) -> list[ActionEntry]:
         cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                FROM actions ORDER BY updated_at DESC"""
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
@@ -640,6 +974,31 @@ class Store:
             alerts=_count(
                 "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
             ),
+            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+            blocked_egress_calls=_count(
+                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
+            ),
+        )
+
+    def get_enforcement_counts(self) -> Counts:
+        """Return cheap Overview enforcement counters.
+
+        This intentionally leaves ``alerts`` at zero. Exact alert counts scan
+        ``audit_events.severity`` and are still unnecessary for the TUI
+        startup/refresh path. The TUI combines these exact policy/scan counts
+        with the alert summaries it already loaded for the Alerts panel.
+        """
+
+        def _count(sql: str) -> int:
+            return self.db.execute(sql).fetchone()[0]
+
+        q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
+        q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        return Counts(
+            blocked_skills=_count(q_skill + "'block'"),
+            allowed_skills=_count(q_skill + "'allow'"),
+            blocked_mcps=_count(q_mcp + "'block'"),
+            allowed_mcps=_count(q_mcp + "'allow'"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
             blocked_egress_calls=_count(
                 "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
@@ -668,6 +1027,7 @@ class Store:
             severity=row[6] or "",
             run_id=row[7] or "",
             structured=structured,
+            connector=(row[9] or "") if len(row) > 9 else "",
         )
 
     def get_target_snapshot(
@@ -739,16 +1099,58 @@ class Store:
             actions=ActionState.from_dict(actions_dict),
             reason=row[5] or "",
             updated_at=_parse_ts(row[6]),
+            connector=(row[7] or "") if len(row) > 7 else "",
         )
+
+
+def _event_connector_value(event: Event) -> str:
+    connector = (event.connector or "").strip().lower()
+    if connector:
+        return connector
+    raw = event.structured.get("connector") if isinstance(event.structured, dict) else ""
+    connector = str(raw or "").strip().lower()
+    if connector:
+        return connector
+    return _details_connector(event.details)
+
+
+def _details_connector(details: str) -> str:
+    marker = "connector="
+    text = (details or "").strip()
+    if not text:
+        return ""
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    value_start = start + len(marker)
+    if value_start >= len(text):
+        return ""
+    if text[value_start] == '"':
+        value_start += 1
+        value_end = text.find('"', value_start)
+        if value_end < 0:
+            value_end = len(text)
+    else:
+        value_end = text.find(" ", value_start)
+        if value_end < 0:
+            value_end = len(text)
+    return text[value_start:value_end].strip().lower()
 
 
 def _parse_ts(val: Any) -> datetime:
     if isinstance(val, datetime):
         return val
     if isinstance(val, str):
+        text = val.strip()
+        if text:
+            iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+            try:
+                return datetime.fromisoformat(iso_text)
+            except ValueError:
+                pass
         for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(val, fmt)
+                return datetime.strptime(text, fmt)
             except ValueError:
                 continue
     return datetime.now(timezone.utc)

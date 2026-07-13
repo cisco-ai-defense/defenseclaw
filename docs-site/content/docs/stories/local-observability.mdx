@@ -54,11 +54,11 @@ Brings up five containers via Docker Compose:
 
 ```bash
 defenseclaw setup guardrail \
-  --connector $(cat ~/.defenseclaw/picked_connector) \
+  --connector codex \
   --restart
 ```
 
-Setup detects the local stack on `127.0.0.1:4317` and wires the top-level `otel.endpoint` (in `~/.defenseclaw/config.yaml`) to point at it.
+Replace `codex` with another connector you have wired, such as `claudecode`. Setup detects the local stack on `127.0.0.1:4317` and creates or updates the named `local-observability` route in `otel.destinations[]`. On a multi-connector host, that route is shared; use `--connector` only when you also want to reconcile that connector's hook wiring.
 
 </Step>
 
@@ -93,6 +93,7 @@ Stops the containers and unwires the OTLP endpoint. Your audit DB is untouched.
 
 <Flow
   direction="LR"
+  compact
   caption="The gateway exports three signals. The local stack receives all three and Grafana joins them."
 >
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>

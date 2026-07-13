@@ -195,6 +195,20 @@ type Manager struct {
 	mu    sync.RWMutex
 	sinks []Sink
 
+	// connectorSinks holds per-connector audit sinks (D5b). A connector's
+	// events route to ITS sinks when the connector has an override (see
+	// connectorOverride below), otherwise they fall back to the global
+	// sinks slice above. Keyed by normalized connector name.
+	connectorSinks map[string][]Sink
+
+	// connectorOverride records connectors with an explicit per-connector
+	// audit_sinks dimension (a present list, possibly empty). A connector
+	// present here with an empty connectorSinks slice SUPPRESSES global
+	// routing for that connector (the tri-state's empty-list case); a
+	// connector absent here INHERITS the global sinks (the safety default —
+	// no silent drop). Keyed by normalized connector name.
+	connectorOverride map[string]bool
+
 	// flushImmediateActions enumerates audit actions that trigger an
 	// immediate sync flush (e.g. lifecycle events the operator must see
 	// without batching latency).
@@ -262,7 +276,9 @@ func (m *Manager) SetCircuitCallbacks(onTrip, onRecover func(kind, sinkName stri
 	m.cbMu.Unlock()
 }
 
-// Register adds a sink to the fan-out list. Order is preserved.
+// Register adds a sink to the global fan-out list. Order is preserved.
+// Global sinks receive every connector's events unless that connector has a
+// per-connector override (see RegisterForConnector / MarkConnectorOverride).
 func (m *Manager) Register(s Sink) {
 	if m == nil || s == nil {
 		return
@@ -272,27 +288,128 @@ func (m *Manager) Register(s Sink) {
 	m.mu.Unlock()
 }
 
-// Sinks returns a snapshot of the registered sinks. Used by health
-// reporters and the TUI.
+// normalizeConnector canonicalizes a connector name for per-connector sink
+// routing: trim + lowercase, folding the known hyphen/underscore aliases onto
+// their canonical registry name. Mirrors config.normalizeConnectorKey — kept
+// local so the sinks package stays free of a config import (it deliberately
+// sits low in the dependency graph; see the Event-duplication note above).
+func normalizeConnector(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
+	}
+}
+
+// RegisterForConnector registers a sink that receives ONLY events whose
+// Connector matches connector. Registering a sink for a connector implicitly
+// marks that connector as having a per-connector override, so its events stop
+// flowing to the global sinks (override semantics). Order is preserved.
+//
+// The composition layer (internal/audit/sinkconfig.BuildAuditSinks) calls this for each
+// sink declared under observability.connectors[<name>].audit_sinks. To express
+// the tri-state's empty-list "suppress" case (an override present but with zero
+// sinks), call MarkConnectorOverride instead/as well.
+func (m *Manager) RegisterForConnector(connector string, s Sink) {
+	if m == nil || s == nil {
+		return
+	}
+	key := normalizeConnector(connector)
+	if key == "" {
+		// No connector identity — fall back to the global list rather than
+		// silently dropping the sink.
+		m.Register(s)
+		return
+	}
+	m.mu.Lock()
+	if m.connectorSinks == nil {
+		m.connectorSinks = make(map[string][]Sink)
+	}
+	if m.connectorOverride == nil {
+		m.connectorOverride = make(map[string]bool)
+	}
+	m.connectorSinks[key] = append(m.connectorSinks[key], s)
+	m.connectorOverride[key] = true
+	m.mu.Unlock()
+}
+
+// MarkConnectorOverride records that connector has an explicit per-connector
+// audit_sinks dimension even when it resolves to zero sinks. This is the
+// tri-state's empty-list case: the connector's events are SUPPRESSED (routed
+// to no sinks) rather than inheriting the global list. Idempotent and safe to
+// call alongside RegisterForConnector.
+func (m *Manager) MarkConnectorOverride(connector string) {
+	if m == nil {
+		return
+	}
+	key := normalizeConnector(connector)
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.connectorOverride == nil {
+		m.connectorOverride = make(map[string]bool)
+	}
+	m.connectorOverride[key] = true
+	m.mu.Unlock()
+}
+
+// sinksForConnector returns the sink slice an event with the given connector
+// routes to, honoring the per-connector tri-state. MUST be called with at
+// least an RLock held. Returns the global sinks when the connector has no
+// override (inherit), or the connector's own sinks (possibly empty = suppress)
+// when it does.
+func (m *Manager) sinksForConnectorLocked(connector string) []Sink {
+	if connector != "" && len(m.connectorOverride) > 0 {
+		key := normalizeConnector(connector)
+		if m.connectorOverride[key] {
+			return m.connectorSinks[key]
+		}
+	}
+	return m.sinks
+}
+
+// Sinks returns a snapshot of every registered sink — global and
+// per-connector (D5b) — so health reporters, the TUI, FlushAll, and Close all
+// observe the complete set. Per-connector sinks are distinct objects from the
+// global ones, so the union has no duplicates.
 func (m *Manager) Sinks() []Sink {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]Sink, len(m.sinks))
-	copy(out, m.sinks)
+	return m.allSinksLocked()
+}
+
+// allSinksLocked returns global + per-connector sinks. Caller holds at least
+// an RLock.
+func (m *Manager) allSinksLocked() []Sink {
+	out := make([]Sink, 0, len(m.sinks))
+	out = append(out, m.sinks...)
+	for _, ss := range m.connectorSinks {
+		out = append(out, ss...)
+	}
 	return out
 }
 
-// Len reports the number of registered sinks.
+// Len reports the number of registered sinks (global + per-connector). Used by
+// the boot path to decide whether to install the manager at all, so it must
+// count per-connector sinks — a global-empty install that only routes a
+// connector to its own sink is still a live manager.
 func (m *Manager) Len() int {
 	if m == nil {
 		return 0
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.sinks)
+	n := len(m.sinks)
+	for _, ss := range m.connectorSinks {
+		n += len(ss)
+	}
+	return n
 }
 
 // Forward fans out the event to every registered sink. The returned map
@@ -302,8 +419,14 @@ func (m *Manager) Forward(ctx context.Context, e Event) map[string]error {
 		return nil
 	}
 	m.mu.RLock()
-	snap := make([]Sink, len(m.sinks))
-	copy(snap, m.sinks)
+	// Per-connector routing (D5b): an event whose connector has an explicit
+	// override fans out only to that connector's sinks (empty = suppress);
+	// every other event inherits the global sinks. This keys off the
+	// connector already stamped on the event by the logger/gateway, so no
+	// extra threading is required at the call site.
+	targets := m.sinksForConnectorLocked(e.Connector)
+	snap := make([]Sink, len(targets))
+	copy(snap, targets)
 	immediate := m.shouldFlushImmediatelyLocked(e.Action)
 	hook := m.deliveryHook
 	m.mu.RUnlock()
@@ -446,8 +569,10 @@ func (m *Manager) Close() error {
 	// even if they already captured an RLock-protected snapshot.
 	m.closed.Store(true)
 	m.mu.Lock()
-	snap := m.sinks
+	snap := m.allSinksLocked()
 	m.sinks = nil
+	m.connectorSinks = nil
+	m.connectorOverride = nil
 	m.mu.Unlock()
 
 	var errs []error

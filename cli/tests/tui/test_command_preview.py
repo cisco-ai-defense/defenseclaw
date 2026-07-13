@@ -96,3 +96,38 @@ async def test_command_preview_cancel_button_dismisses() -> None:
         await pilot.pause()
 
         assert app.result is False
+
+
+@pytest.mark.asyncio
+async def test_command_preview_benign_focuses_run() -> None:
+    app = PreviewHarness(_parsed(("setup", "mode", "codex"), category="setup"))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "preview-run"
+
+
+@pytest.mark.asyncio
+async def test_command_preview_destructive_focuses_cancel_so_enter_cancels() -> None:
+    app = PreviewHarness(_parsed(("uninstall", "--all", "--yes"), category="other"))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "preview-cancel"
+
+        # A reflexive Enter now cancels instead of running the destructive cmd.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result is False
+
+
+@pytest.mark.asyncio
+async def test_command_preview_secret_focuses_cancel() -> None:
+    app = PreviewHarness(_parsed(("keys", "set", "OPENAI_API_KEY", "--value", "sk-x"), category="keys"))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "preview-cancel"

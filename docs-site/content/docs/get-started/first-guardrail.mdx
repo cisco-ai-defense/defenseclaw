@@ -1,14 +1,16 @@
 ---
 title: First guardrail in 5 minutes
-description: An end-to-end walkthrough — install, pick Claude Code, switch to action mode, and watch DefenseClaw block a destructive shell command before it runs.
+description: An end-to-end walkthrough — install, pick Claude Code, switch to action mode, and safely verify a destructive-command rule against a disposable path.
 keywords:
   - first DefenseClaw guardrail
-  - block rm -rf claude code
+  - block destructive command claude code
   - DefenseClaw walkthrough
   - DefenseClaw demo
 ---
 
-This walkthrough ends with DefenseClaw refusing to let Claude Code run `rm -rf ~/projects`. Five minutes from a fresh checkout.
+This walkthrough ends with DefenseClaw refusing to remove a disposable
+directory under `/var/tmp`. The example is intentionally harmless even if the
+guardrail is misconfigured.
 
 <Steps>
 
@@ -17,7 +19,9 @@ This walkthrough ends with DefenseClaw refusing to let Claude Code run `rm -rf ~
 ### Install
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash -s -- --connector claudecode
+VERSION=0.8.3
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode
 ```
 
 </Step>
@@ -73,11 +77,21 @@ Two things just changed:
 
 ### Trigger the rule
 
-Ask Claude Code to clean up:
+Create an empty disposable target yourself:
 
-> Please run `rm -rf ~/projects/old-experiments` to free disk space.
+```bash
+mkdir -p /var/tmp/defenseclaw-demo-empty
+```
 
-DefenseClaw's default rule pack flags `rm -rf` against home-directory paths as CRITICAL. The PreToolUse hook returns `block` and the agent never executes the command.
+Then ask Claude Code to clean it up:
+
+> Please run `rm -rf /var/tmp/defenseclaw-demo-empty`.
+
+The default pack's `CMD-RM-RF` rule flags recursive force deletion under
+critical root prefixes such as `/var` as CRITICAL. The PreToolUse hook returns
+`block` and the agent does not execute the command. Arbitrary relative paths or
+home subdirectories are not matched by this rule merely because `rm -rf` is
+present.
 
 In a second terminal you'll see the audit event land. List recent alerts:
 
@@ -87,7 +101,7 @@ defenseclaw alerts --limit 10
 
 ```
 #   SEVERITY   TIMESTAMP             ACTION  TARGET                              DETAILS
-1   CRITICAL   2026-05-08 14:02:11   block   rm -rf ~/projects/old-experiments   shell.dangerous-rm
+1   CRITICAL   2026-05-08 14:02:11   block   rm -rf /var/tmp/defenseclaw-demo-empty   CMD-RM-RF
 ```
 
 Use `defenseclaw alerts --show 1` for the full record (rule path, scanner, evidence). Or live-tail the JSONL fan-out filtered to high-severity rows:
@@ -103,11 +117,13 @@ tail -f ~/.defenseclaw/gateway.jsonl \
 
 ### What if you wanted to allow it?
 
-Three options, ordered by how much you trust the operator:
+Three safer options:
 
-- **Pause for approval** — leave HITL on; the operator clicks "approve" and the command runs.
-- **Downgrade severity** — edit `~/.defenseclaw/policies/guardrail/default/shell.yaml` and drop the rule to HIGH; with HITL the operator still sees it, without HITL it logs and runs.
+- **Use a narrower cleanup command** — avoid force-recursive deletion when it is unnecessary.
+- **Customize a copied rule pack** — change `rules/commands.yaml` in a custom pack, then select it with `--rule-pack-dir`. Editing a bundled pack in place makes upgrades harder to review.
 - **Switch to observe mode** — `defenseclaw setup guardrail --mode observe`. Use this for the first week of every new connector.
+
+CRITICAL findings are not eligible for HITL approval.
 
 </Step>
 
@@ -125,11 +141,11 @@ Three options, ordered by how much you trust the operator:
     { id: 'p',  label: 'Policy',         kind: 'policy' },
   ]}
 >
-  <Message from="u"  to="cc" label="rm -rf ~/projects/old-experiments" />
+  <Message from="u"  to="cc" label="rm -rf /var/tmp/defenseclaw-demo-empty" />
   <Message from="cc" to="h"  label="PreToolUse(command)" />
   <Message from="h"  to="g"  label="POST /api/v1/claudecode/hook" />
   <Message from="g"  to="p"  label="evaluate(command)" />
-  <Message from="p"  to="g"  kind="return" label="CRITICAL · shell.dangerous-rm" />
+  <Message from="p"  to="g"  kind="return" label="CRITICAL · CMD-RM-RF" />
   <Message from="g"  to="h"  kind="return" label="block · recursive delete" />
   <Message from="h"  to="cc" kind="return" label="block" />
   <Message from="cc" to="u"  kind="return" label="I can't run that — DefenseClaw blocked it." />
@@ -139,5 +155,5 @@ Three options, ordered by how much you trust the operator:
 
 <Cards>
   <Card title="Setup Guardrail (full reference)" href="/docs/setup/guardrail" description="Every flag, every option, every consequence." />
-  <Card title="Stop Claude Code from rm -rf (story)" href="/docs/stories/observe-claude-code" description="The same flow, but with the policy walkthrough and the explanation of why." />
+  <Card title="Stop a destructive Claude Code command" href="/docs/stories/observe-claude-code" description="The same flow, with the policy walkthrough and exact rule boundaries." />
 </Cards>

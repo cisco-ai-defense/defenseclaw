@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.observability.display import redact_endpoint_for_display
+from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 
 NoticeLevel = Literal["info", "warn", "error"]
@@ -132,6 +134,28 @@ class OverviewConfig:
     # DISABLED rather than hiding them; a *fully removed* connector simply
     # leaves ``active_connectors()`` and never reaches the roster at all.
     connector_disabled: tuple[str, ...] = ()
+    # N3: scanner action overrides from the *active* policy's synced
+    # ``data.json`` (``scanner_overrides`` → scanner_type → severity →
+    # ``{install,file,runtime}`` → action). These live only in the active
+    # policy YAML / ``data.json``; today only ``policy show`` surfaces them, so
+    # ``defenseclaw status`` and the Overview guardrail summary are blind to a
+    # policy that, say, downgrades a scanner surface to ``warn``/``allow``.
+    # Stored flattened as ``(scanner_type, severity, surface, action)`` so the
+    # frozen dataclass stays hashable; empty for the default config → no
+    # Overview change. Populated by the adapter (which reads ``data.json``);
+    # rendered via :func:`format_scanner_overrides_summary` /
+    # :meth:`OverviewPanelModel.scanner_overrides_summary`.
+    scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
+    # A2: a non-empty diagnostic when the connector roster could not be fully
+    # built — e.g. ``Config.active_connectors()`` raised on a malformed/alias
+    # key, so the adapter degraded to a single-connector (or empty) view
+    # instead of the full roster. The module-level builder in ``app.py`` can't
+    # emit a status-line message itself (the TUI subtree has no stderr logger),
+    # so it stuffs the reason here and the Overview surfaces it as a visible
+    # error notice via :meth:`OverviewPanelModel.build_notices`, rather than the
+    # roster silently collapsing (chip vanishes, ``m`` stops cycling, tiles
+    # disappear). Empty (the common case) renders nothing.
+    roster_error: str = ""
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
@@ -236,6 +260,20 @@ class ServiceCard:
     detail: str = ""
     since: str = ""
     last_error: str = ""
+
+
+@dataclass(frozen=True)
+class ObservabilityDestinationRow:
+    """One runtime-loaded OTel destination or audit sink for Overview."""
+
+    name: str
+    target: Literal["otel", "audit_sinks"]
+    scope: str
+    kind: str
+    state: str
+    signals: str
+    endpoint: str
+    routing: str = ""
 
 
 @dataclass(frozen=True)
@@ -387,6 +425,15 @@ class OverviewPanelModel:
             hint = self.gateway_standalone_hint()
             if hint:
                 notices.append(OverviewNotice("info", hint))
+        if self.cfg is not None and self.cfg.roster_error.strip():
+            notices.append(
+                OverviewNotice(
+                    "error",
+                    "Connector roster degraded: "
+                    f"{self.cfg.roster_error.strip()} - showing a reduced view; "
+                    "check your connector config",
+                )
+            )
         if self.cfg is not None and guardrail_off:
             notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
         if not self.skill_scanner_available:
@@ -487,14 +534,10 @@ class OverviewPanelModel:
             check for check in self.doctor.top_failures(3) if live_health_contradicts(check, self.health)
         )
         stale_failures = sum(
-            1
-            for check in self.doctor.checks
-            if check.status == "fail" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "fail" and live_health_contradicts(check, self.health)
         )
         stale_warnings = sum(
-            1
-            for check in self.doctor.checks
-            if check.status == "warn" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "warn" and live_health_contradicts(check, self.health)
         )
         effective_failed = max(self.doctor.failed - stale_failures, 0)
         effective_warned = max(self.doctor.warned - stale_warnings, 0)
@@ -553,26 +596,33 @@ class OverviewPanelModel:
             )
 
         summary = self.ai_usage.summary
-        parts = [f"{summary.active_signals} active"]
-        if summary.new_signals:
-            parts.append(f"{summary.new_signals} new")
-        if summary.changed_signals:
-            parts.append(f"{summary.changed_signals} changed")
-        if summary.gone_signals:
-            parts.append(f"{summary.gone_signals} gone")
+        agent_signals = tuple(signal for signal in self.ai_usage.signals if signal.category != "local_model")
+        active_agents = sum(signal.state.strip().lower() != "gone" for signal in agent_signals)
+        new_agents = sum(signal.state.strip().lower() == "new" for signal in agent_signals)
+        changed_agents = sum(signal.state.strip().lower() == "changed" for signal in agent_signals)
+        gone_agents = sum(signal.state.strip().lower() == "gone" for signal in agent_signals)
+        parts = [f"{active_agents} active"]
+        if new_agents:
+            parts.append(f"{new_agents} new")
+        if changed_agents:
+            parts.append(f"{changed_agents} changed")
+        if gone_agents:
+            parts.append(f"{gone_agents} gone")
         if summary.scanned_at:
             parts.append(f"scanned {format_scan_age(summary.scanned_at, now=now)}")
         if summary.privacy_mode:
             parts.append(f"mode {summary.privacy_mode}")
 
-        if not self.ai_usage.signals:
+        if not agent_signals:
             return OverviewAIDiscoveryBoxState(
                 "empty",
                 "no AI agents detected yet - try: defenseclaw agent discover",
                 summary_parts=tuple(parts),
             )
 
-        rows = self.ai_usage_sorted or sort_ai_discovery_signals_for_overview(self.ai_usage.signals)
+        rows = unique_ai_discovery_signals_for_overview(
+            sort_ai_discovery_signals_for_overview(agent_signals)
+        )
         overflow = max(len(rows) - MAX_AI_DISCOVERY_OVERVIEW_ROWS, 0)
         rendered = tuple(
             OverviewAIDiscoveryRow(
@@ -607,9 +657,7 @@ class OverviewPanelModel:
                 # when every rostered connector is disabled (the gateway drops
                 # disabled connectors, so connectors[] is empty but the right
                 # answer is "disabled", not "unknown").
-                if self._is_multi_connector() and (
-                    self.health.connectors or self._all_connectors_disabled()
-                ):
+                if self._is_multi_connector() and (self.health.connectors or self._all_connectors_disabled()):
                     return self._aggregate_connector_state()
                 if self.health.connector is None:
                     return "unknown"
@@ -668,6 +716,8 @@ class OverviewPanelModel:
                 return string_detail(self.health.api.details, "addr") if self.health else ""
             case "ai_discovery":
                 return self.ai_discovery_detail()
+            case "telemetry":
+                return self.telemetry_detail()
             case _:
                 return ""
 
@@ -691,13 +741,48 @@ class OverviewPanelModel:
         )
 
     def active_connector_name(self) -> str:
+        """Primary connector name, or ``""`` when none is configured.
+
+        A1 (Root R1, TUI-display-only per fix-plan §10.1): never fabricate
+        ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
+        singular override (``guardrail.connector``) → the active *set*'s
+        primary (``connector_modes`` — the multi-connector roster that the
+        singular ``config.active_connector()`` ignores, which is why a
+        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
+        ``config.active_connector()`` contract is deliberately left untouched;
+        this distinguishes "none configured" at the display layer only.
+        Callers treat ``""`` as "no connector present" (e.g. the app's
+        ``connector_present`` gate / merged-catalog fallback).
+
+        The genuinely-zero-connector case additionally depends on the adapter
+        passing an empty ``claw_mode`` rather than the collapsed ``"openclaw"``
+        default — that adapter half lives in ``app.py`` (the ``tui/app`` lane).
+        """
         if self.cfg is None:
-            return "openclaw"
+            return ""
         if self.cfg.guardrail_connector.strip():
             return self.cfg.guardrail_connector.strip().lower()
+        primary = connector_filter.active_connector_name(self.cfg.connector_modes)
+        if primary:
+            return primary.strip().lower()
         if self.cfg.claw_mode.strip():
             return self.cfg.claw_mode.strip().lower()
-        return "openclaw"
+        return ""
+
+    def scanner_overrides_summary(self) -> str:
+        """One-line summary of the active policy's scanner action overrides,
+        or ``""`` when there are none (N3).
+
+        Surfaces overrides that today live only in ``policy show`` /
+        ``data.json``. Empty (the default config) renders nothing, so the
+        Overview is unchanged until the adapter populates
+        :attr:`OverviewConfig.scanner_overrides`. See
+        :func:`format_scanner_overrides_summary`.
+        """
+        if self.cfg is None:
+            return ""
+        return format_scanner_overrides_summary(self.cfg.scanner_overrides)
 
     def multi_connector_rows(self) -> list[tuple[str, str]]:
         """Per-connector ``(label, detail)`` rows for the Overview.
@@ -753,10 +838,7 @@ class OverviewPanelModel:
         ``unknown``). Mirrors how an operator reads the CONNECTORS table.
         """
 
-        states = [
-            (conn.state or "").strip().lower()
-            for conn in (self.health.connectors if self.health else ())
-        ]
+        states = [(conn.state or "").strip().lower() for conn in (self.health.connectors if self.health else ())]
         if not states:
             # No live connectors. If every rostered connector is disabled,
             # say so explicitly instead of the generic "unknown".
@@ -782,14 +864,10 @@ class OverviewPanelModel:
             # Disabled connectors stay in the roster (history) but enforce
             # nothing, so they're reported separately and excluded from the
             # "active" denominator.
-            disabled_n = sum(
-                1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c)
-            )
+            disabled_n = sum(1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c))
             enabled_total = max(total - disabled_n, 0)
             live = self.health.connectors if self.health else ()
-            running = sum(
-                1 for conn in live if (conn.state or "").strip().lower() in self._RUNNING_STATES
-            )
+            running = sum(1 for conn in live if (conn.state or "").strip().lower() in self._RUNNING_STATES)
             if not disabled_n:
                 # No kill switches → original phrasing, unchanged.
                 if not live:
@@ -858,6 +936,166 @@ class OverviewPanelModel:
             parts.append(str(details["mode"]))
         return ", ".join(parts)
 
+    def telemetry_detail(self) -> str:
+        """Summarize named OTLP destinations without exposing headers."""
+
+        if self.health is None:
+            return ""
+        details = self.health.telemetry.details
+        destinations = details.get("destinations")
+        if isinstance(destinations, list):
+            names: list[str] = []
+            for item in destinations:
+                if not isinstance(item, dict) or not item.get("enabled") or not item.get("name"):
+                    continue
+                label = str(item["name"])
+                if str(item.get("preset", "")).lower() == "galileo" or label.lower() == "galileo":
+                    label = "Galileo"
+                delivery = item.get("delivery")
+                if isinstance(delivery, dict) and delivery.get("attempted"):
+                    try:
+                        attempted = max(0, int(delivery.get("attempted", 0) or 0))
+                        delivered = max(
+                            0,
+                            int(
+                                delivery.get(
+                                    "collector_accepted",
+                                    delivery.get("delivered", 0),
+                                )
+                                or 0
+                            ),
+                        )
+                    except (TypeError, ValueError):
+                        attempted = delivered = 0
+                    if attempted:
+                        label += f" ({100 * delivered / attempted:.1f}% delivered)"
+                else:
+                    routing = item.get("routing")
+                    if isinstance(routing, dict) and routing.get("total"):
+                        try:
+                            percentage = float(
+                                routing.get(
+                                    "eligibility_percentage",
+                                    routing.get("accepted_percentage", 0),
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            percentage = 0
+                        label += f" ({percentage:.1f}% eligible; awaiting delivery)"
+                names.append(label)
+            count = details.get("destination_count", len(destinations))
+            suffix = f": {', '.join(names)}" if names else ""
+            return f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        parts: list[str] = []
+        if details.get("signals"):
+            parts.append(str(details["signals"]))
+        if details.get("endpoint"):
+            parts.append(
+                redact_endpoint_for_display(str(details["endpoint"]), hide_path=True)
+            )
+        return ", ".join(parts)
+
+    def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
+        """Return every runtime-loaded OTel route and audit sink.
+
+        The health API deliberately omits headers and secret values, making it
+        the safest source for an always-visible Overview inventory. OTel
+        destinations and audit sinks are separate routing planes, so each row
+        keeps ``target`` and process/global/connector ``scope`` explicit.
+        """
+
+        if self.health is None:
+            return ()
+
+        rows: list[ObservabilityDestinationRow] = []
+        telemetry = self.health.telemetry.details.get("destinations")
+        if isinstance(telemetry, list):
+            for item in telemetry:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                name = str(item["name"])
+                preset = str(item.get("preset", "") or "")
+                kind = preset or "otlp"
+                signals = str(item.get("signals", "") or "none")
+                routing_label = ""
+                routing = item.get("routing")
+                if isinstance(routing, dict):
+                    try:
+                        accepted = max(0, int(routing.get("accepted", 0) or 0))
+                        dropped = max(0, int(routing.get("dropped", 0) or 0))
+                    except (TypeError, ValueError):
+                        accepted = dropped = 0
+                    try:
+                        total = max(accepted + dropped, int(routing.get("total", 0) or 0))
+                    except (TypeError, ValueError):
+                        total = accepted + dropped
+                    if total:
+                        try:
+                            percentage = float(
+                                routing.get(
+                                    "eligibility_percentage",
+                                    routing.get("accepted_percentage", 100 * accepted / total),
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            percentage = 0.0
+                        routing_label = f"{percentage:.1f}% ({accepted}/{total})"
+                    else:
+                        routing_label = "waiting"
+                delivery = item.get("delivery")
+                if isinstance(delivery, dict):
+                    try:
+                        attempted = max(0, int(delivery.get("attempted", 0) or 0))
+                        delivered = max(
+                            0,
+                            int(delivery.get("collector_accepted", delivery.get("delivered", 0)) or 0),
+                        )
+                        rejected = max(0, int(delivery.get("rejected", 0) or 0))
+                        failed = max(0, int(delivery.get("failed", 0) or 0))
+                        pending = max(0, int(delivery.get("pending", 0) or 0))
+                    except (TypeError, ValueError):
+                        attempted = delivered = rejected = failed = pending = 0
+                    if attempted:
+                        routing_label = (
+                            f"collector accepted {delivered}/{attempted}; pending {pending}; "
+                            f"rejected {rejected}; failed {failed}"
+                        )
+                rows.append(
+                    ObservabilityDestinationRow(
+                        name="Galileo" if name.lower() == "galileo" else name,
+                        target="otel",
+                        scope=str(item.get("scope", "") or "process"),
+                        kind=kind,
+                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        signals=signals,
+                        endpoint=redact_endpoint_for_display(str(item.get("endpoint", "") or "—")),
+                        routing=routing_label,
+                    )
+                )
+
+        sinks = self.health.sinks.details.get("sinks")
+        if isinstance(sinks, list):
+            for item in sinks:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                endpoint = redact_endpoint_for_display(
+                    str(item.get("endpoint") or item.get("url") or "—"),
+                    hide_path=True,
+                )
+                rows.append(
+                    ObservabilityDestinationRow(
+                        name=str(item["name"]),
+                        target="audit_sinks",
+                        scope=str(item.get("scope", "") or "global"),
+                        kind=str(item.get("kind", "") or "unknown"),
+                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        signals="audit-events",
+                        endpoint=str(endpoint),
+                    )
+                )
+        return tuple(rows)
+
+
 def gateway_health_is_broken(state: str) -> bool:
     return state.strip().lower() not in {"running", "disabled"}
 
@@ -922,7 +1160,12 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity":
+        case "omnigent":
+            return (
+                f"{name} connector has seen 0 policy events after {formatted} - "
+                "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
+            )
+        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -935,7 +1178,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
 
 
 def friendly_connector_name(connector: str) -> str:
-    match (connector or "openclaw").strip().lower() or "openclaw":
+    match (connector or "").strip().lower():
         case "openclaw":
             return "OpenClaw"
         case "zeptoclaw":
@@ -958,12 +1201,16 @@ def friendly_connector_name(connector: str) -> str:
             return "OpenHands"
         case "antigravity":
             return "Antigravity"
+        case "opencode":
+            return "OpenCode"
+        case "omnigent":
+            return "OmniGent"
         case value:
-            return value[:1].upper() + value[1:] if value else "OpenClaw"
+            return value[:1].upper() + value[1:] if value else "No connector"
 
 
 def connector_source_label(connector: str, category: str) -> str:
-    connector = (connector or "openclaw").strip().lower() or "openclaw"
+    connector = (connector or "").strip().lower()
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
@@ -975,7 +1222,13 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
         ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
-        ("antigravity", "skills"): ("unsupported/hooks-only surface",),
+        ("antigravity", "skills"): (
+            "~/.gemini/config/skills/<skill>/SKILL.md",
+            "<workspace>/.agents/skills/<skill>/SKILL.md",
+            "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
+        ),
+        ("opencode", "skills"): ("unsupported/hooks-only surface",),
+        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
@@ -986,7 +1239,13 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
-        ("antigravity", "mcps"): ("unsupported/hooks-only surface",),
+        ("antigravity", "mcps"): (
+            "~/.gemini/config/mcp_config.json",
+            "<workspace>/.agents/mcp_config.json",
+            "<plugin>/mcp_config.json (discovery-only)",
+        ),
+        ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
+        ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): ("~/.claude/plugins",),
         ("codex", "plugins"): ("~/.codex/plugins",),
@@ -997,7 +1256,13 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "plugins"): ("./.gemini/extensions",),
         ("copilot", "plugins"): ("copilot plugin list",),
         ("openhands", "plugins"): ("unsupported",),
-        ("antigravity", "plugins"): ("unsupported",),
+        ("antigravity", "plugins"): (
+            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+        ),
+        ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
+        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): ("~/.claude/settings.json",),
         ("codex", "config"): ("~/.codex/config.toml",),
@@ -1009,6 +1274,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("copilot", "config"): ("./.github/hooks/*.json",),
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
+        ("opencode", "config"): ("~/.config/opencode/plugins/defenseclaw.js",),
+        ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
     }
     return ", ".join(sources.get((connector, category), ()))
 
@@ -1018,11 +1285,44 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
         return health.connector.name.strip()
     if mode.strip():
         return mode.strip()
-    return "openclaw"
+    return ""
+
+
+def format_scanner_overrides_summary(
+    overrides: tuple[tuple[str, str, str, str], ...],
+) -> str:
+    """One-line summary of active-policy scanner action overrides (N3).
+
+    ``overrides`` is the flattened ``(scanner_type, severity, surface, action)``
+    view of the active policy's ``scanner_overrides`` (synced into
+    ``data.json``; only ``policy show`` surfaces these today). Returns ``""``
+    when empty, so the Overview / ``defenseclaw status`` render nothing for the
+    common default config. Groups by scanner then severity, e.g.::
+
+        secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
+
+    Malformed entries (not 4 fields, or missing scanner/surface) are skipped so
+    a bad adapter payload degrades to a partial line rather than raising.
+    """
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for entry in overrides:
+        if len(entry) != 4:
+            continue
+        scanner, severity, surface, action = (str(part).strip() for part in entry)
+        if not scanner or not surface:
+            continue
+        grouped.setdefault(scanner, {}).setdefault(severity.upper(), []).append(f"{surface}={action}")
+    parts: list[str] = []
+    for scanner, sevs in grouped.items():
+        sev_parts = [
+            f"{severity + ' ' if severity else ''}{', '.join(surfaces)}" for severity, surfaces in sevs.items()
+        ]
+        parts.append(f"{scanner}: {'; '.join(sev_parts)}")
+    return " | ".join(parts)
 
 
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
-    def rank(signal: AIUsageSignal) -> tuple[int, float, float, str]:
+    def rank(signal: AIUsageSignal) -> tuple[int, int, float, float, str]:
         state_rank = {
             "new": 0,
             "changed": 1,
@@ -1030,10 +1330,42 @@ def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -
             "": 2,
             "gone": 3,
         }.get(signal.state.strip().lower(), 4)
+        model_rank = 0 if signal.model is not None and signal.model.status == "loaded" else 1
         last_seen = signal.last_seen.timestamp() if signal.last_seen is not None else 0.0
-        return (state_rank, -signal.confidence, -last_seen, display_ai_discovery_name(signal).lower())
+        return (state_rank, model_rank, -signal.confidence, -last_seen, display_ai_discovery_name(signal).lower())
 
     return tuple(sorted(signals, key=rank))
+
+
+def unique_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
+    """Collapse multiple evidence signals into one Overview row per agent."""
+
+    seen: set[tuple[str, str]] = set()
+    rows: list[AIUsageSignal] = []
+    for signal in signals:
+        key = _ai_discovery_overview_key(signal)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(signal)
+    return tuple(rows)
+
+
+def _ai_discovery_overview_key(signal: AIUsageSignal) -> tuple[str, str]:
+    connector = signal.supported_connector.strip().lower()
+    if connector:
+        return ("connector", connector)
+    if signal.component is not None:
+        ecosystem = signal.component.ecosystem.strip().lower()
+        name = signal.component.name.strip().lower()
+        if ecosystem or name:
+            return ("component", f"{ecosystem}:{name}")
+    if signal.model is not None and signal.model.id.strip():
+        provider = signal.model.provider.strip().lower() or signal.vendor.strip().lower()
+        return ("model", f"{provider}:{signal.model.id.strip().lower()}")
+    name = display_ai_discovery_name(signal).strip().lower()
+    vendor = display_ai_discovery_vendor(signal).strip().lower()
+    return ("display", f"{vendor}:{name}")
 
 
 def ai_discovery_state_badge(state: str) -> str:
@@ -1049,7 +1381,8 @@ def ai_discovery_state_badge(state: str) -> str:
 
 
 def display_ai_discovery_name(signal: AIUsageSignal) -> str:
-    for candidate in (signal.name, signal.product, signal.signature_id, signal.signal_id):
+    model_name = signal.model.id if signal.model is not None else ""
+    for candidate in (model_name, signal.name, signal.product, signal.signature_id, signal.signal_id):
         if candidate.strip():
             return candidate.strip()
     return "(unknown)"
@@ -1063,6 +1396,11 @@ def display_ai_discovery_vendor(signal: AIUsageSignal) -> str:
     label = " ".join(parts)
     if signal.supported_connector.strip():
         label = f"{label} ({signal.supported_connector.strip()})"
+    if signal.model is not None:
+        details = [signal.model.status.strip(), signal.model.format.strip()]
+        details = [item for item in details if item]
+        if details:
+            label = f"{label} ({', '.join(details)})"
     return label
 
 
@@ -1136,6 +1474,7 @@ __all__ = [
     "OverviewConfig",
     "OverviewNotice",
     "OverviewPanelModel",
+    "ObservabilityDestinationRow",
     "QUICK_ACTIONS",
     "RenderedDoctorCheck",
     "STALENESS_WINDOW",
@@ -1150,6 +1489,7 @@ __all__ = [
     "format_age",
     "format_duration",
     "format_scan_age",
+    "format_scanner_overrides_summary",
     "friendly_connector_name",
     "gateway_health_is_broken",
     "keys_overflow_suffix",

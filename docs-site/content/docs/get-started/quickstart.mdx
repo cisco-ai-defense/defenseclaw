@@ -31,15 +31,32 @@ The recommended first run for a human at a terminal. The wizard walks you throug
 defenseclaw init
 ```
 
-That's it. On a TTY this runs the guided path (`_prompt_first_run`) and asks you which connector to wire up, whether to start in `observe` or `action` mode, whether to enable the LLM judge, and so on. Every prompt has a sensible default — pressing Enter through them gives you the same result as `quickstart`.
+On a TTY this runs the guided path (`_prompt_first_run`). It runs local agent discovery, **pre-selects every installed hook connector**, and configures them **all in `observe` (log-only) mode** by default — pressing Enter through the connector prompt brings up everything you have. Rather than asking observe-vs-action for each one, it asks a single question, **"Action-mode connector(s)"**, naming the subset that should enforce. Leave it blank and every connector stays in observe.
 
-To skip the wizard inside a session that *is* a TTY (CI on a pty, scripted demos):
+The action-only policy knobs — hook fail-mode (`open`/`closed`) and HITL human-approval plus its minimum severity — are asked **once** and shared across every connector you promote to action; observe connectors never see them. Proxy connectors (`openclaw`, `zeptoclaw`) are detected but excluded from the observe-all set — they own the single LLM proxy port and can't be multi-connector peers — so the wizard prints a one-line note pointing you to `defenseclaw setup <proxy>` for them.
+
+<Callout type="warn">
+An action connector whose installed version doesn't map to a known hook contract is **downgraded to observe** with a warning — the same gate the gateway applies at boot. Override only for exploratory testing with `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1`.
+</Callout>
+
+### Scripted `init` (no prompts)
+
+To skip the wizard — including inside a session that *is* a TTY (CI on a pty, scripted demos) — `defenseclaw init` exposes two **init-only** multi-connector flags. These do **not** exist on `quickstart`:
 
 ```bash
-defenseclaw init --non-interactive --yes --connector codex
+# Observe every detected hook connector, enforce on codex:
+defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 ```
 
-`--non-interactive` skips prompts; `--yes` accepts every confirmation; `--connector` pre-selects the agent.
+| Flag (`init` only) | Effect |
+| --- | --- |
+| `--observe-all` | Configure every detected hook connector in `observe` mode. |
+| `--action-connectors codex,claudecode` | Comma-separated connectors to configure in `action` mode. Composable with `--observe-all` (everything else stays observe); the named connectors are configured even on their own. |
+| `--non-interactive` | Skip every prompt. |
+| `--yes` / `-y` | Auto-accept every confirmation. |
+| `--connector <x>` | Pre-select a single agent. Single-connector path — wins over the multi flags. |
+
+With neither multi flag nor `--connector`, non-interactive init keeps the single-connector default: one discovery-backed connector in `observe`. An explicit `--connector` always wins.
 
 ## Path B — Zero prompts (`defenseclaw quickstart`)
 
@@ -55,7 +72,7 @@ The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: 
 defenseclaw quickstart --connector claudecode
 ```
 
-Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openclaw`, or `zeptoclaw` to target the agent you actually use. If you skip `--connector`, quickstart consults `~/.defenseclaw/picked_connector` (written by the installer when you passed `--connector` to it) and falls back to `codex`.
+Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, or `zeptoclaw` to target the agent you actually use. `quickstart` configures **one** connector. If you skip `--connector`, it uses the single configured or detected connector; if more than one connector is configured/detected, or the installer hint disagrees with the detected connector, it exits and asks you to rerun with `--connector <name>`.
 
 </Step>
 
@@ -113,7 +130,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
   <Node id="bootstrap" kind="generic">{`run_first_run()\nbootstrap.py`}</Node>
   <Node id="apply" kind="generic">apply choices to config.yaml</Node>
   <Node id="env" kind="generic">{`bootstrap_env\nseed DB · dirs · scanners`}</Node>
-  <Node id="guard" kind="connector">{`quiet guardrail setup\nfor picked connector`}</Node>
+  <Node id="guard" kind="connector">{`quiet guardrail setup\nfor resolved connector`}</Node>
   <Node id="gw" kind="gateway">{`start defenseclaw-gateway\n(unless --skip-gateway)`}</Node>
   <Node id="report" kind="generic">first-run report</Node>
   <Edge from="init" to="bootstrap" />
@@ -130,8 +147,8 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity",
-      description: "Agent connector. Defaults to ~/.defenseclaw/picked_connector (written by the installer) or codex.",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent",
+      description: "Agent connector. Required when more than one connector is configured or detected; otherwise quickstart uses the single configured/detected connector, then the installer hint if no connector can be detected.",
     },
     "--mode": {
       type: "observe|action",

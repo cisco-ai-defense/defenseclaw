@@ -174,9 +174,9 @@ def test_textual_command_parser_keeps_raw_read_only_commands_unblocked() -> None
 
 
 def test_textual_command_parser_previews_raw_setup_commands() -> None:
-    parsed = _parser()("defenseclaw setup mode codex")
+    parsed = _parser()("defenseclaw setup codex --mode action")
 
-    assert _argv(parsed) == ["defenseclaw", "setup", "mode", "codex"]
+    assert _argv(parsed) == ["defenseclaw", "setup", "codex", "--mode", "action"]
     assert parsed.category == "setup"
     assert parsed.needs_preview is True
 
@@ -206,5 +206,4 @@ def test_textual_command_parser_accepts_go_gateway_registry_commands() -> None:
     assert _argv(parsed) == ["defenseclaw-gateway", "status"]
     assert parsed.category == "daemon"
     assert parsed.needs_preview is False
-
 

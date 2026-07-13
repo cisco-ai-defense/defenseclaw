@@ -104,6 +104,7 @@ class TestSkillDirs:
     def test_new_connector_skill_dirs_are_connector_specific(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert connector_paths.skill_dirs("hermes") == [
             os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
         ]
@@ -113,6 +114,20 @@ class TestSkillDirs:
             workspace_dir=str(tmp_path),
         )
         assert connector_paths.skill_dirs("windsurf") == []
+        antigravity = connector_paths.skill_dirs("antigravity", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".agents", "skills") in antigravity
+        assert os.path.join(str(tmp_path), "_agents", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in antigravity
+        opencode = connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".opencode", "skills") in opencode
+        assert os.path.join(str(tmp_path), ".claude", "skills") in opencode
+        assert os.path.join(str(tmp_path), ".agents", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".claude", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in opencode
+        assert os.path.join(str(tmp_path), "opencode-custom", "skills") in opencode
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
             "geminicli",
@@ -221,6 +236,7 @@ class TestPluginDirs:
     def test_new_connector_plugin_dirs(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
         assert connector_paths.plugin_dirs("cursor") == []
         assert connector_paths.plugin_dirs("windsurf") == []
@@ -233,6 +249,15 @@ class TestPluginDirs:
         )
         assert connector_paths.plugin_dirs("copilot") == []
         assert connector_paths.plugin_dirs("openhands") == []
+        antigravity = connector_paths.plugin_dirs("antigravity", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".agents", "plugins") in antigravity
+        assert os.path.join(str(tmp_path), "_agents", "plugins") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "plugins") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins") in antigravity
+        opencode = connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".opencode", "plugins") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "plugins") in opencode
+        assert os.path.join(str(tmp_path), "opencode-custom", "plugins") in opencode
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -313,6 +338,80 @@ class TestMCPServers:
         openhands.parent.mkdir(parents=True)
         openhands.write_text(json.dumps({"mcpServers": {"o": {"command": "openhands-mcp"}}}))
         assert connector_paths.mcp_servers("openhands")[0].command == "openhands-mcp"
+
+    def test_antigravity_reads_global_and_workspace_mcp_config(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+
+        global_mcp = fake_home / ".gemini" / "config" / "mcp_config.json"
+        global_mcp.parent.mkdir(parents=True)
+        global_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "local": {
+                    "command": "/opt/defenseclaw/bin/defenseclaw",
+                    "args": ["mcp", "serve"],
+                    "env": {"AGY_PROFILE": "default"},
+                    "cwd": "/workspace/project",
+                    "disabled": True,
+                    "disabledTools": ["unsafe_tool"],
+                },
+                "remote": {
+                    "serverUrl": "https://mcp.example.com/mcp/",
+                    "headers": {"Authorization": "Bearer ${AGY_MCP_TOKEN}"},
+                    "authProviderType": "oauth",
+                    "oauth": {"issuer": "https://accounts.example.com"},
+                },
+            }
+        }))
+        workspace_mcp = workspace / ".agents" / "mcp_config.json"
+        workspace_mcp.parent.mkdir()
+        workspace_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "workspace-remote": {"url": "https://workspace.example.com/mcp"},
+            }
+        }))
+
+        entries = connector_paths.mcp_servers("antigravity", workspace_dir=str(workspace))
+        names = [e.name for e in entries]
+        assert names == ["local", "remote", "workspace-remote"]
+        local = entries[0]
+        assert local.command == "/opt/defenseclaw/bin/defenseclaw"
+        assert local.args == ["mcp", "serve"]
+        assert local.env == {"AGY_PROFILE": "default"}
+        assert local.cwd == "/workspace/project"
+        assert local.disabled is True
+        assert local.disabled_tools == ["unsafe_tool"]
+        remote = entries[1]
+        assert remote.url == "https://mcp.example.com/mcp/"
+        assert remote.headers == {"Authorization": "Bearer ${AGY_MCP_TOKEN}"}
+        assert remote.auth_provider_type == "oauth"
+        assert remote.oauth == {"issuer": "https://accounts.example.com"}
+        assert entries[2].url == "https://workspace.example.com/mcp"
+
+    def test_antigravity_ignores_workspace_mcp_without_explicit_workspace(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        workspace_mcp = workspace / ".agents" / "mcp_config.json"
+        workspace_mcp.parent.mkdir()
+        workspace_mcp.write_text(json.dumps({
+            "mcpServers": {"workspace": {"command": "workspace-mcp"}},
+        }))
+
+        assert connector_paths.mcp_servers("antigravity") == []
 
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
         """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only
@@ -514,8 +613,184 @@ class TestMCPServers:
 
 
 # ---------------------------------------------------------------------------
+# opencode MCP reader — reads opencode.json's `mcp` map, never OpenClaw
+# ---------------------------------------------------------------------------
+
+
+class TestOpenCodeMCPReader:
+    def _write_global(self, home: Path, servers: dict) -> Path:
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": servers}))
+        return path
+
+    def test_reads_local_server_splits_command_argv(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(
+            home,
+            {
+                "fs": {
+                    "type": "local",
+                    "command": ["npx", "-y", "fs-mcp"],
+                    "environment": {"TOKEN": "secret"},
+                    "enabled": True,
+                },
+            },
+        )
+        entries = connector_paths.mcp_servers("opencode")
+        assert [e.name for e in entries] == ["fs"]
+        assert entries[0].command == "npx"
+        assert entries[0].args == ["-y", "fs-mcp"]
+        assert entries[0].env == {"TOKEN": "secret"}
+        assert entries[0].transport == "local"
+
+    def test_reads_remote_server(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(
+            home,
+            {"api": {"type": "remote", "url": "https://example.com/mcp", "enabled": True}},
+        )
+        entries = connector_paths.mcp_servers("opencode")
+        assert [e.name for e in entries] == ["api"]
+        assert entries[0].url == "https://example.com/mcp"
+        assert entries[0].transport == "remote"
+        assert entries[0].command == ""
+
+    def test_never_reads_openclaw_config(self, tmp_path, monkeypatch):
+        """The Root-1 leak: opencode must read its own config, never
+        ~/.openclaw/openclaw.json — even when openclaw has servers and
+        opencode has none."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        # Populate OpenClaw's config with a server that must NOT leak.
+        oc = home / ".openclaw"
+        oc.mkdir()
+        (oc / "openclaw.json").write_text(
+            json.dumps({"mcp": {"servers": {"leaked": {"command": "do-not-show"}}}})
+        )
+        # No opencode.json present → opencode sees nothing.
+        assert connector_paths.mcp_servers("opencode") == []
+        # Now add an opencode server; only it shows, never "leaked".
+        self._write_global(home, {"mine": {"type": "local", "command": ["mine"]}})
+        names = [e.name for e in connector_paths.mcp_servers("opencode")]
+        assert names == ["mine"]
+        assert "leaked" not in names
+
+    def test_project_file_layers_with_explicit_workspace(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(home, {"g": {"type": "local", "command": ["g-cmd"]}})
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({"mcp": {"p": {"type": "local", "command": ["p-cmd"]}}})
+        )
+        # Without workspace: only the global server.
+        assert [e.name for e in connector_paths.mcp_servers("opencode")] == ["g"]
+        # With an explicit workspace: both global and project servers.
+        names = {e.name for e in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))}
+        assert names == {"g", "p"}
+
+    def test_no_config_returns_empty(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        assert connector_paths.mcp_servers("opencode") == []
+
+
+# ---------------------------------------------------------------------------
+# connector_home — opencode/antigravity resolve to their own dirs
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorHome:
+    def test_opencode_home_is_xdg_config(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert connector_paths.connector_home("opencode") == os.path.join(
+            str(tmp_path), ".config", "opencode"
+        )
+
+    def test_antigravity_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert connector_paths.connector_home("antigravity") == os.path.join(
+            str(tmp_path), ".gemini", "antigravity-cli"
+        )
+
+    def test_opencode_home_is_not_openclaw(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        home = connector_paths.connector_home("opencode")
+        assert ".openclaw" not in home
+
+
+# ---------------------------------------------------------------------------
 # Round-trip via Config.skill_dirs / plugin_dirs / mcp_servers
 # ---------------------------------------------------------------------------
+
+
+class TestConnectorConfigFiles:
+    """N2 — ``connector_config_files`` must point at the file the connector
+    actually writes, not a phantom path."""
+
+    def test_hermes_lists_yaml_not_json(self, tmp_path, monkeypatch):
+        # The Go source of truth (hermesConfigPath / the hook-contract
+        # template) resolves hermes' config to ~/.hermes/config.yaml; the old
+        # ~/.hermes/config.json is never written. (N2)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files("hermes")
+        assert os.path.join(str(fake_home), ".hermes", "config.yaml") in files
+        assert not any(p.endswith(os.path.join(".hermes", "config.json")) for p in files)
+
+    def test_hermes_workspace_path_is_yaml(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files(
+            "hermes", workspace_dir=str(tmp_path)
+        )
+        assert os.path.join(str(tmp_path), ".hermes", "config.yaml") in files
+        assert not any(p.endswith("config.json") for p in files)
+
+    def test_antigravity_lists_mcp_config_paths(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files(
+            "antigravity",
+            workspace_dir=str(tmp_path),
+        )
+        assert os.path.join(
+            str(fake_home), ".gemini", "config", "mcp_config.json"
+        ) in files
+        assert os.path.join(str(tmp_path), ".agents", "mcp_config.json") in files
+
+    def test_omnigent_honors_config_home(self, tmp_path, monkeypatch):
+        config_home = tmp_path / "isolated-omnigent"
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+
+        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
+        assert connector_paths.connector_home("omnigent") == str(config_home)
+        assert connector_paths.connector_config_files("omnigent") == [
+            str(config_home / "config.yaml")
+        ]
+
+    def test_omnigent_relative_config_home_is_resolved_consistently(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "relative-omnigent")
+        config_home = tmp_path / "relative-omnigent"
+
+        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
+        assert connector_paths.connector_home("omnigent") == str(config_home)
 
 
 class TestConfigDispatch:

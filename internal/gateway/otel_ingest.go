@@ -131,9 +131,17 @@ func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	if strings.TrimSpace(r.Header.Get(otelSourceHeader)) == "" {
-		r.Header.Set(otelSourceHeader, source)
-	}
+	// ("Scoped OTLP path-token source can be
+	// spoofed with x-defenseclaw-source"): the path-token route
+	// authenticates a *specific* connector source via the URL, so
+	// the authenticated source is the one parsed from the path.
+	// The previous implementation only filled the header when it
+	// was empty, which let a loopback caller present the geminicli
+	// path token while setting `x-defenseclaw-source: codex` and
+	// have telemetry attributed to codex. Always overwrite so the
+	// audited Actor / AgentName / metrics labels match the
+	// authenticated path source.
+	r.Header.Set(otelSourceHeader, source)
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/v1/logs"):
 		a.handleOTLPSignal(w, r, otelSignalLogs)
@@ -217,6 +225,13 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	sessionID := extractOTLPSessionID(summaryBody, signal)
 	if sessionID != "" {
 		ctx = ContextWithSessionID(ctx, sessionID)
+		// follow-up: when session_id arrives in the OTLP body
+		// (after auth has already happened), the request envelope was
+		// promoted with no session_id. Re-promote now so persisted
+		// events carry both session_id AND a stable agent_instance_id
+		// — otherwise downstream joins on (session_id, instance_id)
+		// fail because instance_id is empty.
+		ctx = PromoteSessionIfAuthenticated(ctx)
 		enrichHTTPSpanFromContext(ctx)
 		enrichOTLPIngestSpan(ctx, sessionID)
 	}
@@ -285,7 +300,24 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	// telemetry directly — no extra audit OTLP sink needed.
 	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
 	for _, usage := range extractOTLPTokenUsage(summaryBody, signal, source) {
-		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), SessionIDFromContext(ctx), usage.tokenType, usage.tokens)
+		if usage.cumulative {
+			var ok bool
+			usage, ok = a.deltaOTLPCumulativeTokenUsage(usage)
+			if !ok {
+				continue
+			}
+		}
+		usageSessionID := firstNonEmpty(usage.sessionID, sessionID, SessionIDFromContext(ctx))
+		agentName := usage.agentName
+		agentID := SharedAgentRegistry().AgentID()
+		if snapshot, ok := a.hookLifecycleSnapshot(source, usageSessionID, ""); ok {
+			agentName = firstNonEmpty(snapshot.AgentName, agentName)
+			agentID = firstNonEmpty(snapshot.AgentID, agentID)
+		}
+		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, agentName, agentID, usageSessionID, usage.tokenType, usage.tokens)
+		if signal == otelSignalLogs {
+			a.rememberOTLPHookLLMTokenUsage(source, usageSessionID, usage)
+		}
 	}
 	for _, duration := range extractOTLPOperationDurations(summaryBody, signal, source) {
 		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)
@@ -293,6 +325,37 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
+}
+
+func (a *APIServer) deltaOTLPCumulativeTokenUsage(usage otelTokenUsage) (otelTokenUsage, bool) {
+	if a == nil || !usage.cumulative || usage.tokens <= 0 || usage.seriesKey == "" {
+		return usage, usage.tokens > 0
+	}
+	a.otlpMetricMu.Lock()
+	defer a.otlpMetricMu.Unlock()
+	if a.otlpMetricCumulative == nil {
+		a.otlpMetricCumulative = make(map[string]otlpCumulativePoint)
+	}
+	previous, exists := a.otlpMetricCumulative[usage.seriesKey]
+	delta := usage.tokens
+	start := usage.startTime
+	if exists && previous.start == start {
+		if usage.tokens <= previous.value {
+			return usage, false
+		}
+		delta = usage.tokens - previous.value
+	}
+	if !exists {
+		for len(a.otlpMetricCumulative) >= hookPromptCacheMaxEntries && len(a.otlpMetricCumulativeOrder) > 0 {
+			oldest := a.otlpMetricCumulativeOrder[0]
+			a.otlpMetricCumulativeOrder = a.otlpMetricCumulativeOrder[1:]
+			delete(a.otlpMetricCumulative, oldest)
+		}
+		a.otlpMetricCumulativeOrder = append(a.otlpMetricCumulativeOrder, usage.seriesKey)
+	}
+	a.otlpMetricCumulative[usage.seriesKey] = otlpCumulativePoint{value: usage.tokens, start: start}
+	usage.tokens = delta
+	return usage, delta > 0
 }
 
 func normalizeOTLPIngestBody(body []byte, signal otelIngestSignal, contentType string) ([]byte, string, error) {
@@ -455,7 +518,7 @@ func agentIdentityForOTLPSource(source string) AgentIdentity {
 
 func normalizeConnectorTelemetrySource(source string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent":
 		return strings.ToLower(strings.TrimSpace(source))
 	case "claude-code", "claude_code":
 		return "claudecode"
@@ -544,8 +607,17 @@ type otelTokenUsage struct {
 	providerName  string
 	model         string
 	agentName     string
+	sessionID     string
 	tokenType     string
 	tokens        int64
+	cumulative    bool
+	seriesKey     string
+	startTime     string
+}
+
+type otlpCumulativePoint struct {
+	value int64
+	start string
 }
 
 type otelLLMDuration struct {
@@ -676,6 +748,7 @@ func extractOTLPLogTokenUsage(body []byte, source string) []otelTokenUsage {
 						"unknown",
 					),
 					agentName: agentName,
+					sessionID: firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs)),
 					tokenType: "input",
 					tokens:    inputTokens,
 				})
@@ -689,6 +762,7 @@ func extractOTLPLogTokenUsage(body []byte, source string) []otelTokenUsage {
 						"unknown",
 					),
 					agentName: agentName,
+					sessionID: firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs)),
 					tokenType: "output",
 					tokens:    outputTokens,
 				})
@@ -728,6 +802,7 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 				if metric.Name != "claude_code.token.usage" {
 					continue
 				}
+				cumulative := otlpAggregationIsCumulative(metric.Sum.AggregationTemporality)
 				points := metric.Sum.DataPoints
 				if len(points) == 0 {
 					points = metric.Gauge.DataPoints
@@ -743,13 +818,20 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 					if agentName == "" || agentName == "unknown" {
 						agentName = firstNonEmpty(serviceName, "claudecode")
 					}
+					model := firstNonEmpty(otlpString(attrs, "model"), "unknown")
+					sessionID := firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs))
 					out = append(out, otelTokenUsage{
 						operationName: "chat",
 						providerName:  firstNonEmpty(source, serviceName, "claudecode"),
-						model:         firstNonEmpty(otlpString(attrs, "model"), "unknown"),
+						model:         model,
 						agentName:     agentName,
+						sessionID:     sessionID,
 						tokenType:     tokenType,
 						tokens:        tokens,
+						cumulative:    cumulative,
+						seriesKey: stableLLMEventID("otlp-metric", source, serviceName,
+							otlpString(resourceAttrs, "service.instance.id"), metric.Name, model, tokenType, sessionID),
+						startTime: string(point.StartTimeUnixNano),
 					})
 				}
 			}
@@ -905,13 +987,22 @@ func extractOTLPTraceDurations(body []byte, source string) []otelLLMDuration {
 }
 
 type otlpMetricPoints struct {
-	DataPoints []otlpMetricDataPoint `json:"dataPoints"`
+	DataPoints             []otlpMetricDataPoint `json:"dataPoints"`
+	AggregationTemporality json.RawMessage       `json:"aggregationTemporality"`
+	IsMonotonic            bool                  `json:"isMonotonic"`
 }
 
 type otlpMetricDataPoint struct {
-	Attributes []otlpAttribute `json:"attributes"`
-	AsInt      json.RawMessage `json:"asInt"`
-	AsDouble   json.RawMessage `json:"asDouble"`
+	Attributes        []otlpAttribute `json:"attributes"`
+	AsInt             json.RawMessage `json:"asInt"`
+	AsDouble          json.RawMessage `json:"asDouble"`
+	StartTimeUnixNano json.RawMessage `json:"startTimeUnixNano"`
+	TimeUnixNano      json.RawMessage `json:"timeUnixNano"`
+}
+
+func otlpAggregationIsCumulative(raw json.RawMessage) bool {
+	value := strings.Trim(strings.ToUpper(strings.TrimSpace(string(raw))), `"`)
+	return value == "2" || strings.Contains(value, "CUMULATIVE")
 }
 
 type otlpHistogramPoints struct {
@@ -1791,10 +1882,16 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 			meta.PromptID = emittedPromptID
 			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
 		}
+		spanMeta := meta
+		spanMeta.Source = "codex"
+		a.rememberHookLLMSpanPrompt(spanMeta, prompt)
 	}
 	if response := codexNotifyResponse(payload); response != "" {
 		meta.ResponseID = stableLLMEventID("response", "codex", sessionID, turnID)
 		emitLLMResponseEvent(ctx, meta, response, "", codexNotifyFinishReasons(payload))
+		spanMeta := meta
+		spanMeta.Source = "codex"
+		a.emitHookLLMSpan(ctx, spanMeta, response)
 	}
 }
 

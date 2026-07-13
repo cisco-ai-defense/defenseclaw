@@ -19,6 +19,266 @@ set -u
 
 log() { printf '[runner-cleanup] %s\n' "$*"; }
 
+repair_state_path() {
+  local state_path="$1"
+  [ -e "$state_path" ] || return 0
+  if sudo -n chown -R -- "$runner_uid:$runner_gid" "$state_path" 2>/dev/null; then
+    chmod -R u+rwX -- "$state_path" 2>/dev/null || true
+    return 0
+  fi
+  if sudo -n setfacl -R -m "u:${runner_uid}:rwX" -- "$state_path" 2>/dev/null; then
+    return 0
+  fi
+  if sudo -n chmod -R a+rwX -- "$state_path" 2>/dev/null; then
+    log "Relaxed permissions on $state_path after ownership repair failed"
+    return 0
+  fi
+  return 1
+}
+
+repair_persistent_state_permissions() {
+  local runner_uid runner_gid state_dir repaired resolved_state_dir
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  for state_dir in "$HOME/.defenseclaw" "$HOME/.openclaw"; do
+    [ -e "$state_dir" ] || continue
+    repaired=0
+
+    # Sandbox setup can leave ~/.openclaw as a symlink to a root-owned target.
+    # Repair the resolved target first; chown -R on the symlink path itself may
+    # only affect the link and leave openclaw.json unreadable.
+    if [ -L "$state_dir" ]; then
+      resolved_state_dir="$(realpath "$state_dir" 2>/dev/null || true)"
+      if [ -n "$resolved_state_dir" ] && [ "$resolved_state_dir" != "$state_dir" ]; then
+        if repair_state_path "$resolved_state_dir"; then
+          repaired=1
+        else
+          log "WARNING: unable to repair permissions on $resolved_state_dir"
+        fi
+      fi
+    fi
+
+    if repair_state_path "$state_dir"; then
+      repaired=1
+    fi
+    if [ "$repaired" -ne 1 ]; then
+      log "WARNING: unable to repair permissions on $state_dir"
+    fi
+  done
+}
+
+prune_stale_openclaw_e2e_artifacts() {
+  local dir
+  for dir in \
+    "$HOME/.openclaw/workspace/skills" \
+    "$HOME/.openclaw/skills" \
+    "$HOME/.openclaw/extensions"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -mindepth 1 -maxdepth 1 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
+  done
+  for dir in \
+    "$HOME/.defenseclaw/quarantine/skills" \
+    "$HOME/.defenseclaw/quarantine/plugins"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -mindepth 1 -maxdepth 2 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
+  done
+}
+
+prune_stale_openclaw_channel_plugin_projects() {
+  local project_root project removed
+  removed=0
+  for project_root in /data/openclaw/npm/projects "$HOME/.openclaw/npm/projects"; do
+    [ -d "$project_root" ] || continue
+    while IFS= read -r -d '' project; do
+      if rm -rf -- "$project" 2>/dev/null; then
+        removed=$((removed + 1))
+      elif sudo -n rm -rf -- "$project" 2>/dev/null; then
+        removed=$((removed + 1))
+      else
+        log "WARNING: unable to remove stale OpenClaw channel plugin project $project"
+      fi
+    done < <(find "$project_root" -mindepth 1 -maxdepth 1 -type d \
+      \( -name 'openclaw-discord-*' \
+         -o -name 'openclaw-slack-*' \
+         -o -name 'openclaw-telegram-*' \
+         -o -name 'openclaw-whatsapp-*' \) -print0 2>/dev/null)
+  done
+  if [ "$removed" -gt 0 ]; then
+    log "Removed stale OpenClaw channel plugin project(s) ($removed)"
+  fi
+}
+
+normalize_openclaw_ci_config() {
+  local oc_home="$HOME/.openclaw"
+  [ -d "$oc_home" ] || return 0
+  python3 - "$oc_home" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+oc_home = Path(sys.argv[1])
+cfg_paths = []
+seen = set()
+for pattern in ("openclaw.json", "openclaw.json.*"):
+    for path in sorted(oc_home.glob(pattern)):
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        cfg_paths.append(path)
+
+if not cfg_paths:
+    raise SystemExit(0)
+
+stale_channel_plugin_ids = {"discord", "slack", "telegram", "whatsapp"}
+
+
+def is_defenseclaw_load_path(value):
+    if isinstance(value, str):
+        return Path(value.rstrip("/")).name == "defenseclaw"
+    if isinstance(value, dict):
+        return any(is_defenseclaw_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_defenseclaw_load_path(item) for item in value)
+    return False
+
+
+def is_stale_channel_load_path(value):
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(
+            f"openclaw-{name}-" in lowered or f"@openclaw/{name}" in lowered
+            for name in stale_channel_plugin_ids
+        )
+    if isinstance(value, dict):
+        return any(is_stale_channel_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_stale_channel_load_path(item) for item in value)
+    return False
+
+
+def should_remove_plugin_name(name):
+    value = str(name)
+    return value == "defenseclaw" or value in stale_channel_plugin_ids
+
+
+def normalize_config(cfg_path):
+    try:
+        with cfg_path.open() as f:
+            cfg = json.load(f)
+    except PermissionError as exc:
+        print(f"[runner-cleanup] WARNING: OpenClaw config unreadable during normalization: {exc}")
+        return "skipped"
+    except json.JSONDecodeError as exc:
+        print(f"[runner-cleanup] WARNING: OpenClaw config invalid during normalization: {exc}")
+        return "skipped"
+
+    if not isinstance(cfg, dict):
+        return "skipped"
+
+    changed = False
+    plugins = cfg.get("plugins")
+    if isinstance(plugins, dict):
+        for section in ("entries", "installs", "allow", "enabled"):
+            bucket = plugins.get(section)
+            if isinstance(bucket, dict):
+                next_bucket = {name: meta for name, meta in bucket.items() if not should_remove_plugin_name(name)}
+                if next_bucket != bucket:
+                    plugins[section] = next_bucket
+                    changed = True
+            elif isinstance(bucket, list):
+                next_bucket = [item for item in bucket if not should_remove_plugin_name(item)]
+                if next_bucket != bucket:
+                    plugins[section] = next_bucket
+                    changed = True
+
+        load = plugins.get("load")
+        if isinstance(load, dict):
+            paths = load.get("paths")
+            if isinstance(paths, list):
+                next_paths = [
+                    path for path in paths
+                    if not is_defenseclaw_load_path(path)
+                    and not is_stale_channel_load_path(path)
+                ]
+                if next_paths != paths:
+                    load["paths"] = next_paths
+                    changed = True
+
+        if plugins.get("allow") != ["defenseclaw"]:
+            plugins["allow"] = ["defenseclaw"]
+            changed = True
+
+    gateway = cfg.get("gateway")
+    if not isinstance(gateway, dict):
+        gateway = {}
+        cfg["gateway"] = gateway
+        changed = True
+    if not gateway.get("mode"):
+        gateway["mode"] = "local"
+        changed = True
+
+    channels = cfg.get("channels")
+    if isinstance(channels, dict):
+        for channel in channels.values():
+            if not isinstance(channel, dict):
+                continue
+            if "nativeStreaming" in channel:
+                channel.pop("nativeStreaming", None)
+                changed = True
+            if "streaming" in channel and not isinstance(channel.get("streaming"), dict):
+                channel.pop("streaming", None)
+                changed = True
+
+    if changed:
+        with cfg_path.open("w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        return "changed"
+    return "clean"
+
+
+changed = clean = skipped = 0
+for cfg_path in cfg_paths:
+    result = normalize_config(cfg_path)
+    if result == "changed":
+        changed += 1
+    elif result == "clean":
+        clean += 1
+    else:
+        skipped += 1
+
+if changed:
+    print(f"[runner-cleanup] OpenClaw config normalized for CI ({changed} file(s))")
+elif clean:
+    print("[runner-cleanup] OpenClaw config already clean")
+elif skipped:
+    print("[runner-cleanup] OpenClaw config normalization skipped")
+PY
+}
+
+if [ "${RUNNER_CLEANUP_REPAIR_PERMISSIONS_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions only"
+  repair_persistent_state_permissions
+  exit 0
+fi
+
+if [ "${RUNNER_CLEANUP_PERMISSIONS_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions only"
+  repair_persistent_state_permissions
+  prune_stale_openclaw_e2e_artifacts
+  prune_stale_openclaw_channel_plugin_projects
+  exit 0
+fi
+
+if [ "${RUNNER_CLEANUP_STATE_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions and config only"
+  repair_persistent_state_permissions
+  prune_stale_openclaw_e2e_artifacts
+  prune_stale_openclaw_channel_plugin_projects
+  normalize_openclaw_ci_config
+  exit 0
+fi
+
 log "Disk before cleanup: $(df -h / | tail -1)"
 
 # 1. Stop stranded sidecar processes from earlier crashed runs. The runner
@@ -38,6 +298,14 @@ docker container prune -f 2>/dev/null || true
 docker volume prune -f 2>/dev/null || true
 docker image prune -a -f 2>/dev/null || true
 docker builder prune -a -f 2>/dev/null || true
+
+# 2b. Persistent product state can be left owned by root after sandboxed or
+# service-backed E2E paths. Repair it before workflow cleanup parses or prunes
+# these directories on the next run.
+repair_persistent_state_permissions
+prune_stale_openclaw_e2e_artifacts
+prune_stale_openclaw_channel_plugin_projects
+normalize_openclaw_ci_config
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job
 # that ever ran on this host; without TTL pruning they grow unbounded.

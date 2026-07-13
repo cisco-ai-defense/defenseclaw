@@ -24,6 +24,7 @@ directories when the operator explicitly runs ``defenseclaw codeguard install``.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -329,20 +330,60 @@ def _makedirs_owner_only(path: str, *, stop_at: str = "") -> None:
 
 
 def _is_codeguard_skill_dir(path: str) -> bool:
-    manifest = os.path.join(path, "SKILL.md")
-    try:
-        text = Path(manifest).read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return _looks_like_codeguard(text)
+    """True only when *path* holds the GENUINE bundled CodeGuard skill.
+
+    Provenance — not spoofable marker substrings — decides whether an
+    existing asset is "already installed" (F-0281). An attacker (or a
+    third-party package) can pre-create ``SKILL.md`` containing the
+    ``CodeGuard`` / ``CG-CRED-`` markers, which the old heuristic accepted
+    as proof the asset was installed, so ``install --replace=False``
+    skipped copying and the connector kept reading attacker content. We
+    instead compare a content signature of the whole directory tree
+    against the canonical shipped asset; anything that doesn't match
+    byte-for-byte (normalized) is treated as NOT installed (a conflict to
+    be (re)installed), never trusted as genuine.
+    """
+    source = _find_skill_source()
+    if source is None:
+        # No canonical reference available (stripped install). We cannot
+        # prove provenance, and install would return "skill source not
+        # found" anyway, so fall back to the weak marker heuristic only
+        # to keep `codeguard status` informative — never to authorize a
+        # skip of a real install.
+        manifest = os.path.join(path, "SKILL.md")
+        try:
+            text = Path(manifest).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return _looks_like_codeguard(text)
+    installed_sig = _dir_signature(path)
+    canonical_sig = _dir_signature(source)
+    return (
+        installed_sig is not None
+        and canonical_sig is not None
+        and installed_sig == canonical_sig
+    )
 
 
 def _is_codeguard_rule_file(path: str) -> bool:
+    """True only when *path* matches the GENUINE rendered CodeGuard rule.
+
+    Same provenance requirement as :func:`_is_codeguard_skill_dir`
+    (F-0281): the rule file content must match the canonical rendered
+    rule, not merely contain spoofable marker substrings.
+    """
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        existing = Path(path).read_text(encoding="utf-8")
     except OSError:
         return False
-    return _looks_like_codeguard(text)
+    source = _find_skill_source()
+    if source is None:
+        return _looks_like_codeguard(existing)
+    try:
+        canonical = _rule_content(source)
+    except OSError:
+        return _looks_like_codeguard(existing)
+    return _normalize_text(existing) == _normalize_text(canonical)
 
 
 def _looks_like_codeguard(text: str) -> bool:
@@ -351,6 +392,47 @@ def _looks_like_codeguard(text: str) -> bool:
         or "Project CodeGuard" in text
         or "defenseclaw:codeguard" in text
     )
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize newline style and trailing whitespace for comparison."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _normalize_bytes(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").strip()
+
+
+def _dir_signature(root: str) -> str | None:
+    """SHA-256 over every (relative-path, normalized-content) under *root*.
+
+    Returns ``None`` when *root* is not a directory or a file cannot be
+    read. The signature is order-independent (entries are sorted) and
+    tolerant of newline / trailing-whitespace drift, so a genuine
+    install compares equal to the canonical source while any added,
+    removed, or modified file (e.g. an attacker-planted ``main.py``)
+    changes the digest.
+    """
+    if not os.path.isdir(root):
+        return None
+    entries: list[tuple[str, bytes]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            try:
+                data = Path(full).read_bytes()
+            except OSError:
+                return None
+            entries.append((rel, _normalize_bytes(data)))
+    digest = hashlib.sha256()
+    for rel, content in sorted(entries):
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _find_skill_source() -> str | None:

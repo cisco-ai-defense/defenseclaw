@@ -85,6 +85,20 @@ REQUIRED_EVENT_FIELDS = {
     "llm_prompt":      {"prompt_id"},
     "llm_response":    {"response_id"},
     "tool_invocation": {"phase", "tool"},
+    # Final connector-facing hook result. This is deliberately distinct from
+    # a scanner verdict: action is what the connector received, while
+    # raw_action and would_block retain the underlying policy outcome.
+    "hook_decision": {
+        "connector",
+        "event",
+        "result",
+        "action",
+        "raw_action",
+        "severity",
+        "mode",
+        "would_block",
+        "enforced",
+    },
     # v7.2 continuous AI visibility inventory deltas. The payload is
     # intentionally sanitized: raw paths, commands, prompt text, and
     # env values are not part of the required shape.

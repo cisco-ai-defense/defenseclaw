@@ -41,7 +41,7 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
 Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
 OpenHands — are fully supported. Their hook decisions run **natively in the
-`defenseclaw` binary** (the agent invokes `defenseclaw hook --connector <name>
+`defenseclaw-gateway` binary** (the agent invokes `defenseclaw-gateway hook --connector <name>
 --event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
 shims** — there are zero external prerequisites beyond the binary itself.
 
@@ -113,7 +113,7 @@ Python 3.11+ is recommended if you need the MCP scanner
 ### Clone and Build Everything
 
 ```bash
-git clone https://github.com/defenseclaw/defenseclaw.git
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
 
 # Build all three components (does not install)
@@ -319,7 +319,9 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-curl -LsSf https://github.com/defenseclaw/defenseclaw/releases/latest/download/install.sh | bash
+VERSION=0.8.3
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
 
 The installer detects the platform, downloads the correct gateway
@@ -330,7 +332,9 @@ confirmations.
 Pin a specific version:
 
 ```bash
-VERSION=0.2.0 curl -LsSf .../install.sh | bash
+VERSION=0.8.3
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
 
 #### Picking an agent connector at install time
@@ -340,20 +344,23 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
+VERSION=0.8.3
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
-curl -LsSf .../install.sh | bash -s -- --connector codex
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector codex
 
 # Claude Code (no OpenClaw; patches ~/.claude/settings.json hooks)
-curl -LsSf .../install.sh | bash -s -- --connector claudecode
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode
 
 # ZeptoClaw (no OpenClaw; patches ~/.zeptoclaw/config.json)
-curl -LsSf .../install.sh | bash -s -- --connector zeptoclaw
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector zeptoclaw
 
 # Lay binaries only — pick a connector later
-curl -LsSf .../install.sh | bash -s -- --connector none
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector none
 
 # Shortcut for "skip OpenClaw" without naming another connector
-curl -LsSf .../install.sh | bash -s -- --no-openclaw
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --no-openclaw
 ```
 
 Run interactively (without `--yes` and without `--connector`) and the
@@ -439,7 +446,7 @@ What guardrail setup does:
 3. Installs the DefenseClaw OpenClaw plugin
 4. Patches `openclaw.json` to route LLM calls through the proxy
 5. Saves settings to `config.yaml` and API keys to `.env`
-6. Writes `guardrail_runtime.json` for live mode toggling
+6. Uses the gateway config watcher to apply supported `config.yaml` changes at runtime
 
 ```bash
 # Non-interactive with specific mode
@@ -499,7 +506,7 @@ defenseclaw setup mcp-scanner
 
 | Flag | Description |
 |------|-------------|
-| `--analyzers LIST` | Comma-separated analyzer list (e.g. `yara,api,llm,behavioral,readiness`) |
+| `--analyzers LIST` | Comma-separated analyzer list (default `auto`; explicit example: `yara,api,llm,behavioral,readiness`) |
 | `--llm-provider PROVIDER` | `anthropic` or `openai` |
 | `--llm-model MODEL` | Model for LLM analyzer |
 | `--scan-prompts` | Scan MCP server prompts |
@@ -509,6 +516,11 @@ defenseclaw setup mcp-scanner
 
 MCP server URLs are managed separately with `defenseclaw mcp set` /
 `defenseclaw mcp unset`, not through this setup command.
+
+`auto` lets DefenseClaw choose the scanner plugin set supported by the
+installed `cisco-ai-mcp-scanner` version and configured credentials. To opt out
+of an analyzer, pass an explicit list that omits it; once you pass a list,
+DefenseClaw uses that list as-is instead of adding missing analyzer names back.
 
 ```bash
 defenseclaw setup mcp-scanner --analyzers yara,api,behavioral --non-interactive
@@ -640,21 +652,27 @@ running `defenseclaw doctor` for the full report.
 
 ## Upgrading
 
-### Upgrading from 0.2.0 to 0.3.0
+### Upgrading from 0.2.0 to an artifact-backed release
 
 Release 0.2.0 does not include the `defenseclaw upgrade` CLI command. Use the
-standalone upgrade shell script instead:
+standalone upgrade shell script instead. Historical 0.3.x tags do not publish
+the wheel and gateway release assets required by the upgrader, so use 0.4.0 or
+newer as the target release.
 
 ```bash
-# Upgrade to 0.3.0 (downloads from GitHub Releases)
-curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
-  | bash -s -- --version 0.3.0
+# Upgrade to 0.4.0 (downloads from GitHub Releases)
+UPGRADE_SCRIPT_VERSION=0.8.3
+UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
+curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.4.0
 ```
+
+`UPGRADE_SCRIPT_VERSION` pins the upgrade script itself; `--version` is the
+release you are installing.
 
 Or, if you have the repository cloned:
 
 ```bash
-./scripts/upgrade.sh --version 0.3.0
+./scripts/upgrade.sh --version 0.4.0
 ```
 
 Add `--yes` to skip the confirmation prompt.
@@ -672,6 +690,8 @@ available for all future upgrades.
 
 #### 0.3.0 migration: legacy model provider cleanup
 
+This migration still runs when upgrading directly from 0.2.0 to 0.4.0 or newer.
+
 The 0.2.0 guardrail setup redirected LLM traffic by writing provider and model
 entries directly into `~/.openclaw/openclaw.json`:
 
@@ -683,21 +703,14 @@ entries directly into `~/.openclaw/openclaw.json`:
 In 0.3.0, routing is handled transparently by a fetch interceptor in the
 OpenClaw plugin, so these entries are no longer needed.
 
-The migration uses a **pristine-backup restore** strategy. When DefenseClaw's
-guardrail was first enabled, it captured a one-time snapshot of the original
-`openclaw.json` (before any DefenseClaw modifications). The migration:
-
-1. Restores `openclaw.json` from that pristine backup — removing all
-   DefenseClaw-injected entries in one clean step
-2. Re-applies only the minimal plugin registration that 0.3.0 needs
-   (`plugins.allow`, `plugins.entries`, `plugins.load.paths`)
-3. Saves a `.pre-0.3.0-migration` backup of the current file before
-   overwriting, for safety
-
-If no pristine backup exists (e.g. guardrail was never enabled, or the backup
-was deleted), the migration falls back to **surgical removal**: it deletes
-`models.providers.defenseclaw` / `models.providers.litellm` and strips the
-proxy prefix from `agents.defaults.model.primary`.
+The migration uses a **surgical live-file** strategy. A pristine snapshot may
+exist from initial guardrail setup, but the migration never restores that
+snapshot over the live `openclaw.json`. It deletes only
+`models.providers.defenseclaw` /
+`models.providers.litellm`, strips the old proxy prefix from
+`agents.defaults.model.primary`, and preserves operator-added providers,
+plugins, models, workspaces, and ordering. It saves a
+`.pre-0.3.0-migration` backup before changing the live file.
 
 If none of these legacy entries exist, the migration is a no-op.
 
@@ -746,8 +759,9 @@ cp ~/.defenseclaw/backups/upgrade-20260429T120000/openclaw.json ~/.openclaw/
 # Downgrade to the previous version
 defenseclaw upgrade --version 0.2.0
 # Or use the shell script if the CLI is broken:
-curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
-  | bash -s -- --version 0.2.0
+UPGRADE_SCRIPT_VERSION=0.8.3
+UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
+curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.2.0
 ```
 
 ---
@@ -853,7 +867,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot | openhands | antigravity | opencode | omnigent
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

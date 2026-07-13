@@ -28,8 +28,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -59,6 +62,70 @@ func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store, audit.NewLogger(store)
+}
+
+func bindTestConfigRuntime(t *testing.T, api *APIServer) {
+	t.Helper()
+	if api == nil || api.scannerCfg == nil {
+		t.Fatal("bindTestConfigRuntime requires an API config")
+	}
+	path := configFilePathForSnapshot(api.scannerCfg)
+	api.scannerCfg.ConfigFilePath = path
+	data, err := yaml.Marshal(map[string]any{
+		"config_version":  7,
+		"data_dir":        api.scannerCfg.DataDir,
+		"deployment_mode": api.scannerCfg.DeploymentMode,
+		"gateway": map[string]any{
+			"token": api.scannerCfg.Gateway.Token,
+			"config_reload": map[string]any{
+				"mode": api.scannerCfg.Gateway.ConfigReload.Mode,
+			},
+		},
+		"guardrail": map[string]any{
+			"enabled":       api.scannerCfg.Guardrail.Enabled,
+			"mode":          api.scannerCfg.Guardrail.Mode,
+			"scanner_mode":  api.scannerCfg.Guardrail.ScannerMode,
+			"block_message": api.scannerCfg.Guardrail.BlockMessage,
+			"connector":     api.scannerCfg.Guardrail.Connector,
+			"hilt": map[string]any{
+				"enabled":      api.scannerCfg.Guardrail.HILT.Enabled,
+				"min_severity": api.scannerCfg.Guardrail.HILT.MinSeverity,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal API config: %v", err)
+	}
+	if err := config.WriteFileAtomic(path, data, 0o600); err != nil {
+		t.Fatalf("write API config: %v", err)
+	}
+
+	initial, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load API config: %v", err)
+	}
+	api.cfgMu.Lock()
+	api.scannerCfg = cloneConfig(initial)
+	api.cfgMu.Unlock()
+	var liveMu sync.RWMutex
+	live := cloneConfig(initial)
+	api.SetConfigRuntime(func(context.Context, string) error {
+		next, err := config.LoadFromFile(path)
+		if err != nil {
+			return err
+		}
+		liveMu.Lock()
+		live = next
+		liveMu.Unlock()
+		api.cfgMu.Lock()
+		api.scannerCfg = cloneConfig(next)
+		api.cfgMu.Unlock()
+		return nil
+	}, func() *config.Config {
+		liveMu.RLock()
+		defer liveMu.RUnlock()
+		return cloneConfig(live)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -92,13 +159,13 @@ func TestNewSidecarHealthInitialState(t *testing.T) {
 func TestSidecarHealthSetGateway(t *testing.T) {
 	h := NewSidecarHealth()
 
-	h.SetGateway(StateRunning, "", map[string]interface{}{"protocol": 3})
+	h.SetGateway(StateRunning, "", map[string]interface{}{"protocol": openClawMaxProtocol})
 	snap := h.Snapshot()
 	if snap.Gateway.State != StateRunning {
 		t.Errorf("Gateway.State = %q, want %q", snap.Gateway.State, StateRunning)
 	}
-	if snap.Gateway.Details["protocol"] != 3 {
-		t.Errorf("Gateway.Details[protocol] = %v, want 3", snap.Gateway.Details["protocol"])
+	if snap.Gateway.Details["protocol"] != openClawMaxProtocol {
+		t.Errorf("Gateway.Details[protocol] = %v, want %d", snap.Gateway.Details["protocol"], openClawMaxProtocol)
 	}
 
 	h.SetGateway(StateError, "connection lost", nil)
@@ -291,6 +358,8 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
+		{"opencode_observability", &stubConnector{name: "opencode"}, false},
+		{"omnigent_observability", &stubConnector{name: "omnigent"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -326,6 +395,8 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
 		{"openhands", "openhands", false},
+		{"opencode", "opencode", false},
+		{"omnigent", "omnigent", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -981,6 +1052,25 @@ func TestGuardrailProxyDisabled(t *testing.T) {
 	}
 }
 
+func TestSidecarRunGuardrailZeroConfigDoesNotDefaultOpenClaw(t *testing.T) {
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: &config.Config{}, health: health}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sidecar.runGuardrail(ctx); err != nil {
+		t.Fatalf("runGuardrail zero-config returned error: %v", err)
+	}
+
+	snap := health.Snapshot()
+	if snap.Guardrail.State != StateDisabled {
+		t.Fatalf("Guardrail.State = %q, want %q", snap.Guardrail.State, StateDisabled)
+	}
+	if snap.Guardrail.LastError != "no connector configured" {
+		t.Fatalf("Guardrail.LastError = %q, want no connector configured", snap.Guardrail.LastError)
+	}
+}
+
 func TestDeriveMasterKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	keyFile := filepath.Join(tmpDir, "device.key")
@@ -1243,7 +1333,7 @@ func TestEventFrameNoSeq(t *testing.T) {
 func TestHelloOKParsing(t *testing.T) {
 	raw := `{
 		"type": "hello-ok",
-		"protocol": 3,
+		"protocol": 4,
 		"features": {
 			"methods": ["skills.update", "config.patch"],
 			"events": ["tool_call", "tool_result"]
@@ -1260,8 +1350,8 @@ func TestHelloOKParsing(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if hello.Protocol != 3 {
-		t.Errorf("Protocol = %d, want 3", hello.Protocol)
+	if hello.Protocol != openClawMaxProtocol {
+		t.Errorf("Protocol = %d, want %d", hello.Protocol, openClawMaxProtocol)
 	}
 	if hello.Features == nil {
 		t.Fatal("Features should not be nil")
@@ -1278,7 +1368,7 @@ func TestHelloOKParsing(t *testing.T) {
 }
 
 func TestHelloOKWithPolicy(t *testing.T) {
-	raw := `{"type":"hello-ok","protocol":3,"policy":{"tickIntervalMs":5000}}`
+	raw := `{"type":"hello-ok","protocol":4,"policy":{"tickIntervalMs":5000}}`
 	var hello HelloOK
 	if err := json.Unmarshal([]byte(raw), &hello); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
@@ -1292,7 +1382,7 @@ func TestHelloOKWithPolicy(t *testing.T) {
 }
 
 func TestHelloOKMinimalPayload(t *testing.T) {
-	raw := `{"type":"hello-ok","protocol":3}`
+	raw := `{"type":"hello-ok","protocol":4}`
 	var hello HelloOK
 	if err := json.Unmarshal([]byte(raw), &hello); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
@@ -1428,7 +1518,11 @@ func TestSkillsUpdateParamsSerialization(t *testing.T) {
 func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	allowList := []string{"existing-a"}
 	rawJSON, _ := json.Marshal(pluginConfigRaw("my-plugin", false, allowList))
-	params := ConfigPatchRawParams{Raw: string(rawJSON), BaseHash: "abc123"}
+	params := ConfigPatchRawParams{
+		Raw:          string(rawJSON),
+		BaseHash:     "abc123",
+		ReplacePaths: []string{"plugins.allow"},
+	}
 	data, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -1443,6 +1537,10 @@ func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	}
 	if parsed["baseHash"] != "abc123" {
 		t.Errorf("baseHash = %v, want abc123", parsed["baseHash"])
+	}
+	replacePaths, ok := parsed["replacePaths"].([]interface{})
+	if !ok || len(replacePaths) != 1 || replacePaths[0] != "plugins.allow" {
+		t.Errorf("replacePaths = %v, want [plugins.allow]", parsed["replacePaths"])
 	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(rawStr), &nested); err != nil {
@@ -2477,7 +2575,7 @@ func TestAPIStatusHandlerWithHello(t *testing.T) {
 	health := NewSidecarHealth()
 	client := &Client{
 		hello: &HelloOK{
-			Protocol: 3,
+			Protocol: openClawMaxProtocol,
 			Features: &HelloFeatures{Methods: []string{"skills.update"}},
 		},
 	}
@@ -2575,6 +2673,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks"},
 		},
+		{
+			name:             "omnigent_direct_policy_api_until_optional_otel_is_configured",
+			connector:        "omnigent",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"policy-api"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2603,6 +2708,12 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			}
 			if cm["mode"] != c.wantMode {
 				t.Errorf("mode = %v, want %s", cm["mode"], c.wantMode)
+			}
+			if cm["policy_mode"] != "observe" {
+				t.Errorf("policy_mode = %v, want observe", cm["policy_mode"])
+			}
+			if c.connector == "omnigent" && cm["enforcement_surface"] != "omnigent_policy_api" {
+				t.Errorf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 			}
 			if cm["proxy_intercept"] != c.wantIntercept {
 				t.Errorf("proxy_intercept = %v, want %v", cm["proxy_intercept"], c.wantIntercept)
@@ -2636,7 +2747,36 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			if first["mode"] != c.wantMode {
 				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
 			}
+			if first["policy_mode"] != cm["policy_mode"] {
+				t.Errorf("connector_modes[0].policy_mode = %v, want %v", first["policy_mode"], cm["policy_mode"])
+			}
+			if first["enforcement_surface"] != cm["enforcement_surface"] {
+				t.Errorf("connector_modes[0].enforcement_surface = %v, want %v", first["enforcement_surface"], cm["enforcement_surface"])
+			}
 		})
+	}
+}
+
+func TestAPIStatusOmnigentActionPolicyMode(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "omnigent"
+	cfg.Guardrail.Mode = "action"
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+
+	api.handleStatus(w, req)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cm, _ := result["connector_mode"].(map[string]interface{})
+	if cm["policy_mode"] != "action" {
+		t.Fatalf("policy_mode = %v, want action", cm["policy_mode"])
+	}
+	if cm["enforcement_surface"] != "omnigent_policy_api" {
+		t.Fatalf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 	}
 }
 
@@ -2686,6 +2826,38 @@ func TestAPIStatusConnectorModesFansOut(t *testing.T) {
 	}
 	if got["openclaw"] != "guardrail" {
 		t.Errorf("openclaw mode = %q, want guardrail (got roster %v)", got["openclaw"], got)
+	}
+}
+
+func TestAPIStatusConnectorModeReportsHookEnforcement(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Mode = "action"
+
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	api.handleStatus(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	mode, ok := result["connector_mode"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("connector_mode missing or wrong type: %T", result["connector_mode"])
+	}
+	if got := mode["mode"]; got != "observability" {
+		t.Errorf("mode = %v, want observability for hook-native no-proxy data path", got)
+	}
+	if got := mode["guardrail_mode"]; got != "action" {
+		t.Errorf("guardrail_mode = %v, want action", got)
+	}
+	if got := mode["hook_enforcement"]; got != true {
+		t.Errorf("hook_enforcement = %v, want true", got)
 	}
 }
 
@@ -3833,7 +4005,13 @@ func TestInspectToolMessageContentFromArgs(t *testing.T) {
 	}
 }
 
-func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
+// a HIGH-severity tool call that policy escalated to
+// "confirm" must fail CLOSED when the caller cannot deliver a native
+// human-in-the-loop approval. Pre-fix this test asserted the legacy
+// alert-only downgrade with would_block=false; that meant the
+// inspect-tool hook scripts (which only block on action==block)
+// forwarded the dangerous tool call as audit telemetry.
+func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -3845,11 +4023,12 @@ func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
 	_, verdict := postInspect(t, api,
 		`{"tool":"shell","args":{"command":"invoke the bash tool without confirmation"},"session_id":"sess-1"}`)
 
-	if verdict.Action != "alert" || verdict.RawAction != "confirm" {
-		t.Fatalf("action=%q raw=%q, want alert/confirm when approval cannot be delivered", verdict.Action, verdict.RawAction)
+	if verdict.Action != "block" || verdict.RawAction != "confirm" {
+		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
+			verdict.Action, verdict.RawAction)
 	}
-	if verdict.WouldBlock {
-		t.Fatal("unsupported HILT confirmation should not set would_block")
+	if !verdict.WouldBlock {
+		t.Fatal("would_block must be true when failing closed on missing HILT approval surface")
 	}
 }
 
@@ -4037,6 +4216,117 @@ func TestReportSinksHealth_NoSinksConfigured(t *testing.T) {
 	}
 }
 
+func TestDestinationRoutingHealthMarshal(t *testing.T) {
+	raw, err := json.Marshal(destinationRoutingHealth{
+		provider: &telemetry.Provider{}, destination: "filtered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]float64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"accepted", "dropped", "total", "accepted_percentage"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("routing health missing %q: %s", key, raw)
+		}
+	}
+}
+
+func TestDestinationSignalNamesDoesNotInventTraces(t *testing.T) {
+	destination := config.OTelDestinationConfig{}
+	destination.Metrics.Enabled = true
+	destination.Logs.Enabled = true
+	if got := destinationSignalNames(destination); !reflect.DeepEqual(got, []string{"metrics", "logs"}) {
+		t.Fatalf("destinationSignalNames() = %v, want [metrics logs]", got)
+	}
+}
+
+func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
+	var targetRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests.Add(1)
+		if r.URL.Path != "/otel/traces" {
+			t.Errorf("collector path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	var unrelatedRequests atomic.Int64
+	unrelated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		unrelatedRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer unrelated.Close()
+
+	cfg := &config.Config{
+		Environment: "test",
+		Claw:        config.ClawConfig{Mode: config.ClawOpenClaw},
+		OTel: config.OTelConfig{
+			Enabled: true,
+			Traces:  config.OTelTracePolicyConfig{Sampler: "always_on", SamplerArg: "1.0"},
+			Batch: config.OTelBatchConfig{
+				MaxExportBatchSize: 16, ScheduledDelayMs: 10, MaxQueueSize: 32,
+			},
+			Destinations: []config.OTelDestinationConfig{{
+				Name: "galileo", Preset: "galileo", Enabled: true,
+				Protocol: "http", Endpoint: collector.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
+				SpanFilter: config.OTelSpanFilterConfig{Operations: []config.OTelSpanFilterOperationConfig{
+					{Name: "chat", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+					{Name: "invoke_agent", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.agent.name",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+				}},
+			}, {
+				Name: "unrelated", Preset: "generic-otlp", Enabled: true,
+				Protocol: "http", Endpoint: unrelated.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
+			}},
+		},
+	}
+	provider, err := telemetry.NewProvider(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	api := &APIServer{otel: provider}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost, "/api/v1/telemetry/canary", strings.NewReader(`{"destination":"galileo"}`),
+	)
+	api.handleTelemetryCanary(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		TraceID      string                                `json:"trace_id"`
+		Acknowledged bool                                  `json:"acknowledged"`
+		Delivery     telemetry.DestinationDeliverySnapshot `json:"delivery"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Acknowledged || len(payload.TraceID) != 32 {
+		t.Fatalf("payload=%+v", payload)
+	}
+	if payload.Delivery.Attempted != 2 || payload.Delivery.Delivered != 2 {
+		t.Fatalf("delivery=%+v want two acknowledged runtime spans", payload.Delivery)
+	}
+	if targetRequests.Load() == 0 || unrelatedRequests.Load() != 0 {
+		t.Fatalf(
+			"target requests=%d unrelated requests=%d; canary must be destination-scoped",
+			targetRequests.Load(), unrelatedRequests.Load(),
+		)
+	}
+}
+
 func TestReportSinksHealth_AllDisabledStillSurfacesEntries(t *testing.T) {
 	s := &Sidecar{
 		cfg: &config.Config{
@@ -4128,6 +4418,48 @@ func TestReportSinksHealth_MixedEnabledDisabled(t *testing.T) {
 	}
 	if rows[1]["enabled"] != true {
 		t.Errorf("rows[1].enabled = %v, want true", rows[1]["enabled"])
+	}
+}
+
+func TestReportSinksHealth_IncludesConnectorOverridesAndSuppression(t *testing.T) {
+	codexSinks := []config.AuditSink{
+		{
+			Name: "codex-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+			OTLPLogs: &config.OTLPLogsSinkConfig{
+				Endpoint: "collector.example.test:4317", Protocol: "grpc",
+			},
+		},
+	}
+	claudeSinks := []config.AuditSink{}
+	s := &Sidecar{
+		cfg: &config.Config{
+			Observability: config.ObservabilityConfig{
+				Connectors: map[string]config.PerConnectorObservability{
+					"codex":      {AuditSinks: &codexSinks},
+					"claudecode": {AuditSinks: &claudeSinks},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+	}
+
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateRunning {
+		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateRunning)
+	}
+	if got, _ := snap.Sinks.Details["summary"].(string); got != "1 of 2 enabled" {
+		t.Fatalf("summary = %q, want %q", got, "1 of 2 enabled")
+	}
+	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
+	if !ok || len(rows) != 2 {
+		t.Fatalf("sinks = %#v, want two connector-scoped rows", snap.Sinks.Details["sinks"])
+	}
+	if rows[0]["scope"] != "connector:claudecode" || rows[0]["suppressed"] != true {
+		t.Errorf("rows[0] = %#v, want claudecode suppression", rows[0])
+	}
+	if rows[1]["scope"] != "connector:codex" || rows[1]["name"] != "codex-otlp" {
+		t.Errorf("rows[1] = %#v, want codex OTLP sink", rows[1])
 	}
 }
 
@@ -4920,6 +5252,7 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 			},
 		},
 	}
+	api.SetConfigRuntime(func(context.Context, string) error { return nil }, nil)
 
 	body, _ := json.Marshal(map[string]string{
 		"mode":         "action",
@@ -4948,6 +5281,34 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	original := []byte("config_version: 6\ndata_dir: " + dir + "\ndeployment_mode: standalone\n")
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	api := &APIServer{}
+	if err := api.patchGuardrailConfigFile(path, map[string]any{"deployment_mode": "invalid"}); err == nil {
+		t.Fatal("patchGuardrailConfigFile succeeded with invalid deployment mode")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("restored config = %q, want %q", got, original)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored config: %v", err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+		t.Fatalf("restored config mode = %o, want 640", gotMode)
+	}
+}
+
 func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
@@ -4965,10 +5326,12 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 			},
 		},
 	}
+	bindTestConfigRuntime(t, api)
 
-	body, _ := json.Marshal(map[string]string{
-		"mode":         "action",
-		"scanner_mode": "both",
+	body, _ := json.Marshal(map[string]any{
+		"mode":              "action",
+		"hilt_enabled":      true,
+		"hilt_min_severity": "medium",
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -4986,8 +5349,174 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	if api.scannerCfg.Guardrail.Mode != "action" {
 		t.Errorf("mode = %q, want action", api.scannerCfg.Guardrail.Mode)
 	}
-	if api.scannerCfg.Guardrail.ScannerMode != "both" {
-		t.Errorf("scanner_mode = %q, want both", api.scannerCfg.Guardrail.ScannerMode)
+	if api.scannerCfg.Guardrail.ScannerMode != "local" {
+		t.Errorf("scanner_mode = %q, want local", api.scannerCfg.Guardrail.ScannerMode)
+	}
+	var response map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["hilt_enabled"] != true {
+		t.Fatalf("hilt_enabled = %#v, want true", response["hilt_enabled"])
+	}
+	if response["hilt_min_severity"] != "MEDIUM" {
+		t.Fatalf("hilt_min_severity = %#v, want MEDIUM", response["hilt_min_severity"])
+	}
+	if response["live"] != true {
+		t.Fatalf("live = %#v, want true", response["live"])
+	}
+}
+
+func TestHandleGuardrailConfig_RefusesWriteWithoutCentralReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	const tok = "patch-config-no-reloader"
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+	body, _ := json.Marshal(map[string]any{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, config.DefaultConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("uncoordinated PATCH created config file: %v", err)
+	}
+}
+
+func TestHandleGuardrailConfig_RestartRequiredHotChangeRollsBack(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-restart-required"
+	api := &APIServer{
+		health: NewSidecarHealth(),
+		logger: logger,
+		store:  store,
+		scannerCfg: &config.Config{
+			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+	bindTestConfigRuntime(t, api)
+	path := api.configFilePath()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config before PATCH: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"scanner_mode": "both"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after PATCH: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("restart-required hot PATCH changed config.yaml despite rejection")
+	}
+	if got := api.runtimeConfigSnapshot().Guardrail.ScannerMode; got != "local" {
+		t.Fatalf("live scanner_mode = %q, want local", got)
+	}
+}
+
+func TestHandleGuardrailConfig_PatchRejectedInManagedEnterprise(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-managed"
+	api := &APIServer{
+		health: NewSidecarHealth(),
+		logger: logger,
+		store:  store,
+		scannerCfg: &config.Config{
+			DataDir:        tmpDir,
+			DeploymentMode: "managed_enterprise",
+			Gateway:        config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+
+	body, _ := json.Marshal(map[string]string{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Result().StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusForbidden, w.Body.String())
+	}
+	if api.scannerCfg.Guardrail.Mode != "observe" {
+		t.Errorf("mode = %q, want observe", api.scannerCfg.Guardrail.Mode)
+	}
+	if !strings.Contains(w.Body.String(), "administrator privileges") {
+		t.Fatalf("body = %q, want administrator guidance", w.Body.String())
+	}
+}
+
+func TestHandleGuardrailConfig_ReauthorizesAfterEnteringWriteTransaction(t *testing.T) {
+	tmpDir := t.TempDir()
+	const tok = "patch-config-transition-to-managed"
+	unmanaged := &config.Config{
+		DataDir: tmpDir,
+		Gateway: config.GatewayConfig{Token: tok},
+		Guardrail: config.GuardrailConfig{
+			Mode:        "observe",
+			ScannerMode: "local",
+		},
+	}
+	managedCfg := cloneConfig(unmanaged)
+	managedCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+
+	api := &APIServer{scannerCfg: unmanaged}
+	snapshotCalls := 0
+	api.SetConfigRuntime(func(context.Context, string) error {
+		t.Fatal("managed transition reached central reload")
+		return nil
+	}, func() *config.Config {
+		snapshotCalls++
+		if snapshotCalls == 1 {
+			return cloneConfig(unmanaged)
+		}
+		return cloneConfig(managedCfg)
+	})
+
+	body, _ := json.Marshal(map[string]string{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "administrator privileges") {
+		t.Fatalf("body = %q, want managed-mode authorization guidance", w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, config.DefaultConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("PATCH wrote config after managed transition: %v", err)
 	}
 }
 
@@ -5008,6 +5537,7 @@ func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 			},
 		},
 	}
+	bindTestConfigRuntime(t, api)
 
 	const N = 50
 	var wg sync.WaitGroup
@@ -6054,6 +6584,41 @@ func TestAPINetworkEgressHandlerRejectsInvalidBlockedFilter(t *testing.T) {
 	}
 }
 
+func TestAPINetworkEgressIngestDerivesAgentLifecycleCorrelation(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "egress-session", AgentID: "egress-agent",
+		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
+	}
+	api := &APIServer{
+		store: store, logger: logger,
+		hookSessionTraces: map[string]hookSessionTrace{
+			hookSessionTraceKey(meta): {meta: meta},
+		},
+	}
+	body := strings.NewReader(`{"hostname":"docs.example.com","policy_outcome":"allowed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/network-egress", body)
+	ctx := ContextWithSessionID(req.Context(), meta.SessionID)
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{AgentID: meta.AgentID, AgentName: "codex", AgentType: "codex"})
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{Connector: "codex", ToolID: "web-tool-1"})
+	req = req.WithContext(ctx)
+	req.Header.Set(llmEventUserIDHeader, "user-egress")
+	w := httptest.NewRecorder()
+	api.handleNetworkEgress(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	rows, err := store.QueryNetworkEgressEvents(audit.NetworkEgressFilter{AgentID: meta.AgentID})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("egress rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0]
+	if got.AgentLifecycleID != meta.LifecycleID || got.AgentExecutionID != meta.ExecutionID ||
+		got.UserID != "user-egress" || got.ToolID != "web-tool-1" {
+		t.Fatalf("egress correlation=%+v", got)
+	}
+}
+
 func TestToolInjectionToVerdict(t *testing.T) {
 	clean := func(cats ...string) map[string]interface{} {
 		all := []string{"Instruction Manipulation", "Context Manipulation", "Obfuscation", "Data Exfiltration", "Destructive Commands"}
@@ -6281,5 +6846,177 @@ func TestMaxBodyMiddleware_RejectsOversizedBody(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("expected 400 or 413 for oversized body, got %d", resp.StatusCode)
+	}
+}
+
+func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
+	dataDir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	scoped := map[string]string{}
+	hookPaths := map[string]string{}
+	for _, name := range reg.Names() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		he, ok := conn.(connector.HookEndpoint)
+		if !ok {
+			continue
+		}
+		tok, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			t.Fatalf("EnsureHookAPIToken(%s): %v", name, err)
+		}
+		scoped[name] = tok
+		hookPaths[name] = he.HookAPIPath()
+	}
+	if len(hookPaths) == 0 {
+		t.Fatal("default registry has no hook endpoints")
+	}
+	proxyScopedToken, err := connector.EnsureHookAPIToken(dataDir, "openclaw")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(openclaw): %v", err)
+	}
+	scoped["openclaw"] = proxyScopedToken
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			DataDir: dataDir,
+			Gateway: config.GatewayConfig{
+				Token: "master-token",
+			},
+		},
+	}
+	api.SetConnectorRegistry(reg)
+	api.SetHookAPITokens(scoped)
+
+	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for name, path := range hookPaths {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "127.0.0.1:47777"
+		req.Header.Set("Authorization", "Bearer "+scoped[name])
+		rec := httptest.NewRecorder()
+		allowed.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s (%s) with scoped token status = %d, want %d body=%s", name, path, rec.Code, http.StatusNoContent, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec := httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("/api/v1/codex/notify with codex scoped token status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+proxyScopedToken)
+	req.Header.Set("X-DefenseClaw-Connector", "openclaw")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("generic inspect route with matching OpenClaw scoped token status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+proxyScopedToken)
+	req.Header.Set("X-DefenseClaw-Connector", "codex")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("generic inspect route with mismatched scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/status with scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("claudecode hook with codex scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
+	dataDir := t.TempDir()
+	oldToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	api.SetHookAPITokens(map[string]string{"codex": oldToken})
+	if !api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("provisioned hook token was rejected")
+	}
+
+	tokenPath, err := connector.HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("remove hook token: %v", err)
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("deleted hook token remained valid from cache")
+	}
+
+	newToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("rotate hook token: %v", err)
+	}
+	if newToken == oldToken {
+		t.Fatal("rotated hook token unexpectedly reused old value")
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("old hook token remained valid after rotation")
+	}
+	if !api.hookAPITokenMatches("codex", newToken) {
+		t.Fatal("rotated hook token was rejected")
+	}
+}
+
+func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.T) {
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			Gateway: config.GatewayConfig{Token: "master-token"},
+		},
+	}
+	api.SetHookAPITokens(map[string]string{
+		"codex":  "codex-scoped-token",
+		"hermes": "hermes-scoped-token",
+	})
+	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer codex-scoped-token")
+	rec := httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy codex hook fallback status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer hermes-scoped-token")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unregistered wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }

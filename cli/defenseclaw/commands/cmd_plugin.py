@@ -56,20 +56,30 @@ def _sidecar_client(app: AppContext):
 def plugin() -> None:
     """Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore.
 
-    Multi-connector: plugins are tracked per-connector. ``plugin list``
-    shows every active connector's plugins by default (pass ``--connector
-    X`` to narrow to one peer). The other subcommands take ``--connector
-    X`` to target a configured peer (default: the active connector).
+    Multi-connector: plugins are tracked per connector. With no --connector,
+    commands that operate on plugin copies run across configured connectors
+    where the plugin or plugin directory applies. Pass --connector X to narrow to one
+    connector. Policy commands that create unscoped entries say so in their own
+    help.
     """
 
 
 @plugin.command()
-@click.argument("name_or_path")
+@click.argument("name_or_path", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
 @click.option("--policy", "policy_name", default="", help="Scan policy: default, strict, permissive, or path to YAML")
 @click.option("--profile", type=click.Choice(["default", "strict"]), default=None,
               help="Scan profile (overrides policy profile)")
-@click.option("--use-llm", is_flag=True, help="Enable LLM-based semantic analysis (uses skill_scanner LLM config)")
+@click.option("--all", "scan_all", is_flag=True, help="Scan every installed plugin across configured connectors")
+@click.option(
+    "--use-llm/--no-llm", "use_llm", default=None,
+    help=(
+        "Run the LLM semantic analyzer in addition to the static scanner. "
+        "Default (auto): on whenever a model is configured for scanners.plugin, "
+        "off otherwise. The LLM lane degrades loudly (never silent-clean) if no "
+        "model resolves or the backend is unreachable."
+    ),
+)
 @click.option("--llm-model", default="", help="LLM model override (e.g. claude-sonnet-4-20250514, gpt-4)")
 @click.option("--llm-provider", default="", help="LLM provider hint (anthropic, openai, ollama, etc.)")
 @click.option("--llm-consensus-runs", default=0, type=int, help="Number of LLM consensus runs (default: 1)")
@@ -79,18 +89,20 @@ def plugin() -> None:
     "--connector", "connector_flag", default="",
     help=(
         "Scan a specific connector's plugins. "
-        "Default: the active connector; on multi-connector installs pass "
-        "--connector <name> to target a configured peer."
+        "Default: bare names scan every matching configured connector copy; "
+        "no target/--all scans configured connectors. Use --connector "
+        "<name> to narrow."
     ),
 )
 @pass_ctx
 def scan(
     app: AppContext,
-    name_or_path: str,
+    name_or_path: str | None,
     as_json: bool,
     policy_name: str,
     profile: str | None,
-    use_llm: bool,
+    scan_all: bool,
+    use_llm: bool | None,
     llm_model: str,
     llm_provider: str,
     llm_consensus_runs: int,
@@ -108,25 +120,30 @@ def scan(
 
     Examples:\n
       defenseclaw plugin scan my-plugin\n
+      defenseclaw plugin scan --all\n
       defenseclaw plugin scan my-plugin --policy strict\n
       defenseclaw plugin scan my-plugin --use-llm\n
+      defenseclaw plugin scan my-plugin --no-llm\n
       defenseclaw plugin scan my-plugin --use-llm --llm-model gpt-4\n
       defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
     """
-    from defenseclaw.commands import _scan_ui, resolve_list_connector
+    from defenseclaw import ux
     from defenseclaw.scanner.plugin import PluginScannerWrapper
+    from defenseclaw.scanner.rulepack import maybe_wrap
 
-    # resolve_list_connector validates --connector and falls back to the
-    # canonical active_connector() (guardrail.connector → claw.mode →
-    # openclaw). This also replaces the prior bare guardrail.connector read,
-    # which missed claw.mode-only installs and disagreed with `plugin list`.
-    connector = resolve_list_connector(app, connector_flag)
-    scan_dir = _resolve_plugin_dir(name_or_path, app.cfg.plugin_dir, connector)
-    if not scan_dir:
-        click.echo(f"error: plugin not found: {name_or_path}", err=True)
-        click.echo(f"  Provide a path, a DefenseClaw plugin name, or a {connector} plugin name.", err=True)
-        raise SystemExit(1)
+    # P-C: accept a literal ``all`` argument (parity with skill/mcp scan),
+    # treat a missing target as "scan configured plugins", and reject
+    # TARGET + --all together.
+    if scan_all and name_or_path not in (None, "all"):
+        click.echo("error: provide either a plugin name/path or --all, not both", err=True)
+        raise SystemExit(2)
+    if scan_all or name_or_path == "all" or not name_or_path:
+        _scan_all_plugins(
+            app, as_json, policy_name, profile, use_llm, llm_model,
+            llm_provider, llm_consensus_runs, enable_meta, lenient, connector_flag,
+        )
+        return
 
     # Build scan options from CLI flags + config
     scan_options = _build_scan_options(
@@ -138,10 +155,85 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    # R4: overlay the configured guardrail rule pack over the plugin source.
+    # No-op when no rule_pack_dir is set.
+    scanner = maybe_wrap(scanner, app.cfg)
 
-    # S6.2 — surface the connector and the concrete category list
-    # before kicking off the scan, so operators see what's being
-    # checked instead of an opaque "[plugin] scanning..." line.
+    matches: list[tuple[str, str]] = []
+    if _looks_like_explicit_path(name_or_path):
+        from defenseclaw.commands import resolve_list_connector
+        connector = resolve_list_connector(app, connector_flag)
+        scan_dir = _resolve_plugin_dir(
+            name_or_path,
+            app.cfg.plugin_dir,
+            connector,
+            _plugin_roots_for_connector(app, connector),
+        )
+        if scan_dir:
+            matches = [(connector, scan_dir)]
+    else:
+        matches = _plugin_match_dir_scopes(app, name_or_path, connector_flag)
+        if not matches:
+            # OpenClaw can report a plugin root via its CLI even when the
+            # directory is outside our configured filesystem roots.
+            from defenseclaw.commands import resolve_list_connector
+            connector = resolve_list_connector(app, connector_flag)
+            scan_dir = _resolve_plugin_dir(
+                name_or_path,
+                app.cfg.plugin_dir,
+                connector,
+                _plugin_roots_for_connector(app, connector),
+            )
+            if scan_dir:
+                matches = [(connector, scan_dir)]
+
+    if not matches:
+        scope = (
+            f" for connector {connector_flag!r}"
+            if connector_flag
+            else " across configured connectors"
+        )
+        click.echo(f"error: plugin not found: {name_or_path}{scope}", err=True)
+        click.echo("  Provide a path, a DefenseClaw plugin name, or a connector plugin name.", err=True)
+        raise SystemExit(1)
+
+    for idx, (connector, scan_dir) in enumerate(matches):
+        if len(matches) > 1 and not as_json:
+            if idx:
+                click.echo()
+            click.echo(ux._style(f"── connector: {connector} ──", fg="cyan"))
+        _scan_one_plugin_dir(
+            app,
+            scanner,
+            scan_dir=scan_dir,
+            connector=connector,
+            as_json=as_json,
+            scan_options=scan_options,
+            policy_name=policy_name,
+            use_llm=use_llm,
+            llm_model=llm_model,
+            profile=profile,
+        )
+
+
+def _scan_one_plugin_dir(
+    app: AppContext,
+    scanner: Any,
+    *,
+    scan_dir: str,
+    connector: str,
+    as_json: bool,
+    scan_options: dict[str, Any],
+    policy_name: str,
+    use_llm: bool | None,
+    llm_model: str,
+    profile: str | None,
+) -> None:
+    from defenseclaw.commands import _scan_ui
+
+    # S6.2 — surface the connector and the concrete category list before
+    # kicking off the scan, so operators see what's being checked instead of
+    # an opaque "[plugin] scanning..." line.
     ctx = _scan_ui.ScanContext.for_plugin(
         connector=connector,
         paths=[scan_dir],
@@ -172,9 +264,15 @@ def scan(
         app.logger.log_scan(result)
 
     if as_json:
-        # JSON contract is locked: ScanResult.to_json() — automation
-        # parses it. Don't reshape via render_json_payload here.
-        click.echo(result.to_json())
+        # Preserve the ScanResult keys automation already parses, while adding
+        # connector metadata so scoped JSON callers need not infer it from paths.
+        payload = json.loads(result.to_json())
+        payload["connector"] = connector
+        payload["target_metadata"] = {
+            "connector": connector,
+            "path": result.target,
+        }
+        click.echo(json.dumps(payload, indent=2, default=str))
         return
 
     target_name = os.path.basename(scan_dir)
@@ -219,11 +317,243 @@ def scan(
     )
 
 
+def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
+    """The target connector's own plugin dirs (P-B), empty on any failure."""
+    try:
+        return list(app.cfg.plugin_dirs(connector))
+    except Exception:  # noqa: BLE001 — managed-dir-only fallback.
+        return []
+
+
+def _active_plugin_connectors(app: AppContext) -> list[str]:
+    cfg = app.cfg
+    if hasattr(cfg, "active_connectors"):
+        try:
+            names = [n for n in cfg.active_connectors() if n]
+            if names:
+                return names
+        except Exception:  # noqa: BLE001 — fall back to the singular connector.
+            pass
+    if hasattr(cfg, "active_connector"):
+        active = cfg.active_connector()
+        if active:
+            return [active]
+    return ["openclaw"]
+
+
+def _plugin_roots_for_connector(
+    app: AppContext, connector: str, *, include_legacy: bool = True,
+) -> list[str]:
+    """Filesystem roots that can hold plugins for one connector.
+
+    New installs target ``cfg.plugin_dirs(connector)``. The legacy
+    DefenseClaw-managed ``plugin_dir`` remains readable for old local installs
+    and tests, but only for the active/single-connector scope so it does not
+    fabricate a copy on every peer in multi-connector info/quarantine flows.
+    """
+    roots: list[str] = []
+    try:
+        roots.extend(d for d in app.cfg.plugin_dirs(connector) if d)
+    except Exception:  # noqa: BLE001 — legacy root below may still work.
+        pass
+
+    if include_legacy and getattr(app.cfg, "plugin_dir", ""):
+        active = (
+            app.cfg.active_connector()
+            if hasattr(app.cfg, "active_connector")
+            else "openclaw"
+        )
+        active_connectors = _active_plugin_connectors(app)
+        if len(active_connectors) <= 1 or connector == active:
+            roots.append(app.cfg.plugin_dir)
+
+    deduped: list[str] = []
+    for root in roots:
+        if root and root not in deduped:
+            deduped.append(root)
+    return deduped
+
+
+def _all_active_plugin_dirs(app: AppContext) -> list[str]:
+    roots: list[str] = []
+    for connector in _active_plugin_connectors(app):
+        for root in _plugin_roots_for_connector(app, connector):
+            if root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _plugin_basename(target: str) -> str:
+    name = target.rstrip("/\\")
+    if "/" in name or "\\" in name:
+        name = os.path.basename(name)
+    return name.lstrip("@")
+
+
+def _connector_for_plugin_path(
+    app: AppContext, plugin_path: str, connector_hint: str = "",
+) -> str:
+    real_path = os.path.realpath(plugin_path)
+    if connector_hint:
+        return connector_hint
+    for connector in _active_plugin_connectors(app):
+        for root in _plugin_roots_for_connector(app, connector, include_legacy=False):
+            real_root = os.path.realpath(root)
+            if real_path == real_root or real_path.startswith(real_root + os.sep):
+                return connector
+    return ""
+
+
+def _plugin_match_dir_scopes(
+    app: AppContext, target: str, connector: str = "",
+) -> list[tuple[str, str]]:
+    """Every ``(connector, path)`` pair that contains a plugin target."""
+    if _looks_like_explicit_path(target) and os.path.isdir(target):
+        resolved = _resolve_connector_scope(app, connector)
+        return [(_connector_for_plugin_path(app, target, resolved), target)]
+
+    name = _plugin_basename(target)
+    if connector:
+        resolved = _resolve_connector_scope(app, connector)
+        scoped_matches: list[tuple[str, str]] = []
+        for root in _plugin_roots_for_connector(app, resolved):
+            candidate = os.path.join(root, name)
+            if os.path.isdir(candidate) and (resolved, candidate) not in scoped_matches:
+                scoped_matches.append((resolved, candidate))
+        return scoped_matches
+
+    matches: list[tuple[str, str]] = []
+    seen_paths: set[str] = set()
+    for c in _active_plugin_connectors(app):
+        for root in _plugin_roots_for_connector(app, c):
+            candidate = os.path.join(root, name)
+            if os.path.isdir(candidate) and candidate not in seen_paths:
+                matches.append((c, candidate))
+                seen_paths.add(candidate)
+    return matches
+
+
+def _scan_all_plugins(
+    app: AppContext,
+    as_json: bool,
+    policy_name: str,
+    profile: str | None,
+    use_llm: bool | None,
+    llm_model: str,
+    llm_provider: str,
+    llm_consensus_runs: int,
+    enable_meta: bool,
+    lenient: bool,
+    connector_flag: str,
+) -> None:
+    """P-C: sweep every installed plugin across configured connectors.
+
+    Mirrors ``skill scan --all`` / ``mcp scan --all``: an explicit
+    ``--connector`` targets exactly one peer; otherwise a multi-connector
+    install fans out across every configured connector (each under a
+    ``── connector: c ──`` banner), and a single-connector install scans the
+    one configured connector.
+    """
+    from defenseclaw import ux
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
+    from defenseclaw.scanner.plugin import PluginScannerWrapper
+    from defenseclaw.scanner.rulepack import maybe_wrap
+
+    if connector_flag:
+        connectors: list[str] = [resolve_list_connector(app, connector_flag)]
+    elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
+        connectors = list(app.cfg.active_connectors())
+    else:
+        connectors = [resolve_list_connector(app, "")]
+
+    scan_options = _build_scan_options(
+        app, policy_name, profile, use_llm, llm_model, llm_provider,
+        llm_consensus_runs, enable_meta, lenient,
+    )
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = maybe_wrap(scanner, app.cfg)
+
+    json_groups: list[dict[str, Any]] = []
+    for connector in connectors:
+        if len(connectors) > 1 and not as_json:
+            click.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
+
+        plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
+        # Resolve each plugin id to a directory on disk (managed dir or the
+        # connector's own dirs). Skip phantom (scan-history / enforcement-only)
+        # rows that have no files to scan.
+        host_dirs = _host_plugin_dirs(app, connector)
+        targets: list[tuple[str, str]] = []
+        for p in plugins:
+            pid = p.get("id", "")
+            if not pid:
+                continue
+            scan_dir = _resolve_plugin_dir(pid, app.cfg.plugin_dir, connector, host_dirs)
+            if scan_dir:
+                targets.append((pid, scan_dir))
+
+        if not targets:
+            if not as_json:
+                click.echo(f"No plugins found to scan for connector={connector}.")
+            else:
+                json_groups.append({"connector": connector, "results": []})
+            continue
+
+        ctx = _scan_ui.ScanContext.for_plugin(
+            connector=connector,
+            paths=[d for _, d in targets],
+            as_json=as_json,
+        )
+        _scan_ui.render_preamble(ctx, target_count=len(targets))
+
+        clean = blocked = errored = 0
+        total_ms = 0
+        group_results: list[dict[str, Any]] = []
+        for pid, scan_dir in targets:
+            try:
+                result = scanner.scan(scan_dir, **scan_options)
+            except Exception as exc:  # noqa: BLE001 — surface, keep sweeping.
+                errored += 1
+                if not as_json:
+                    click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
+                continue
+            if app.logger:
+                app.logger.log_scan(result)
+            total_ms += int(result.duration.total_seconds() * 1000)
+            if as_json:
+                group_results.append(json.loads(result.to_json()))
+                continue
+            if result.is_clean():
+                clean += 1
+                _scan_ui.render_per_target_status(
+                    ctx, target=pid, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                )
+            else:
+                blocked += 1
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=pid,
+                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    detail=f"max severity: {result.max_severity()}",
+                    findings=len(result.findings),
+                )
+        if as_json:
+            json_groups.append({"connector": connector, "results": group_results})
+        else:
+            _scan_ui.render_summary(
+                ctx, clean=clean, blocked=blocked, errored=errored,
+                total=len(targets), duration_ms=total_ms,
+            )
+
+    if as_json:
+        click.echo(json.dumps(json_groups, indent=2, default=str))
+
+
 def _build_scan_options(
     app: AppContext,
     policy_name: str,
     profile: str | None,
-    use_llm: bool,
+    use_llm: bool | None,
     llm_model: str,
     llm_provider: str,
     llm_consensus_runs: int,
@@ -238,8 +568,12 @@ def _build_scan_options(
     only forwards the per-invocation knobs the operator set on this
     particular command line. Any field left at its default ("", 0)
     falls through to the unified config.
+
+    P-F: ``use_llm`` is tri-state — ``None`` (auto: on when a model is
+    configured), ``True`` (force on), ``False`` (force off). It is always
+    forwarded so the wrapper can make the auto decision.
     """
-    opts: dict = {}
+    opts: dict = {"use_llm": use_llm}
 
     if policy_name:
         opts["policy"] = policy_name
@@ -247,7 +581,6 @@ def _build_scan_options(
         opts["profile"] = profile
 
     if use_llm:
-        opts["use_llm"] = True
         if llm_model:
             opts["llm_model"] = llm_model
         if llm_provider:
@@ -270,7 +603,10 @@ def _build_scan_options(
 @click.option("--action", "take_action", is_flag=True, help="Apply plugin_actions policy based on scan severity")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+    help=(
+        "Install into one configured connector's plugin directory. "
+        "Default: every configured connector that exposes a plugin directory."
+    ),
 )
 @pass_ctx
 def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, connector_flag: str) -> None:
@@ -287,13 +623,15 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     After downloading, the plugin is scanned for security issues. Pass --action
     to apply the configured plugin_actions policy (quarantine, disable, block)
     based on scan severity. Use --force to overwrite an existing plugin.
+
+    With no ``--connector`` the source is materialized into every configured
+    connector that exposes a plugin directory. ``--connector`` narrows both
+    placement and admission/enforcement attribution to that peer.
     """
     import tempfile
 
-    from defenseclaw.commands import resolve_list_connector
+    from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.enforce.admission import evaluate_admission
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
     from defenseclaw.registry import (
         RegistryError,
         SourceType,
@@ -303,10 +641,12 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         fetch_npm_package,
     )
     from defenseclaw.scanner.plugin import PluginScannerWrapper
+    from defenseclaw.scanner.rulepack import maybe_wrap
 
-    connector = resolve_list_connector(app, connector_flag)
-    plugin_dir = app.cfg.plugin_dir
-    os.makedirs(plugin_dir, exist_ok=True)
+    connectors = resolve_list_connectors(app, connector_flag)
+    targets = _plugin_install_targets(
+        app, connectors, explicit_connector=bool(connector_flag),
+    )
 
     source = detect_source(name_or_path)
     pe = PolicyEngine(app.store)
@@ -322,40 +662,15 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     else:
         plugin_name = ""
 
-    pre_decision = None
+    pre_decisions: dict[str, Any] = {}
     if plugin_name:
-        pre_install_source = name_or_path if source == SourceType.LOCAL else ""
-        pre_decision = evaluate_admission(
+        pre_decisions = _check_plugin_pre_install_admission(
+            app,
             pe,
-            policy_dir=app.cfg.policy_dir,
-            target_type="plugin",
-            name=plugin_name,
-            source_path=pre_install_source,
-            fallback_actions=app.cfg.plugin_actions,
-            connector=connector,
-            asset_policy=app.cfg.asset_policy,
+            targets,
+            plugin_name,
+            source_path=name_or_path if source == SourceType.LOCAL else "",
         )
-
-    # --- Block list check ---
-    if pre_decision is not None and pre_decision.verdict == "blocked":
-        if app.logger:
-            app.logger.log_action("install-rejected", plugin_name, "reason=blocked")
-        click.echo(
-            f"error: plugin {plugin_name!r} is on the block list"
-            f" — run 'defenseclaw plugin allow {plugin_name}' to unblock",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    # --- Manual/policy allow check (skip scan) ---
-    allowed = pre_decision is not None and pre_decision.verdict == "allowed"
-    if allowed:
-        if pre_decision is not None and pre_decision.source == "scan-disabled":
-            click.echo(f"[install] policy allows {plugin_name!r} without scan")
-        else:
-            click.echo(f"[install] {plugin_name!r} is on the allow list — skipping scan")
-        if app.logger:
-            app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed")
 
     # --- Fetch plugin ---
     tmpdir: str | None = None
@@ -387,114 +702,91 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             plugin_name = os.path.basename(source_path)
 
     try:
-        # --- Duplicate check ---
-        dest = os.path.join(plugin_dir, plugin_name)
-        if os.path.exists(dest):
-            if not force:
-                click.echo(f"Plugin already installed: {plugin_name}")
-                click.echo(f"  Remove first with: defenseclaw plugin remove {plugin_name}")
-                click.echo("  Or pass --force to overwrite")
-                raise SystemExit(1)
-            shutil.rmtree(dest)
+        # --- Validate the derived install name (F-0301) ---
+        # plugin_name is a basename of operator-controlled input (local path /
+        # npm spec / clawhub URI / extracted dir). Reject empty / dot /
+        # traversal / separator names before any destructive operation.
+        if (
+            not plugin_name
+            or plugin_name in (".", "..")
+            or "/" in plugin_name
+            or "\\" in plugin_name
+            or os.sep in plugin_name
+            or (os.altsep and os.altsep in plugin_name)
+        ):
+            click.echo(f"error: invalid plugin name: {plugin_name!r}", err=True)
+            raise SystemExit(1)
 
-        # --- Scan (unless allow-listed) ---
-        if not allowed:
-            click.echo(f"[install] scanning {source_path}...")
-            scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-            try:
-                result = scanner.scan(source_path)
-            except Exception as exc:
-                click.echo(f"error: scan failed: {exc}", err=True)
-                raise SystemExit(1)
+        if not pre_decisions:
+            pre_decisions = _check_plugin_pre_install_admission(
+                app,
+                pe,
+                targets,
+                plugin_name,
+                source_path=source_path if source == SourceType.LOCAL else "",
+            )
 
+        click.echo(
+            f"[install] installing {plugin_name!r} for "
+            + ", ".join(f"connector={connector}" for connector, _root in targets)
+            + "..."
+        )
+        installed_paths: list[str] = []
+        installed_by_connector: dict[str, str] = {}
+        for connector, install_root in targets:
+            plugin_path = _copy_plugin_tree_to_connector(
+                source_path, install_root, plugin_name, force=force,
+            )
+            installed_paths.append(plugin_path)
+            installed_by_connector[connector] = plugin_path
+            click.echo(
+                f"[install] installed {plugin_name!r} -> {plugin_path} "
+                f"(connector={connector})"
+            )
             if app.logger:
-                app.logger.log_scan(result)
-
-            _print_install_result(plugin_name, result)
-
-            if result.is_clean():
-                click.echo(f"[install] {plugin_name!r} is clean")
-                if app.logger:
-                    app.logger.log_action("install-clean", plugin_name, "verdict=clean")
-            else:
-                sev = result.max_severity()
-                detail = f"severity={sev} findings={len(result.findings)}"
-                provenance_path = source_path if source == SourceType.LOCAL else ""
-                post_decision = evaluate_admission(
-                    pe,
-                    policy_dir=app.cfg.policy_dir,
-                    target_type="plugin",
-                    name=plugin_name,
-                    source_path=provenance_path,
-                    scan_result=result,
-                    fallback_actions=app.cfg.plugin_actions,
-                    connector=connector,
-                    asset_policy=app.cfg.asset_policy,
+                app.logger.log_action(
+                    "plugin-install",
+                    plugin_name,
+                    f"source={name_or_path} connector={connector}",
                 )
 
-                if post_decision.verdict == "allowed":
-                    click.echo(f"[install] {plugin_name!r} became allow-listed — skipping post-scan enforcement")
-                    if app.logger:
-                        app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed-post-scan")
-                elif not take_action:
+        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+        scanner = maybe_wrap(scanner, app.cfg)
+        for connector, _install_root in targets:
+            plugin_path = installed_by_connector[connector]
+            pre_decision = pre_decisions[connector]
+            if pre_decision.verdict == "allowed":
+                if pre_decision.source == "scan-disabled":
                     click.echo(
-                        f"[install] {len(result.findings)} {sev} findings in {plugin_name!r} "
-                        f"(no action taken — pass --action to enforce)"
+                        f"[install] policy allows {plugin_name!r} without scan "
+                        f"(connector={connector})"
                     )
-                    if app.logger:
-                        app.logger.log_action("install-warning", plugin_name, detail)
                 else:
-                    action_cfg = post_decision.action
-                    enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
-                    applied_actions: list[str] = []
+                    click.echo(
+                        f"[install] {plugin_name!r} is on the allow list for "
+                        f"connector={connector} — skipping scan"
+                    )
+                pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+                if app.logger:
+                    app.logger.log_action(
+                        "install-allowed",
+                        plugin_name,
+                        f"reason=allow-listed connector={connector}",
+                    )
+                continue
 
-                    if action_cfg.file == "quarantine":
-                        se = PluginEnforcer(app.cfg.quarantine_dir)
-                        q_dest = se.quarantine(plugin_name, source_path)
-                        if q_dest:
-                            applied_actions.append(f"quarantined to {q_dest}")
-                            pe.quarantine("plugin", plugin_name, enforcement_reason)
-                        else:
-                            click.echo("[install] quarantine failed", err=True)
+            _scan_installed_plugin_for_connector(
+                app,
+                pe,
+                scanner,
+                plugin_name,
+                plugin_path,
+                connector=connector,
+                take_action=take_action,
+                rollback_paths=installed_paths,
+            )
 
-                    if action_cfg.runtime == "disable":
-                        client = _sidecar_client(app)
-                        try:
-                            client.disable_plugin(plugin_name)
-                            applied_actions.append("disabled via gateway")
-                            pe.disable("plugin", plugin_name, enforcement_reason)
-                        except Exception as exc:
-                            click.echo(f"[install] gateway disable failed: {exc}", err=True)
-
-                    if action_cfg.install == "block":
-                        pe.block("plugin", plugin_name, enforcement_reason)
-                        applied_actions.append("added to block list")
-
-                    if action_cfg.install == "allow":
-                        pe.allow("plugin", plugin_name, enforcement_reason)
-                        applied_actions.append("added to allow list")
-
-                    if applied_actions:
-                        actions_str = ", ".join(applied_actions)
-                        click.echo(f"[install] {plugin_name!r}: {actions_str} ({detail})")
-                        if app.logger:
-                            app.logger.log_action("install-enforced", plugin_name, f"{detail}; {actions_str}")
-                        click.echo(
-                            f"error: plugin {plugin_name!r} had {sev} findings — actions applied: {actions_str}",
-                            err=True,
-                        )
-                        raise SystemExit(1)
-
-                    click.echo(f"[install] warning: {len(result.findings)} {sev} findings in {plugin_name!r}")
-                    if app.logger:
-                        app.logger.log_action("install-warning", plugin_name, detail)
-
-        # --- Copy to plugin_dir ---
-        shutil.copytree(source_path, dest)
-        pe.set_source_path("plugin", plugin_name, dest)
         click.echo(f"Installed plugin: {plugin_name}")
-        if app.logger:
-            app.logger.log_action("plugin-install", plugin_name, f"source={name_or_path}")
 
         from defenseclaw.commands import hint
         hint(
@@ -505,6 +797,301 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _check_plugin_pre_install_admission(
+    app: AppContext,
+    pe: Any,
+    targets: list[tuple[str, str]],
+    plugin_name: str,
+    *,
+    source_path: str,
+) -> dict[str, Any]:
+    from defenseclaw.enforce.admission import evaluate_admission
+
+    pre_decisions: dict[str, Any] = {}
+    for connector, _install_root in targets:
+        decision = evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="plugin",
+            name=plugin_name,
+            source_path=source_path,
+            fallback_actions=app.cfg.plugin_actions,
+            connector=connector,
+            asset_policy=app.cfg.asset_policy,
+            include_quarantine=True,
+        )
+        pre_decisions[connector] = decision
+
+        if decision.verdict == "blocked":
+            if app.logger:
+                app.logger.log_action(
+                    "install-rejected",
+                    plugin_name,
+                    f"reason=blocked connector={connector}",
+                )
+            click.echo(
+                f"error: plugin {plugin_name!r} is on the block list for "
+                f"connector={connector} — run "
+                f"'defenseclaw plugin allow {plugin_name} --connector {connector}' "
+                "to unblock",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        if decision.verdict == "rejected" and decision.source == "quarantine":
+            if app.logger:
+                app.logger.log_action(
+                    "install-rejected",
+                    plugin_name,
+                    f"reason=quarantined connector={connector}",
+                )
+            click.echo(
+                f"error: plugin {plugin_name!r} is quarantined for "
+                f"connector={connector} — release the quarantine before reinstalling",
+                err=True,
+            )
+            raise SystemExit(1)
+
+    return pre_decisions
+
+
+def _plugin_install_targets(
+    app: AppContext, connectors: list[str], *, explicit_connector: bool = False,
+) -> list[tuple[str, str]]:
+    """Return ``(connector, install_root)`` targets for plugin installs."""
+    targets: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    for connector in connectors:
+        if connector == "antigravity":
+            skipped.append(connector)
+            continue
+        dirs = [d for d in app.cfg.plugin_dirs(connector) if d]
+        if not dirs:
+            skipped.append(connector)
+            continue
+        targets.append((connector, dirs[0]))
+
+    if not targets:
+        if explicit_connector and connectors:
+            click.echo(
+                f"error: connector {connectors[0]!r} does not expose a plugin install directory",
+                err=True,
+            )
+        else:
+            click.echo(
+                "error: no configured connector exposes a plugin install directory",
+                err=True,
+            )
+        raise SystemExit(1)
+
+    for connector in skipped:
+        click.echo(
+            f"[install] skipping connector={connector}: no plugin install directory"
+        )
+    return targets
+
+
+def _copy_plugin_tree_to_connector(
+    source_path: str, install_root: str, plugin_name: str, *, force: bool,
+) -> str:
+    target_path = os.path.join(install_root, plugin_name)
+    real_root = os.path.realpath(install_root)
+    real_target = os.path.realpath(target_path)
+    if not (real_target != real_root and real_target.startswith(real_root + os.sep)):
+        click.echo("error: resolved install path escapes the connector plugin directory", err=True)
+        raise SystemExit(1)
+
+    if os.path.realpath(source_path) == real_target:
+        return target_path
+    if os.path.exists(target_path):
+        if not force:
+            click.echo(
+                f"error: plugin {plugin_name!r} already exists at {target_path}; "
+                "pass --force to replace it",
+                err=True,
+            )
+            raise SystemExit(1)
+        shutil.rmtree(target_path)
+    os.makedirs(install_root, exist_ok=True)
+    shutil.copytree(source_path, target_path)
+    return target_path
+
+
+def _rollback_plugin_install_paths(paths: list[str]) -> None:
+    seen: set[str] = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+        except OSError as exc:
+            click.echo(
+                f"[install] warning: could not remove partial install {path}: {exc}",
+                err=True,
+            )
+
+
+def _scan_installed_plugin_for_connector(
+    app: AppContext,
+    pe: Any,
+    scanner: Any,
+    plugin_name: str,
+    plugin_path: str,
+    *,
+    connector: str,
+    take_action: bool,
+    rollback_paths: list[str] | None = None,
+) -> None:
+    from defenseclaw.enforce.admission import evaluate_admission
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    click.echo(f"[install] scanning {plugin_path} (connector={connector})...")
+    try:
+        result = scanner.scan(plugin_path)
+    except Exception as exc:
+        _rollback_plugin_install_paths(rollback_paths or [plugin_path])
+        click.echo(
+            f"error: scan failed for connector={connector}: {exc}",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if app.logger:
+        app.logger.log_scan(result)
+
+    _print_install_result(plugin_name, result)
+
+    post_decision = evaluate_admission(
+        pe,
+        policy_dir=app.cfg.policy_dir,
+        target_type="plugin",
+        name=plugin_name,
+        source_path=plugin_path,
+        scan_result=result,
+        fallback_actions=app.cfg.plugin_actions,
+        connector=connector,
+        asset_policy=app.cfg.asset_policy,
+    )
+
+    if post_decision.verdict == "allowed":
+        click.echo(
+            f"[install] {plugin_name!r} became allow-listed for "
+            f"connector={connector} — skipping post-scan enforcement"
+        )
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        if app.logger:
+            app.logger.log_action(
+                "install-allowed",
+                plugin_name,
+                f"reason=allow-listed-post-scan connector={connector}",
+            )
+        return
+
+    if post_decision.verdict == "clean":
+        click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        if app.logger:
+            app.logger.log_action(
+                "install-clean",
+                plugin_name,
+                f"verdict=clean connector={connector}",
+            )
+        return
+
+    sev = result.max_severity()
+    detail = f"severity={sev} findings={len(result.findings)} connector={connector}"
+
+    if not take_action:
+        sev_norm = (sev or "").strip().upper()
+        if sev_norm in {"HIGH", "CRITICAL"}:
+            _rollback_plugin_install_paths(rollback_paths or [plugin_path])
+            click.echo(
+                f"error: refusing to install {plugin_name!r} for connector={connector} — "
+                f"{len(result.findings)} {sev_norm} findings detected and "
+                "--action was not passed. Run with --action to enforce, or "
+                f"`defenseclaw plugin allow {plugin_name} --connector {connector}` "
+                "to explicitly accept the risk.",
+                err=True,
+            )
+            if app.logger:
+                app.logger.log_action(
+                    "install-refused",
+                    plugin_name,
+                    f"{detail} reason=critical-without-action",
+                )
+            raise SystemExit(1)
+        click.echo(
+            f"[install] {len(result.findings)} {sev} findings in {plugin_name!r} "
+            f"(connector={connector}; no action taken — pass --action to enforce)"
+        )
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        if app.logger:
+            app.logger.log_action("install-warning", plugin_name, detail)
+        return
+
+    action_cfg = post_decision.action
+    enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
+    applied_actions: list[str] = []
+
+    if action_cfg.file == "quarantine":
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        se = PluginEnforcer(app.cfg.quarantine_dir)
+        q_dest = se.quarantine(plugin_name, plugin_path, connector=connector)
+        if q_dest:
+            applied_actions.append(f"quarantined to {q_dest}")
+            pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
+        else:
+            click.echo("[install] quarantine failed", err=True)
+
+    if action_cfg.runtime == "disable":
+        target_connector = _normalize_runtime_connector(connector)
+        if target_connector == "openclaw":
+            client = _sidecar_client(app)
+            try:
+                client.disable_plugin(plugin_name)
+                applied_actions.append("disabled via gateway")
+                pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            except Exception as exc:
+                click.echo(f"[install] gateway disable failed: {exc}", err=True)
+        else:
+            applied_actions.append(f"runtime disable recorded for connector={connector}")
+            pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
+
+    if action_cfg.install == "block":
+        pe.block_for_connector("plugin", plugin_name, connector, enforcement_reason)
+        applied_actions.append("added to block list")
+
+    if action_cfg.install == "allow":
+        pe.allow_for_connector("plugin", plugin_name, connector, enforcement_reason)
+        applied_actions.append("added to allow list")
+
+    pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+
+    if applied_actions:
+        actions_str = ", ".join(applied_actions)
+        click.echo(f"[install] {plugin_name!r}: {actions_str} ({detail})")
+        if app.logger:
+            app.logger.log_action(
+                "install-enforced", plugin_name, f"{detail}; {actions_str}",
+            )
+        click.echo(
+            f"error: plugin {plugin_name!r} had {sev} findings for "
+            f"connector={connector} — actions applied: {actions_str}",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo(
+        f"[install] warning: {len(result.findings)} {sev} findings in "
+        f"{plugin_name!r} (connector={connector})"
+    )
+    pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+    if app.logger:
+        app.logger.log_action("install-warning", plugin_name, detail)
 
 
 def _print_install_result(name: str, result) -> None:
@@ -530,7 +1117,7 @@ def _print_install_result(name: str, result) -> None:
     default="",
     help=(
         "List plugins for a specific configured connector. "
-        "Default: every active connector (on a single-connector install, "
+        "Default: every configured connector (on a single-connector install, "
         "just that one). Pass --connector <name> to narrow to one peer."
     ),
 )
@@ -538,16 +1125,17 @@ def _print_install_result(name: str, result) -> None:
 def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """List installed plugins with scan severity.
 
-    By default this lists **every active connector's** plugins — each
+    By default this lists **every configured connector's** plugins — each
     connector gets its own connector-tagged table — so the output reads
-    the same whether one or many connectors are active. ``--connector
+    the same whether one or many connectors are configured. ``--connector
     <name>`` narrows the listing to one configured peer.
     """
     from defenseclaw.commands import resolve_list_connectors
 
     connectors = resolve_list_connectors(app, connector_flag)
     scan_map = _build_plugin_scan_map(app.store)
-    actions_map = _build_plugin_actions_map(app.store)
+    # P-A: resolve the effective actions per connector (connector-scoped row
+    # overrides unscoped) so each connector's table/card shows its own verdict.
 
     if as_json:
         if len(connectors) > 1:
@@ -556,8 +1144,9 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     "connector": c,
                     "plugins": _plugin_list_json_items(
                         _collect_plugins_for_connector(app, c, scan_map),
-                        scan_map,
-                        actions_map,
+                        _build_plugin_scan_map_for_connector(app, c),
+                        _build_plugin_actions_map(app.store, c),
+                        connector=c,
                     ),
                 }
                 for c in connectors
@@ -565,17 +1154,34 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             click.echo(json.dumps(groups, indent=2, default=str))
         else:
             plugins = _collect_plugins_for_connector(app, connectors[0], scan_map)
-            _print_plugin_list_json(plugins, scan_map, actions_map)
+            _print_plugin_list_json(
+                plugins,
+                _build_plugin_scan_map_for_connector(app, connectors[0]),
+                _build_plugin_actions_map(app.store, connectors[0]),
+                connector=connectors[0],
+            )
         return
 
     shown_any = False
+    empty_connectors: list[str] = []
     for connector in connectors:
         plugins = _collect_plugins_for_connector(app, connector, scan_map)
         if not plugins:
-            click.echo(f"No plugins found. Check your {connector} installation and plugin directories.")
+            empty_connectors.append(connector)
+            if len(connectors) > 1:
+                click.echo(f"Plugins (connector={connector}): no plugins found")
             continue
-        _print_plugin_list_table(plugins, scan_map, actions_map, connector)
+        actions_map = _build_plugin_actions_map(app.store, connector)
+        connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
+        _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
         shown_any = True
+
+    if not shown_any:
+        if len(connectors) == 1:
+            click.echo(
+                f"No plugins found. Check your {connectors[0]} installation and plugin directories."
+            )
+        return
 
     if shown_any:
         from defenseclaw.commands import hint
@@ -595,9 +1201,22 @@ def _collect_plugins_for_connector(
     into a Codex / Claude Code / ZeptoClaw view.
     """
     plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
+    known_ids = {p["id"] for p in plugins}
+    for pid, ae in sorted(_build_plugin_actions_map(app.store, connector).items()):
+        if pid in known_ids or ae.actions.file != "quarantine":
+            continue
+        plugins.append({
+            "id": pid,
+            "name": pid,
+            "description": "",
+            "version": "",
+            "origin": "enforcement",
+            "enabled": False,
+            "source": "enforcement",
+        })
+        known_ids.add(pid)
     if connector != "openclaw":
         return plugins
-    known_ids = {p["id"] for p in plugins}
     for scan_id in scan_map:
         if scan_id not in known_ids:
             plugins.append({
@@ -624,7 +1243,7 @@ def _merge_all_plugins(
     Each entry carries both ``id`` (directory basename, matches scan DB
     targets) and ``name`` (human-readable display name).
 
-    Plan C6: when *cfg* is provided AND the active connector is not
+    Plan C6: when *cfg* is provided AND the requested connector is not
     OpenClaw, host-agent plugins are enumerated via cfg.plugin_dirs()
     and tagged ``source: "host:<connector>"`` so the merged list
     distinguishes managed-by-DefenseClaw plugins from host-owned
@@ -671,7 +1290,15 @@ def _merge_all_plugins(
 
 
 
-def _plugin_status(p: dict[str, Any]) -> str:
+def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
+    if action_entry and not action_entry.actions.is_empty():
+        a = action_entry.actions
+        if a.file == "quarantine":
+            return "quarantined"
+        if a.install == "block":
+            return "blocked"
+        if a.runtime == "disable":
+            return "disabled"
     if not p.get("enabled"):
         return "disabled"
     return "enabled"
@@ -691,10 +1318,19 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
     return "\u2717 disabled"
 
 
+def _plugin_effectively_enabled(p: dict[str, Any], action_entry: Any = None) -> bool:
+    if action_entry and not action_entry.actions.is_empty():
+        a = action_entry.actions
+        if a.file == "quarantine" or a.install == "block" or a.runtime == "disable":
+            return False
+    return bool(p.get("enabled"))
+
+
 def _plugin_list_json_items(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
@@ -706,9 +1342,11 @@ def _plugin_list_json_items(
             "version": p.get("version", ""),
             "origin": p.get("origin", ""),
             "source": p.get("source", ""),
-            "status": _plugin_status(p),
-            "enabled": p.get("enabled", False),
+            "status": _plugin_status(p, actions_map.get(pid)),
+            "enabled": _plugin_effectively_enabled(p, actions_map.get(pid)),
         }
+        if connector:
+            item["connector"] = connector
         if pid in scan_map:
             item["scan"] = scan_map[pid]
         if pid in actions_map:
@@ -725,9 +1363,10 @@ def _print_plugin_list_json(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> None:
     click.echo(json.dumps(
-        _plugin_list_json_items(plugins, scan_map, actions_map),
+        _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
         indent=2,
         default=str,
     ))
@@ -744,7 +1383,9 @@ def _print_plugin_list_table(
 
     from defenseclaw.commands import list_scope_title
 
-    enabled_count = sum(1 for p in plugins if p.get("enabled"))
+    enabled_count = sum(
+        1 for p in plugins if _plugin_effectively_enabled(p, actions_map.get(p["id"]))
+    )
 
     detail = f"({enabled_count}/{len(plugins)} enabled)"
     title = (
@@ -841,7 +1482,12 @@ def _looks_like_explicit_path(value: str) -> bool:
     return False
 
 
-def _resolve_plugin_dir(name_or_path: str, plugin_dir: str, connector: str = "") -> str | None:
+def _resolve_plugin_dir(
+    name_or_path: str,
+    plugin_dir: str,
+    connector: str = "",
+    search_dirs: list[str] | None = None,
+) -> str | None:
     """Resolve a plugin name or path to a directory on disk.
 
     Resolution order:
@@ -857,7 +1503,11 @@ def _resolve_plugin_dir(name_or_path: str, plugin_dir: str, connector: str = "")
          the local folder and skips the OpenClaw / DefenseClaw lookup
          entirely.
       2. Subdirectory under DefenseClaw's plugin_dir
-      3. Connector plugin by name (openclaw CLI or filesystem)
+      3. P-B: the target connector's own plugin dirs (``search_dirs`` =
+         ``cfg.plugin_dirs(connector)``) so a host-owned plugin that
+         ``plugin list --connector X`` shows can also be scanned. This
+         mirrors ``info()`` so list/scan/info agree across peers.
+      4. Connector plugin by name (openclaw CLI or filesystem)
     """
     if _looks_like_explicit_path(name_or_path) and os.path.isdir(name_or_path):
         return name_or_path
@@ -865,6 +1515,11 @@ def _resolve_plugin_dir(name_or_path: str, plugin_dir: str, connector: str = "")
     candidate = os.path.join(plugin_dir, name_or_path)
     if os.path.isdir(candidate):
         return candidate
+
+    for d in search_dirs or []:
+        host_candidate = os.path.join(d, name_or_path)
+        if os.path.isdir(host_candidate):
+            return host_candidate
 
     for lookup in dict.fromkeys([name_or_path, name_or_path.lower()]):
         info = _get_openclaw_plugin_info(lookup, connector)
@@ -1051,6 +1706,13 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
     except OSError:
         return []
     for entry in entries:
+        # N6: host plugin dirs carry non-plugin siblings — a ``cache``
+        # working dir (codex/zeptoclaw register ``…/plugins/cache``) and
+        # dot-prefixed dirs (``.git`` and editor/OS cruft). Skip both so they
+        # never surface as phantom plugin rows. The manifest stays optional
+        # below, so genuinely manifest-less host plugins still list.
+        if entry == "cache" or entry.startswith("."):
+            continue
         plugin_path = os.path.join(host_dir, entry)
         if not os.path.isdir(plugin_path):
             continue
@@ -1075,7 +1737,7 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
 
 
 def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
-    """Enumerate host-agent-owned plugins for the active connector.
+    """Enumerate host-agent-owned plugins for the requested connector.
 
     Plan C6: matrix §5 marks zeptoclaw / claudecode / codex as ⚠️ for
     ``plugin list`` because the host's own plugin directory was
@@ -1173,7 +1835,7 @@ def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
 
 
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:
-    """Query plugins from the active connector.
+    """Query plugins from the requested connector.
 
     For OpenClaw, shells out to ``openclaw plugins list --json``.
     For other connectors, returns an empty list (plugins are discovered
@@ -1226,47 +1888,202 @@ def _list_openclaw_plugins(connector: str = "") -> list[dict]:
 
 @plugin.command()
 @click.argument("name")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Remove from one configured connector's plugin dirs. "
+        "Default: remove matching copies across every configured connector."
+    ),
+)
 @pass_ctx
-def remove(app: AppContext, name: str) -> None:
-    """Remove an installed plugin."""
-    plugin_dir = app.cfg.plugin_dir
+def remove(app: AppContext, name: str, connector_flag: str) -> None:
+    """Remove an installed plugin.
+
+    Bare removes matching copies across every configured connector; ``--connector
+    <name>`` narrows removal to that peer's plugin dirs. The legacy
+    DefenseClaw-managed plugin dir is removed only for bare operations (or a
+    single-connector install), because it is shared rather than peer-owned.
+    """
+    from defenseclaw.commands import resolve_list_connectors
+
     safe_name = os.path.basename(name)
     if not safe_name or safe_name in (".", ".."):
         click.echo(f"Invalid plugin name: {name}", err=True)
         raise SystemExit(1)
 
-    path = os.path.realpath(os.path.join(plugin_dir, safe_name))
-    if not path.startswith(os.path.realpath(plugin_dir) + os.sep):
-        click.echo(f"Invalid plugin name: {name}", err=True)
-        raise SystemExit(1)
+    connectors = resolve_list_connectors(app, connector_flag)
+    scoped = bool(connector_flag and connector_flag.strip())
 
-    if not os.path.isdir(path):
+    roots: list[tuple[str, str]] = []
+    include_legacy = not scoped or len(_active_plugin_connectors(app)) <= 1
+    if include_legacy and getattr(app.cfg, "plugin_dir", ""):
+        roots.append(("", app.cfg.plugin_dir))
+    for connector in connectors:
+        for root in _host_plugin_dirs(app, connector):
+            roots.append((connector, root))
+
+    removed: list[tuple[str, str]] = []
+    seen_paths: set[str] = set()
+    for connector, root in roots:
+        if not root:
+            continue
+        real_root = os.path.realpath(root)
+        candidate = os.path.realpath(os.path.join(root, safe_name))
+        if candidate != real_root and not candidate.startswith(real_root + os.sep):
+            continue
+        if os.path.isdir(candidate):
+            if candidate in seen_paths:
+                continue
+            shutil.rmtree(candidate)
+            removed.append((connector, candidate))
+            seen_paths.add(candidate)
+
+    if not removed:
         click.echo(f"Plugin not found: {safe_name}")
         return
 
-    shutil.rmtree(path)
-    click.echo(f"Removed plugin: {safe_name}")
+    for connector, path in removed:
+        suffix = f" (connector={connector})" if connector else ""
+        click.echo(f"[plugin] {safe_name!r} removed from {path}{suffix}")
+
     if app.logger:
-        app.logger.log_action("plugin-remove", safe_name, "")
+        connector_detail = (
+            f"connector={connectors[0]}" if scoped and connectors else "connector=all"
+        )
+        app.logger.log_action(
+            "plugin-remove", safe_name, connector_detail,
+        )
 
     from defenseclaw.commands import hint
     hint("Restart gateway to apply:  defenseclaw-gateway restart")
 
 
 # ---------------------------------------------------------------------------
-# plugin block
+# plugin block / allow / disable / enable / quarantine / restore / remove
+#
+# P-A: these accept ``--connector`` to scope policy. Bare verb writes an
+# unscoped entry that applies across connectors; ``--connector <name>``
+# narrows the entry to one peer. The connector dimension lives in the audit
+# store's per-connector column (the SK-4/N2 foundation) via the
+# PolicyEngine ``*_for_connector`` methods; reads resolve most-specific-wins
+# (connector entry, then unscoped). Runtime honoring is at the admission gate
+# (enforce/admission.py threads the connector into its block/allow/quarantine
+# check), not CLI-only. Mirrors the ``mcp`` N2 commands.
 # ---------------------------------------------------------------------------
+
+_CONNECTOR_SCOPE_HELP = (
+    "Scope to one connector. Default: create an unscoped policy entry "
+    "that applies across connectors. "
+    "Pass --connector <name> to narrow to that peer."
+)
+_CONNECTOR_RUNTIME_SCOPE_HELP = (
+    "Scope to one connector. Default: matching plugin copies across configured connectors."
+)
+
+
+def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
+    """Validate a connector-scoped plugin policy flag.
+
+    Bare policy commands intentionally write an unscoped row. A supplied
+    connector must be configured, so typos cannot create inert policy state.
+    """
+    if not connector_flag:
+        return ""
+    from defenseclaw.commands import resolve_list_connector
+    return resolve_list_connector(app, connector_flag)
+
+
+def _resolve_plugin_quarantine_restore_scopes(
+    app: AppContext, pe: Any, plugin_name: str, connector_flag: str,
+) -> list[tuple[str, Any | None]]:
+    """Resolve which quarantine rows a plugin restore command should use."""
+    if connector_flag:
+        connector = _resolve_connector_scope(app, connector_flag)
+        return [(connector, pe.get_action("plugin", plugin_name, connector))]
+
+    matches: list[tuple[str, Any]] = []
+    global_entry = pe.get_action("plugin", plugin_name)
+    if global_entry is not None and global_entry.actions.file == "quarantine":
+        matches.append(("", global_entry))
+
+    active_order = {c: i for i, c in enumerate(_active_plugin_connectors(app))}
+    seen_connectors: set[str] = set()
+    for entry in pe.list_by_type("plugin"):
+        c = entry.connector
+        if not c or c in seen_connectors:
+            continue
+        seen_connectors.add(c)
+        scoped_entry = pe.get_action("plugin", plugin_name, c)
+        if scoped_entry is not None and scoped_entry.actions.file == "quarantine":
+            matches.append((c, scoped_entry))
+
+    if matches:
+        return sorted(matches, key=lambda item: active_order.get(item[0], len(active_order)))
+    return [("", global_entry)]
+
+
+def _plugin_policy_fanout_connectors(
+    app: AppContext, pe: Any, plugin_name: str,
+) -> list[str]:
+    """Connectors where a bare plugin policy command should apply.
+
+    The set includes installed matching connector copies plus any connector
+    that already has scoped enforcement for the plugin, so bare allow/unblock
+    can clean stale connector-scoped rows even after a copy was removed.
+    """
+    active_order = {
+        _normalize_runtime_connector(connector): idx
+        for idx, connector in enumerate(_active_plugin_connectors(app))
+    }
+    seen: set[str] = set()
+    connectors: list[str] = []
+
+    def add(connector: str) -> None:
+        normalized = _normalize_runtime_connector(connector)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        connectors.append(normalized)
+
+    for connector, _path in _plugin_match_dir_scopes(app, plugin_name):
+        add(connector)
+
+    if pe is not None:
+        for entry in pe.list_by_type("plugin"):
+            if entry.target_name == plugin_name and entry.connector:
+                add(entry.connector)
+
+    return sorted(connectors, key=lambda c: active_order.get(c, len(active_order)))
+
+
+def _plugin_has_connector_enforcement(
+    app: AppContext, plugin_name: str, connector: str,
+) -> bool:
+    if app.store is None:
+        return False
+    return (
+        app.store.has_action("plugin", plugin_name, "install", "block", connector)
+        or app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+        or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
+        or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
+        or app.store.has_action("plugin", plugin_name, "runtime", "enable", connector)
+    )
+
 
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for blocking")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def block(app: AppContext, name: str, reason: str) -> None:
+def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install block list.
 
     Blocked plugins are rejected by the admission gate before any scan.
     Does not affect already-installed plugins — use 'plugin disable' or
     'plugin quarantine' for that.
+
+    Bare ``plugin block <name>`` creates an unscoped block entry;
+    ``--connector <name>`` narrows the block to one peer.
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -1276,14 +2093,131 @@ def block(app: AppContext, name: str, reason: str) -> None:
     if not reason:
         reason = "manual block via CLI"
 
-    pe.block("plugin", plugin_name, reason)
-    plugin_path = _resolve_plugin_path(app, plugin_name)
-    if plugin_path:
-        pe.set_source_path("plugin", plugin_name, plugin_path)
-    click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
+    connector = _resolve_connector_scope(app, connector_flag)
+    if connector:
+        if pe.is_blocked_for_connector("plugin", plugin_name, connector):
+            if app.store and app.store.has_action(
+                "plugin", plugin_name, "install", "block", connector,
+            ):
+                click.echo(f"Already blocked for {connector}: {plugin_name}")
+            else:
+                click.echo(
+                    f"Already blocked by unscoped policy (covers {connector}): {plugin_name}"
+                )
+            return
+        pe.block_for_connector("plugin", plugin_name, connector, reason)
+        plugin_path = _resolve_plugin_path(app, plugin_name, connector)
+        if plugin_path:
+            pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        click.secho(
+            f"[plugin] {plugin_name!r} added to block list (connector={connector})",
+            fg="red",
+        )
+    else:
+        pe.block("plugin", plugin_name, reason)
+        plugin_path = _resolve_plugin_path(app, plugin_name)
+        if plugin_path:
+            pe.set_source_path("plugin", plugin_name, plugin_path)
+        click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
 
     if app.logger:
-        app.logger.log_action("plugin-block", plugin_name, f"reason={reason}")
+        app.logger.log_action(
+            "plugin-block", plugin_name, f"reason={reason} connector={connector}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# plugin unblock
+# ---------------------------------------------------------------------------
+
+@plugin.command()
+@click.argument("name")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Scope to one connector. Default: clear matching connector copies and unscoped state. "
+        "Pass --connector <name> to clear only that peer's per-connector state; "
+        "an unscoped block stays in force."
+    ),
+)
+@pass_ctx
+def unblock(app: AppContext, name: str, connector_flag: str) -> None:
+    """Remove plugin enforcement state without adding an allow entry."""
+    from defenseclaw.enforce import PolicyEngine
+
+    plugin_name = os.path.basename(name)
+    pe = PolicyEngine(app.store)
+    connector = _resolve_connector_scope(app, connector_flag)
+    if connector:
+        has_state = bool(app.store) and (
+            app.store.has_action("plugin", plugin_name, "install", "block", connector)
+            or app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+            or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
+            or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
+        )
+        if not has_state:
+            click.echo(
+                f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}"
+            )
+            return
+        pe.remove_action_for_connector("plugin", plugin_name, connector)
+        click.secho(
+            f"[plugin] {plugin_name!r} all enforcement state cleared "
+            f"(connector={connector}) (allow/block/quarantine/disable)",
+            fg="green",
+        )
+        if app.logger:
+            app.logger.log_action(
+                "plugin-unblock", plugin_name, f"manual unblock via CLI connector={connector}",
+            )
+        return
+
+    targets = _plugin_policy_fanout_connectors(app, pe, plugin_name)
+    has_unscoped_state = bool(app.store) and (
+        pe.is_blocked("plugin", plugin_name)
+        or pe.is_allowed("plugin", plugin_name)
+        or pe.is_quarantined("plugin", plugin_name)
+        or app.store.has_action("plugin", plugin_name, "runtime", "disable")
+        or app.store.has_action("plugin", plugin_name, "runtime", "enable")
+    )
+    has_scoped_state = any(
+        _plugin_has_connector_enforcement(app, plugin_name, target_connector)
+        for target_connector in targets
+    )
+    if targets and (has_unscoped_state or has_scoped_state):
+        for target_connector in targets:
+            pe.remove_action_for_connector("plugin", plugin_name, target_connector)
+            click.secho(
+                f"[plugin] {plugin_name!r} all enforcement state cleared "
+                f"(connector={target_connector}) (allow/block/quarantine/disable)",
+                fg="green",
+            )
+        if has_unscoped_state:
+            pe.remove_action("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-unblock", plugin_name, "manual unblock via CLI connector=all",
+            )
+        return
+
+    has_state = bool(app.store) and (
+        pe.is_blocked("plugin", plugin_name)
+        or pe.is_allowed("plugin", plugin_name)
+        or pe.is_quarantined("plugin", plugin_name)
+        or app.store.has_action("plugin", plugin_name, "runtime", "disable")
+    )
+    if not has_state:
+        click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
+        return
+
+    pe.remove_action("plugin", plugin_name)
+    click.secho(
+        f"[plugin] {plugin_name!r} all enforcement state cleared "
+        "(allow/block/quarantine/disable)",
+        fg="green",
+    )
+    if app.logger:
+        app.logger.log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------
@@ -1293,12 +2227,16 @@ def block(app: AppContext, name: str, reason: str) -> None:
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for allowing")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def allow(app: AppContext, name: str, reason: str) -> None:
+def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install allow list.
 
     Allow-listed plugins skip the scan gate during install.
     Adding a plugin also removes it from the block list.
+
+    Bare ``plugin allow <name>`` allows matching configured connector copies;
+    ``--connector <name>`` narrows the allow to one peer.
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -1309,9 +2247,64 @@ def allow(app: AppContext, name: str, reason: str) -> None:
     if not reason:
         reason = "manual allow via CLI"
 
+    # P-A connector-scoped allow: write the narrowed entry and clear residual
+    # file/runtime state for that peer. The gateway runtime-enable dance below
+    # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
+    connector_scope = _resolve_connector_scope(app, connector_flag)
+    if connector_scope:
+        if pe.is_allowed_for_connector("plugin", plugin_name, connector_scope):
+            if app.store and app.store.has_action(
+                "plugin", plugin_name, "install", "allow", connector_scope,
+            ):
+                click.echo(f"Already allowed for {connector_scope}: {plugin_name}")
+            else:
+                click.echo(
+                    f"Already allowed by unscoped policy (covers {connector_scope}): {plugin_name}"
+                )
+            return
+        pe.allow_for_connector("plugin", plugin_name, connector_scope, reason)
+        plugin_path = _resolve_plugin_path(app, plugin_name, connector_scope)
+        if plugin_path:
+            pe.set_source_path("plugin", plugin_name, plugin_path, connector_scope)
+        click.secho(
+            f"[plugin] {plugin_name!r} added to allow list (connector={connector_scope})",
+            fg="green",
+        )
+        if app.logger:
+            app.logger.log_action(
+                "plugin-allow", plugin_name,
+                f"reason={reason} connector={connector_scope}",
+            )
+        return
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else getattr(getattr(app.cfg, "guardrail", None), "connector", "")
+    )
+    connector = _normalize_runtime_connector(connector)
+    targets = _plugin_policy_fanout_connectors(app, pe, plugin_name)
+    if targets and (len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"):
+        for target_connector in targets:
+            pe.allow_for_connector("plugin", plugin_name, target_connector, reason)
+            plugin_path = _resolve_plugin_path(app, plugin_name, target_connector)
+            if plugin_path:
+                pe.set_source_path("plugin", plugin_name, plugin_path, target_connector)
+            click.secho(
+                f"[plugin] {plugin_name!r} added to allow list "
+                f"(connector={target_connector})",
+                fg="green",
+            )
+        if app.store and pe.get_action("plugin", plugin_name) is not None:
+            pe.remove_action("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-allow", plugin_name, f"reason={reason} connector=all",
+            )
+        return
+
     entry = pe.get_action("plugin", plugin_name)
     runtime_entry = entry
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
     for candidate in _plugin_runtime_candidates(name, connector):
         resolved_entry = pe.get_action("plugin", candidate)
         if resolved_entry is not None and resolved_entry.actions.runtime == "disable":
@@ -1349,45 +2342,135 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 # plugin disable (runtime, via gateway RPC)
 # ---------------------------------------------------------------------------
 
+_PLUGIN_RUNTIME_PROBE_CONNECTORS = {"claudecode"}
+
+
+def _normalize_runtime_connector(connector: str) -> str:
+    from defenseclaw import connector_paths
+    return connector_paths.normalize(connector or "openclaw")
+
+
+def _plugin_runtime_probe_enforced(connector: str) -> bool:
+    return _normalize_runtime_connector(connector) in _PLUGIN_RUNTIME_PROBE_CONNECTORS
+
+
+def _warn_plugin_runtime_disable_advisory(plugin_name: str, connector: str, scoped: bool) -> None:
+    scope = f"connector={connector}"
+    click.secho(
+        f"warning: plugin runtime disable is advisory for {scope}; that connector "
+        "does not emit plugin runtime events DefenseClaw can gate. Use "
+        f"'defenseclaw plugin quarantine {plugin_name}"
+        + (f" --connector {connector}" if scoped else "")
+        + "' for hard enforcement on that peer.",
+        fg="yellow",
+    )
+
+
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_RUNTIME_SCOPE_HELP)
 @pass_ctx
-def disable(app: AppContext, name: str, reason: str) -> None:
-    """Disable a plugin at runtime via the gateway.
+def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
+    """Disable a plugin at runtime.
 
-    Sends an RPC to prevent the agent from using the plugin until
-    re-enabled. This is runtime-only — it does not block install or
+    OpenClaw uses the gateway RPC. Hook connectors store a runtime-disable
+    policy row that the hook runtime gate enforces when that connector emits
+    plugin runtime events. This is runtime-only — it does not block install or
     quarantine files.
 
-    Requires the gateway to be running.
+    Bare records a runtime-disable row for every matching configured connector copy;
+    ``--connector <name>`` narrows the runtime-disable record to that peer.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
-    plugin_name = _resolve_openclaw_plugin_id(name, connector)
-
-    client = _sidecar_client(app)
-    try:
-        resp = client.disable_plugin(plugin_name)
-    except Exception as exc:
-        click.echo(f"error: gateway disable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    if resp.get("status") != "disabled":
-        click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f"[plugin] {plugin_name!r} disabled via gateway RPC")
+    connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
+    plugin_name = (
+        _resolve_openclaw_plugin_id(name, connector)
+        if connector == "openclaw"
+        else os.path.basename(name)
+    )
 
     if not reason:
         reason = "manual disable via CLI"
 
     pe = PolicyEngine(app.store)
-    pe.disable("plugin", plugin_name, reason)
+    if not connector_flag and (
+        len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"
+    ):
+        targets = _plugin_match_dir_scopes(app, plugin_name)
+        if not targets:
+            click.echo(
+                f"error: plugin not found: {plugin_name} across configured connectors",
+                err=True,
+            )
+            raise SystemExit(1)
+        seen_connectors: set[str] = set()
+        for target_connector, _path in targets:
+            target_connector = _normalize_runtime_connector(target_connector)
+            if target_connector in seen_connectors:
+                continue
+            seen_connectors.add(target_connector)
+            pe.disable_for_connector("plugin", plugin_name, target_connector, reason)
+            click.echo(
+                f"[plugin] {plugin_name!r} runtime disable recorded "
+                f"(connector={target_connector})"
+            )
+            if _plugin_runtime_probe_enforced(target_connector):
+                click.echo(
+                    f"  Enforced by hook runtime gate for connector={target_connector}."
+                )
+            else:
+                _warn_plugin_runtime_disable_advisory(plugin_name, target_connector, True)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-disable", plugin_name, f"reason={reason} connector=all",
+            )
+        return
+
+    if connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            resp = client.disable_plugin(plugin_name)
+        except Exception as exc:
+            click.echo(f"error: gateway disable failed: {exc}", err=True)
+            raise SystemExit(1)
+
+        if resp.get("status") != "disabled":
+            click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"[plugin] {plugin_name!r} disabled via gateway RPC")
+    elif connector_flag:
+        click.echo(
+            f"[plugin] {plugin_name!r} runtime disable recorded "
+            f"(connector={connector})"
+        )
+        if _plugin_runtime_probe_enforced(connector):
+            click.echo(
+                f"  Enforced by hook runtime gate for connector={connector}."
+            )
+        else:
+            _warn_plugin_runtime_disable_advisory(plugin_name, connector, True)
+    else:
+        click.echo(f"[plugin] {plugin_name!r} runtime disable recorded as unscoped policy")
+        if _plugin_runtime_probe_enforced(connector):
+            click.echo(
+                "  Enforced by hook runtime gates for connectors that emit plugin events."
+            )
+        else:
+            _warn_plugin_runtime_disable_advisory(plugin_name, connector, False)
+
+    if connector_flag:
+        pe.disable_for_connector("plugin", plugin_name, connector, reason)
+    else:
+        pe.disable("plugin", plugin_name, reason)
 
     if app.logger:
-        app.logger.log_action("plugin-disable", plugin_name, f"reason={reason}")
+        app.logger.log_action(
+            "plugin-disable", plugin_name, f"reason={reason} connector={connector_flag}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1396,35 +2479,93 @@ def disable(app: AppContext, name: str, reason: str) -> None:
 
 @plugin.command()
 @click.argument("name")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_RUNTIME_SCOPE_HELP)
 @pass_ctx
-def enable(app: AppContext, name: str) -> None:
-    """Enable a previously disabled plugin via the gateway.
+def enable(app: AppContext, name: str, connector_flag: str) -> None:
+    """Enable a previously disabled plugin.
 
-    This is a runtime-only action.
+    This is a runtime-only action. Bare clears runtime-disable rows for every
+    matching configured connector copy; ``--connector <name>`` narrows the clear to
+    that peer.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
-    plugin_name = _resolve_openclaw_plugin_id(name, connector)
-
-    client = _sidecar_client(app)
-    try:
-        resp = client.enable_plugin(plugin_name)
-    except Exception as exc:
-        click.echo(f"error: gateway enable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    if resp.get("status") != "enabled":
-        click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f"[plugin] {plugin_name!r} enabled via gateway RPC")
+    connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
+    plugin_name = (
+        _resolve_openclaw_plugin_id(name, connector)
+        if connector == "openclaw"
+        else os.path.basename(name)
+    )
 
     pe = PolicyEngine(app.store)
-    pe.enable("plugin", plugin_name)
+    if not connector_flag and (
+        len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"
+    ):
+        targets = _plugin_match_dir_scopes(app, plugin_name)
+        if not targets:
+            click.echo(
+                f"error: plugin not found: {plugin_name} across configured connectors",
+                err=True,
+            )
+            raise SystemExit(1)
+        seen_connectors: set[str] = set()
+        for target_connector, _path in targets:
+            target_connector = _normalize_runtime_connector(target_connector)
+            if target_connector in seen_connectors:
+                continue
+            seen_connectors.add(target_connector)
+            pe.enable_for_connector("plugin", plugin_name, target_connector)
+            click.echo(
+                f"[plugin] {plugin_name!r} runtime disable cleared "
+                f"(connector={target_connector})"
+            )
+        pe.enable("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-enable", plugin_name, "re-enabled via CLI connector=all",
+            )
+        return
+
+    if connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            resp = client.enable_plugin(plugin_name)
+        except Exception as exc:
+            click.echo(f"error: gateway enable failed: {exc}", err=True)
+            raise SystemExit(1)
+
+        if resp.get("status") != "enabled":
+            click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"[plugin] {plugin_name!r} enabled via gateway RPC")
+    elif connector_flag:
+        click.echo(
+            f"[plugin] {plugin_name!r} runtime disable cleared "
+            f"(connector={connector})"
+        )
+    else:
+        click.echo(f"[plugin] {plugin_name!r} unscoped runtime disable cleared")
+
+    if connector_flag:
+        pe.enable_for_connector("plugin", plugin_name, connector)
+        if app.store and app.store.has_action("plugin", plugin_name, "runtime", "disable"):
+            app.store.set_action_field(
+                "plugin",
+                plugin_name,
+                "runtime",
+                "enable",
+                "manual scoped enable via CLI; overrides unscoped runtime disable",
+                connector,
+            )
+    else:
+        pe.enable("plugin", plugin_name)
 
     if app.logger:
-        app.logger.log_action("plugin-enable", plugin_name, "re-enabled via CLI")
+        app.logger.log_action(
+            "plugin-enable", plugin_name, f"re-enabled via CLI connector={connector_flag}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1434,50 +2575,108 @@ def enable(app: AppContext, name: str) -> None:
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for quarantine")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def quarantine(app: AppContext, name: str, reason: str) -> None:
+def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Quarantine a plugin's files to the quarantine area.
 
-    Moves the plugin's directory to ~/.defenseclaw/quarantine/plugins/ and
-    records the action. The plugin can be restored with 'plugin restore'.
+    Moves matching plugin directories to ~/.defenseclaw/quarantine/plugins/
+    and records the action. The plugin can be restored with 'plugin restore'.
+
+    On a multi-connector install a bare plugin name quarantines every matching
+    copy across configured connectors; pass ``--connector`` to scope the operation
+    to one connector.
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
     plugin_name = os.path.basename(name)
-    plugin_dir = app.cfg.plugin_dir
-
-    if os.path.isabs(name):
-        real_path = os.path.realpath(name)
-        real_plugin_dir = os.path.realpath(plugin_dir)
-        if not real_path.startswith(real_plugin_dir + os.sep):
-            click.echo(f"error: path must be within plugin directory {plugin_dir}", err=True)
-            raise SystemExit(1)
-        plugin_path = real_path
-    else:
-        plugin_path = _resolve_plugin_path(app, plugin_name)
-
-    if not plugin_path:
-        click.echo(f"error: could not locate plugin {plugin_name!r}", err=True)
+    if not plugin_name or ".." in name:
+        click.echo(f"error: invalid plugin name {name!r}", err=True)
         raise SystemExit(1)
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    dest = pe_enforcer.quarantine(plugin_name, plugin_path)
-    if dest is None:
-        click.echo(f"error: plugin path does not exist: {plugin_path}", err=True)
-        raise SystemExit(1)
+    resolved_connector = _resolve_connector_scope(app, connector_flag)
+    scope_roots = (
+        _plugin_roots_for_connector(app, resolved_connector)
+        if resolved_connector
+        else _all_active_plugin_dirs(app)
+    )
 
-    click.echo(f"[plugin] {plugin_name!r} quarantined to {dest}")
+    if os.path.isabs(name):
+        real_path = os.path.realpath(name)
+        allowed_roots = [os.path.realpath(root) for root in scope_roots]
+        if any(real_path == root for root in allowed_roots):
+            click.echo(
+                f"error: path {name!r} must point to a specific plugin directory, not the plugin root",
+                err=True,
+            )
+            raise SystemExit(1)
+        if not any(real_path.startswith(root + os.sep) for root in allowed_roots):
+            click.echo(
+                f"error: path {name!r} is not inside a configured plugin directory\n"
+                f"  Allowed roots: {', '.join(allowed_roots)}",
+                err=True,
+            )
+            raise SystemExit(1)
+        targets = [(
+            resolved_connector or _connector_for_plugin_path(app, real_path),
+            real_path,
+        )]
+    else:
+        targets = _plugin_match_dir_scopes(app, plugin_name, connector_flag)
+
+    if not targets:
+        if not reason:
+            reason = "manual quarantine via CLI"
+        pe = PolicyEngine(app.store)
+        quarantined_connectors = (
+            [resolved_connector]
+            if resolved_connector and pe_enforcer.is_quarantined(plugin_name, resolved_connector)
+            else [
+                c
+                for c in _active_plugin_connectors(app)
+                if pe_enforcer.is_quarantined(plugin_name, c)
+            ]
+        )
+        if quarantined_connectors:
+            for target_connector in quarantined_connectors:
+                pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
+                click.echo(
+                    f"[plugin] {plugin_name!r} is already quarantined "
+                    f"(connector={target_connector})"
+                )
+            return
+        click.echo(f"error: could not locate plugin {plugin_name!r}", err=True)
+        raise SystemExit(1)
 
     if not reason:
         reason = "manual quarantine via CLI"
-
     pe = PolicyEngine(app.store)
-    pe.quarantine("plugin", plugin_name, reason)
-    pe.set_source_path("plugin", plugin_name, plugin_path)
 
-    if app.logger:
-        app.logger.log_action("plugin-quarantine", plugin_name, f"reason={reason}, dest={dest}")
+    for target_connector, plugin_path in targets:
+        dest = pe_enforcer.quarantine(
+            plugin_name, plugin_path, connector=target_connector,
+        )
+        if dest is None:
+            click.echo(f"error: plugin path does not exist: {plugin_path}", err=True)
+            raise SystemExit(1)
+
+        suffix = f" (connector={target_connector})" if target_connector else ""
+        click.echo(f"[plugin] {plugin_name!r} quarantined to {dest}{suffix}")
+
+        if target_connector:
+            pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
+            pe.set_source_path("plugin", plugin_name, plugin_path, target_connector)
+        else:
+            pe.quarantine("plugin", plugin_name, reason)
+            pe.set_source_path("plugin", plugin_name, plugin_path)
+
+        if app.logger:
+            app.logger.log_action(
+                "plugin-quarantine", plugin_name,
+                f"reason={reason}, dest={dest} connector={target_connector}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1487,53 +2686,105 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
 @plugin.command()
 @click.argument("name")
 @click.option("--path", "restore_path", default="", help="Override restore destination (defaults to original path)")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def restore(app: AppContext, name: str, restore_path: str) -> None:
+def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) -> None:
     """Restore a quarantined plugin to its original location.
 
     By default restores to the original path recorded during quarantine.
-    Use --path to override the restore destination.
+    Use --path to override the restore destination. Bare restore restores every
+    configured connector-scoped quarantine copy; pass ``--connector`` to narrow to
+    one connector.
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
     plugin_name = os.path.basename(name)
 
+    pe = PolicyEngine(app.store)
+    targets = _resolve_plugin_quarantine_restore_scopes(
+        app, pe, plugin_name, connector_flag,
+    )
+    if restore_path and len(targets) > 1:
+        click.echo(
+            "error: --path with multiple quarantined connector copies is ambiguous; "
+            "pass --connector <name> to restore one copy to an explicit path",
+            err=True,
+        )
+        raise SystemExit(1)
+
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    if not pe_enforcer.is_quarantined(plugin_name):
+    existing_targets = [
+        (target_connector, entry)
+        for target_connector, entry in targets
+        if pe_enforcer.is_quarantined(plugin_name, target_connector)
+    ]
+    if not existing_targets:
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    pe = PolicyEngine(app.store)
-    plugin_dir = app.cfg.plugin_dir
+    for resolved_connector, entry in existing_targets:
+        target_restore_path = restore_path
+        if not target_restore_path:
+            if entry is None or not entry.source_path:
+                click.echo(
+                    f"error: no stored path for {plugin_name!r}"
+                    + (
+                        f" on connector={resolved_connector}"
+                        if resolved_connector else ""
+                    )
+                    + " — use --path to specify restore destination",
+                    err=True,
+                )
+                raise SystemExit(1)
+            target_restore_path = entry.source_path
 
-    if not restore_path:
-        entry = pe.get_action("plugin", plugin_name)
-        if entry is None or not entry.source_path:
+        allowed_roots = (
+            _plugin_roots_for_connector(app, resolved_connector)
+            if resolved_connector
+            else _all_active_plugin_dirs(app)
+        )
+        real_restore = os.path.realpath(target_restore_path)
+        if allowed_roots:
+            if not any(
+                real_restore == os.path.realpath(root)
+                or real_restore.startswith(os.path.realpath(root) + os.sep)
+                for root in allowed_roots
+            ):
+                click.echo(
+                    "error: restore path must be within configured plugin directories",
+                    err=True,
+                )
+                raise SystemExit(1)
+
+        if not pe_enforcer.restore(
+            plugin_name,
+            target_restore_path,
+            allowed_roots=allowed_roots,
+            connector=resolved_connector,
+        ):
             click.echo(
-                f"error: no stored path for {plugin_name!r} — use --path to specify restore destination",
+                f"error: restore failed for {plugin_name!r}"
+                + (f" on connector={resolved_connector}" if resolved_connector else ""),
                 err=True,
             )
             raise SystemExit(1)
-        restore_path = entry.source_path
 
-    real_restore = os.path.realpath(restore_path)
-    real_plugin_dir = os.path.realpath(plugin_dir)
-    if not real_restore.startswith(real_plugin_dir + os.sep) and real_restore != real_plugin_dir:
-        click.echo(f"error: restore path must be within plugin directory {plugin_dir}", err=True)
-        raise SystemExit(1)
+        suffix = f" (connector={resolved_connector})" if resolved_connector else ""
+        click.echo(f"[plugin] {plugin_name!r} restored to {target_restore_path}{suffix}")
 
-    if not pe_enforcer.restore(plugin_name, restore_path):
-        click.echo(f"error: restore failed for {plugin_name!r}", err=True)
-        raise SystemExit(1)
+        if resolved_connector:
+            pe.clear_quarantine_for_connector("plugin", plugin_name, resolved_connector)
+            pe.set_source_path("plugin", plugin_name, target_restore_path, resolved_connector)
+        else:
+            pe.clear_quarantine("plugin", plugin_name)
+            pe.set_source_path("plugin", plugin_name, target_restore_path)
 
-    click.echo(f"[plugin] {plugin_name!r} restored to {restore_path}")
-
-    pe.clear_quarantine("plugin", plugin_name)
-    pe.set_source_path("plugin", plugin_name, restore_path)
-
-    if app.logger:
-        app.logger.log_action("plugin-restore", plugin_name, f"restored to {restore_path}")
+        if app.logger:
+            app.logger.log_action(
+                "plugin-restore", plugin_name,
+                f"restored to {target_restore_path} connector={resolved_connector}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1554,75 +2805,165 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
     Displays plugin metadata, latest scan results from the DefenseClaw
     audit database, and enforcement actions.
     """
-    from defenseclaw.commands import resolve_list_connector
-
-    connector = resolve_list_connector(app, connector_flag)
     plugin_name = os.path.basename(name)
 
-    info_map: dict = {"name": plugin_name}
-
-    # Check if installed — consult the target connector's plugin dirs first
-    # (parity: inspect a non-primary connector's plugin), then fall back to
-    # the DefenseClaw-managed plugin_dir.
-    search_dirs: list[str] = []
-    try:
-        search_dirs.extend(app.cfg.plugin_dirs(connector))
-    except Exception:  # noqa: BLE001 — fall back to the single managed dir.
-        pass
-    if app.cfg.plugin_dir not in search_dirs:
-        search_dirs.append(app.cfg.plugin_dir)
-
-    candidate = next(
-        (os.path.join(d, plugin_name) for d in search_dirs
-         if os.path.isdir(os.path.join(d, plugin_name))),
-        "",
-    )
-    if candidate:
-        info_map["installed"] = True
-        info_map["path"] = candidate
-        # Try to read package.json for metadata
-        pkg_json = os.path.join(candidate, "package.json")
-        if os.path.isfile(pkg_json):
-            try:
-                with open(pkg_json) as f:
-                    pkg = json.load(f)
-                info_map["version"] = pkg.get("version", "")
-                info_map["description"] = pkg.get("description", "")
-            except (OSError, json.JSONDecodeError):
-                pass
+    if connector_flag:
+        connector = _resolve_connector_scope(app, connector_flag)
+        card = _plugin_info_card(app, plugin_name, connector=connector)
+        cards = [card] if card is not None else []
     else:
-        info_map["installed"] = False
+        cards: list[dict[str, Any]] = []
+        for connector in _active_plugin_connectors(app):
+            card = _plugin_info_card(
+                app,
+                plugin_name,
+                connector=connector,
+                suppress_global_action_only=True,
+            )
+            if card is not None:
+                cards.append(card)
+        if not cards:
+            fallback = _plugin_info_card(app, plugin_name)
+            if (
+                fallback is not None
+                and (
+                    fallback.get("installed")
+                    or fallback.get("scan")
+                    or fallback.get("quarantined")
+                )
+            ):
+                cards.append(fallback)
 
-    # Scan results
-    scan_map = _build_plugin_scan_map(app.store)
-    if plugin_name in scan_map:
-        info_map["scan"] = scan_map[plugin_name]
+    if not cards:
+        click.echo(f"error: plugin {plugin_name!r} not found", err=True)
+        raise SystemExit(1)
 
-    # Enforcement actions
-    actions_map = _build_plugin_actions_map(app.store)
+    if as_json:
+        payload: Any = cards if len(cards) > 1 else cards[0]
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    for idx, card in enumerate(cards):
+        if idx:
+            click.echo()
+        _print_plugin_info_card(
+            card,
+            plugin_name,
+            show_connector=bool(card.get("connector")),
+        )
+
+
+def _plugin_metadata_from_path(plugin_name: str, candidate: str) -> dict[str, Any]:
+    info_map: dict[str, Any] = {
+        "name": plugin_name,
+        "installed": True,
+        "path": candidate,
+    }
+    pkg_json = os.path.join(candidate, "package.json")
+    if os.path.isfile(pkg_json):
+        try:
+            with open(pkg_json) as f:
+                pkg = json.load(f)
+            info_map["version"] = pkg.get("version", "")
+            info_map["description"] = pkg.get("description", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return info_map
+
+
+def _plugin_info_card(
+    app: AppContext,
+    plugin_name: str,
+    *,
+    connector: str = "",
+    suppress_global_action_only: bool = False,
+) -> dict[str, Any] | None:
+    info_map: dict[str, Any] | None = None
+    if connector:
+        candidate = next(
+            (
+                os.path.join(root, plugin_name)
+                for root in _plugin_roots_for_connector(app, connector)
+                if os.path.isdir(os.path.join(root, plugin_name))
+            ),
+            "",
+        )
+        if candidate:
+            info_map = _plugin_metadata_from_path(plugin_name, candidate)
+        else:
+            oc_info = _get_openclaw_plugin_info(plugin_name, connector)
+            oc_path = str(oc_info.get("rootDir") or oc_info.get("source") or "") if oc_info else ""
+            if oc_path and os.path.isdir(oc_path):
+                info_map = _plugin_metadata_from_path(plugin_name, oc_path)
+                info_map.update({
+                    "description": oc_info.get("description", info_map.get("description", "")),
+                    "version": oc_info.get("version", info_map.get("version", "")),
+                })
+    else:
+        candidate = _resolve_plugin_path(app, plugin_name)
+        if candidate:
+            info_map = _plugin_metadata_from_path(plugin_name, candidate)
+
+    scan_entry = (
+        _latest_plugin_scan_for_connector(app, plugin_name, connector)
+        if connector
+        else _build_plugin_scan_map(app.store).get(plugin_name)
+    )
+    actions_map = _build_plugin_actions_map(app.store, connector)
+    scoped_action = None
+    if suppress_global_action_only and connector and app.store is not None:
+        try:
+            scoped_action = app.store.get_action("plugin", plugin_name, connector)
+        except Exception:
+            scoped_action = None
+
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
+    quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
+
+    if info_map is None:
+        if (
+            suppress_global_action_only
+            and connector
+            and plugin_name in actions_map
+            and scoped_action is None
+            and scan_entry is None
+            and not quarantined
+        ):
+            return None
+        if scan_entry is None and plugin_name not in actions_map and not quarantined:
+            return None
+        info_map = {"name": plugin_name, "installed": False}
+    else:
+        info_map = dict(info_map)
+
+    if connector:
+        info_map["connector"] = connector
+    if scan_entry is not None:
+        info_map["scan"] = scan_entry
     if plugin_name in actions_map:
         ae = actions_map[plugin_name]
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
+    info_map["quarantined"] = quarantined
+    info_map.setdefault("installed", False)
+    return info_map
 
-    # Quarantine status
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    info_map["quarantined"] = pe_enforcer.is_quarantined(plugin_name)
 
-    if as_json:
-        click.echo(json.dumps(info_map, indent=2, default=str))
-        return
-
-    click.echo(f"Plugin:      {info_map['name']}")
+def _print_plugin_info_card(
+    info_map: dict[str, Any], plugin_name: str, *, show_connector: bool = False,
+) -> None:
+    click.echo(f"Plugin:      {info_map.get('name', plugin_name)}")
+    if show_connector and info_map.get("connector"):
+        click.echo(f"Connector:   {info_map['connector']}")
     if info_map.get("description"):
         click.echo(f"Description: {info_map['description']}")
     if info_map.get("version"):
         click.echo(f"Version:     {info_map['version']}")
     if info_map.get("path"):
         click.echo(f"Path:        {info_map['path']}")
-    click.echo(f"Installed:   {info_map['installed']}")
-    click.echo(f"Quarantined: {info_map['quarantined']}")
+    click.echo(f"Installed:   {info_map.get('installed', False)}")
+    click.echo(f"Quarantined: {info_map.get('quarantined', False)}")
 
     scan_data = info_map.get("scan")
     if scan_data:
@@ -1637,25 +2978,45 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
-    if actions_data:
+    if actions_data or info_map.get("connector"):
         from defenseclaw.models import ActionState
         state = ActionState.from_dict(actions_data)
-        if not state.is_empty():
-            click.echo()
-            click.echo(f"Actions:     {state.summary()}")
+        click.echo()
+        click.echo(f"Actions:     {state.summary()}")
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_plugin_path(app: AppContext, plugin_name: str) -> str | None:
-    """Resolve a plugin name to its installed directory path."""
+def _resolve_plugin_path(
+    app: AppContext, plugin_name: str, connector: str = "",
+) -> str | None:
+    """Resolve a plugin name to its installed directory path.
+
+    Searches the DefenseClaw-managed ``plugin_dir`` first, then — so a
+    host-owned plugin's files can be quarantined/removed (P-A) — the target
+    connector's own plugin dirs via ``cfg.plugin_dirs(connector)`` (mirrors
+    ``info()``). ``connector=""`` keeps the legacy managed-dir-only behavior.
+    """
+    for _connector, candidate in _plugin_match_dir_scopes(app, plugin_name, connector):
+        if os.path.isdir(candidate):
+            return candidate
     plugin_dir = app.cfg.plugin_dir
     candidate = os.path.join(plugin_dir, plugin_name)
     if os.path.isdir(candidate):
         return candidate
     return None
+
+
+def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
+    finding_count = ls["finding_count"]
+    return {
+        "target": ls["target"],
+        "clean": finding_count == 0,
+        "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
+        "total_findings": finding_count,
+    }
 
 
 def _build_plugin_scan_map(store) -> dict:
@@ -1670,17 +3031,83 @@ def _build_plugin_scan_map(store) -> dict:
         return scan_map
     for ls in latest:
         name = os.path.basename(ls["target"])
-        scan_map[name] = {
-            "target": ls["target"],
-            "clean": ls["finding_count"] == 0,
-            "max_severity": ls["max_severity"] or "INFO",
-            "total_findings": ls["finding_count"],
-        }
+        scan_map[name] = _plugin_scan_payload_from_latest(ls)
     return scan_map
 
 
-def _build_plugin_actions_map(store) -> dict:
-    """Build a map of plugin-name -> ActionEntry from the DB."""
+def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dict:
+    """Build plugin-name -> latest scan entry scoped to one connector's roots."""
+    scan_map: dict[str, dict[str, Any]] = {}
+    if app.store is None:
+        return scan_map
+    try:
+        latest = app.store.latest_scans_by_scanner("plugin-scanner")
+    except Exception as exc:
+        click.echo(f"warning: failed to load plugin scan data: {exc}", err=True)
+        return scan_map
+    matches: dict[str, tuple[Any, dict[str, Any]]] = {}
+    for ls in latest:
+        name = os.path.basename(ls["target"])
+        payload = _plugin_scan_payload_from_latest(ls)
+        if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):
+            continue
+        timestamp = ls.get("timestamp")
+        current = matches.get(name)
+        if current is None or timestamp > current[0]:
+            matches[name] = (timestamp, payload)
+    for name, (_timestamp, payload) in matches.items():
+        scan_map[name] = payload
+    return scan_map
+
+
+def _scan_entry_matches_plugin_connector(
+    app: AppContext, scan_data: dict[str, Any] | None, connector: str,
+) -> bool:
+    if not connector or not scan_data:
+        return True
+    target = str(scan_data.get("target") or "")
+    if not target:
+        return False
+    real_target = os.path.realpath(target)
+    roots = _plugin_roots_for_connector(app, connector)
+    return any(
+        real_target == os.path.realpath(root)
+        or real_target.startswith(os.path.realpath(root) + os.sep)
+        for root in roots
+    )
+
+
+def _latest_plugin_scan_for_connector(
+    app: AppContext, plugin_name: str, connector: str,
+) -> dict[str, Any] | None:
+    if app.store is None:
+        return None
+    try:
+        latest = app.store.latest_scans_by_scanner("plugin-scanner")
+    except Exception:
+        return None
+    matches: list[tuple[Any, dict[str, Any]]] = []
+    for ls in latest:
+        if os.path.basename(ls["target"]) != plugin_name:
+            continue
+        payload = _plugin_scan_payload_from_latest(ls)
+        if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):
+            continue
+        matches.append((ls.get("timestamp"), payload))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
+
+
+def _build_plugin_actions_map(store, connector: str = "") -> dict:
+    """Build a map of plugin-name -> effective ActionEntry from the DB.
+
+    Resolves most-specific-wins per name (P-A): the connector-scoped row
+    overrides the unscoped row when ``connector`` is given, so each connector's
+    table/card shows that connector's effective verdict. ``connector=""``
+    returns only the unscoped rows (today's behavior).
+    """
     actions_map: dict = {}
     if store is None:
         return actions_map
@@ -1689,6 +3116,16 @@ def _build_plugin_actions_map(store) -> dict:
     except Exception as exc:
         click.echo(f"warning: failed to load plugin actions data: {exc}", err=True)
         return actions_map
+    # Global first, then overlay the connector-scoped rows so the override wins.
+    # list_actions_by_type returns newest first, so keep the first row per
+    # connector/name.
     for e in entries:
-        actions_map[e.target_name] = e
+        if e.connector == "" and e.target_name not in actions_map:
+            actions_map[e.target_name] = e
+    if connector:
+        seen_scoped: set[str] = set()
+        for e in entries:
+            if e.connector == connector and e.target_name not in seen_scoped:
+                actions_map[e.target_name] = e
+                seen_scoped.add(e.target_name)
     return actions_map

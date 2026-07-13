@@ -68,7 +68,11 @@ rules:
     confidence: 0.95
     tags: [ssrf, credential]
   - id: C2-METADATA-GCP
-    pattern: 'metadata\.google\.internal'
+    # Backport of default pack: DNS hostnames are case-insensitive, so the
+    # previous case-sensitive pattern was bypassed by uppercase variants like
+    # METADATA.GOOGLE.INTERNAL. The (?i) flag matches the convention used by
+    # every other hostname rule in this file.
+    pattern: '(?i)metadata\.google\.internal'
     title: "GCP metadata endpoint (SSRF)"
     severity: CRITICAL
     confidence: 0.95

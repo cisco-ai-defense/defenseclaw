@@ -30,19 +30,22 @@ Run `defenseclaw setup guardrail` once. Reach for the auxiliary verbs only when 
 
 ## Connector aliases (thin wrappers around `setup guardrail`)
 
-Each alias pre-fills the connector flag and inherits every guardrail option. Pass `--mode observe` to run any of them in audit-only mode.
+Each alias pre-fills `setup guardrail --connector <name>` and inherits every guardrail option. Pass `--mode observe` to run any of them in audit-only mode. On a host with another hook connector already active, the setup flow can add the new connector to the roster instead of replacing the old one.
 
 <Cards>
-  <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=openclaw, installs the fetch interceptor + before_tool_call plugin." />
-  <Card title="setup zeptoclaw" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=zeptoclaw, redirects api_base, runs scan + response-scan." />
-  <Card title="setup claude-code" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=claudecode and installs the PreToolUse / Stop hooks into Claude Code's settings.json." />
-  <Card title="setup codex" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=codex and installs the inspect-request / inspect-response hooks." />
-  <Card title="setup cursor" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=cursor and writes hooks.json plus MCP/skills/rules surfaces." />
-  <Card title="setup windsurf" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=windsurf — Cascade hooks plus local config discovery." />
-  <Card title="setup gemini-cli" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=geminicli and configures settings.json hooks plus native OTLP export." />
-  <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=copilot and writes global Copilot hook config." />
-  <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=hermes and wires config.yaml hooks for MCP, skills, and plugins." />
-  <Card title="setup mode <connector>" href="/docs/setup/guardrail/switching-connectors" description="Switch the active claw connector with smart guardrail inheritance — does not re-prompt for guardrail options unless you change the integration scope." />
+  <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Selects OpenClaw with --connector openclaw and installs the fetch interceptor + before_tool_call plugin." />
+  <Card title="setup zeptoclaw" href="/docs/setup/guardrail/aliases" description="Selects ZeptoClaw with --connector zeptoclaw, redirects api_base, runs scan + response-scan." />
+  <Card title="setup claude-code" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Claude Code with --connector claudecode and installs its hooks." />
+  <Card title="setup codex" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Codex with --connector codex and installs hooks, OTel, and notify wiring." />
+  <Card title="setup cursor" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Cursor with --connector cursor and writes hooks.json plus MCP/skills/rules surfaces." />
+  <Card title="setup windsurf" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Windsurf with --connector windsurf for Cascade hooks plus local config discovery." />
+  <Card title="setup gemini-cli" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Gemini CLI with --connector geminicli and configures hooks plus native OTLP export." />
+  <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures GitHub Copilot CLI with --connector copilot and writes hook config." />
+  <Card title="setup openhands" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenHands with --connector openhands and writes lifecycle hooks." />
+  <Card title="setup antigravity" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Antigravity with --connector antigravity and writes agy lifecycle hooks." />
+  <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Hermes with --connector hermes and wires config.yaml hooks." />
+  <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenCode with --connector opencode and writes the bridge plugin." />
+  <Card title="setup omnigent" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OmniGent with --connector omnigent and installs its custom Python policy bridge." />
 </Cards>
 
 ## Auxiliary setup verbs
@@ -86,6 +89,11 @@ The non-guardrail verbs each own a focused slice of the configuration surface. E
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
   />
   <Card
+    title="Enterprise hardening"
+    href="/docs/setup/enterprise-deployment"
+    description="Provision the managed OS service, guardian, trust boundaries, scoped credentials, and tamper-repair controls."
+  />
+  <Card
     title="setup redaction"
     href="/docs/reference/redaction"
     description="Toggle privacy.disable_redaction on/off and inspect status. The right way to manage the redaction kill-switch."
@@ -99,7 +107,7 @@ Every verb in the setup family exposes both a fully-interactive walkthrough and 
 | Verb | Interactive | Non-interactive | Notes |
 | --- | --- | --- | --- |
 | `setup guardrail` | yes (default) | `--non-interactive` + flags | Wizard explains each prompt; non-interactive mode requires every required flag. |
-| `setup mode <connector>` | yes | flags only | Reuses the existing guardrail config; only re-prompts when the integration scope changes. |
+| `setup <connector>` | yes | flags + `--yes` | Adds or reconfigures a connector; pass `--mode observe\|action` to choose enforcement mode. |
 | `keys list` / `set` / `fill-missing` / `check` | yes (default) | `--value` + `--yes` | `keys set` prompts for the value (hidden) when `--value` is omitted. |
 | `setup webhook add <type>` | yes (default) | `--non-interactive` + flags | URL and secret-env are prompt-or-flag; type is always positional. |
 | `setup webhook test <name>` | n/a | n/a | Always non-interactive; safe to re-run. |

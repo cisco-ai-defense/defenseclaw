@@ -145,6 +145,18 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			ClawMode:       "antigravity",
 			Apply:          hookOnlyFixtureApply("antigravity"),
 		},
+		{
+			Name:           "opencode",
+			DestinationApp: "opencode",
+			ClawMode:       "opencode",
+			Apply:          hookOnlyFixtureApply("opencode"),
+		},
+		{
+			Name:           "omnigent",
+			DestinationApp: "omnigent",
+			ClawMode:       "omnigent",
+			Apply:          hookOnlyFixtureApply("omnigent"),
+		},
 	}
 }
 
@@ -181,6 +193,19 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.AntigravityHooksPathOverride
 			connector.AntigravityHooksPathOverride = filepath.Join(home, ".gemini", "config", "hooks.json")
 			t.Cleanup(func() { connector.AntigravityHooksPathOverride = prev })
+		case "opencode":
+			prev := connector.OpenCodePluginPathOverride
+			connector.OpenCodePluginPathOverride = filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+			t.Cleanup(func() { connector.OpenCodePluginPathOverride = prev })
+		case "omnigent":
+			prevConfig := connector.OmnigentConfigPathOverride
+			prevSite := connector.OmnigentSitePackagesPathOverride
+			connector.OmnigentConfigPathOverride = filepath.Join(home, ".omnigent", "config.yaml")
+			connector.OmnigentSitePackagesPathOverride = filepath.Join(home, "site-packages")
+			t.Cleanup(func() {
+				connector.OmnigentConfigPathOverride = prevConfig
+				connector.OmnigentSitePackagesPathOverride = prevSite
+			})
 		}
 		return home, t.TempDir()
 	}

@@ -25,9 +25,9 @@ paths.
 Coverage:
 
 * Single-target preamble: count, label, connector, default categories
-* Single-target verdict: ``[ok]`` / ``[BLOCKED]`` glyph + finding
-  count + max severity detail
-* Single-target summary: clean / blocked / errored counts + duration
+* Single-target verdict: ``[ok]`` / ``[WARN]`` / ``[INFO]`` /
+  ``[BLOCKED]`` glyph + finding count + max severity detail
+* Single-target summary: clean / blocked / findings / errored counts + duration
 * ``--all`` preamble: target count and source dirs
 * ``--all`` summary: aggregated clean / blocked / errored / total
 * ``--json`` mode silences all human helpers and preserves the legacy
@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_skill import skill
+from defenseclaw.config import SeverityAction
 from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context
@@ -105,6 +106,23 @@ class _SkillScanUXBase(unittest.TestCase):
             duration=timedelta(milliseconds=200),
         )
 
+    @staticmethod
+    def _info_result(target: str) -> ScanResult:
+        return ScanResult(
+            scanner="skill-scanner",
+            target=target,
+            timestamp=datetime.now(timezone.utc),
+            findings=[
+                Finding(
+                    id=str(uuid.uuid4()),
+                    severity="INFO",
+                    title="Documentation note",
+                    scanner="skill-scanner",
+                ),
+            ],
+            duration=timedelta(milliseconds=120),
+        )
+
 
 class TestSingleTargetUX(_SkillScanUXBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
@@ -141,19 +159,50 @@ class TestSingleTargetUX(_SkillScanUXBase):
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_blocked_glyph_with_severity_detail(self, mock_cls, _mock_info) -> None:
+    def test_scan_only_finding_uses_warn_not_blocked(self, mock_cls, _mock_info) -> None:
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
 
         result = self.invoke(["scan", "demo-skill", "--path", self.skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[BLOCKED] demo-skill", result.output)
+        self.assertIn("[WARN] demo-skill", result.output)
+        self.assertNotIn("[BLOCKED] demo-skill", result.output)
         self.assertIn("max severity: HIGH", result.output)
         self.assertIn("(1 finding)", result.output)
         self.assertIn("Summary: 1 skill scanned", result.output)
         self.assertIn("clean=0", result.output)
+        self.assertIn("blocked=0", result.output)
+        self.assertIn("findings=1", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_info_only_finding_uses_info_not_blocked(self, mock_cls, _mock_info) -> None:
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._info_result(self.skill_dir)
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "demo-skill", "--path", self.skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[INFO] demo-skill", result.output)
+        self.assertNotIn("[BLOCKED] demo-skill", result.output)
+        self.assertIn("max severity: INFO", result.output)
+        self.assertIn("blocked=0", result.output)
+        self.assertIn("findings=1", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_action_policy_block_uses_blocked(self, mock_cls, _mock_info) -> None:
+        self.app.cfg.skill_actions.high = SeverityAction(install="block")
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "demo-skill", "--path", self.skill_dir, "--action"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED] demo-skill", result.output)
         self.assertIn("blocked=1", result.output)
+        self.assertIn("findings=1", result.output)
 
 
 class TestSingleTargetJsonMode(_SkillScanUXBase):
@@ -171,11 +220,59 @@ class TestSingleTargetJsonMode(_SkillScanUXBase):
         self.assertNotIn("Scanning 1 skill", result.output)
         self.assertNotIn("Summary:", result.output)
         self.assertNotIn("[ok]", result.output)
-        # Legacy contract: ScanResult.to_json() shape
         payload = json.loads(result.output.strip())
         self.assertIn("scanner", payload)
+        self.assertIn("connector", payload)
         self.assertIn("target", payload)
         self.assertIn("findings", payload)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_bare_json_routes_scanner_stdout_to_stderr(self, mock_cls, _mock_info) -> None:
+        def scan_impl(_path):
+            print("SKILL.md missing 'name'; using directory name: dc-shared-skill")
+            os.write(
+                1,
+                b"SKILL.md missing 'description'; using placeholder\n",
+            )
+            return self._clean_result(self.skill_dir)
+
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = scan_impl
+        mock_cls.return_value = mock_scanner
+        runner = CliRunner(mix_stderr=False)
+
+        result = runner.invoke(
+            skill,
+            ["scan", "demo-skill", "--path", self.skill_dir, "--json"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scanner"], "skill-scanner")
+        self.assertNotIn("SKILL.md missing", result.stdout)
+        self.assertIn("SKILL.md missing 'name'", result.stderr)
+        self.assertIn("SKILL.md missing 'description'", result.stderr)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_json_failure_is_parseable_and_names_connector(self, mock_cls, _mock_info) -> None:
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = RuntimeError("boom")
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(
+            ["scan", "demo-skill", "--path", self.skill_dir, "--json", "--connector", "codex"],
+        )
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["scanner"], "skill-scanner")
+        self.assertEqual(payload["connector"], "codex")
+        self.assertIn("boom", payload["error"])
 
 
 class TestScanAllUX(_SkillScanUXBase):
@@ -199,7 +296,7 @@ class TestScanAllUX(_SkillScanUXBase):
         # Patch active connector so skill_dirs() points at our temp root.
         self.app.cfg.skill_dirs = lambda connector=None: [root]
 
-        # Two clean, one blocked.
+        # Two clean, one scan-only finding.
         responses = {
             os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
             os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),
@@ -215,12 +312,13 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("Scanning 3 skills on ", result.output)
         # Per-target glyphs.
         self.assertIn("[ok] alpha", result.output)
-        self.assertIn("[BLOCKED] beta", result.output)
+        self.assertIn("[WARN] beta", result.output)
         self.assertIn("[ok] gamma", result.output)
         # Summary.
         self.assertIn("Summary: 3 skills scanned", result.output)
         self.assertIn("clean=2", result.output)
-        self.assertIn("blocked=1", result.output)
+        self.assertIn("blocked=0", result.output)
+        self.assertIn("findings=1", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -247,6 +345,70 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("boom", result.output)
         # Summary contains "errored=1" only when there's at least one error.
         self.assertIn("errored=1", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scoped_empty_connector_names_connector_and_no_dirs(self, mock_cls) -> None:
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "windsurf"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "codex": [self.tmp_dir],
+            "windsurf": [],
+        }.get(connector, [self.tmp_dir])
+
+        result = self.invoke(["scan", "--connector", "windsurf"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No skills found for connector='windsurf'", result.output)
+        self.assertIn(
+            "(no skill directories configured for connector='windsurf')",
+            result.output,
+        )
+        mock_cls.return_value.scan.assert_not_called()
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scoped_empty_connector_lists_checked_dirs(self, mock_cls) -> None:
+        empty = os.path.join(self.tmp_dir, "windsurf-skills")
+        os.makedirs(empty, exist_ok=True)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "windsurf"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "codex": [self.tmp_dir],
+            "windsurf": [empty],
+        }.get(connector, [self.tmp_dir])
+
+        result = self.invoke(["scan", "--connector", "windsurf"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No skills found for connector='windsurf'", result.output)
+        self.assertIn(empty, result.output)
+        mock_cls.return_value.scan.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_json_is_single_array(self, mock_cls, _mock_list) -> None:
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+
+        responses = {
+            os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
+            os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),
+        }
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = lambda p: responses[p]
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        self.assertEqual([row["target"] for row in payload], [
+            os.path.join(root, "alpha"),
+            os.path.join(root, "beta"),
+        ])
+        self.assertEqual({row["connector"] for row in payload}, {"codex"})
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

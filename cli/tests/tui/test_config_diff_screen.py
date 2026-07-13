@@ -63,6 +63,26 @@ def test_config_diff_model_truncates_and_reports_extra_rows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_diff_screen_renders_all_entries_in_scroll() -> None:
+    # With >8 changes the screen must render every entry (no "... N more"
+    # truncation) inside a bounded VerticalScroll the operator can scroll.
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static as _Static
+
+    entries = tuple(ConfigDiffEntry(f"field.{index}", "before", "after") for index in range(12))
+    app = ConfigDiffHarness(ConfigDiffModalModel(entries))
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#config-diff-scroll", VerticalScroll)  # exists
+        text = str(app.screen.query_one("#config-diff-preview", _Static).content)
+
+    assert "more changes" not in text
+    assert "field.0" in text
+    assert "field.11" in text  # the 12th change is present, not truncated
+
+
+@pytest.mark.asyncio
 async def test_config_diff_enter_returns_save_result() -> None:
     app = ConfigDiffHarness(ConfigDiffModalModel(_diff_entries()))
 

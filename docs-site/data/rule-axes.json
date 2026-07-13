@@ -7,6 +7,48 @@
       ]
     },
     {
+      "id": "C2-METADATA-AWS",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-AZURE",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-DECIMAL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-GCP",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-HEX",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-OCTAL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
       "id": "C2-NGROK",
       "axes": [
         "egress_external"
@@ -32,6 +74,36 @@
     },
     {
       "id": "C2-WEBHOOK-SITE",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-CURL-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-ENV-DUMP",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "CMD-PIPE-CURL",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-PIPE-WGET",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-WGET-POST",
       "axes": [
         "egress_external"
       ]
@@ -100,6 +172,23 @@
       "id": "INJ-OVERRIDE",
       "axes": [
         "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "JUDGE-EXFIL-CHANNEL",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "JUDGE-TOOL-INJ-DESTRUCT",
+      "axes": []
+    },
+    {
+      "id": "JUDGE-TOOL-INJ-EXFIL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
       ]
     },
     {
@@ -207,6 +296,36 @@
       ]
     },
     {
+      "id": "SRC-ENV-READ",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SRC-FETCH",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-HTTP-SERVER",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-NET-SERVER",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-WS",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
       "id": "SSRF-AWS-META",
       "axes": [
         "sensitive_access",
@@ -265,7 +384,12 @@
         "PATH-",
         "ENT-",
         "CRED-",
-        "PII-"
+        "PII-",
+        "CS-PII-",
+        "JSON-SEC-",
+        "COG-",
+        "JUDGE-PII-",
+        "JUDGE-EXFIL-"
       ],
       "axes": [
         "sensitive_access"
@@ -284,7 +408,9 @@
       "prefixes": [
         "INJ-",
         "TRUST-",
-        "JAIL-"
+        "JAIL-",
+        "JUDGE-INJ-",
+        "JUDGE-TOOL-INJ-"
       ],
       "axes": [
         "ingress_untrusted"

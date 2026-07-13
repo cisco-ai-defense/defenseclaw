@@ -152,6 +152,10 @@ class ActionEntry:
     actions: ActionState = field(default_factory=ActionState)
     reason: str = ""
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Connector scoping (SK-4): "" means the entry is global — it applies to
+    # every connector. A non-empty value scopes the action to one connector
+    # (e.g. "hermes"). Mirrors ActionEntry.Connector in internal/audit/store.go.
+    connector: str = ""
 
 
 @dataclass
@@ -165,6 +169,7 @@ class Event:
     structured: dict[str, Any] = field(default_factory=dict)
     severity: str = ""
     run_id: str = ""
+    connector: str = ""
 
 
 @dataclass

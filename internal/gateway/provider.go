@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -121,6 +122,7 @@ type ChatRequest struct {
 	Tools        json.RawMessage `json:"tools,omitempty"`
 	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
 	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams  map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
 	RawBody      json.RawMessage `json:"-"`
 	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
 	TargetPath   string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
@@ -492,8 +494,19 @@ func compositeModelForUpstream(urlInferredPrefix string, bodyModel string) strin
 // providerHTTPClient is used for passthrough upstream requests in the proxy.
 // No client-level Timeout is set because each call site passes a
 // context.WithTimeout — a client-level timeout would race with that.
+//
+// DialContext re-resolves the destination at connect time and refuses
+// private / link-local / cloud-metadata / CGNAT / IPv6-ULA targets,
+// closing the DNS-rebinding window that the validate-once application
+// checks (isPrivateHost / guardUpstreamTargetURL) leave open: a host
+// that resolved to a public IP during validation could otherwise rebind
+// to 169.254.169.254 (cloud IMDS) or an internal RFC1918 service by the
+// time providerHTTPClient.Do actually dials. allowLoopback is true so
+// local Ollama (127.0.0.1) and httptest targets keep working; isUnsafeIP
+// still blocks every link-local/metadata address regardless of that flag.
 var providerHTTPClient = &http.Client{
 	Transport: &http.Transport{
+		DialContext:         secureDialContext(true, 10*time.Second),
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
@@ -520,4 +533,82 @@ func ResolveAPIKey(envVar string, dotenvPath string) string {
 		}
 	}
 	return ""
+}
+
+// isUnsafeIP returns true when an IP address points at a destination
+// the gateway must refuse to dial: loopback, link-local, multicast,
+// the private RFC1918 ranges, IPv6 ULA, ECS metadata, and the CGNAT
+// space. Mirrors the dial-side guard so isPrivateHost (shape.go) and
+// the dial guard share one predicate, closing the application-check
+// vs dial-resolution split documented inline at the call site.
+func isUnsafeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsPrivate() ||
+		ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	// CGNAT: 100.64.0.0/10
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		// AWS / link-local metadata: 169.254.169.254 + 169.254.170.2 (ECS)
+		if v4[0] == 169 && v4[1] == 254 {
+			return true
+		}
+	}
+	// IPv6 ULA: fc00::/7
+	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	return false
+}
+
+// passthroughAllowPrivateForTest is a test-only seam letting the
+// passthrough integration tests simulate a "known provider" pointed
+// at httptest.NewServer (which binds 127.0.0.1). Production code MUST
+// leave this at false; the dedicated SSRF tests still route private
+// targets through the shape-branch which is not subject to this gate.
+var passthroughAllowPrivateForTest bool
+
+// secureDialContext returns a DialContext that re-resolves the
+// destination at dial time and rejects private/loopback/link-local/
+// cloud-metadata IPs (closes F-1306 DNS rebinding). When
+// allowLoopback is true, loopback destinations are permitted (used
+// for test webhooks pointing at httptest.Server).
+func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if isUnsafeIP(ip.IP) {
+				if allowLoopback && ip.IP.IsLoopback() {
+					continue
+				}
+				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)", host, ip.IP)
+			}
+		}
+		// Use the first safe IP literal so we don't re-resolve and
+		// give an attacker a second chance to return a private IP.
+		for _, ip := range ips {
+			if !isUnsafeIP(ip.IP) || (allowLoopback && ip.IP.IsLoopback()) {
+				return d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			}
+		}
+		return nil, fmt.Errorf("secureDialContext: no safe IP for %s", host)
+	}
 }

@@ -21,6 +21,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,22 +79,42 @@ var urlPattern = regexp.MustCompile(
 		`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b`,
 )
 
-// Well-known non-actionable URL prefixes excluded from endpoint drift detection.
-var ignoredPrefixes = []string{
-	"http://localhost",
-	"https://localhost",
-	"http://127.0.0.1",
-	"https://127.0.0.1",
-	"http://example.com",
-	"https://example.com",
-	"http://0.0.0.0",
+// Well-known non-actionable hostnames excluded from endpoint drift
+// detection. ("Endpoint ignore list uses unsafe
+// string-prefix matching"): the legacy implementation tested
+// strings.HasPrefix against `http://localhost`, so URLs like
+// `http://localhost@attacker.example/...` and
+// `http://localhost.attacker.example/...` were silently swallowed
+// even though they targeted external hosts. We now parse the URL
+// and ignore only when the host is one of these *exact* hostnames
+// or a loopback IP literal.
+var ignoredHostnames = map[string]struct{}{
+	"localhost":       {},
+	"example.com":     {},
+	"www.example.com": {},
+	"127.0.0.1":       {},
+	"::1":             {},
+	"0.0.0.0":         {},
 }
 
-func isIgnoredEndpoint(url string) bool {
-	for _, prefix := range ignoredPrefixes {
-		if strings.HasPrefix(url, prefix) {
-			return true
-		}
+func isIgnoredEndpoint(raw string) bool {
+	parsed, err := neturl.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	// Userinfo-bearing URLs are never "non-actionable" -- the
+	// hostname after the @ is the real destination. Refuse them
+	// outright so DriftNewEndpoint sees them.
+	if parsed.User != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if _, ok := ignoredHostnames[host]; ok {
+		return true
+	}
+	// Treat the entire 127.0.0.0/8 loopback range as ignorable.
+	if literal := net.ParseIP(host); literal != nil && literal.IsLoopback() {
+		return true
 	}
 	return false
 }
