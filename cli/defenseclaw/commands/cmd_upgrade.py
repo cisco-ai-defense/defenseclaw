@@ -4053,10 +4053,11 @@ def _poll_health(
 
     ``gateway.state=running`` alone is insufficient during a replacement or
     rollback: a target process that failed to stop can keep answering on the
-    old socket and make the transaction look successful.  Release gateways
-    expose their binary version in the health provenance quartet, so callers
-    that know the expected release require an exact match before accepting the
-    response.
+    old socket and make the transaction look successful. An intentionally
+    disabled fleet uplink is also healthy when the local API is serving.
+    Release gateways expose their binary version in the health provenance
+    quartet, so callers that know the expected release require an exact match
+    before accepting either state.
     """
     from defenseclaw.gateway import OrchestratorClient
 
@@ -4103,7 +4104,7 @@ def _poll_health(
                 if gw_state != last_state:
                     click.echo(f"    {ux.dim('gateway:')} {gw_state}")
                     last_state = gw_state
-                if gw_state == "running":
+                if gw_state in {"running", "disabled"}:
                     if expected_version is not None:
                         provenance = snap.get("provenance")
                         reported_version = provenance.get("binary_version") if isinstance(provenance, dict) else None
@@ -4118,7 +4119,10 @@ def _poll_health(
                                 last_reported_version = version_label
                             time.sleep(2)
                             continue
-                    ux.ok("Gateway is healthy")
+                    if gw_state == "disabled":
+                        ux.ok("Gateway API is healthy; fleet uplink is disabled by configuration")
+                    else:
+                        ux.ok("Gateway is healthy")
                     return
             else:
                 # 2xx with an empty/non-dict body — treat like unreachable so

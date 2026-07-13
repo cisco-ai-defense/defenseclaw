@@ -72,6 +72,38 @@ def test_legacy_base64_certificate_is_normalized(tmp_path: Path) -> None:
     assert historical_release_auth.normalized_certificate_bytes(encoded) == PEM
 
 
+def test_windows_named_and_opened_timestamp_views_do_not_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "checksums.txt"
+    payload = b"authenticated checksums\n"
+    path.write_bytes(payload)
+    real_lstat = Path.lstat
+    lstat_calls: list[Path] = []
+
+    def timestamp_skewed_lstat(candidate: Path):
+        lstat_calls.append(candidate)
+        info = real_lstat(candidate)
+
+        class _TimestampSkewedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampSkewedStat()
+
+    monkeypatch.setattr(Path, "lstat", timestamp_skewed_lstat)
+
+    assert historical_release_auth._read_bounded_regular_file(
+        path,
+        "historical checksums",
+        max_bytes=1024,
+    ) == payload
+    assert lstat_calls == [path, path]
+
+
 def test_oversized_historical_trust_input_fails_before_verification(tmp_path: Path) -> None:
     release, cosign, policy, asset = _release_fixture(tmp_path)
     (release / "checksums.txt.pem").write_bytes(

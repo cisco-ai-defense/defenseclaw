@@ -3773,6 +3773,42 @@ class TestUpgradeServiceVerification(unittest.TestCase):
 
         self.assertEqual(client.health.call_count, 2)
 
+    def test_health_accepts_disabled_fleet_only_with_expected_binary_provenance(self):
+        client = Mock()
+        client.health.side_effect = [
+            {
+                "gateway": {"state": "disabled"},
+                "provenance": {},
+            },
+            {
+                "gateway": {"state": "disabled"},
+                "provenance": {"binary_version": "0.8.3"},
+            },
+            {
+                "gateway": {"state": "disabled"},
+                "provenance": {"binary_version": "0.8.4"},
+            },
+        ]
+        with (
+            patch("defenseclaw.gateway.OrchestratorClient", return_value=client),
+            patch("defenseclaw.commands.cmd_upgrade.ux.ok") as ok,
+            patch(
+                "defenseclaw.commands.cmd_upgrade.time.monotonic",
+                side_effect=[0.0, 0.0, 0.0, 0.0],
+            ),
+            patch("defenseclaw.commands.cmd_upgrade.time.sleep"),
+        ):
+            _poll_health(
+                Config(),
+                timeout_seconds=1,
+                expected_version="0.8.4",
+            )
+
+        self.assertEqual(client.health.call_count, 3)
+        ok.assert_called_once_with(
+            "Gateway API is healthy; fleet uplink is disabled by configuration"
+        )
+
     def test_restart_and_health_use_fresh_post_migration_config_and_dotenv(self):
         app = AppContext()
         app.cfg = Config(gateway=GatewayConfig(api_port=19001, token="stale-value"))

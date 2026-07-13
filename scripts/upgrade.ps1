@@ -2499,7 +2499,7 @@ while time.monotonic() < deadline:
             provenance = payload.get("provenance") if isinstance(payload, dict) else None
             if (
                 isinstance(gateway, dict)
-                and gateway.get("state") == "running"
+                and gateway.get("state") in {"running", "disabled"}
                 and isinstance(provenance, dict)
                 and provenance.get("binary_version") == expected_version
             ):

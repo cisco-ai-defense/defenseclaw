@@ -2164,10 +2164,11 @@ function Initialize-ReleasePolicy {
         $extract=New-PrivateDirectory -Path (Join-Path $script:PolicyDir "gateway")
         Assert-ExactPrivateArtifactDigest -Path $gatewayZip -ExpectedSha256 $script:GatewayArchiveInnerSha256 -Label "protected gateway archive"
         Expand-Archive -LiteralPath $gatewayZip -DestinationPath $extract
-        $script:GatewayBinary=Join-Path $extract "defenseclaw.exe"
-        if(-not(Test-Path -LiteralPath $script:GatewayBinary -PathType Leaf)){Die "Protected gateway archive lacks defenseclaw.exe"}
-        Set-PrivateFileAcl -Path $script:GatewayBinary
-        $script:GatewayBinarySha256=(Get-FileHash -LiteralPath $script:GatewayBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expandedGateway=Join-Path $extract "defenseclaw.exe"
+        if(-not(Test-Path -LiteralPath $expandedGateway -PathType Leaf)){Die "Protected gateway archive lacks defenseclaw.exe"}
+        $expandedGatewaySha256=(Get-FileHash -LiteralPath $expandedGateway -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:GatewayBinary=Join-Path $script:PolicyDir "defenseclaw.exe"
+        $script:GatewayBinarySha256=Copy-AuthenticatedPrivateArtifact -Source $expandedGateway -Destination $script:GatewayBinary -ExpectedSha256 $expandedGatewaySha256
     }else{
         if(-not $schemaProperty -or [int]$schemaProperty.Value -ne 1 -or $releaseArtifactsProperty){Die "Legacy release policy is invalid"}
     }

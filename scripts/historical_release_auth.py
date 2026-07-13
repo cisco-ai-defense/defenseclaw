@@ -46,14 +46,17 @@ def _version_key(version: str) -> tuple[int, int, int]:
     return tuple(map(int, version.split(".")))
 
 
-def _opened_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+def _opened_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
+
+
+def _opened_file_state(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (*_opened_file_identity(metadata), metadata.st_ctime_ns)
 
 
 def _open_bounded_regular_file(
@@ -86,8 +89,13 @@ def _open_bounded_regular_file(
         if (
             not stat.S_ISREG(opened.st_mode)
             or not stat.S_ISREG(path_after.st_mode)
+            # CPython on Windows exposes creation time as pathname st_ctime,
+            # but NTFS change time as descriptor st_ctime. Bind the pathname
+            # to the descriptor without comparing those incompatible fields,
+            # then retain ctime in each same-API mutation check.
             or _opened_file_identity(path_before) != _opened_file_identity(opened)
             or _opened_file_identity(path_after) != _opened_file_identity(opened)
+            or _opened_file_state(path_before) != _opened_file_state(path_after)
         ):
             raise HistoricalReleaseAuthError(f"{label} changed while being opened: {path}")
         if opened.st_size <= 0 or opened.st_size > max_bytes:
@@ -108,7 +116,7 @@ def _assert_open_file_unchanged(
 ) -> None:
     metadata = os.fstat(descriptor)
     if (
-        _opened_file_identity(metadata) != _opened_file_identity(expected_metadata)
+        _opened_file_state(metadata) != _opened_file_state(expected_metadata)
         or bytes_read != expected_metadata.st_size
     ):
         raise HistoricalReleaseAuthError(f"{label} changed while being read: {path}")

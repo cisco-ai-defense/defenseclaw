@@ -58,8 +58,9 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     ]
 
     assert "http://127.0.0.1:18970/health" in canary
-    assert 'gateway.get("state") != "running"' in canary
+    assert 'gateway.get("state") not in {"running", "disabled"}' in canary
     assert 'provenance.get("binary_version") != sys.argv[2]' in canary
+    assert "version-bound healthy before resolver handoff" in canary
     assert "did not reach version-bound health" in canary
 
 

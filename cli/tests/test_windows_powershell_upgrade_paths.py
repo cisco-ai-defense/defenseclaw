@@ -610,7 +610,7 @@ def test_windows_resolver_binds_hard_cut_provenance_before_mutation() -> None:
     assert "[IO.Directory]::CreateDirectory($Path, $acl)" in source
 
 
-def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
+def test_windows_success_health_is_bounded_healthy_and_version_bound() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     helper = source[
         source.index("function Test-VersionBoundGatewayHealth") : source.index("function Assert-PhaseTwoGatewayStopped")
@@ -621,7 +621,7 @@ def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
         "http.client.HTTPConnection",
         'connection.request("GET", "/health", headers=headers)',
         "response.read((1 << 20) + 1)",
-        'gateway.get("state") == "running"',
+        'gateway.get("state") in {"running", "disabled"}',
         'provenance.get("binary_version") == expected_version',
         "cfg.gateway.resolved_token() if loopback else",
         "-I -c $probe",
@@ -714,6 +714,14 @@ def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> N
         "gateway": {"state": "running"},
         "provenance": {"binary_version": "0.8.3"},
     }
+    disabled_wrong_version = {
+        "gateway": {"state": "disabled"},
+        "provenance": {"binary_version": "0.8.3"},
+    }
+    disabled_expected = {
+        "gateway": {"state": "disabled"},
+        "provenance": {"binary_version": "0.8.4"},
+    }
     expected = {
         "gateway": {"state": "running"},
         "provenance": {"binary_version": "0.8.4"},
@@ -721,6 +729,8 @@ def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> N
 
     assert run_probe([unhealthy]).returncode != 0
     assert run_probe([wrong_version]).returncode != 0
+    assert run_probe([disabled_wrong_version]).returncode != 0
+    assert run_probe([disabled_expected]).returncode == 0
     delayed = run_probe([unhealthy, wrong_version, expected])
     assert delayed.returncode == 0, delayed.stdout + delayed.stderr
 
