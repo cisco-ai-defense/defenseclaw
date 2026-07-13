@@ -1417,8 +1417,12 @@ function Assert-SetupInstallState(
 function Get-DefenseClawGatewayAutoStart {
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     if (-not (Test-Path -LiteralPath $runKey)) { return $null }
-    return (Get-ItemProperty -LiteralPath $runKey -Name 'DefenseClawGateway' `
-        -ErrorAction SilentlyContinue).DefenseClawGateway
+    $item = Get-ItemProperty -LiteralPath $runKey -Name 'DefenseClawGateway' `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $null }
+    $property = $item.PSObject.Properties['DefenseClawGateway']
+    if ($null -eq $property) { return $null }
+    return $property.Value
 }
 
 function Assert-GatewayAutoStart([string]$Gateway) {
