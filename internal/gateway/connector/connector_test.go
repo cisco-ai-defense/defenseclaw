@@ -1973,6 +1973,9 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
+	if token, err := LoadOTLPPathToken(dir, OTLPScopeClaude); err != nil || token != "" {
+		t.Fatalf("Claude scoped OTLP token survived teardown: token=%q err=%v", token, err)
+	}
 
 	data, _ := os.ReadFile(settingsPath)
 	var settings map[string]interface{}
@@ -3832,6 +3835,9 @@ timeout = 7
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("teardown: %v", err)
+	}
+	if token, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || token != "" {
+		t.Fatalf("Codex scoped OTLP token survived teardown: token=%q err=%v", token, err)
 	}
 
 	postRaw, err := os.ReadFile(configPath)

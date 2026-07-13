@@ -171,6 +171,44 @@ func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 	}
 }
 
+func TestRemoveOTLPPathTokenRevokesAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(path+".tmp", []byte(strings.Repeat("d", 64)+"\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("RemoveOTLPPathToken: %v", err)
+	}
+	for _, artifact := range []string{path, path + ".tmp"} {
+		if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
+			t.Fatalf("token artifact survived removal: %s (err=%v)", artifact, err)
+		}
+	}
+	if got, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || got != "" {
+		t.Fatalf("LoadOTLPPathToken after removal = %q, %v", got, err)
+	}
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("idempotent RemoveOTLPPathToken: %v", err)
+	}
+	second, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("token was reused after revocation")
+	}
+}
+
 func TestOTLPPathTokenScopeForConnector(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

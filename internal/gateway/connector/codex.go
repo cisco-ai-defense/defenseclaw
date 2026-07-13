@@ -167,6 +167,12 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	if err := writeDisabledHookTombstone(opts, "codex-hook.sh", "Codex"); err != nil {
 		return fmt.Errorf("codex teardown: disabled hook: %w", err)
 	}
+	if err := c.VerifyClean(opts); err != nil {
+		return fmt.Errorf("codex teardown: verify clean before token revocation: %w", err)
+	}
+	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
+		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
 	return nil
 }
 

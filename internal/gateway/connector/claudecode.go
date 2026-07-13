@@ -134,6 +134,17 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		errs = append(errs, fmt.Sprintf("disabled hook: %v", err))
 	}
 
+	if len(errs) == 0 {
+		if err := c.VerifyClean(opts); err != nil {
+			errs = append(errs, fmt.Sprintf("verify clean before token revocation: %v", err))
+		}
+	}
+	if len(errs) == 0 {
+		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
+			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
 	}
