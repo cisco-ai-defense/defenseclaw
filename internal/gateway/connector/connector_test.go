@@ -2511,8 +2511,8 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all six Codex events and pointing at the generated
-// codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
+// covering all six Codex events and pointing at the platform-native hook
+// command. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	dir := t.TempDir()
@@ -2549,9 +2549,12 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			}
 		}
 	}
-	wantHookNeedle := "codex-hook.sh"
-	if !strings.Contains(content, wantHookNeedle) {
-		t.Errorf("config.toml [hooks] missing %q reference\nfile:\n%s", wantHookNeedle, content)
+	if runtime.GOOS == "windows" {
+		if strings.Contains(strings.ToLower(content), ".sh") {
+			t.Errorf("Windows config.toml contains a Unix hook dependency\nfile:\n%s", content)
+		}
+	} else if !strings.Contains(content, "codex-hook.sh") {
+		t.Errorf("config.toml [hooks] missing codex-hook.sh reference\nfile:\n%s", content)
 	}
 
 	// Re-parse to ensure it's valid TOML and codex's expected shape
@@ -2574,6 +2577,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		matchers := hooks["PreToolUse"].([]interface{})
 		handlers := matchers[0].(map[string]interface{})["hooks"].([]interface{})
 		handler := handlers[0].(map[string]interface{})
+		if got, _ := handler["command"].(string); got != windowsCodexHookCommand() {
+			t.Errorf("command = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
+		}
 		if got, _ := handler["command_windows"].(string); got != windowsCodexHookCommand() {
 			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
 		}
