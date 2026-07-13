@@ -84,7 +84,7 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertFalse(older.supported)
 
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
-        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.144")
+        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.152")
         self.assertEqual(compat.status, STATUS_KNOWN)
         self.assertEqual(compat.connector, "claudecode")
         self.assertEqual(compat.contract.contract_id, "claudecode-hooks-v1")
@@ -221,7 +221,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         GuardrailConfig.Validate now rejects at load)."""
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+            return_value=_discovery("claudecode", installed=True, version="2.1.152"),
         ):
             ok = _apply_hook_connector_setup(
                 self.app,
@@ -238,7 +238,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+                return_value=_discovery("claudecode", installed=True, version="2.1.152"),
             ),
             patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa") as sync_hilt,
         ):

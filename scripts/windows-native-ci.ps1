@@ -1230,7 +1230,7 @@ function New-WizardAgentFixtures([string]$Root) {
         [pscustomobject]@{
             Name = 'claude.exe'
             ClassName = 'ClaudeVersionFixture'
-            Version = 'claude 2.1.144'
+            Version = 'claude 2.1.152'
         }
     )
     foreach ($fixture in $fixtures) {

@@ -88,7 +88,7 @@
         {
           "contract_id": "claudecode-hooks-v1",
           "agent_version": {
-            "min_inclusive": "2.1.144",
+            "min_inclusive": "2.1.152",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -162,7 +162,7 @@
             "scope": "user"
           },
           "notes": [
-            "Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
+            "Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older Claude Code releases exposed smaller hook event sets.",
             "Claude Code PreToolUse supports native HITL via permissionDecision=ask."
           ]
         }

@@ -177,7 +177,7 @@ with a warning. Action mode fails closed unless
 | OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Claude Code | hook contract | `>=2.1.152` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v8` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
@@ -205,7 +205,7 @@ until upstream publishes a hook-version floor. DefenseClaw installs OpenHands
 globally through `~/.openhands/hooks.json` by default and uses repo-local
 `.openhands/hooks.json` only when a workspace is pinned.
 Claude Code is pinned to the current documented hook surface captured at
-`2.1.144`; older Claude Code versions exposed smaller event sets.
+`2.1.152`, which introduced `MessageDisplay`; older Claude Code versions exposed smaller event sets.
 
 ## Hook Capability Matrix
 

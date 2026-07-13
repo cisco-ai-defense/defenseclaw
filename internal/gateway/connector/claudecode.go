@@ -458,7 +458,7 @@ const fileChangedMatcher = "CLAUDE.md|.claude/settings.json|.claude/settings.loc
 //   - SessionStart: the four lifecycle phases worth observing.
 //   - FileChanged: config-file allowlist — see fileChangedMatcher above.
 //
-// Timeouts in milliseconds. Slow events get a larger budget:
+// Timeouts in seconds, as required by Claude Code. Slow events get a larger budget:
 //   - PostToolBatch summarizes many tool results → 90s.
 //   - Stop / SubagentStop run Stop-time CodeGuard scans → 90s.
 //   - SessionEnd can persist session-level audit → 60s.
@@ -468,34 +468,34 @@ var hookGroups = []struct {
 	matcher   string
 	timeout   int
 }{
-	{"SessionStart", "startup|resume|clear|compact", 30000},
-	{"InstructionsLoaded", "*", 30000},
-	{"UserPromptSubmit", "", 30000},
-	{"UserPromptExpansion", "", 30000},
-	{"MessageDisplay", "", 10000},
-	{"PreToolUse", "*", 30000},
-	{"PermissionRequest", "*", 30000},
-	{"PostToolUse", "*", 30000},
-	{"PostToolUseFailure", "*", 30000},
-	{"PostToolBatch", "", 90000},
-	{"PermissionDenied", "*", 30000},
-	{"Notification", "*", 30000},
-	{"SubagentStart", "*", 30000},
-	{"SubagentStop", "*", 90000},
-	{"TaskCreated", "", 30000},
-	{"TaskCompleted", "", 30000},
-	{"Stop", "", 90000},
-	{"StopFailure", "*", 30000},
-	{"TeammateIdle", "", 30000},
-	{"ConfigChange", "*", 30000},
-	{"CwdChanged", "", 30000},
-	{"FileChanged", fileChangedMatcher, 30000},
-	{"WorktreeRemove", "", 30000},
-	{"PreCompact", "*", 30000},
-	{"PostCompact", "*", 30000},
-	{"SessionEnd", "", 60000},
-	{"Elicitation", "*", 30000},
-	{"ElicitationResult", "*", 30000},
+	{"SessionStart", "startup|resume|clear|compact", 30},
+	{"InstructionsLoaded", "*", 30},
+	{"UserPromptSubmit", "", 30},
+	{"UserPromptExpansion", "", 30},
+	{"MessageDisplay", "", 10},
+	{"PreToolUse", "*", 30},
+	{"PermissionRequest", "*", 30},
+	{"PostToolUse", "*", 30},
+	{"PostToolUseFailure", "*", 30},
+	{"PostToolBatch", "", 90},
+	{"PermissionDenied", "*", 30},
+	{"Notification", "*", 30},
+	{"SubagentStart", "*", 30},
+	{"SubagentStop", "*", 90},
+	{"TaskCreated", "", 30},
+	{"TaskCompleted", "", 30},
+	{"Stop", "", 90},
+	{"StopFailure", "*", 30},
+	{"TeammateIdle", "", 30},
+	{"ConfigChange", "*", 30},
+	{"CwdChanged", "", 30},
+	{"FileChanged", fileChangedMatcher, 30},
+	{"WorktreeRemove", "", 30},
+	{"PreCompact", "*", 30},
+	{"PostCompact", "*", 30},
+	{"SessionEnd", "", 60},
+	{"Elicitation", "*", 30},
+	{"ElicitationResult", "*", 30},
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
@@ -504,11 +504,15 @@ var hookGroups = []struct {
 // prevent corruption from concurrent gateway starts.
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
 	// On Unix the agent runs the bundled .sh hook (ToSlash is a no-op there).
-	// On Windows there is no Bash/.cmd chain: the agent invokes the DefenseClaw
-	// binary's native `hook` subcommand directly. hookInvocationCommand returns
-	// the platform-correct command, which is used verbatim as the agent's hook
-	// command and recognized on teardown by isOwnedHook.
+	// On Windows Claude Code's exec form invokes the native launcher directly,
+	// without Git Bash or PowerShell parsing an absolute path that may contain
+	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand := hookInvocationCommand("claudecode", filepath.ToSlash(hookScript))
+	hookArgs := []string(nil)
+	if runtime.GOOS == "windows" {
+		hookCommand = defenseclawHookBinary()
+		hookArgs = []string{"hook", "--connector", "claudecode"}
+	}
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {
@@ -552,14 +556,16 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		}
 
 		for _, group := range hookGroups {
+			handler := map[string]interface{}{
+				"type":    "command",
+				"command": hookCommand,
+				"timeout": group.timeout,
+			}
+			if hookArgs != nil {
+				handler["args"] = hookArgs
+			}
 			entry := map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": hookCommand,
-						"timeout": group.timeout,
-					},
-				},
+				"hooks": []interface{}{handler},
 			}
 			if group.matcher != "" {
 				entry["matcher"] = group.matcher
@@ -579,7 +585,14 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
 			return err
 		}
-		backup.ManagedHookCommands = []string{hookCommand}
+		if runtime.GOOS == "windows" {
+			// Exec-form hooks are recognized by their exact argument vector. Keep
+			// this legacy list empty so an unrelated use of the same executable
+			// with different arguments can never be removed by command alone.
+			backup.ManagedHookCommands = nil
+		} else {
+			backup.ManagedHookCommands = []string{hookCommand}
+		}
 		if err := c.saveBackup(opts.DataDir, backup); err != nil {
 			return fmt.Errorf("save claudecode backup: %w", err)
 		}
@@ -867,11 +880,54 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 		if isNativeHookCommand(cmd) {
 			return true
 		}
+		if isClaudeCodeNativeExecHook(hm) {
+			return true
+		}
 		if scriptHasMarker(cmd) {
 			return true
 		}
 	}
 	return false
+}
+
+// isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape.
+// Both the executable basename and the complete argument vector must match so
+// teardown cannot claim an unrelated invocation of the DefenseClaw launcher.
+func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	command, _ := hook["command"].(string)
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	if base != strings.ToLower(windowsHookBinaryName) && base != "defenseclaw-gateway.exe" {
+		return false
+	}
+	var args []string
+	switch rawArgs := hook["args"].(type) {
+	case []interface{}:
+		args = make([]string, len(rawArgs))
+		for i, raw := range rawArgs {
+			arg, ok := raw.(string)
+			if !ok {
+				return false
+			}
+			args[i] = arg
+		}
+	case []string:
+		args = rawArgs
+	default:
+		return false
+	}
+	if len(args) != 3 {
+		return false
+	}
+	want := []string{"hook", "--connector", "claudecode"}
+	for i, arg := range args {
+		if arg != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // scriptHasMarker reads the first 512 bytes of a file and checks for the

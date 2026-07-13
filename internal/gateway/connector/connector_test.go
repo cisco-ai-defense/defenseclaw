@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -1272,12 +1273,12 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 	firstBinary := filepath.Join(dir, "installed", windowsHookBinaryName)
 	secondBinary := filepath.Join(dir, "source-build", windowsHookBinaryName)
 	defenseclawHookBinaryOverride = firstBinary
-	firstCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	firstCommand := firstBinary
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("first Setup: %v", err)
 	}
 	defenseclawHookBinaryOverride = secondBinary
-	secondCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	secondCommand := secondBinary
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("refresh Setup: %v", err)
 	}
@@ -1408,7 +1409,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 	repoFound := false
 	foreignFound := false
 	managedCount := 0
-	currentCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	currentCommand := defenseclawHookBinary()
 	hooks, ok := settings["hooks"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("hooks = %T, want object", settings["hooks"])
@@ -1557,6 +1558,97 @@ func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
 	// are already covered by PostToolUse.
 	if m := firstMatcher(hooks["FileChanged"]); !strings.Contains(m, "CLAUDE.md") {
 		t.Errorf("FileChanged matcher = %q, want config-file matcher including CLAUDE.md", m)
+	}
+}
+
+func TestClaudeCode_Setup_UsesDocumentedTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	for event, want := range map[string]float64{
+		"MessageDisplay": 10,
+		"PreToolUse":     30,
+		"SessionEnd":     60,
+		"Stop":           90,
+	} {
+		entries := hooks[event].([]interface{})
+		handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+		if got := handler["timeout"].(float64); got != want {
+			t.Errorf("%s timeout = %v, want %v seconds", event, got, want)
+		}
+	}
+}
+
+func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Claude Code exec form")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+	oldOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "Defense Claw", windowsHookBinaryName)
+	defer func() { defenseclawHookBinaryOverride = oldOverride }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if got := handler["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("command = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
+	}
+	wantArgs := []interface{}{"hook", "--connector", "claudecode"}
+	if got := handler["args"]; !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", got, wantArgs)
+	}
+	if _, present := handler["shell"]; present {
+		t.Fatal("exec-form hook must not select a shell")
+	}
+	if !isOwnedHook(entries[0], filepath.Join(dir, "hooks")) {
+		t.Fatal("exec-form hook was not recognized as DefenseClaw-owned")
+	}
+
+	foreign := map[string]interface{}{"hooks": []interface{}{map[string]interface{}{
+		"type": "command", "command": defenseclawHookBinaryOverride,
+		"args": []interface{}{"version"},
+	}}}
+	if isOwnedHook(foreign, filepath.Join(dir, "hooks")) {
+		t.Fatal("unrelated invocation of the same executable was claimed as owned")
 	}
 }
 

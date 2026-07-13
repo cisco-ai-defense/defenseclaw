@@ -253,7 +253,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	discovery := map[string]any{
 		"agents": map[string]any{
 			"codex":      map[string]any{"version": "codex-cli 0.142.4"},
-			"claudecode": map[string]any{"version": "Claude Code v2.1.144"},
+			"claudecode": map[string]any{"version": "Claude Code v2.1.152"},
 		},
 	}
 	raw, err := json.Marshal(discovery)

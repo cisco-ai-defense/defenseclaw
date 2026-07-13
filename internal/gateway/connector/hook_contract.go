@@ -137,7 +137,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"claudecode": {{
 		Connector:               "claudecode",
 		ContractID:              "claudecode-hooks-v1",
-		MinAgentVersion:         "2.1.144",
+		MinAgentVersion:         "2.1.152",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"~/.claude/settings.json"},
@@ -199,7 +199,7 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
 		Notes: []string{
-			"Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
+			"Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older releases exposed smaller hook event sets.",
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 		},
 	}},
