@@ -19,6 +19,18 @@ from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+
+
+def test_installers_require_portable_litellm_wheels() -> None:
+    install_sh = INSTALL_SH.read_text(encoding="utf-8")
+    install_ps1 = INSTALL_PS1.read_text(encoding="utf-8")
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert install_sh.count("--only-binary litellm") == 3
+    assert "--only-binary litellm" in install_ps1
+    assert project.count('"litellm>=1.84.0,<1.92.0"') == 2
+
+
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MAKEFILE = ROOT / "Makefile"
 INSTALL_DOC = ROOT / "docs" / "INSTALL.md"

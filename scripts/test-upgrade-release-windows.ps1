@@ -530,8 +530,10 @@ function Assert-ReleaseSet {
     foreach ($name in $authenticatedNames) {
         $authenticationArguments += @("--asset", $name)
     }
-    & $script:Commandpython @authenticationArguments
-    if ($LASTEXITCODE -ne 0) {
+    $authenticationOutput = @(& $script:Commandpython @authenticationArguments 2>&1)
+    $authenticationStatus = $LASTEXITCODE
+    foreach ($line in $authenticationOutput) { Write-Host ([string]$line) }
+    if ($authenticationStatus -ne 0) {
         Fail "Signed release authentication failed for $Version"
     }
     if((Compare-Version $Version $script:BridgeVersion)-ge 0){

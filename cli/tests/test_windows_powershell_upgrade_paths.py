@@ -735,6 +735,21 @@ def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> N
     assert delayed.returncode == 0, delayed.stdout + delayed.stderr
 
 
+def test_windows_release_authentication_output_cannot_pollute_manifest_return() -> None:
+    source = (ROOT / "scripts" / "test-upgrade-release-windows.ps1").read_text(encoding="utf-8")
+    release_set = source[
+        source.index("function Assert-ReleaseSet") : source.index("function Assert-SealedCandidateResolver")
+    ]
+
+    capture = "$authenticationOutput = @(& $script:Commandpython @authenticationArguments 2>&1)"
+    status = "$authenticationStatus = $LASTEXITCODE"
+    host = "foreach ($line in $authenticationOutput) { Write-Host ([string]$line) }"
+    gate = "if ($authenticationStatus -ne 0)"
+    assert capture in release_set
+    assert release_set.index(capture) < release_set.index(status) < release_set.index(host)
+    assert release_set.index(host) < release_set.index(gate)
+
+
 def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -> None:
     policy = json.loads((ROOT / "release/upgrade-baselines.json").read_text(encoding="utf-8"))
 

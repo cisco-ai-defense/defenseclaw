@@ -90,30 +90,41 @@ def test_flat_otel_migration_is_previewable_applied_once_and_idempotent() -> Non
     assert repeated.yaml_changes == []
 
 
-def test_flat_otel_migration_advances_only_explicit_v6_schema_stamp() -> None:
-    _, tmp = _make_tmp_ctx()
-    cfg_path = os.path.join(tmp, "config.yaml")
-    with open(cfg_path, "w") as handle:
-        handle.write(
-            "config_version: 6\n"
-            "otel:\n"
-            "  enabled: true\n"
-            "  endpoint: 127.0.0.1:4317\n"
-        )
+def test_flat_otel_migration_advances_explicit_v5_and_v6_schema_stamps() -> None:
+    for source_version in (5, 6):
+        _, tmp = _make_tmp_ctx()
+        cfg_path = os.path.join(tmp, "config.yaml")
+        with open(cfg_path, "w") as handle:
+            handle.write(
+                f"config_version: {source_version}\n"
+                "otel:\n"
+                "  enabled: true\n"
+                "  endpoint: 127.0.0.1:4317\n"
+            )
 
-    migrate_flat_otel(tmp, dry_run=False)
-    assert _read_yaml(tmp)["config_version"] == 7
+        migrate_flat_otel(tmp, dry_run=False)
+        assert _read_yaml(tmp)["config_version"] == 7
 
-    # A missing stamp may represent any historical schema. Preserve it so the
-    # Go loader still runs unrelated pre-v6 compatibility migrations.
-    with open(cfg_path, "w") as handle:
-        handle.write(
-            "otel:\n"
-            "  enabled: true\n"
-            "  endpoint: 127.0.0.1:4317\n"
-        )
-    migrate_flat_otel(tmp, dry_run=False)
-    assert "config_version" not in _read_yaml(tmp)
+
+def test_flat_otel_migration_preserves_missing_and_pre_v5_schema_stamps() -> None:
+    for source_version in (None, 4):
+        _, tmp = _make_tmp_ctx()
+        cfg_path = os.path.join(tmp, "config.yaml")
+        stamp = "" if source_version is None else f"config_version: {source_version}\n"
+        with open(cfg_path, "w") as handle:
+            handle.write(
+                stamp
+                + "otel:\n"
+                "  enabled: true\n"
+                "  endpoint: 127.0.0.1:4317\n"
+            )
+
+        migrate_flat_otel(tmp, dry_run=False)
+        migrated = _read_yaml(tmp)
+        if source_version is None:
+            assert "config_version" not in migrated
+        else:
+            assert migrated["config_version"] == source_version
 
 
 def test_flat_otel_global_endpoint_enables_all_signals() -> None:

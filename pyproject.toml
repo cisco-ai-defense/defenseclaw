@@ -19,6 +19,11 @@ dependencies = [
     # resolving this package through /simple/.
     "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl#sha256=9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe",
     "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
+    # LiteLLM 1.92.0 publishes only manylinux wheels and a Rust-backed sdist.
+    # Keep every supported installer on the portable wheel line until upstream
+    # restores Windows/macOS artifacts; the lower bound contains our reviewed
+    # security fixes and matches the runtime API exercised by DefenseClaw.
+    "litellm>=1.84.0,<1.92.0",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
     # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
@@ -135,7 +140,7 @@ override-dependencies = [
     # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1.
     "cryptography>=48.0.1,<49",
     # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
-    "litellm>=1.84.0,<2",
+    "litellm>=1.84.0,<1.92.0",
     # litellm pins exact transitive versions that conflict with what
     # cisco-ai-skill-scanner 2.0.11 (and our own pins) expect. We
     # override to a single compatible version per package — the newer

@@ -1397,12 +1397,14 @@ install_python_cli() {
 
     info "Installing from wheel..."
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${WHEEL_STAGED}" \
+        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet \
+            --only-binary litellm "${WHEEL_STAGED}" \
             || die "Failed to install CLI from protected release wheel"
     elif [[ -n "${LOCAL_DIR}" ]]; then
         local whl
         whl="$(artifact_path "defenseclaw-*.whl")"
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${whl}" \
+        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet \
+            --only-binary litellm "${whl}" \
             || die "Failed to install CLI from wheel"
     else
         local whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
@@ -1410,7 +1412,8 @@ install_python_cli() {
         whl_url="$(artifact_path "${whl_name}")"
         tmp="$(mktemp -d)"
         fetch_artifact "${whl_url}" "${tmp}/${whl_name}"
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${tmp}/${whl_name}" \
+        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet \
+            --only-binary litellm "${tmp}/${whl_name}" \
             || die "Failed to install CLI from wheel"
         warn "Legacy wheel download residue was preserved because exact retirement is unavailable"
     fi

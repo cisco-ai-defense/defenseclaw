@@ -2306,7 +2306,7 @@ function Install-Cli {
         if($script:ModernRelease){
             Assert-ExactPrivateArtifactDigest -Path $whlPath -ExpectedSha256 $script:WheelInnerSha256 -Label "protected wheel"
         }
-        & uv pip install --python $venvPython --quiet $whlPath
+        & uv pip install --python $venvPython --quiet --only-binary litellm $whlPath
         if ($LASTEXITCODE -ne 0) { Die "Failed to install CLI from wheel" }
     } finally {
         Remove-PrivateDirectory -Path $tmp

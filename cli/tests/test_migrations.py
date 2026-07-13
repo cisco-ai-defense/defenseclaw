@@ -1907,6 +1907,28 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertEqual(self._read(), after)
         self.assertFalse(any("named otel.destinations" in change for change in second.changes))
 
+    def test_upgrade_advances_v5_flat_otel_through_noop_v6_stamp(self):
+        self._write(
+            "config_version: 5\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  protocol: grpc\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+
+        first = self._ctx()
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(first))
+        with open(self.cfg_path) as handle:
+            doc = yaml.safe_load(handle) or {}
+        self.assertEqual(doc["config_version"], 7)
+        self.assertEqual(doc["otel"]["destinations"][0]["endpoint"], "127.0.0.1:4317")
+        self.assertNotIn("endpoint", doc["otel"])
+
+        after = self._read()
+        second = self._ctx()
+        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))
+        self.assertEqual(self._read(), after)
+
     def test_upgrade_persists_environment_backed_signal_exporter(self):
         self._write("config_version: 6\notel:\n  enabled: true\n")
         environment = {
