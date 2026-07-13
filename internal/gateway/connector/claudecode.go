@@ -531,6 +531,108 @@ var hookGroups = []claudeCodeHookGroup{
 	newClaudeCodeHookGroup("ElicitationResult", "*"),
 }
 
+// ownedHookContractPresent performs the connector-specific presence check used
+// by the runtime hook guardian. A single recognizable command is not enough:
+// Claude can keep that command under an irrelevant event, a narrow matcher, or
+// an asynchronous handler while all blockable surfaces remain unprotected.
+func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	data, err := os.ReadFile(claudeCodeSettingsPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("parse Claude Code settings: %w", err)
+	}
+	if rawDisabled, exists := settings["disableAllHooks"]; exists {
+		disabled, ok := rawDisabled.(bool)
+		if !ok || disabled {
+			return false, nil
+		}
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+
+	for _, group := range hookGroups {
+		entries, ok := hooks[group.eventType].([]interface{})
+		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.matcher, opts) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func claudeCodeEventHasEnforcingHook(entries []interface{}, requiredMatcher string, opts SetupOpts) bool {
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok || !claudeCodeMatcherCovers(entry["matcher"], requiredMatcher) {
+			continue
+		}
+		handlers, ok := entry["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, rawHandler := range handlers {
+			handler, ok := rawHandler.(map[string]interface{})
+			if !ok || !claudeCodeHandlerEnforces(handler, opts) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func claudeCodeMatcherCovers(raw interface{}, required string) bool {
+	matcher := ""
+	if raw != nil {
+		var ok bool
+		matcher, ok = raw.(string)
+		if !ok {
+			return false
+		}
+	}
+	// Empty and "*" both match every occurrence. They are safe supersets of
+	// the deliberately narrower SessionStart and FileChanged registrations.
+	return matcher == "" || matcher == "*" || matcher == required
+}
+
+func claudeCodeHandlerEnforces(handler map[string]interface{}, opts SetupOpts) bool {
+	for _, field := range [...]string{"async", "asyncRewake"} {
+		if async, exists := handler[field]; exists {
+			value, ok := async.(bool)
+			if !ok || value {
+				return false
+			}
+		}
+	}
+	if condition, exists := handler["if"]; exists {
+		value, ok := condition.(string)
+		if !ok || value != "" {
+			return false
+		}
+	}
+	if hookType, _ := handler["type"].(string); hookType != "command" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		command, _ := handler["command"].(string)
+		return isClaudeCodeNativeExecHook(handler) &&
+			strings.EqualFold(filepath.Clean(command), filepath.Clean(defenseclawHookBinary()))
+	}
+	command, _ := handler["command"].(string)
+	expected := hookInvocationCommand(
+		"claudecode",
+		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
+	)
+	return command == expected
+}
+
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
 // hooks, and registers DefenseClaw hooks for all Claude Code events.
 // The read-modify-write cycle is protected by an advisory file lock to

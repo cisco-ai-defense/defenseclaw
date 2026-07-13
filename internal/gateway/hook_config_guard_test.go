@@ -308,6 +308,131 @@ func TestHookConfigGuard_NotifierFiresOnHeal(t *testing.T) {
 	}
 }
 
+func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t *testing.T) {
+	settingsDir := filepath.Join(t.TempDir(), "claude")
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	previous := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+	opts := connector.SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	conn := connector.NewClaudeCodeConnector()
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("create Claude settings directory: %v", err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["disableAllHooks"] = true
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	notified := make(chan struct{}, 1)
+	guard.SetHealNotifier(func(string, []string) { notified <- struct{}{} })
+	guard.Start(ctx, conn, opts)
+	t.Cleanup(guard.Stop)
+
+	// Queue a target-file removal and then replace its watched directory
+	// before the debounce fires. Setup must recreate the owned hooks while
+	// preserving the disabling setting, so verification still fails.
+	if err := os.Remove(settingsPath); err != nil {
+		t.Fatalf("remove Claude settings: %v", err)
+	}
+	if err := os.RemoveAll(settingsDir); err != nil {
+		t.Fatalf("remove watched Claude directory: %v", err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("recreate Claude directory: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{\"disableAllHooks\":true}\n"), 0o600); err != nil {
+		t.Fatalf("restore disabled Claude settings: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, readErr := os.ReadFile(settingsPath)
+		var current map[string]interface{}
+		if readErr == nil && json.Unmarshal(data, &current) == nil {
+			_, hooksRestored := current["hooks"].(map[string]interface{})
+			if hooksRestored && current["disableAllHooks"] == true {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("guard did not attempt the policy-blocked repair (readErr=%v settings=%v)", readErr, current)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case <-notified:
+		t.Fatal("guard reported a repair even though Claude Code still disables all hooks")
+	default:
+	}
+
+	// The failed verification must not strand the watcher on the deleted
+	// directory object. Let the normal self-write suppression expire, then
+	// remove the policy and strip the hooks; the running guard must observe and
+	// heal this edit.
+	guard.mu.Lock()
+	suppressedUntil := guard.suppressUntil
+	guard.mu.Unlock()
+	if remaining := time.Until(suppressedUntil) + 2*guardTestDebounce; remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("remove Claude policy and hooks: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		present, presenceErr := connector.OwnedHooksPresent(conn, opts)
+		if presenceErr == nil && present {
+			break
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(settingsPath)
+			guard.mu.Lock()
+			pending := len(guard.pending)
+			suppressedUntil := guard.suppressUntil
+			watchList := guard.fsw.WatchList()
+			started := guard.started
+			guard.mu.Unlock()
+			t.Fatalf(
+				"guard did not heal subsequent edit (err=%v started=%v pending=%d suppressedUntil=%s watches=%v settings=%s)",
+				presenceErr,
+				started,
+				pending,
+				suppressedUntil.Format(time.RFC3339Nano),
+				watchList,
+				data,
+			)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard did not report the subsequent successful repair")
+	}
+
+	guard.Stop()
+}
+
 func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {
 	conn, opts, cfgPath := installedCursorConnector(t)
 

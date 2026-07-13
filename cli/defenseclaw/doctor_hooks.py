@@ -36,6 +36,40 @@ _EXPECTED_CONTRACT = {
     "codex": "codex-hooks-v1",
     "claudecode": "claudecode-hooks-v1",
 }
+_CLAUDE_FILE_CHANGED_MATCHER = (
+    "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
+    "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
+)
+_CLAUDE_HOOK_MATCHERS = {
+    "SessionStart": "startup|resume|clear|compact",
+    "InstructionsLoaded": "*",
+    "UserPromptSubmit": "",
+    "UserPromptExpansion": "",
+    "MessageDisplay": "",
+    "PreToolUse": "*",
+    "PermissionRequest": "*",
+    "PostToolUse": "*",
+    "PostToolUseFailure": "*",
+    "PostToolBatch": "",
+    "PermissionDenied": "*",
+    "Notification": "*",
+    "SubagentStart": "*",
+    "SubagentStop": "",
+    "TaskCreated": "",
+    "TaskCompleted": "",
+    "Stop": "",
+    "StopFailure": "*",
+    "TeammateIdle": "",
+    "ConfigChange": "*",
+    "CwdChanged": "",
+    "FileChanged": _CLAUDE_FILE_CHANGED_MATCHER,
+    "WorktreeRemove": "",
+    "PreCompact": "*",
+    "PostCompact": "*",
+    "SessionEnd": "",
+    "Elicitation": "*",
+    "ElicitationResult": "*",
+}
 _REPAIR = {
     "codex": "defenseclaw setup codex --yes --restart",
     "claudecode": "defenseclaw setup claude-code --yes --restart",
@@ -336,7 +370,248 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
     return document
 
 
-def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
+def _default_claude_managed_settings_paths() -> tuple[str, ...]:
+    """Return locally inspectable Windows file-policy sources in merge order."""
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    root = os.path.join(program_files, "ClaudeCode")
+    paths = [os.path.join(root, "managed-settings.json")]
+    dropins = os.path.join(root, "managed-settings.d")
+    try:
+        with os.scandir(dropins) as entries:
+            names = sorted(
+                entry.name
+                for entry in entries
+                if not entry.name.startswith(".") and entry.name.lower().endswith(".json")
+            )
+    except FileNotFoundError:
+        names = []
+    except OSError as exc:
+        raise _InspectionError("policy-blocked", f"cannot inspect Claude Code managed policy directory: {exc}") from exc
+    paths.extend(os.path.join(dropins, name) for name in names)
+    return tuple(paths)
+
+
+def _read_optional_claude_policy(path: str) -> dict[str, Any] | None:
+    """Read one passive JSON policy file, returning None when it is absent."""
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _InspectionError("policy-blocked", f"cannot inspect Claude Code managed policy {path}: {exc}") from exc
+    if is_link_or_reparse(path) or not stat.S_ISREG(before.st_mode):
+        raise _InspectionError("policy-blocked", f"Claude Code managed policy is not a regular file: {path}")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(2 * 1024 * 1024 + 1)
+    except OSError as exc:
+        raise _InspectionError("policy-blocked", f"cannot read Claude Code managed policy {path}: {exc}") from exc
+    if len(raw) > 2 * 1024 * 1024:
+        raise _InspectionError("policy-blocked", f"Claude Code managed policy is too large: {path}")
+    try:
+        after = os.lstat(path)
+    except OSError as exc:
+        raise _InspectionError(
+            "policy-blocked", f"Claude Code managed policy changed during inspection: {path}"
+        ) from exc
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise _InspectionError("policy-blocked", f"Claude Code managed policy changed during inspection: {path}")
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, ValueError) as exc:
+        raise _InspectionError("policy-blocked", f"cannot parse Claude Code managed policy {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise _InspectionError("policy-blocked", f"Claude Code managed policy is not an object: {path}")
+    return document
+
+
+def _read_claude_registry_policy(hive_name: str) -> dict[str, Any] | None:
+    """Read one locally inspectable Windows managed-settings registry tier."""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        hive = getattr(winreg, hive_name)
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(hive, r"SOFTWARE\Policies\ClaudeCode", 0, access) as key:
+            raw, value_type = winreg.QueryValueEx(key, "Settings")
+    except FileNotFoundError:
+        return None
+    except (OSError, AttributeError) as exc:
+        raise _InspectionError(
+            "policy-blocked", f"cannot inspect Claude Code {hive_name} managed policy: {exc}"
+        ) from exc
+    if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ} or not isinstance(raw, str):
+        raise _InspectionError("policy-blocked", f"Claude Code {hive_name} Settings policy has an invalid type")
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise _InspectionError(
+            "policy-blocked", f"cannot parse Claude Code {hive_name} Settings policy: {exc}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise _InspectionError("policy-blocked", f"Claude Code {hive_name} Settings policy is not an object")
+    return document
+
+
+def _merge_claude_file_policies(paths: tuple[str, ...]) -> dict[str, Any]:
+    """Merge Claude file-policy tiers in their documented precedence order."""
+    managed: dict[str, Any] = {}
+    for path in paths:
+        policy = _read_optional_claude_policy(path)
+        if policy is None:
+            continue
+        # Base policy is read first; sorted drop-ins override scalars and
+        # extend arrays, matching Claude Code's file-policy merge order.
+        for key, value in policy.items():
+            if isinstance(value, list) and isinstance(managed.get(key), list):
+                combined = list(managed[key])
+                combined.extend(item for item in value if item not in combined)
+                managed[key] = combined
+            else:
+                managed[key] = value
+    return managed
+
+
+def _validate_claude_policy(document: dict[str, Any], managed_settings_paths: tuple[str, ...] | None) -> None:
+    """Reject local policy states that prevent user-scoped Claude hooks."""
+    if managed_settings_paths is None:
+        # Claude chooses the highest available local managed tier rather than
+        # merging tiers: HKLM, then system files, then HKCU.
+        managed = _read_claude_registry_policy("HKEY_LOCAL_MACHINE") or {}
+        if not managed:
+            managed = _merge_claude_file_policies(_default_claude_managed_settings_paths())
+        if not managed:
+            managed = _read_claude_registry_policy("HKEY_CURRENT_USER") or {}
+    else:
+        # An explicit list is a deterministic test/embedding seam and excludes
+        # host registry state.
+        managed = _merge_claude_file_policies(managed_settings_paths)
+
+    if "policyHelper" in managed:
+        raise _InspectionError(
+            "policy-blocked",
+            "Claude Code uses a dynamic policyHelper, so passive Doctor inspection cannot prove user hooks are active",
+        )
+
+    managed_disable = managed.get("disableAllHooks")
+    if managed_disable is not None and not isinstance(managed_disable, bool):
+        raise _InspectionError("policy-blocked", "Claude Code managed disableAllHooks policy is malformed")
+    user_disable = document.get("disableAllHooks")
+    if user_disable is not None and not isinstance(user_disable, bool):
+        raise _InspectionError("policy-blocked", "Claude Code user disableAllHooks setting is malformed")
+    if managed_disable is True or user_disable is True:
+        source = "managed policy" if managed_disable is True else "user settings"
+        raise _InspectionError("policy-blocked", f"Claude Code {source} sets disableAllHooks=true")
+    if managed.get("allowManagedHooksOnly") is True:
+        raise _InspectionError(
+            "policy-blocked",
+            "Claude Code managed policy sets allowManagedHooksOnly=true, so the user-scoped "
+            "DefenseClaw hooks are ignored",
+        )
+    if "allowManagedHooksOnly" in managed and not isinstance(managed["allowManagedHooksOnly"], bool):
+        raise _InspectionError("policy-blocked", "Claude Code managed allowManagedHooksOnly policy is malformed")
+    strict = managed.get("strictPluginOnlyCustomization")
+    if strict is True or (isinstance(strict, list) and "hooks" in strict):
+        raise _InspectionError(
+            "policy-blocked",
+            "Claude Code managed policy restricts hooks to plugins or managed settings, so the "
+            "user-scoped DefenseClaw hooks are ignored",
+        )
+    if strict is not None and not (
+        isinstance(strict, bool) or (isinstance(strict, list) and all(isinstance(item, str) for item in strict))
+    ):
+        raise _InspectionError(
+            "policy-blocked", "Claude Code managed strictPluginOnlyCustomization policy is malformed"
+        )
+
+
+def _managed_hook_command(command: str, connector: str) -> bool:
+    """Report whether a command is a current or recognized legacy launcher."""
+    marker = f"hook --connector {connector}"
+    legacy = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
+    if marker in command or legacy in command:
+        return True
+    if connector == "codex" and "-encodedcommand" in command.casefold():
+        try:
+            target, _args, _kind = _command_target(command, connector)
+        except _InspectionError:
+            return False
+        return ntpath.basename(target).casefold() in {
+            "defenseclaw-hook.exe",
+            "defenseclaw-gateway.exe",
+            "defenseclaw-gateway.cmd",
+        }
+    return False
+
+
+def _matcher_covers(actual: Any, required: str) -> bool:
+    """Report whether a configured matcher covers a required hook matcher."""
+    if actual is None:
+        actual = ""
+    if not isinstance(actual, str):
+        return False
+    return actual in {"", "*", required}
+
+
+def _validate_claude_hook_contract(
+    managed_entries: list[tuple[str, dict[str, Any], dict[str, Any], str]],
+) -> None:
+    """Require synchronous, unconditional coverage for every Claude event."""
+    covered: set[str] = set()
+    rejected: dict[str, str] = {}
+    for event, entry, hook, _command in managed_entries:
+        required_matcher = _CLAUDE_HOOK_MATCHERS.get(event)
+        if required_matcher is None:
+            continue
+        if hook.get("type") != "command":
+            rejected[event] = "handler type is not command"
+            continue
+        async_value = hook.get("async", False)
+        if type(async_value) is not bool or async_value:
+            rejected[event] = "handler is asynchronous"
+            continue
+        async_rewake = hook.get("asyncRewake", False)
+        if type(async_rewake) is not bool or async_rewake:
+            rejected[event] = "handler uses asynchronous rewake"
+            continue
+        condition = hook.get("if", "")
+        if not isinstance(condition, str) or condition:
+            rejected[event] = "handler has a narrowing if condition"
+            continue
+        if not _matcher_covers(entry.get("matcher"), required_matcher):
+            rejected[event] = f"matcher {entry.get('matcher')!r} is narrower than {required_matcher!r}"
+            continue
+        covered.add(event)
+
+    missing = [event for event in _CLAUDE_HOOK_MATCHERS if event not in covered]
+    if not missing:
+        return
+    detail = ", ".join(missing)
+    reasons = "; ".join(f"{event}: {rejected[event]}" for event in missing if event in rejected)
+    if reasons:
+        detail = f"{detail} ({reasons})"
+    raise _InspectionError(
+        "stale",
+        f"Claude Code hook contract is incomplete; missing synchronous broad DefenseClaw registrations for: {detail}",
+    )
+
+
+def _commands_from_hooks(
+    document: dict[str, Any],
+    connector: str,
+    *,
+    claude_managed_settings_paths: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Extract managed commands after validating connector-specific policy."""
+    if connector == "claudecode":
+        _validate_claude_policy(document, claude_managed_settings_paths)
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "hook registration has no hooks table")
@@ -345,6 +620,7 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
         if isinstance(features, dict) and features.get("hooks") is False:
             raise _InspectionError("malformed", "Codex features.hooks is explicitly disabled")
     commands: list[str] = []
+    command_entries: list[tuple[str, dict[str, Any], dict[str, Any], str]] = []
     malformed_entry = False
     for event, entries in hooks.items():
         if event == "state":
@@ -373,33 +649,21 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
                         # separately. Reconstruct only for passive validation;
                         # Doctor never launches the registered command.
                         command = subprocess.list2cmdline([command, *args])
-                    commands.append(command.strip())
+                    command = command.strip()
+                    commands.append(command)
+                    command_entries.append((event, entry, hook, command))
                 else:
                     malformed_entry = True
     if malformed_entry and not commands:
         raise _InspectionError("malformed", "hook registration contains malformed command entries")
     if not commands:
         raise _InspectionError("missing", "hook registration contains no command entries")
-    marker = f"hook --connector {connector}"
-    legacy = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
-    managed: list[str] = []
-    for command in commands:
-        if marker in command or legacy in command:
-            managed.append(command)
-            continue
-        if connector == "codex" and "-encodedcommand" in command.casefold():
-            try:
-                target, _args, _kind = _command_target(command, connector)
-            except _InspectionError:
-                continue
-            if ntpath.basename(target).casefold() in {
-                "defenseclaw-hook.exe",
-                "defenseclaw-gateway.exe",
-                "defenseclaw-gateway.cmd",
-            }:
-                managed.append(command)
+    managed_entries = [entry for entry in command_entries if _managed_hook_command(entry[3], connector)]
+    managed = [entry[3] for entry in managed_entries]
     if not managed:
         raise _InspectionError("foreign", "hook registration contains commands, but none target DefenseClaw")
+    if connector == "claudecode":
+        _validate_claude_hook_contract(managed_entries)
     unique = set(managed)
     if len(unique) != 1:
         raise _InspectionError("malformed", "DefenseClaw hook entries use inconsistent commands")
@@ -459,8 +723,7 @@ def _command_target(command: str, connector: str) -> tuple[str, list[str], str]:
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"& '((?:[^']|'')+)' hook --connector " + re.escape(connector) +
-                r"; exit \$LASTEXITCODE",
+                r"& '((?:[^']|'')+)' hook --connector " + re.escape(connector) + r"; exit \$LASTEXITCODE",
                 script,
             )
             if not match:
@@ -539,6 +802,7 @@ def validate_windows_hook_registration(
     install_root: str,
     search_path: str,
     pathext: str,
+    claude_managed_settings_paths: tuple[str, ...] | None = None,
 ) -> WindowsHookCheck:
     """Return a classified, side-effect-free Windows registration result."""
     connector = connector.strip().lower()
@@ -547,7 +811,11 @@ def validate_windows_hook_registration(
     raw_target = ""
     try:
         document = _read_config(config_path, connector)
-        commands = _commands_from_hooks(document, connector)
+        commands = _commands_from_hooks(
+            document,
+            connector,
+            claude_managed_settings_paths=claude_managed_settings_paths,
+        )
         command = commands[0]
         raw_target, _args, kind = _command_target(command, connector)
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
@@ -604,7 +872,7 @@ def validate_windows_hook_registration(
     except _InspectionError as exc:
         return WindowsHookCheck(
             exc.state,
-            _repair_detail(connector, exc.detail),
+            exc.detail if exc.state == "policy-blocked" else _repair_detail(connector, exc.detail),
             command,
             target,
             raw_target,

@@ -101,7 +101,14 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 //
 // Connectors with no hook config paths or no owned hook command (proxy/plugin
 // connectors) are reported as present so the guard never tries to heal them.
+type ownedHookContractInspector interface {
+	ownedHookContractPresent(SetupOpts) (bool, error)
+}
+
 func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
+	if inspector, ok := conn.(ownedHookContractInspector); ok {
+		return inspector.ownedHookContractPresent(opts)
+	}
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
 		return true, nil

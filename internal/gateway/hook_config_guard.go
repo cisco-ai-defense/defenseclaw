@@ -257,6 +257,30 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 	}
 }
 
+// resyncTargetsLocked force-refreshes directory watches after Setup. A
+// directory watch is tied to the underlying directory object, so a path that
+// Setup recreated can look unchanged in watchedDirs while fsnotify still
+// references the deleted object. Rebuilding the watcher avoids inode/file-ID
+// reuse making a remove/add cycle silently retain the stale OS handle. Caller
+// must hold g.mu.
+func (g *HookConfigGuard) resyncTargetsLocked(conn connector.Connector, opts connector.SetupOpts) {
+	if g.fsw == nil {
+		g.applyTargetsLocked(conn, opts)
+		return
+	}
+
+	fresh, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guard] refresh fsnotify watcher: %v (keeping existing watcher)\n", err)
+		return
+	}
+	previous := g.fsw
+	g.fsw = fresh
+	g.watchedDirs = map[string]struct{}{}
+	g.applyTargetsLocked(conn, opts)
+	_ = previous.Close()
+}
+
 func (g *HookConfigGuard) run() {
 	defer close(g.done)
 	defer func() {
@@ -385,11 +409,27 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 		return
 	}
 
-	// A whole-directory deletion would have dropped our fsnotify watch;
-	// Setup recreates the parent dirs, so re-sync the watch set.
+	// Setup may have recreated a deleted parent directory. Rebind the watch
+	// before verification can return so later policy/config changes are still
+	// observed even when enforcement remains inactive.
 	g.mu.Lock()
-	g.applyTargetsLocked(conn, opts)
+	g.resyncTargetsLocked(conn, opts)
 	g.mu.Unlock()
+
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil || !present {
+		if err == nil {
+			err = fmt.Errorf("effective hook contract is still inactive")
+		}
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v\n", connName, err)
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+			fmt.Sprintf("re-installed %s hook config but enforcement is still inactive", connName), err)
+		if g.logger != nil {
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
+		}
+		return
+	}
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
 	if g.otel != nil {

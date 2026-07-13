@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ from defenseclaw.doctor_hooks import (
     _commands_from_hooks,
     _InspectionError,
     _packaged_windows_install_root,
+    _read_claude_registry_policy,
     _split_windows,
     resolve_windows_command,
     validate_windows_hook_registration,
@@ -101,16 +103,81 @@ class WindowsHookDoctorTests(unittest.TestCase):
         else:
             path = self.profile / ".claude" / "settings.json"
             path.parent.mkdir(exist_ok=True)
-            events: dict[str, object] = {
-                "PreToolUse": [{"hooks": [{"type": "command", "command": command, "timeout": 30000}]}]
+            events: dict[str, object] = {}
+            matchers = {
+                "SessionStart": "startup|resume|clear|compact",
+                "FileChanged": (
+                    "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
+                    "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
+                ),
             }
+            wildcard_events = {
+                "InstructionsLoaded",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PermissionDenied",
+                "Notification",
+                "SubagentStart",
+                "StopFailure",
+                "ConfigChange",
+                "PreCompact",
+                "PostCompact",
+                "Elicitation",
+                "ElicitationResult",
+            }
+            for event in (
+                "SessionStart",
+                "InstructionsLoaded",
+                "UserPromptSubmit",
+                "UserPromptExpansion",
+                "MessageDisplay",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PostToolBatch",
+                "PermissionDenied",
+                "Notification",
+                "SubagentStart",
+                "SubagentStop",
+                "TaskCreated",
+                "TaskCompleted",
+                "Stop",
+                "StopFailure",
+                "TeammateIdle",
+                "ConfigChange",
+                "CwdChanged",
+                "FileChanged",
+                "WorktreeRemove",
+                "PreCompact",
+                "PostCompact",
+                "SessionEnd",
+                "Elicitation",
+                "ElicitationResult",
+            ):
+                entry: dict[str, object] = {"hooks": [{"type": "command", "command": command, "timeout": 30}]}
+                if event in matchers:
+                    entry["matcher"] = matchers[event]
+                elif event in wildcard_events:
+                    entry["matcher"] = "*"
+                events[event] = [entry]
             if extra_command:
-                events["PostToolUse"] = [{"hooks": [{"type": "command", "command": extra_command, "timeout": 30000}]}]
+                events["PostToolUse"].append({"hooks": [{"type": "command", "command": extra_command, "timeout": 30}]})
             path.write_text(json.dumps({"hooks": events}), encoding="utf-8")
         self._lock(connector, path)
         return path
 
-    def _validate(self, connector: str, config: Path, *, search_path: str = "", pathext: str = ".EXE;.CMD"):
+    def _validate(
+        self,
+        connector: str,
+        config: Path,
+        *,
+        search_path: str = "",
+        pathext: str = ".EXE;.CMD",
+        managed_settings_paths: tuple[str, ...] | None = (),
+    ):
         return validate_windows_hook_registration(
             connector=connector,
             config_path=str(config),
@@ -118,6 +185,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             install_root=str(self.install),
             search_path=search_path,
             pathext=pathext,
+            claude_managed_settings_paths=managed_settings_paths,
         )
 
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
@@ -157,14 +225,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("Windows-native executable", check.detail)
-        self.assertIn("entries=1", check.detail)
+        self.assertIn("entries=28", check.detail)
 
     def test_healthy_claude_exec_form_with_path_spaces(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))
         document = json.loads(config.read_text(encoding="utf-8"))
-        handler = document["hooks"]["PreToolUse"][0]["hooks"][0]
-        handler["args"] = ["hook", "--connector", "claudecode"]
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = ["hook", "--connector", "claudecode"]
         config.write_text(json.dumps(document), encoding="utf-8")
 
         check = self._validate("claudecode", config)
@@ -175,7 +243,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))
         document = json.loads(config.read_text(encoding="utf-8"))
-        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = "hook --connector claudecode"
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = "hook --connector claudecode"
         config.write_text(json.dumps(document), encoding="utf-8")
 
         check = self._validate("claudecode", config)
@@ -198,11 +267,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
     def test_codex_explicitly_disabled_hooks_raise_malformed(self) -> None:
         document = {
             "features": {"hooks": False},
-            "hooks": {
-                "PreToolUse": [
-                    {"hooks": [{"command": "defenseclaw-hook.exe hook --connector codex"}]}
-                ]
-            },
+            "hooks": {"PreToolUse": [{"hooks": [{"command": "defenseclaw-hook.exe hook --connector codex"}]}]},
         }
 
         with self.assertRaises(_InspectionError) as raised:
@@ -287,7 +352,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         for switch, value in (("-Command", "ignored"), ("-EncodedCommand", "Zg==")):
             with self.subTest(switch=switch):
                 command = (
-                    f'powershell.exe -NoProfile -NonInteractive {switch} {value} '
+                    f"powershell.exe -NoProfile -NonInteractive {switch} {value} "
                     f'-File "{runtime}" hook --connector claudecode'
                 )
                 config = self._config("claudecode", command)
@@ -308,6 +373,115 @@ class WindowsHookDoctorTests(unittest.TestCase):
         config = self._config("claudecode", managed, extra_command='"C:\\Tools\\formatter.exe" --quiet')
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_claude_requires_complete_synchronous_broad_hook_contract(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector claudecode'
+        mutations = {
+            "notification-only": lambda document: document.update(
+                {"hooks": {"Notification": document["hooks"]["Notification"]}}
+            ),
+            "missing-pretooluse": lambda document: document["hooks"].pop("PreToolUse"),
+            "narrow-pretooluse": lambda document: document["hooks"]["PreToolUse"][0].update({"matcher": "Bash"}),
+            "whitespace-pretooluse": lambda document: document["hooks"]["PreToolUse"][0].update({"matcher": " * "}),
+            "async-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update({"async": True}),
+            "async-rewake-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"asyncRewake": True}
+            ),
+            "non-command-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"type": "http"}
+            ),
+            "conditional-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"if": "Bash(git *)"}
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                config = self._config("claudecode", command)
+                document = json.loads(config.read_text(encoding="utf-8"))
+                mutate(document)
+                config.write_text(json.dumps(document), encoding="utf-8")
+                check = self._validate("claudecode", config)
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn("contract", check.detail)
+
+    def test_claude_reports_disable_all_hooks_as_policy_blocked(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        document = json.loads(config.read_text(encoding="utf-8"))
+        document["disableAllHooks"] = True
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("disableAllHooks", check.detail)
+
+    def test_claude_reports_locally_inspectable_managed_policy_blockers(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector claudecode'
+        policy_path = self.root / "managed-settings.json"
+        for policy, evidence in (
+            ({"allowManagedHooksOnly": True}, "allowManagedHooksOnly"),
+            ({"strictPluginOnlyCustomization": ["hooks"]}, "plugins or managed settings"),
+            ({"disableAllHooks": True}, "disableAllHooks"),
+        ):
+            with self.subTest(policy=policy):
+                config = self._config("claudecode", command)
+                policy_path.write_text(json.dumps(policy), encoding="utf-8")
+                check = self._validate(
+                    "claudecode",
+                    config,
+                    managed_settings_paths=(str(policy_path),),
+                )
+                self.assertEqual(check.state, "policy-blocked", check.detail)
+                self.assertIn(evidence, check.detail)
+
+    def test_claude_managed_policy_merge_and_precedence_are_applied(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector claudecode'
+        config = self._config("claudecode", command)
+        base = self.root / "managed-settings.json"
+        dropin = self.root / "20-security.json"
+        base.write_text(json.dumps({"strictPluginOnlyCustomization": ["hooks"]}), encoding="utf-8")
+        dropin.write_text(json.dumps({"strictPluginOnlyCustomization": ["skills"]}), encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(base), str(dropin)),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+
+        document = json.loads(config.read_text(encoding="utf-8"))
+        document["disableAllHooks"] = True
+        config.write_text(json.dumps(document), encoding="utf-8")
+        base.write_text(json.dumps({"disableAllHooks": False}), encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(base),),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("user settings sets disableAllHooks=true", check.detail)
+
+    def test_claude_reads_windows_registry_managed_policy_without_executing_it(self) -> None:
+        key = MagicMock()
+        key.__enter__.return_value = key
+        fake_winreg = SimpleNamespace(
+            HKEY_LOCAL_MACHINE=object(),
+            KEY_READ=1,
+            KEY_WOW64_64KEY=2,
+            REG_SZ=3,
+            REG_EXPAND_SZ=4,
+            OpenKey=MagicMock(return_value=key),
+            QueryValueEx=MagicMock(return_value=(json.dumps({"allowManagedHooksOnly": True}), 3)),
+        )
+        with (
+            patch.dict(sys.modules, {"winreg": fake_winreg}),
+            patch("defenseclaw.doctor_hooks.os.name", "nt"),
+        ):
+            policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
+        self.assertEqual(policy, {"allowManagedHooksOnly": True})
+        fake_winreg.OpenKey.assert_called_once()
 
     def test_missing_registrations_have_only_native_repair_guidance(self) -> None:
         for connector, filename, repair in (

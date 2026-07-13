@@ -119,6 +119,110 @@ func TestOwnedHooksPresent_ProxyConnectorReportsPresent(t *testing.T) {
 	}
 }
 
+func installedClaudeCodeConnectorForPresence(t *testing.T) (Connector, SetupOpts, string) {
+	t.Helper()
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	opts := SetupOpts{
+		DataDir:  t.TempDir(),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	conn := NewClaudeCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+	return conn, opts, settingsPath
+}
+
+func mutateClaudeSettings(t *testing.T, path string, mutate func(map[string]interface{})) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	mutate(settings)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
+	conn, opts, settingsPath := installedClaudeCodeConnectorForPresence(t)
+	baseline, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]func(map[string]interface{}){
+		"irrelevant-event-only": func(settings map[string]interface{}) {
+			hooks := settings["hooks"].(map[string]interface{})
+			settings["hooks"] = map[string]interface{}{"Notification": hooks["Notification"]}
+		},
+		"missing-block-event": func(settings map[string]interface{}) {
+			delete(settings["hooks"].(map[string]interface{}), "PreToolUse")
+		},
+		"narrow-block-matcher": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = "Bash"
+		},
+		"whitespace-padded-wildcard": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = " * "
+		},
+		"asynchronous-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["async"] = true
+		},
+		"async-rewake-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["asyncRewake"] = true
+		},
+		"non-command-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["type"] = "http"
+		},
+		"conditional-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["if"] = "Bash(git *)"
+		},
+		"hooks-disabled": func(settings map[string]interface{}) {
+			settings["disableAllHooks"] = true
+		},
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(settingsPath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutateClaudeSettings(t, settingsPath, mutate)
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if present {
+				t.Fatal("OwnedHooksPresent=true for a non-enforcing Claude Code hook contract")
+			}
+		})
+	}
+}
+
 // TestOwnedHookNeedles_WindowsSurvivesConfigEscaping guards the Windows
 // presence-detection path. On Windows the agent config stores the native
 // invocation (`"C:\...\defenseclaw-gateway.exe" hook --connector <name>`),
