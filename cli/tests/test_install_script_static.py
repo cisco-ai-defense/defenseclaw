@@ -28,7 +28,7 @@ def test_installers_require_portable_litellm_wheels() -> None:
 
     assert install_sh.count("--only-binary litellm") == 3
     assert "--only-binary litellm" in install_ps1
-    assert project.count('"litellm>=1.84.0,<1.92.0"') == 2
+    assert project.count('"litellm>=1.84.0,<1.92.0"') == 1
 
 
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
