@@ -58,6 +58,14 @@ func Write(path string, data []byte) error {
 	return write(path, data)
 }
 
+// ReplaceFile performs a replacement-style rename from source to destination.
+// On Windows it retries transient access, sharing, and lock violations commonly caused
+// by antivirus scanners briefly opening a newly written file. Callers remain
+// responsible for validating both paths and cleaning up source on failure.
+func ReplaceFile(source, destination string) error {
+	return replaceFile(source, destination)
+}
+
 // WritePrivate protects the managed parent directory and holds it against
 // replacement while atomically writing a sensitive state file.
 func WritePrivate(path string, data []byte) error {

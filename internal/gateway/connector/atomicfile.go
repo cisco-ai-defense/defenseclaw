@@ -27,9 +27,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-// atomicWriteFile writes data to path atomically by writing to a temp file in
-// the same directory and renaming. This prevents partial writes from corrupting
-// the target file if the process crashes mid-write.
+// atomicWriteFile writes data to a temp file in the same directory and then
+// performs a replacement-style rename. This prevents partial writes from
+// corrupting the target file if the process crashes mid-write.
 //
 // If path is a symlink, write through to the linked target instead of renaming
 // over the symlink itself. Many operators keep agent dotfiles in a managed
@@ -76,7 +76,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, writePath); err != nil {
+	if err := safefile.ReplaceFile(tmpPath, writePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}

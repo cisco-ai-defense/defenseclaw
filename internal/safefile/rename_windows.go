@@ -13,11 +13,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const (
+	replaceFileMaxAttempts = 100
+	replaceFileRetryDelay  = 5 * time.Millisecond
+)
+
 func replaceFile(source, destination string) error {
-	const attempts = 100
+	return replaceFileWith(source, destination, os.Rename, time.Sleep)
+}
+
+func replaceFileWith(
+	source string,
+	destination string,
+	rename func(string, string) error,
+	sleep func(time.Duration),
+) error {
 	var err error
-	for attempt := 0; attempt < attempts; attempt++ {
-		err = os.Rename(source, destination)
+	for attempt := 0; attempt < replaceFileMaxAttempts; attempt++ {
+		err = rename(source, destination)
 		if err == nil {
 			return nil
 		}
@@ -26,7 +39,10 @@ func replaceFile(source, destination string) error {
 			!errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 			return err
 		}
-		time.Sleep(5 * time.Millisecond)
+		if attempt+1 == replaceFileMaxAttempts {
+			return err
+		}
+		sleep(replaceFileRetryDelay)
 	}
 	return err
 }
