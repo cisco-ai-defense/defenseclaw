@@ -160,6 +160,9 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
+	if err := validateOTLPPathTokenDirectory(tokenPath); err != nil {
+		return "", err
+	}
 
 	buf := make([]byte, otlpTokenLen)
 	if _, err := rand.Read(buf); err != nil {
@@ -289,6 +292,9 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateOTLPPathTokenDirectory(path); err != nil {
+		return "", err
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("OTLP path-token %s is a symlink", path)
 	}
@@ -319,6 +325,14 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 		return "", fmt.Errorf("OTLP path-token %s is not a 64-character lowercase hex token", path)
 	}
 	return tok, nil
+}
+
+func validateOTLPPathTokenDirectory(path string) error {
+	tokenDir := filepath.Dir(path)
+	if err := otlpValidateDirectory(tokenDir); err != nil {
+		return fmt.Errorf("OTLP path-token directory %s is not trusted: %w", tokenDir, err)
+	}
+	return nil
 }
 
 func validateOTLPPathTokenLocation(dataDir, path string) error {

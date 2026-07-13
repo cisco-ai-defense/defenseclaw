@@ -66,10 +66,26 @@ func TestLoadOTLPPathTokenWindowsRejectsWritableAncestor(t *testing.T) {
 			if _, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err != nil {
 				t.Fatalf("seed token: %v", err)
 			}
+			tokenPath, err := OTLPPathTokenFilePath(dataDir, OTLPScopeCodex)
+			if err != nil {
+				t.Fatalf("resolve token path: %v", err)
+			}
 			setOTLPTokenWindowsDACL(t, ancestor, tc.mask, true)
 
+			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
+				t.Fatalf("EnsureOTLPPathToken accepted an Everyone-writable ancestor; token=%q", token)
+			}
 			if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
 				t.Fatalf("LoadOTLPPathToken accepted an Everyone-writable ancestor; token=%q", token)
+			}
+			if err := os.Remove(tokenPath); err != nil {
+				t.Fatalf("remove seeded token: %v", err)
+			}
+			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
+				t.Fatalf("EnsureOTLPPathToken minted beneath an Everyone-writable ancestor; token=%q", token)
+			}
+			if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+				t.Fatalf("rejected first provisioning left a token at %s: %v", tokenPath, err)
 			}
 		})
 	}

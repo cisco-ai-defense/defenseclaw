@@ -33,9 +33,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase 'go'
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase 'windows-native-go')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-go')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -61,9 +63,12 @@ jobs:
             'TestHookAPITokenWindowsAllowsOwnerRightsACE',
             'TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE',
             'TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor',
-            'TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations',
             'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
-            'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor'
+            'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor',
+            'TestLoadOTLPPathTokenWindowsRejectsWritableAncestor',
+            'TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor'
           )
           $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
           Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
@@ -117,9 +122,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase ('py-' + $env:PYTHON_SHARD)
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase ('windows-native-python-' + $env:PYTHON_SHARD))" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -200,9 +207,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase 'ps'
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase 'windows-native-powershell')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-powershell')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -245,9 +254,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase 'pkg'
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase 'windows-native-package-build')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-package')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -297,9 +308,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase 'acc'
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase 'windows-native-acceptance')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-acceptance')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -346,9 +359,11 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          $stateBase = Join-Path $env:LOCALAPPDATA 'DefenseClawNativeCI'
+          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
+          $stateRoot = Join-Path $stateBase ('ct-' + $env:CONNECTOR)
+          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
           "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$(Join-Path $stateBase ('windows-native-contract-' + $env:CONNECTOR))" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
           "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
           "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-' + $env:CONNECTOR))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

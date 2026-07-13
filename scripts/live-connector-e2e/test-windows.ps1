@@ -59,6 +59,38 @@ try {
     ) -TimeoutSeconds 30
     Assert-True ($profileTest.ExitCode -eq 0 -and $profileTest.StdOut -match 'self-test passed') 'disposable Windows profile and PATH isolation'
 
+    $originalNativeBase = [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    try {
+        $broadNativeBase = [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::UserProfile
+        )
+        $approvedNativeBase = Join-Path $broadNativeBase '.dc-ci'
+        $shortNativeRoot = Join-Path $approvedNativeBase 'ct-claudecode'
+        Assert-True ($shortNativeRoot.Length -le 48) `
+            'worst-case native connector root preserves the linker path budget'
+        $env:DC_WINDOWS_NATIVE_BASE_ROOT = $approvedNativeBase
+        $approvedBaseResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $nativeHarness, '-Operation', 'cleanup',
+            '-StateRoot', $shortNativeRoot
+        ) -TimeoutSeconds 15
+        Assert-True ($approvedBaseResult.ExitCode -eq 0) `
+            'native cleanup accepts a short state root below its explicit user-profile base'
+
+        $env:DC_WINDOWS_NATIVE_BASE_ROOT = $broadNativeBase
+        $broadBaseResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $nativeHarness, '-Operation', 'cleanup',
+            '-StateRoot', (Join-Path $temp 'broad-base-rejection')
+        ) -TimeoutSeconds 15 -AllowedExitCodes @(1)
+        Assert-True ($broadBaseResult.StdErr -match
+            'DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user''s profile') `
+            'native cleanup rejects an explicit base as broad as the user profile'
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            'DC_WINDOWS_NATIVE_BASE_ROOT',
+            $originalNativeBase
+        )
+    }
+
     $unicodeInterop = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-File', $wizardHarness,
         '-SetupPath', $pwsh,
@@ -155,18 +187,21 @@ try {
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
-        '\$stateBase = Join-Path \$env:LOCALAPPDATA ''DefenseClawNativeCI'''
-    ).Count -eq 6) 'every native Windows job roots mutable state below per-user LOCALAPPDATA'
+        '\$stateBase = Join-Path \$env:USERPROFILE ''\.dc-ci'''
+    ).Count -eq 6) 'every native Windows job roots mutable state below the trusted user profile'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '"DC_WINDOWS_NATIVE_BASE_ROOT=\$stateBase" >> \$env:GITHUB_ENV'
     ).Count -eq 6) 'every native Windows job exports the cleanup-approved state base'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
-        '"DC_STATE_ROOT=\$\(Join-Path \$stateBase '
+        '"DC_STATE_ROOT=\$stateRoot" >> \$env:GITHUB_ENV'
+    ).Count -eq 6 -and [regex]::Matches(
+        $nativeWorkflowText,
+        'if \(\$stateRoot\.Length -gt 48\)'
     ).Count -eq 6 -and
         $nativeWorkflowText -notmatch '"DC_STATE_ROOT=\$\(Join-Path \$env:RUNNER_TEMP') `
-        'native runtime state never inherits the hosted runner temp volume owner'
+        'native runtime state stays short and never inherits the hosted runner temp volume owner'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '"DC_DIAGNOSTICS=\$\(Join-Path \$env:RUNNER_TEMP '
@@ -177,6 +212,10 @@ try {
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
         'interactive setup cleanup accepts only the pre-validated runner temp or explicit state base'
+    Assert-True ($nativeHarnessText -match 'function Test-PathWithinOrEquals' -and
+        [regex]::Matches($nativeHarnessText, 'Test-PathWithinOrEquals \$root \$approvedStateBase').Count -eq 1 -and
+        [regex]::Matches($nativeHarnessText, 'Test-PathWithinOrEquals \$full \$explicitBase').Count -eq 1) `
+        'state-root and setup cleanup gates share identical equals-or-descendant semantics'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -190,9 +229,12 @@ try {
         'TestHookAPITokenWindowsAllowsOwnerRightsACE',
         'TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE',
         'TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor',
-        'TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor',
+        'TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor',
+        'TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations',
         'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
-        'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor'
+        'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor',
+        'TestLoadOTLPPathTokenWindowsRejectsWritableAncestor',
+        'TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor'
     )) {
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }

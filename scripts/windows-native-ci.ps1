@@ -58,6 +58,26 @@ function Test-PathWithin([string]$Path, [string]$Root) {
     return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-PathWithinOrEquals([string]$Path, [string]$Root) {
+    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $candidate.Equals($parent, [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-PathWithin $candidate $parent)
+}
+
+function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $userProfile = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::UserProfile
+    ).TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($userProfile) -or
+        -not (Test-PathWithin $full $userProfile)) {
+        throw "DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user's profile: $full"
+    }
+    return $full
+}
+
 function Assert-NoReparseAncestors([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $drive = [IO.Path]::GetPathRoot($full)
@@ -117,18 +137,16 @@ function Remove-SafeDisposableTree([string]$Path, [string]$Root = $Path) {
 
 function Assert-SafeStateRoot([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $explicitBase = [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    $explicitBase = Resolve-SafeWindowsNativeBase (
+        [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    )
     $allowedRoots = @(
         [Environment]::GetEnvironmentVariable('RUNNER_TEMP'),
-        $explicitBase,
         [IO.Path]::GetTempPath()
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    $equalsExplicitBase = -not [string]::IsNullOrWhiteSpace($explicitBase) -and
-        $full.Equals(
-            [IO.Path]::GetFullPath($explicitBase).TrimEnd('\'),
-            [StringComparison]::OrdinalIgnoreCase
-        )
-    if (-not $equalsExplicitBase -and
+    $withinExplicitBase = -not [string]::IsNullOrWhiteSpace($explicitBase) -and
+        (Test-PathWithinOrEquals $full $explicitBase)
+    if (-not $withinExplicitBase -and
         -not ($allowedRoots | Where-Object { Test-PathWithin $full $_ } | Select-Object -First 1)) {
         throw "StateRoot must be a child of RUNNER_TEMP, DC_WINDOWS_NATIVE_BASE_ROOT, or the system temp directory: $full"
     }
@@ -1758,7 +1776,9 @@ function Invoke-SetupAcceptance {
     if (-not $AllowCurrentUserSetupAcceptance -and $env:GITHUB_ACTIONS -ne 'true') {
         throw 'setup-acceptance mutates the current Windows user. Run only on a disposable CI user, or pass -AllowCurrentUserSetupAcceptance explicitly.'
     }
-    $approvedStateBase = [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    $approvedStateBase = Resolve-SafeWindowsNativeBase (
+        [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    )
     $root = Assert-SafeStateRoot $StateRoot
     $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
     $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
@@ -1797,11 +1817,7 @@ function Invoke-SetupAcceptance {
             (Test-PathWithin $root $env:RUNNER_TEMP)
         $belowApprovedBase = $false
         if (-not [string]::IsNullOrWhiteSpace($approvedStateBase)) {
-            $approvedFull = [IO.Path]::GetFullPath($approvedStateBase).TrimEnd('\')
-            $belowApprovedBase = $root.Equals(
-                $approvedFull,
-                [StringComparison]::OrdinalIgnoreCase
-            ) -or (Test-PathWithin $root $approvedFull)
+            $belowApprovedBase = Test-PathWithinOrEquals $root $approvedStateBase
         }
         if (-not $belowRunnerTemp -and -not $belowApprovedBase) {
             throw 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT'
