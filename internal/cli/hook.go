@@ -149,12 +149,16 @@ func openCursorHookInputFile(hookDir, path string) (*os.File, error) {
 	return input, nil
 }
 
-// buildHookOptions resolves the hook configuration from flags plus the same
-// environment variables the .sh hooks honor, so the native path and the Bash
-// path behave identically. It is factored out of RunE (which calls os.Exit)
-// so it can be unit-tested.
+// buildHookOptions resolves hook configuration. Source builds and Unix hooks
+// retain their environment-compatible behavior. A packaged Windows hook binds
+// security-critical values to installer-owned state and accepts inherited
+// environment only when it tightens policy. It is factored out of RunE (which
+// calls os.Exit) so it can be unit-tested.
 func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Options {
-	home := config.DefaultDataPath()
+	home, trustedNativeState := trustedNativeHookHome()
+	if !trustedNativeState {
+		home = config.DefaultDataPath()
+	}
 	hookDir := filepath.Join(home, "hooks")
 
 	// Setup writes hooks/.hookcfg on Windows so the agent's hook command can
@@ -162,7 +166,10 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	// stable). It supplies the gateway address + fail mode the flags omit.
 	sidecar := readHookSidecar(filepath.Join(hookDir, ".hookcfg"))
 
-	if apiAddr == "" {
+	if apiAddr == "" && trustedNativeState {
+		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
+	}
+	if apiAddr == "" && !trustedNativeState {
 		apiAddr = os.Getenv("DEFENSECLAW_GATEWAY_ADDR")
 	}
 	if apiAddr == "" {
@@ -186,14 +193,21 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
 	}
 
-	// Precedence mirrors the .sh `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-baked}"`:
-	// the env var wins, then the explicit flag, then the sidecar's baked value,
-	// and finally hookexec's "open" default for an empty string.
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
-		failMode = v
-	}
 	if failMode == "" {
 		failMode = hookSidecarFailMode(sidecar, connector)
+	}
+	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
+		if !trustedNativeState || strings.EqualFold(strings.TrimSpace(v), "closed") {
+			// A packaged native hook accepts inherited environment only when it
+			// tightens policy. Project settings cannot turn a baked closed mode open.
+			failMode = v
+		}
+	}
+	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
+	if trustedNativeState {
+		// Connector-scoped token sidecars are ACL-protected installer state.
+		// Never let an inherited generic token shadow or replace them.
+		token = ""
 	}
 
 	opts := hookexec.Options{
@@ -203,7 +217,7 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		FailMode:           failMode,
 		Home:               home,
 		HookDir:            hookDir,
-		Token:              os.Getenv("DEFENSECLAW_GATEWAY_TOKEN"),
+		Token:              token,
 		StrictAvailability: hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),
@@ -219,7 +233,10 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			opts.MaxBody = n
+			if !trustedNativeState || n <= 1<<20 {
+				// Packaged hooks allow projects to lower the cap, never raise it.
+				opts.MaxBody = n
+			}
 		}
 	}
 

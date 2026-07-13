@@ -112,8 +112,9 @@ var defenseclawHookBinaryOverride string
 // On Windows there is no Bash/.cmd/jq/PATH-restore chain: the agent invokes the
 // DefenseClaw binary's hidden `hook` subcommand directly. The Windows command
 // deliberately carries no per-install volatile values — the gateway address,
-// token, and fail mode are resolved at runtime from the hook sidecar
-// (hooks/.hookcfg, hooks/.token) and the environment. Keeping the command
+// token, and fail mode are resolved at runtime from protected hook sidecars
+// (hooks/.hookcfg, hooks/.token). Packaged Windows hooks only honor inherited
+// environment when it tightens policy. Keeping the command
 // byte-identical across setup and teardown is required so Codex's trust-hash
 // recognition and the JSON/YAML hook removers (which match on the exact command
 // string) still find the entries DefenseClaw inserted.
