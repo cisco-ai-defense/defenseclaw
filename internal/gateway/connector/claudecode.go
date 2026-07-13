@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -473,39 +474,49 @@ const fileChangedMatcher = "CLAUDE.md|.claude/settings.json|.claude/settings.loc
 //   - Stop / SubagentStop run Stop-time CodeGuard scans → 90s.
 //   - SessionEnd can persist session-level audit → 60s.
 //   - Everything else: 30s.
-var hookGroups = []struct {
+type claudeCodeHookGroup struct {
 	eventType string
 	matcher   string
 	timeout   int
-}{
-	{"SessionStart", "startup|resume|clear|compact", 30},
-	{"InstructionsLoaded", "*", 30},
-	{"UserPromptSubmit", "", 30},
-	{"UserPromptExpansion", "", 30},
-	{"MessageDisplay", "", 10},
-	{"PreToolUse", "*", 30},
-	{"PermissionRequest", "*", 30},
-	{"PostToolUse", "*", 30},
-	{"PostToolUseFailure", "*", 30},
-	{"PostToolBatch", "", 90},
-	{"PermissionDenied", "*", 30},
-	{"Notification", "*", 30},
-	{"SubagentStart", "*", 30},
-	{"SubagentStop", "*", 90},
-	{"TaskCreated", "", 30},
-	{"TaskCompleted", "", 30},
-	{"Stop", "", 90},
-	{"StopFailure", "*", 30},
-	{"TeammateIdle", "", 30},
-	{"ConfigChange", "*", 30},
-	{"CwdChanged", "", 30},
-	{"FileChanged", fileChangedMatcher, 30},
-	{"WorktreeRemove", "", 30},
-	{"PreCompact", "*", 30},
-	{"PostCompact", "*", 30},
-	{"SessionEnd", "", 60},
-	{"Elicitation", "*", 30},
-	{"ElicitationResult", "*", 30},
+}
+
+func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
+	return claudeCodeHookGroup{
+		eventType: eventType,
+		matcher:   matcher,
+		timeout:   hookexec.ClaudeCodeHookTimeoutSeconds(eventType),
+	}
+}
+
+var hookGroups = []claudeCodeHookGroup{
+	newClaudeCodeHookGroup("SessionStart", "startup|resume|clear|compact"),
+	newClaudeCodeHookGroup("InstructionsLoaded", "*"),
+	newClaudeCodeHookGroup("UserPromptSubmit", ""),
+	newClaudeCodeHookGroup("UserPromptExpansion", ""),
+	newClaudeCodeHookGroup("MessageDisplay", ""),
+	newClaudeCodeHookGroup("PreToolUse", "*"),
+	newClaudeCodeHookGroup("PermissionRequest", "*"),
+	newClaudeCodeHookGroup("PostToolUse", "*"),
+	newClaudeCodeHookGroup("PostToolUseFailure", "*"),
+	newClaudeCodeHookGroup("PostToolBatch", ""),
+	newClaudeCodeHookGroup("PermissionDenied", "*"),
+	newClaudeCodeHookGroup("Notification", "*"),
+	newClaudeCodeHookGroup("SubagentStart", "*"),
+	newClaudeCodeHookGroup("SubagentStop", "*"),
+	newClaudeCodeHookGroup("TaskCreated", ""),
+	newClaudeCodeHookGroup("TaskCompleted", ""),
+	newClaudeCodeHookGroup("Stop", ""),
+	newClaudeCodeHookGroup("StopFailure", "*"),
+	newClaudeCodeHookGroup("TeammateIdle", ""),
+	newClaudeCodeHookGroup("ConfigChange", "*"),
+	newClaudeCodeHookGroup("CwdChanged", ""),
+	newClaudeCodeHookGroup("FileChanged", fileChangedMatcher),
+	newClaudeCodeHookGroup("WorktreeRemove", ""),
+	newClaudeCodeHookGroup("PreCompact", "*"),
+	newClaudeCodeHookGroup("PostCompact", "*"),
+	newClaudeCodeHookGroup("SessionEnd", ""),
+	newClaudeCodeHookGroup("Elicitation", "*"),
+	newClaudeCodeHookGroup("ElicitationResult", "*"),
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original

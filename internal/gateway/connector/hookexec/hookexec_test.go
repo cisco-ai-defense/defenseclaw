@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -947,6 +948,56 @@ func TestSupportedConnectorsSorted(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeRequestTimeoutUsesPayloadEventBudget(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  time.Duration
+	}{
+		{event: "MessageDisplay", want: 9 * time.Second},
+		{event: "PreToolUse", want: 29 * time.Second},
+		{event: "SessionEnd", want: 59 * time.Second},
+		{event: "PostToolBatch", want: 89 * time.Second},
+		{event: "Stop", want: 89 * time.Second},
+		{event: "SubagentStop", want: 89 * time.Second},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"hook_event_name":%q}`, tc.event))
+			event := resolveHookEvent("", payload)
+			if event != tc.event {
+				t.Fatalf("resolved event=%q, want %q", event, tc.event)
+			}
+			if got := hookRequestTimeout("claudecode", event); got != tc.want {
+				t.Fatalf("request timeout=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveHookEventPrefersExplicitFlagAndRejectsMalformedPayload(t *testing.T) {
+	if got := resolveHookEvent("PreToolUse", []byte(`{"hook_event_name":"Stop"}`)); got != "PreToolUse" {
+		t.Fatalf("explicit event was not preserved: %q", got)
+	}
+	if got := resolveHookEvent("", []byte(`{"hook_event_name":`)); got != "" {
+		t.Fatalf("malformed payload event=%q, want empty", got)
+	}
+	if got := hookRequestTimeout("claudecode", ""); got != 9*time.Second {
+		t.Fatalf("missing Claude event timeout=%s, want shortest safe budget 9s", got)
+	}
+	if got := hookRequestTimeout("claudecode", "FutureEvent"); got != 29*time.Second {
+		t.Fatalf("future Claude event timeout=%s, want ordinary budget 29s", got)
+	}
+	if got := hookRequestTimeout("codex", "Stop"); got != 10*time.Second {
+		t.Fatalf("non-Claude timeout=%s, want 10s", got)
+	}
+}
+
+func TestDefaultHTTPClientUsesSuppliedTotalTimeout(t *testing.T) {
+	client := defaultHTTPClient(89 * time.Second)
+	if client.Timeout != 89*time.Second {
+		t.Fatalf("client timeout=%s, want 89s", client.Timeout)
+	}
+}
+
 // TestDefaultHTTPClientDoesNotFollowRedirects pins the no-follow-redirect
 // contract: the native hook must behave like `curl` without `-L` (the .sh
 // hooks never passed -L). A gateway hook endpoint never legitimately
@@ -967,7 +1018,7 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	resp, err := defaultHTTPClient().Get(redirector.URL)
+	resp, err := defaultHTTPClient(10 * time.Second).Get(redirector.URL)
 	if err != nil {
 		t.Fatalf("Get returned error (redirect should not be followed, not error): %v", err)
 	}
