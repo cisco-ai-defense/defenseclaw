@@ -2285,6 +2285,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.currentConfig().DataDir,
@@ -2308,6 +2309,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
+		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
@@ -3180,6 +3182,7 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
@@ -3197,6 +3200,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard:   false,
 		AgentVersion:       agentVersion,
+		AgentExecutable:    agentExecutable,
 		HookContractID:     contractResolution.Contract.ContractID,
 	}, nil
 }

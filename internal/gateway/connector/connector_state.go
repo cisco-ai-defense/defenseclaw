@@ -538,29 +538,52 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
-	if strings.TrimSpace(dataDir) == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
-	if err != nil {
-		return ""
-	}
-	var payload struct {
-		Agents map[string]struct {
-			Version string `json:"version"`
-		} `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return ""
-	}
-	if payload.Agents == nil {
-		return ""
-	}
-	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
 	if !ok {
 		return ""
 	}
 	return strings.TrimSpace(signal.Version)
+}
+
+// LoadCachedAgentExecutable returns the exact binary selected by trusted
+// Python discovery. The cache is user-private state and the caller still
+// validates that the path is absolute before launching it; this helper merely
+// keeps version and executable selection bound to the same discovery record.
+func LoadCachedAgentExecutable(dataDir, connectorName string) string {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(signal.BinaryPath)
+}
+
+type cachedAgentSignal struct {
+	Version    string `json:"version"`
+	BinaryPath string `json:"binary_path"`
+}
+
+func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {
+	if strings.TrimSpace(dataDir) == "" {
+		return cachedAgentSignal{}, false
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
+	if err != nil {
+		return cachedAgentSignal{}, false
+	}
+	var payload struct {
+		Agents map[string]cachedAgentSignal `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return cachedAgentSignal{}, false
+	}
+	if payload.Agents == nil {
+		return cachedAgentSignal{}, false
+	}
+	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	if !ok {
+		return cachedAgentSignal{}, false
+	}
+	return signal, true
 }
 
 func loadHookContractLock(dataDir string) hookContractLock {

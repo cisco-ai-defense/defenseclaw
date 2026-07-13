@@ -117,6 +117,14 @@ type SetupOpts struct {
 	// HookContract. Empty means "not probed"; it never implies latest.
 	AgentVersion string
 
+	// AgentExecutable is the absolute local agent binary selected by trusted
+	// discovery. Connectors use it only for passive, bounded inspection of the
+	// agent's own effective policy surface (for example Codex app-server's
+	// configRequirements/read RPC). Keeping the selected path beside the
+	// observed version prevents a stale or poisoned PATH entry from changing
+	// which client Setup validates.
+	AgentExecutable string
+
 	// HookContractID optionally pins setup/profile resolution to a specific
 	// known contract. A non-empty value that does not match the resolved
 	// contract marks the profile incompatible instead of silently using a

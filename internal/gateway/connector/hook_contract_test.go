@@ -853,7 +853,10 @@ func TestLoadCachedAgentVersion(t *testing.T) {
 	payload := map[string]interface{}{
 		"version": 1,
 		"agents": map[string]interface{}{
-			"codex": map[string]interface{}{"version": "codex 0.31.0"},
+			"codex": map[string]interface{}{
+				"version":     "codex 0.31.0",
+				"binary_path": `C:\Program Files\Codex\codex.exe`,
+			},
 		},
 	}
 	b, err := json.Marshal(payload)
@@ -865,5 +868,8 @@ func TestLoadCachedAgentVersion(t *testing.T) {
 	}
 	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.31.0" {
 		t.Fatalf("LoadCachedAgentVersion=%q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); got != `C:\Program Files\Codex\codex.exe` {
+		t.Fatalf("LoadCachedAgentExecutable=%q", got)
 	}
 }
