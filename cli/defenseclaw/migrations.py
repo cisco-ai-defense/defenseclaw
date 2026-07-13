@@ -51,7 +51,12 @@ import click
 import yaml
 
 from defenseclaw import ux
-from defenseclaw.file_permissions import copy_windows_dacl, set_file_mode
+from defenseclaw.file_permissions import (
+    copy_windows_dacl,
+    delete_file_durable,
+    replace_file_durable,
+    set_file_mode,
+)
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
@@ -269,7 +274,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     # follow-up: the previous implementation used a non-atomic
     # ``open(..., "w") + json.dump`` pair which could leave the user's
     # Codex MCP config truncated mid-write if the process was killed.
-    # Route through the atomic temp-file + os.replace helper used for
+    # Route through the durable same-directory replacement helper used for
     # every other migration write so a crash here is harmless: either
     # the new content is fully present or the old file is intact. We
     # use mode=0o644 (not 0o600) because openclaw.json is a regular
@@ -486,7 +491,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.writelines(new_lines)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, config_path)
+        replace_file_durable(tmp, config_path)
     except OSError as exc:
         ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
         return
@@ -575,7 +580,7 @@ def _migrate_0_4_0_remove_legacy_codex_env(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
-            os.remove(path)
+            delete_file_durable(path)
             ctx.changes.append(
                 f"removed legacy codex env override {name} (S8.1: replaced by ~/.codex/config.toml patch)"
             )
@@ -1004,8 +1009,9 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     in the *target* directory so the bytes never exist on disk under a
     predictable name, applies the file mode from creation, refuses to
     write through a pre-existing symlink at ``path``, and calls
-    :func:`os.fsync` before :func:`os.replace` so a crash mid-rename
-    cannot leave a half-written file. For secret-bearing writes
+    :func:`os.fsync` before the write-through native replacement so a crash
+    cannot leave a half-written file or an uncommitted Windows rename. For
+    secret-bearing writes
     (``mode <= 0o600``) the parent directory is tightened to 0o700 first,
     even when it already exists with a more permissive mode. Non-secret
     writes (``mode > 0o600``, e.g. the surgical ``openclaw.json``
@@ -1074,7 +1080,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             f.write(body)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        replace_file_durable(tmp_path, path)
         # Re-apply the effective mode after replace in case the FS quirks
         # restored a different mode (e.g. tmpfs ACL inheritance).
         try:
@@ -1356,9 +1362,10 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
        flat path that is NOT in ``_LEGACY_FLAT_REGO_FILENAMES`` is left
        alone so a hand-curated custom rule never disappears mid-upgrade.
 
-    3. Atomic on a per-file basis: each ``os.remove`` either succeeds or
-       leaves the file in place; we never half-delete a file. A failure
-       to remove one file does not abort the migration.
+    3. Durable on a per-file basis: each live name is atomically renamed to an
+       inert tombstone before deletion. A crash cannot resurrect a legacy
+       filename that a downgraded process would consume again. A failure to
+       remove one file does not abort the migration.
 
     4. Idempotent: re-running on a clean install (no flat residue) is a
        no-op.
@@ -1394,7 +1401,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         if not os.path.isfile(flat_path):
             continue
         try:
-            os.remove(flat_path)
+            delete_file_durable(flat_path)
             removed_rego.append(name)
         except OSError as exc:
             ux.warn(f"could not remove {flat_path}: {exc}", indent="    ")
@@ -1434,7 +1441,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         return
 
     # Skip symlinks: filecmp on a symlink would resolve through it and
-    # potentially short-circuit to "identical", but then ``os.remove``
+    # potentially short-circuit to "identical", but then durable deletion
     # would unlink the symlink while the operator's intent was a live
     # alias. Leave symlinks for operators to retire manually.
     if os.path.islink(flat_data):
@@ -1453,7 +1460,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
 
     if identical:
         try:
-            os.remove(flat_data)
+            delete_file_durable(flat_data)
             ctx.changes.append(f"removed duplicate {flat_data} (canonical {nested_data} is the one the loader reads)")
         except OSError as exc:
             ux.warn(f"could not remove {flat_data}: {exc}", indent="    ")
@@ -1476,7 +1483,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
             )
             return
     try:
-        os.replace(flat_data, backup_path)
+        replace_file_durable(flat_data, backup_path)
         ctx.changes.append(
             f"preserved operator-edited {flat_data} as {backup_path} "
             f"(differed from canonical {nested_data}; the gateway no longer "
@@ -1921,7 +1928,7 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
         return
 
     try:
-        os.remove(runtime_path)
+        delete_file_durable(runtime_path)
     except OSError as exc:
         ux.warn(f"could not delete {runtime_path}: {exc}", indent="    ")
         return
