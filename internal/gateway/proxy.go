@@ -3307,7 +3307,7 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	// this verdict's reason. Outside managed_enterprise this resolves to
 	// SinkPolicyDefault, so the existing ForSinkReason behavior is
 	// preserved.
-	policy := sinkPolicyFor(nil, verdict.RedactionEnabled)
+	policy := sinkPolicyFor(context.Background(), verdict.RedactionEnabled)
 	if p.notify != nil {
 		p.notify.Push(SecurityNotification{
 			SubjectType: subject,
@@ -3354,7 +3354,7 @@ func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, dir
 	if verdict == nil {
 		return
 	}
-	policy := sinkPolicyFor(nil, verdict.RedactionEnabled)
+	policy := sinkPolicyFor(context.Background(), verdict.RedactionEnabled)
 	p.notifier.OnWouldBlock(notifier.BlockEvent{
 		Source:       notifier.SourceGuardrail,
 		Target:       model,

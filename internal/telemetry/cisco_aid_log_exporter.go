@@ -109,6 +109,13 @@ func (e *ciscoAIDLogExporter) Shutdown(context.Context) error {
 // 401 (mirrors the inspection path in cisco_inspect.go doInspectHTTP). n is the
 // number of log records in body, used only for the DEFENSECLAW_DEBUG success line.
 func (e *ciscoAIDLogExporter) post(ctx context.Context, body []byte, n int) error {
+	// Bound the whole sequence (token mint + initial POST + at-most-one
+	// re-mint retry) under a single deadline. client.Timeout is per-Do, so
+	// without this a 401 retry could block for up to ~2x ciscoAIDExportTimeout,
+	// contradicting the constant's "single bounded window" contract.
+	ctx, cancel := context.WithTimeout(ctx, ciscoAIDExportTimeout)
+	defer cancel()
+
 	tok, err := e.provider.Token(ctx)
 	if err != nil {
 		return fmt.Errorf("cisco ai defense telemetry: token: %w", err)

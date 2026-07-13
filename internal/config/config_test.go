@@ -1135,10 +1135,10 @@ func TestOTelDestinationWaivedForManagedAIDLogSink(t *testing.T) {
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
 		OTel:           OTelConfig{Enabled: true},
 	}
-	if !managedWithSink.hasManagedAIDLogSink() {
-		t.Fatalf("hasManagedAIDLogSink() = false, want true for managed_enterprise + endpoint")
+	if !managedWithSink.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = false, want true for managed_enterprise + endpoint")
 	}
-	if err := managedWithSink.OTel.validateNamedDestinations(managedWithSink.hasManagedAIDLogSink()); err != nil {
+	if err := managedWithSink.OTel.validateNamedDestinations(managedWithSink.HasManagedAIDLogSink()); err != nil {
 		t.Fatalf("managed AID sink should waive the destination requirement, got: %v", err)
 	}
 
@@ -1147,10 +1147,10 @@ func TestOTelDestinationWaivedForManagedAIDLogSink(t *testing.T) {
 		DeploymentMode: "managed_enterprise",
 		OTel:           OTelConfig{Enabled: true},
 	}
-	if noEndpoint.hasManagedAIDLogSink() {
-		t.Fatalf("hasManagedAIDLogSink() = true with no endpoint, want false")
+	if noEndpoint.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = true with no endpoint, want false")
 	}
-	if err := noEndpoint.OTel.validateNamedDestinations(noEndpoint.hasManagedAIDLogSink()); err == nil ||
+	if err := noEndpoint.OTel.validateNamedDestinations(noEndpoint.HasManagedAIDLogSink()); err == nil ||
 		!strings.Contains(err.Error(), "at least one named destination") {
 		t.Fatalf("without the managed sink the destination rule must still apply, got: %v", err)
 	}
@@ -1161,8 +1161,14 @@ func TestOTelDestinationWaivedForManagedAIDLogSink(t *testing.T) {
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
 		OTel:           OTelConfig{Enabled: true},
 	}
-	if unmanaged.hasManagedAIDLogSink() {
-		t.Fatalf("hasManagedAIDLogSink() = true outside managed_enterprise, want false")
+	if unmanaged.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = true outside managed_enterprise, want false")
+	}
+	// Close the loop: without the waiver, otel.enabled + zero destinations must
+	// still fail even though an endpoint is configured.
+	if err := unmanaged.OTel.validateNamedDestinations(unmanaged.HasManagedAIDLogSink()); err == nil ||
+		!strings.Contains(err.Error(), "at least one named destination") {
+		t.Fatalf("unmanaged + endpoint should still require a destination, got: %v", err)
 	}
 }
 

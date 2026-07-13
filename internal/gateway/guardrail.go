@@ -2052,6 +2052,15 @@ func mergeWithJudge(base, judge *ScanVerdict) *ScanVerdict {
 		return base
 	}
 	if base == nil || base.Severity == "NONE" {
+		// A NONE-severity base can still carry a cloud RedactionEnabled
+		// directive (mergeVerdictsManaged's cloud-allow branch). When the
+		// judge escalates over it, preserve that directive for downstream
+		// sinks — the final merged return below does the same.
+		if base != nil && base.RedactionEnabled != nil {
+			cp := *judge
+			cp.RedactionEnabled = base.RedactionEnabled
+			return &cp
+		}
 		return judge
 	}
 

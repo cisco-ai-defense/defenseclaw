@@ -44,6 +44,10 @@ func emitTestVerdict(ctx context.Context, directive *bool) {
 func TestEmitEvent_CloudDirectiveControlsReason(t *testing.T) {
 	// Baseline redacted form (managed off, DisableAll off) so the test
 	// asserts against the real redactor output rather than a guess.
+	// DisableAll() also honors the DEFENSECLAW_DISABLE_REDACTION env var,
+	// so clear it too — otherwise a CI environment with it set would make
+	// baselineRedacted raw and fail before the feature is exercised.
+	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
 	redaction.SetDisableAll(false)
 	baselineRedacted := redaction.ForSinkReason(rawReason)
 	if baselineRedacted == rawReason {

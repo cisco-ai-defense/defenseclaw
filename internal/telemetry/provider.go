@@ -56,7 +56,6 @@ import (
 	tracehttp "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 )
 
@@ -140,10 +139,9 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 	// from deployment_mode + cisco_ai_defense.endpoint alone — it does NOT
 	// require otel.enabled or any user destination. So the SDK must be built
 	// (not short-circuited to a no-op) whenever either otel.enabled is set OR
-	// the managed sink applies. Keep this predicate in sync with the log
-	// fan-out block below and config.hasManagedAIDLogSink.
-	ciscoAIDLogSink := managed.IsManagedEnterprise(fullCfg.DeploymentMode) &&
-		strings.TrimSpace(fullCfg.CiscoAIDefense.Endpoint) != ""
+	// the managed sink applies. Shares config.HasManagedAIDLogSink so this
+	// predicate has a single definition and cannot drift.
+	ciscoAIDLogSink := fullCfg.HasManagedAIDLogSink()
 	if !cfg.Enabled && !ciscoAIDLogSink {
 		p := &Provider{
 			enabled: false,
