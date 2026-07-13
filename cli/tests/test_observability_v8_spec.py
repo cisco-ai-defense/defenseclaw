@@ -376,7 +376,7 @@ def test_observability_v8_generated_builder_source_contract_is_normative() -> No
     assert "`legacy.audit.*`" in schemas
     assert "The former candidate-generation blockers are resolved" in schemas
     assert "Generated-builder source authority" in verification
-    assert "exactly version 1 and its eleven" in verification
+    assert "exactly version 1 and its thirteen" in verification
     assert "Expanded producer-row tests" in verification
     assert "Derived-value fixtures cover all eleven trace derivations" in verification
     assert "complete compiler-owned `GoAPIPlanIR`" in verification
