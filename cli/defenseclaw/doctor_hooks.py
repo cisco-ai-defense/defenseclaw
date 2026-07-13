@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -357,6 +358,15 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
             for hook in nested:
                 command = hook.get("command") if isinstance(hook, dict) else None
                 if isinstance(command, str) and command.strip():
+                    args = hook.get("args", None)
+                    if "args" in hook:
+                        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                            malformed_entry = True
+                            continue
+                        # Claude Code exec form stores the executable and argv
+                        # separately. Reconstruct only for passive validation;
+                        # Doctor never launches the registered command.
+                        command = subprocess.list2cmdline([command, *args])
                     commands.append(command.strip())
                 else:
                     malformed_entry = True

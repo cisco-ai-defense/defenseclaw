@@ -951,6 +951,14 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
+			} else if connectorName == "claudecode" {
+				var cfg map[string]interface{}
+				if err := json.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse Claude Code config: %v", err)
+				}
+				if !structuredHookCommandReferences(cfg, []string{nativeHookFlag + connectorName}) {
+					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
+				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)

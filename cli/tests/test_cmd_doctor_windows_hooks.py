@@ -156,6 +156,28 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("entries=1", check.detail)
 
+    def test_healthy_claude_exec_form_with_path_spaces(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        handler = document["hooks"]["PreToolUse"][0]["hooks"][0]
+        handler["args"] = ["hook", "--connector", "claudecode"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+    def test_claude_exec_form_rejects_malformed_args(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = "hook --connector claudecode"
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "malformed", check.detail)
+
     def test_codex_bare_executable_uses_safe_pathext_order(self) -> None:
         self._runtime("defenseclaw-hook.cmd")
         exe = self._runtime()

@@ -167,6 +167,9 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 			}
 		}
 	case map[string]interface{}:
+		if structuredNativeExecHookReferences(value, needles) {
+			return true
+		}
 		for key, item := range value {
 			if key == "command" || key == "bash" || key == "handler" {
 				command := strings.TrimSpace(stringValue(item))
@@ -180,6 +183,38 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 			if structuredHookCommandReferences(item, needles) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func structuredNativeExecHookReferences(entry map[string]interface{}, needles []string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	command := strings.TrimSpace(stringValue(entry["command"]))
+	if command == "" || !strings.EqualFold(filepath.Clean(command), filepath.Clean(defenseclawHookBinary())) {
+		return false
+	}
+	rawArgs, ok := entry["args"].([]interface{})
+	if !ok || len(rawArgs) != 3 {
+		return false
+	}
+	args := make([]string, len(rawArgs))
+	for i, raw := range rawArgs {
+		arg, ok := raw.(string)
+		if !ok {
+			return false
+		}
+		args[i] = arg
+	}
+	if args[0] != "hook" || args[1] != "--connector" || strings.TrimSpace(args[2]) == "" {
+		return false
+	}
+	marker := nativeHookFlag + args[2]
+	for _, needle := range needles {
+		if strings.Contains(strings.TrimSpace(needle), marker) {
+			return true
 		}
 	}
 	return false
