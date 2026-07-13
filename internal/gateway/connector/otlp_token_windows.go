@@ -32,7 +32,7 @@ func otlpOpenNoFollow() int {
 // otlpValidatePerm enforces the native Windows owner/DACL and reparse-point
 // contract instead of interpreting synthesized POSIX mode bits.
 func otlpValidatePerm(path string, _ os.FileInfo) error {
-	return hookAPIValidateWindowsPathElement(path, false, false)
+	return hookAPIValidateWindowsPathElement(path, false, true)
 }
 
 // otlpValidateOwner is a no-op on Windows. File ownership uses ACLs and

@@ -84,6 +84,9 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			name: "wide_mode",
 			setup: func(t *testing.T, path string) {
 				t.Helper()
+				if runtime.GOOS == "windows" {
+					t.Skip("POSIX mode bits do not represent an NTFS DACL; see native DACL coverage")
+				}
 				if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
 					t.Fatal(err)
 				}
