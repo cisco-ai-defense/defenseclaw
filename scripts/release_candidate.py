@@ -437,6 +437,24 @@ def published_asset_names(
     )
 
 
+def windows_release_binary_names(version: str) -> tuple[str, ...]:
+    """Return Windows runtime binaries and SBOMs, excluding the refusal resolver."""
+
+    _validate_version(version)
+    canonical = tuple(
+        f"defenseclaw_{version}_windows_{arch}.zip" for arch in ("amd64", "arm64")
+    )
+    if tuple(map(int, version.split("."))) < (0, 8, 4):
+        archives = canonical
+        sboms = tuple(f"{name}.sbom.json" for name in archives)
+    else:
+        protected = _expected_release_artifacts(version)["gateways"]["windows"]
+        archives = tuple(protected[arch] for arch in ("amd64", "arm64"))
+        sboms = tuple(f"{name}.sbom.json" for name in archives)
+        archives = (*archives, *canonical)
+    return tuple(sorted((*archives, *sboms)))
+
+
 def _require_regular_files(directory: Path, names: tuple[str, ...], label: str) -> None:
     if not directory.is_dir():
         raise CandidateError(f"{label} directory not found: {directory}")
@@ -3030,7 +3048,14 @@ def verify(root: Path, version: str, commit: str) -> None:
         _validate_wheel(dist / f"defenseclaw-{version}-py3-none-any.whl", version)
 
 
-def verify_published_release(root: Path, release_json: Path, version: str, commit: str) -> None:
+def verify_published_release(
+    root: Path,
+    release_json: Path,
+    version: str,
+    commit: str,
+    *,
+    omit_windows_binaries: bool = False,
+) -> None:
     """Confirm GitHub exposes the exact sealed bytes after publication."""
 
     verify(root, version, commit)
@@ -3056,6 +3081,9 @@ def verify_published_release(root: Path, release_json: Path, version: str, commi
 
     dist = root / "dist"
     names = _strict_file_names(dist, "release candidate")
+    if omit_windows_binaries:
+        omitted = set(windows_release_binary_names(version))
+        names = tuple(name for name in names if name not in omitted)
     expected = {name: _sha256(dist / name) for name in names}
     if published != expected:
         raise CandidateError("published GitHub asset names or digests differ from the sealed candidate")
@@ -3118,12 +3146,14 @@ def _parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--root", type=Path, required=True)
     list_parser.add_argument("--version", required=True)
     list_parser.add_argument("--commit", required=True)
+    list_parser.add_argument("--omit-windows-binaries", action="store_true")
 
     published_parser = subparsers.add_parser("verify-published")
     published_parser.add_argument("--root", type=Path, required=True)
     published_parser.add_argument("--release-json", type=Path, required=True)
     published_parser.add_argument("--version", required=True)
     published_parser.add_argument("--commit", required=True)
+    published_parser.add_argument("--omit-windows-binaries", action="store_true")
     return parser
 
 
@@ -3175,10 +3205,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"release candidate verified: {args.version} at {args.commit}")
         elif args.command == "list-assets":
             verify(args.root, args.version, args.commit)
-            for name in _strict_file_names(args.root / "dist", "release candidate"):
+            names = _strict_file_names(args.root / "dist", "release candidate")
+            if args.omit_windows_binaries:
+                omitted = set(windows_release_binary_names(args.version))
+                names = tuple(name for name in names if name not in omitted)
+            for name in names:
                 print(name)
         elif args.command == "verify-published":
-            verify_published_release(args.root, args.release_json, args.version, args.commit)
+            verify_published_release(
+                args.root,
+                args.release_json,
+                args.version,
+                args.commit,
+                omit_windows_binaries=args.omit_windows_binaries,
+            )
             print(f"published release verified: {args.version} at {args.commit}")
         else:  # pragma: no cover - argparse enforces the subcommand set
             raise AssertionError(args.command)

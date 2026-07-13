@@ -165,6 +165,32 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
             assert job.get("permissions") != {"contents": "write"}
 
 
+def test_windows_release_binaries_are_disabled_and_omitted() -> None:
+    jobs = _workflow()["jobs"]
+    for name in ("windows-fresh-install", "windows-upgrade"):
+        assert jobs[name]["if"] == "${{ false }}"
+
+    publish_condition = jobs["publish-release"]["if"]
+    assert "always()" in publish_condition
+    for required in (
+        "release-preflight",
+        "assemble-release-candidate",
+        "posix-fresh-install",
+        "linux-upgrade",
+        "macos-upgrade",
+        "historical-baseline-canary",
+        "live-continuity",
+    ):
+        assert f"needs.{required}.result == 'success'" in publish_condition
+    assert "needs.windows-fresh-install.result == 'skipped'" in publish_condition
+    assert "needs.windows-upgrade.result == 'skipped'" in publish_condition
+
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    assert workflow_text.count("--omit-windows-binaries") == 2
+    assert "publish_windows_binaries" not in workflow_text
+    assert "Windows-specific binaries and SBOMs will not be published" in workflow_text
+
+
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert text.count("goreleaser/goreleaser-action@") == 1
@@ -379,7 +405,7 @@ def test_only_final_step_can_create_remote_release_or_tag() -> None:
     assert "gh release upload" not in text
     assert "git push" not in text
     assert "push:\n" not in text
-    assert "Publish tag and all sealed assets" in text
+    assert "Publish tag and selected sealed assets" in text
     assert "verify-published" in text
 
 

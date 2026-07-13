@@ -754,6 +754,7 @@ jobs:
   windows-fresh-install:
     name: Fresh install sealed candidate (Windows)
     needs: [release-preflight, assemble-release-candidate]
+    if: ${{ false }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -963,6 +964,7 @@ jobs:
   windows-upgrade:
     name: Windows upgrade policy ${{ matrix.baseline }} → ${{ needs.release-preflight.outputs.tag }}
     needs: [release-preflight, assemble-release-candidate]
+    if: ${{ false }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -1114,6 +1116,19 @@ jobs:
       - historical-baseline-canary
       - windows-upgrade
       - live-continuity
+    if: >-
+      ${{
+        always() &&
+        needs.release-preflight.result == 'success' &&
+        needs.assemble-release-candidate.result == 'success' &&
+        needs.posix-fresh-install.result == 'success' &&
+        needs.linux-upgrade.result == 'success' &&
+        needs.macos-upgrade.result == 'success' &&
+        needs.historical-baseline-canary.result == 'success' &&
+        needs.live-continuity.result == 'success' &&
+        needs.windows-fresh-install.result == 'skipped' &&
+        needs.windows-upgrade.result == 'skipped'
+      }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -1163,18 +1178,20 @@ jobs:
           fi
 
       # With Immutable Releases enabled, current gh creates a draft, uploads
-      # every supplied asset, and only then publishes. This is the only step
+      # every selected sealed asset, and only then publishes. This is the only step
       # in the workflow that can create the remote release or tag.
-      - name: Publish tag and all sealed assets
+      - name: Publish tag and selected sealed assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
+          echo "::warning title=POSIX-only release::Windows-specific binaries and SBOMs will not be published."
           mapfile -t names < <(
             python3 scripts/release_candidate.py list-assets \
-              --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+              --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+              --omit-windows-binaries
           )
           assets=()
           for name in "${names[@]}"; do
@@ -1211,7 +1228,8 @@ jobs:
               --root release-candidate \
               --release-json published-release.json \
               --version "$RELEASE_TAG" \
-              --commit "$RELEASE_COMMIT"; then
+              --commit "$RELEASE_COMMIT" \
+              --omit-windows-binaries; then
               verified=1
               break
             fi

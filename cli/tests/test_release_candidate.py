@@ -493,6 +493,63 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
 
 
+def test_publication_can_omit_every_windows_specific_asset(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _sealed_candidate(tmp_path)
+    manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
+    omitted = set(release_candidate.windows_release_binary_names(VERSION))
+    assert len(omitted) == 6
+    published_assets = [
+        {
+            "name": item["name"],
+            "digest": f"sha256:{item['sha256']}",
+        }
+        for item in manifest["assets"]
+        if item["name"] not in omitted
+    ]
+    release_json = tmp_path / "published-without-windows.json"
+    release_json.write_text(
+        json.dumps(
+            {
+                "tagName": VERSION,
+                "isDraft": False,
+                "isImmutable": True,
+                "assets": published_assets,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    release_candidate.verify_published_release(
+        root,
+        release_json,
+        VERSION,
+        COMMIT,
+        omit_windows_binaries=True,
+    )
+    with pytest.raises(release_candidate.CandidateError, match="differ from the sealed candidate"):
+        release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+    status = release_candidate.main(
+        [
+            "list-assets",
+            "--root",
+            str(root),
+            "--version",
+            VERSION,
+            "--commit",
+            COMMIT,
+            "--omit-windows-binaries",
+        ]
+    )
+    listed = set(capsys.readouterr().out.splitlines())
+    assert status == 0
+    assert listed == {item["name"] for item in published_assets}
+    assert listed.isdisjoint(omitted)
+
+
 def test_certificate_command_canonicalizes_strict_cosign_wrapper_atomically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
