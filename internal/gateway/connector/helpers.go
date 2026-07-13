@@ -345,10 +345,14 @@ func powershellQuoteLiteral(value string) string {
 }
 
 func windowsAntigravityHookCommand() string {
+	return windowsNativeHookCommand("antigravity")
+}
+
+func windowsNativeHookCommand(connector string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "antigravity",
+		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector,
 		"exit $LASTEXITCODE",
 	}, "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)

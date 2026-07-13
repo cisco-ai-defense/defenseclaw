@@ -464,6 +464,32 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 }
 
+func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T) {
+	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, windowsExe)
+
+	for connector, wrapper := range map[string]func() string{
+		"antigravity": windowsAntigravityHookCommand,
+		"codex":       windowsCodexHookCommand,
+	} {
+		t.Run(connector, func(t *testing.T) {
+			got := wrapper()
+			if want := windowsNativeHookCommand(connector); got != want {
+				t.Fatalf("wrapper command = %q, want shared builder output %q", got, want)
+			}
+			wantScript := strings.Join([]string{
+				"$ErrorActionPreference='Stop'",
+				"$env:NoDefaultCurrentDirectoryInExePath='1'",
+				"& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + connector,
+				"exit $LASTEXITCODE",
+			}, "; ")
+			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
+				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
+			}
+		})
+	}
+}
+
 // TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
 // shell boundary that treats a quoted path as a string unless it is preceded
 // by PowerShell's call operator.

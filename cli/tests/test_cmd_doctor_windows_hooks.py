@@ -21,6 +21,8 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
 )
 from defenseclaw.doctor_hooks import (
+    _commands_from_hooks,
+    _InspectionError,
     _packaged_windows_install_root,
     _split_windows,
     resolve_windows_command,
@@ -192,6 +194,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(exe)))
+
+    def test_codex_explicitly_disabled_hooks_raise_malformed(self) -> None:
+        document = {
+            "features": {"hooks": False},
+            "hooks": {
+                "PreToolUse": [
+                    {"hooks": [{"command": "defenseclaw-hook.exe hook --connector codex"}]}
+                ]
+            },
+        }
+
+        with self.assertRaises(_InspectionError) as raised:
+            _commands_from_hooks(document, "codex")
+
+        self.assertEqual(raised.exception.state, "malformed")
+        self.assertIn("explicitly disabled", raised.exception.detail)
 
     def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:
         runtime = self._runtime()

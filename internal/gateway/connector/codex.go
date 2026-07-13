@@ -842,13 +842,7 @@ func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{}
 }
 
 func windowsCodexHookCommand() string {
-	script := strings.Join([]string{
-		"$ErrorActionPreference='Stop'",
-		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "codex",
-		"exit $LASTEXITCODE",
-	}, "; ")
-	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	return windowsNativeHookCommand("codex")
 }
 
 func codexHookEventKeyLabel(eventType string) string {
