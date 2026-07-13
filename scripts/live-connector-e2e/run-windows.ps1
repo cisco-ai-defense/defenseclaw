@@ -512,8 +512,26 @@ function Assert-DoctorWindowsHookRegistration {
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Doctor contract hook config is missing: $configPath" }
     $originalConfig = [IO.File]::ReadAllBytes($configPath)
     $config = [Text.Encoding]::UTF8.GetString($originalConfig)
-    $commandPattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\s+--connector\s+' + [regex]::Escape($Connector) + '\b'
-    if ($config -notmatch $commandPattern) { throw "$Connector setup did not register the Windows native hook command" }
+    if ($Connector -eq 'claudecode') {
+        try { $settings = $config | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "Claude Code hook config is not valid JSON: $($_.Exception.Message)" }
+        $nativeHookFound = $false
+        foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
+            foreach ($group in @($eventProperty.Value)) {
+                foreach ($handler in @($group.hooks)) {
+                    $args = @($handler.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                        ($args -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
+                        $nativeHookFound = $true
+                    }
+                }
+            }
+        }
+        if (-not $nativeHookFound) { throw 'claudecode setup did not register the Windows native exec-form hook command' }
+    } else {
+        $commandPattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\s+--connector\s+' + [regex]::Escape($Connector) + '\b'
+        if ($config -notmatch $commandPattern) { throw "$Connector setup did not register the Windows native hook command" }
+    }
 
     $result = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout 120
     try { $report = $result.StdOut | ConvertFrom-Json } catch { throw "Doctor did not return JSON: $($_.Exception.Message)" }
