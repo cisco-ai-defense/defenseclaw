@@ -211,11 +211,31 @@ func TestOrdinaryInstallOfNewerPackageRunsMigrations(t *testing.T) {
 	if got := migrationSource(state, "0.8.4", ""); got != "0.8.3" {
 		t.Fatalf("migration source = %q, want installed version", got)
 	}
-	if got := migrationSource(state, "0.8.3", ""); got != "" {
-		t.Fatalf("equal-version repair unexpectedly selected migrations from %q", got)
+	if got := migrationSource(state, "0.8.3", ""); got != "0.8.3" {
+		t.Fatalf("equal-version repair migration source = %q, want installed version", got)
 	}
 	if got := migrationSource(state, "0.8.4", "0.7.9"); got != "0.7.9" {
 		t.Fatalf("explicit migration source = %q", got)
+	}
+}
+
+func TestPackagedMigrationSelectionIncludesSameVersionRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		from string
+		to   string
+		want bool
+	}{
+		{name: "fresh install", from: "", to: "0.8.4", want: false},
+		{name: "upgrade", from: "0.8.3", to: "0.8.4", want: true},
+		{name: "same-version repair", from: "0.8.4", to: "0.8.4", want: true},
+		{name: "invalid downgrade source", from: "0.8.5", to: "0.8.4", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRunPackagedMigrations(tc.from, tc.to); got != tc.want {
+				t.Fatalf("shouldRunPackagedMigrations(%q, %q) = %t, want %t", tc.from, tc.to, got, tc.want)
+			}
+		})
 	}
 }
 

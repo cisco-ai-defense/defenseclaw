@@ -342,7 +342,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := validateInstall(installRoot, payload.Manifest.Version); err != nil {
 		return tryRestore(err)
 	}
-	if upgradeFrom != "" && compareVersions(upgradeFrom, payload.Manifest.Version) < 0 {
+	if shouldRunPackagedMigrations(upgradeFrom, payload.Manifest.Version) {
 		if err := runPackagedMigrations(installRoot, dataRoot, upgradeFrom, payload.Manifest.Version); err != nil {
 			return tryRestore(err)
 		}
@@ -620,10 +620,14 @@ func migrationSource(state *installState, packagedVersion, explicit string) stri
 	if explicit != "" {
 		return explicit
 	}
-	if state != nil && compareVersions(state.Version, packagedVersion) < 0 {
+	if state != nil && compareVersions(state.Version, packagedVersion) <= 0 {
 		return state.Version
 	}
 	return ""
+}
+
+func shouldRunPackagedMigrations(fromVersion, toVersion string) bool {
+	return fromVersion != "" && compareVersions(fromVersion, toVersion) <= 0
 }
 
 func loadExistingInstallState(installRoot string) (*installState, error) {
