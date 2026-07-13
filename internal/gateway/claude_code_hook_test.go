@@ -603,6 +603,25 @@ func TestEvaluateClaudeCodeHook_PostToolUseRuleFindingIsNotReportedAsEnforced(t 
 	}
 }
 
+func TestEvaluateClaudeCodeHook_PostToolBatchFindingStopsNextModelCall(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolBatch",
+		ToolCalls:     "jailbreak ai",
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want block/block/false", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if decision, ok := resp.ClaudeCodeOutput["decision"]; !ok || decision != "block" {
+		t.Fatalf("claude output = %+v, PostToolBatch must stop before the next model call", resp.ClaudeCodeOutput)
+	}
+}
+
 func TestEvaluateClaudeCodeHook_ConfigChangeEnforcementDependsOnSource(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"

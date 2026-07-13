@@ -257,9 +257,10 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 //
 // CanBlock=true: PreToolUse/PermissionRequest honour permissionDecision=
 // deny; UserPromptSubmit and other pre-action events honour decision=block;
-// tasks honour continue=false. PostToolUse/PostToolBatch are intentionally
-// excluded because their tool side effects have already occurred. ConfigChange
-// is blockable except for the policy_settings source.
+// tasks honour continue=false. PostToolUse is advisory because the tool side
+// effects have already occurred; PostToolBatch can still stop the agentic loop
+// before the next model call. ConfigChange is blockable except for the
+// policy_settings source.
 //
 // CanAskNative=true: PreToolUse renders permissionDecision=ask when a
 // hook returns confirm, which Claude Code surfaces as a native HITL
@@ -277,6 +278,7 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 			"UserPromptExpansion",
 			"PreToolUse",
 			"PermissionRequest",
+			"PostToolBatch",
 			"TaskCreated",
 			"TaskCompleted",
 			"TeammateIdle",

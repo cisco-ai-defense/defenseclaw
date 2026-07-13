@@ -361,7 +361,7 @@ func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
 
 	switch req.HookEventName {
 	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
-		"TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
+		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true
 	default:
