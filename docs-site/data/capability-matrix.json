@@ -14,7 +14,7 @@
         "canBlock": true,
         "canAskNative": true,
         "askEvents": ["PreToolUse"],
-        "blockEvents": ["UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolBatch", "TaskCreated", "TaskCompleted", "TeammateIdle", "Stop", "SubagentStop", "PreCompact", "Elicitation", "ElicitationResult"],
+        "blockEvents": ["UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "TaskCreated", "TaskCompleted", "TeammateIdle", "Stop", "SubagentStop", "ConfigChange", "PreCompact", "Elicitation", "ElicitationResult"],
         "supportsFailClosed": true,
         "scope": "user"
       },

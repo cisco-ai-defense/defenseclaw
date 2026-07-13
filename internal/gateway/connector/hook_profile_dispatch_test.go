@@ -181,21 +181,26 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		CanBlock:     true,
 		CanAskNative: true,
 		AskEvents:    []string{"PreToolUse"},
-		BlockEvents:  []string{"UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"},
+		BlockEvents:  []string{"UserPromptSubmit", "PreToolUse", "PermissionRequest", "ConfigChange", "Stop"},
 	}
 	cases := []struct {
 		name         string
 		raw          string
 		event        string
 		mode         string
+		payload      map[string]interface{}
 		wantAction   string
 		wantWouldBlk bool
 	}{
-		{"observe_block", "block", "PreToolUse", "observe", "allow", true},
-		{"action_block_enforceable", "block", "PreToolUse", "action", "block", false},
-		{"action_block_unenforceable", "block", "SessionStart", "action", "allow", true},
-		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", "confirm", false},
-		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", "alert", false},
+		{"observe_block", "block", "PreToolUse", "observe", nil, "allow", true},
+		{"action_block_enforceable", "block", "PreToolUse", "action", nil, "block", false},
+		{"action_block_unenforceable", "block", "SessionStart", "action", nil, "allow", true},
+		{"post_tool_use_is_advisory", "block", "PostToolUse", "action", nil, "allow", true},
+		{"post_tool_batch_is_advisory", "block", "PostToolBatch", "action", nil, "allow", true},
+		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
+		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
+		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
+		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", nil, "alert", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,6 +209,7 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 				Event:     tc.event,
 				Mode:      tc.mode,
 				Caps:      caps,
+				Payload:   tc.payload,
 			})
 			if out.Action != tc.wantAction {
 				t.Errorf("Action=%q want %q", out.Action, tc.wantAction)

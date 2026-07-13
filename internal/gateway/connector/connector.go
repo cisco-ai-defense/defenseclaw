@@ -420,14 +420,16 @@ type HookProfileRequest struct {
 // MapVerdict. RawAction is the normalized upstream verdict
 // ("allow", "block", "alert", "confirm"), Event is the hook event
 // name, Mode is the connector-resolved guardrail mode
-// ("observe" or "action"), and Caps is the connector's hook
-// capability matrix. MapVerdict returns the final action plus a
-// would_block flag.
+// ("observe" or "action"), Caps is the connector's hook capability
+// matrix, and Payload is the original hook payload when an event's
+// enforceability depends on request metadata. MapVerdict returns the
+// final action plus a would_block flag.
 type HookVerdictInput struct {
 	RawAction string
 	Event     string
 	Mode      string
 	Caps      HookCapability
+	Payload   map[string]interface{}
 }
 
 // HookVerdictOutput is MapVerdict's return value. Action is the
