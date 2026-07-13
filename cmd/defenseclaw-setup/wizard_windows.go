@@ -573,7 +573,19 @@ func (w *setupWizard) finish() {
 		}
 	default:
 		setText(w.heading, "DefenseClaw is installed")
-		setText(w.description, "Next, open a terminal and run defenseclaw init to configure connectors, then run defenseclaw tui to review activity. This installer installed the existing CLI/TUI, gateway, hook launcher, and managed runtime; it is not a separate DefenseClaw GUI application.")
+		setText(w.description, wizardCompletionDescription(w.opts.Connector))
+	}
+}
+
+func wizardCompletionDescription(connector string) string {
+	const installed = " Run defenseclaw to open the TUI and review activity. DefenseClaw is a CLI/TUI product; setup did not install a separate GUI application."
+	switch connector {
+	case "codex":
+		return "Codex CLI is configured. On first use, open /hooks in Codex and approve the DefenseClaw hooks." + installed
+	case "claudecode":
+		return "Claude Code is configured and its native Windows hooks are ready." + installed
+	default:
+		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, or another connector." + installed
 	}
 }
 

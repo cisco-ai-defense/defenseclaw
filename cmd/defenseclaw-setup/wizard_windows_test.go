@@ -212,6 +212,28 @@ func TestInteractiveInstallDefaultsPreserveCLIOnlyOptOut(t *testing.T) {
 	}
 }
 
+func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
+	for _, tc := range []struct {
+		connector string
+		want      string
+		reject    string
+	}{
+		{connector: "codex", want: "open /hooks", reject: "defenseclaw init"},
+		{connector: "claudecode", want: "Claude Code is configured", reject: "defenseclaw init"},
+		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			got := wizardCompletionDescription(tc.connector)
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("completion text %q does not contain %q", got, tc.want)
+			}
+			if strings.Contains(got, tc.reject) {
+				t.Fatalf("completion text %q unexpectedly contains %q", got, tc.reject)
+			}
+		})
+	}
+}
+
 func TestHighWord(t *testing.T) {
 	if got := highWord(0x12345678); got != 0x1234 {
 		t.Fatalf("highWord = %#x, want %#x", got, 0x1234)
