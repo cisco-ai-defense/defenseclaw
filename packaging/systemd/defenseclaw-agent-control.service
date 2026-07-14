@@ -1,0 +1,57 @@
+[Unit]
+Description=DefenseClaw Agent Control Policy Synchronizer
+Documentation=https://docs.defenseclaw.ai/docs/setup/agent-control
+After=network-online.target defenseclaw-gateway.service
+Wants=network-online.target defenseclaw-gateway.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=defenseclaw
+Group=defenseclaw
+Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
+Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+EnvironmentFile=/etc/defenseclaw/agent-control.env
+ExecStartPre=/bin/sh -ec 'test -f /etc/defenseclaw/agent-control.env; test ! -L /etc/defenseclaw/agent-control.env; test "$$(/usr/bin/stat -c %%U:%%G:%%a:%%h /etc/defenseclaw/agent-control.env)" = root:defenseclaw:640:1'
+ExecStart=/opt/defenseclaw/bin/defenseclaw agent-control sync --watch
+Restart=on-failure
+RestartSec=5s
+StateDirectory=defenseclaw
+RuntimeDirectory=defenseclaw
+LogsDirectory=defenseclaw
+StateDirectoryMode=0750
+RuntimeDirectoryMode=0750
+LogsDirectoryMode=0750
+WorkingDirectory=/var/lib/defenseclaw
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
+ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

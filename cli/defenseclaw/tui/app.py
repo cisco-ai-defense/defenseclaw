@@ -11,7 +11,7 @@ import subprocess
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -145,6 +145,7 @@ TOKENS = DEFAULT_TOKENS
 # the custom-provider ``Action`` selector.
 _SETUP_DRIVER_FLAGS: dict[SetupWizard, frozenset[str]] = {
     SetupWizard.LLM: frozenset({"--provider", "--role"}),
+    SetupWizard.GUARDRAIL: frozenset({"--regex-source", "--agent-control-deployment"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"--base-provider-type"}),
 }
 _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
@@ -5097,6 +5098,7 @@ class DefenseClawTUI(App[None]):
             ("Connector", f"{friendly_connector_name(connector)} ({connector})"),
             ("Mode", mode or "?"),
             ("Rule pack", rule_pack or "default"),
+            *_agent_control_configuration_rows(cfg),
             ("Guardrail", guardrail_state),
             ("Status", status),
             ("Last activity", last_activity),
@@ -6257,6 +6259,10 @@ class DefenseClawTUI(App[None]):
                     ),
                 ),
                 ("Policy posture", Text(_policy_posture(cfg))),
+                *[
+                    (label, Text(value))
+                    for label, value in _agent_control_configuration_rows(cfg)
+                ],
                 ("Enforcement", Text(_enforcement_label(cfg))),
                 (
                     "Human approval",
@@ -6931,6 +6937,7 @@ class DefenseClawTUI(App[None]):
                     "ON - prompts and outputs are redacted" if cfg and not cfg.privacy_disable_redaction else "OFF",
                 ),
                 ("Policy posture", _policy_posture(cfg)),
+                *_agent_control_configuration_rows(cfg),
                 ("Enforcement", _enforcement_label(cfg)),
                 ("Environment", (cfg.environment if cfg else "") or "unknown"),
                 ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
@@ -9357,6 +9364,7 @@ class DefenseClawTUI(App[None]):
         if len(self.screen_stack) > 1:
             return
         if self.active_panel == "overview" and not self.help_open:
+            self._load_agent_control_overview_state()
             connector_rows_changed = self._overview_connector_rows_changed_since_render()
             self._render_overview_metrics()
             self._schedule_overview_sampled_refresh(allow_scrolled=connector_rows_changed)
@@ -9380,6 +9388,17 @@ class DefenseClawTUI(App[None]):
         self._load_doctor_cache()
         self._load_silent_bypass_count()
         self._load_activity_mutations()
+        self._load_agent_control_overview_state()
+
+    def _load_agent_control_overview_state(self) -> None:
+        """Refresh the redacted status snapshot from the local sync state."""
+
+        current = self.overview_model.cfg
+        if self.config is None or current is None:
+            return
+        self.overview_model.set_cfg(
+            replace(current, **_agent_control_runtime_fields(self.config))
+        )
 
     def _refresh_alerts(self) -> None:
         """Single entry point for refreshing alerts from disk + audit DB.
@@ -10080,6 +10099,45 @@ def _active_policy_scanner_overrides(
     return _flatten_scanner_overrides(data.get("scanner_overrides", {}))
 
 
+def _agent_control_runtime_fields(config: object) -> dict[str, object]:
+    """Return redacted synchronizer fields safe for the Overview."""
+
+    agent_control = getattr(config, "agent_control", None)
+    disabled: dict[str, object] = {
+        "agent_control_sync_status": "disabled",
+        "agent_control_matching_controls": 0,
+        "agent_control_pending_restart": False,
+        "agent_control_observability_status": "disabled",
+        "agent_control_sent_events": 0,
+        "agent_control_dropped_events": 0,
+        "agent_control_last_error": "",
+    }
+    if agent_control is None or not bool(getattr(agent_control, "enabled", False)):
+        return disabled
+    try:
+        from defenseclaw.agent_control.publisher import ManagedPublisher
+        from defenseclaw.agent_control.state import load_state
+
+        publisher = ManagedPublisher(
+            data_dir=str(getattr(config, "data_dir", "") or ""),
+            policy_dir=str(getattr(config, "policy_dir", "") or ""),
+            managed_dir=str(getattr(agent_control, "managed_dir", "") or ""),
+            opa_enabled=bool(getattr(getattr(agent_control, "opa", None), "enabled", False)),
+        )
+        state = load_state(publisher.state_path)
+    except (OSError, ValueError):
+        return {**disabled, "agent_control_sync_status": "unavailable"}
+    return {
+        "agent_control_sync_status": str(state.status or "not_initialized"),
+        "agent_control_matching_controls": max(int(state.matching_controls or 0), 0),
+        "agent_control_pending_restart": bool(state.rule_pack_pending_restart),
+        "agent_control_observability_status": str(state.observability_status or "disabled"),
+        "agent_control_sent_events": max(int(state.observability_sent_events or 0), 0),
+        "agent_control_dropped_events": max(int(state.observability_dropped_events or 0), 0),
+        "agent_control_last_error": str(state.last_error or state.observability_last_error or ""),
+    }
+
+
 def _overview_config(config: object | None) -> OverviewConfig | None:
     if config is None:
         return None
@@ -10088,6 +10146,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     llm = getattr(config, "llm", None)
     inspect_llm = getattr(config, "inspect_llm", None)
     cisco = getattr(config, "cisco_ai_defense", None)
+    agent_control = getattr(config, "agent_control", None)
+    agent_control_opa = getattr(agent_control, "opa", None)
+    agent_control_observability = getattr(agent_control, "observability", None)
     privacy = getattr(config, "privacy", None)
     hilt = getattr(guardrail, "hilt", None)
     # Multi-connector roster (WU10): only when more than one connector is
@@ -10159,6 +10220,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         connector_modes = tuple(pairs)
         connector_packs = tuple(packs)
         connector_disabled = tuple(disabled)
+    runtime_fields = _agent_control_runtime_fields(config)
     return OverviewConfig(
         data_dir=str(getattr(config, "data_dir", "") or ""),
         environment=str(getattr(config, "environment", "") or ""),
@@ -10186,6 +10248,19 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         inspect_llm_provider=str(getattr(inspect_llm, "provider", "") or ""),
         inspect_llm_model=str(getattr(inspect_llm, "model", "") or ""),
         cisco_ai_defense_endpoint=str(getattr(cisco, "endpoint", "") or ""),
+        regex_source=str(getattr(guardrail, "regex_source", "") or "local"),
+        agent_control_enabled=bool(getattr(agent_control, "enabled", False)),
+        agent_control_deployment=str(getattr(agent_control, "deployment", "") or ""),
+        agent_control_server_url=str(getattr(agent_control, "server_url", "") or ""),
+        agent_control_installation_id=str(getattr(agent_control, "installation_id", "") or ""),
+        agent_control_opa_enabled=bool(getattr(agent_control_opa, "enabled", False)),
+        agent_control_opa_precedence=str(getattr(agent_control_opa, "precedence", "") or ""),
+        agent_control_observability_enabled=bool(
+            getattr(agent_control_observability, "enabled", False)
+        ),
+        agent_control_observability_include_content=bool(
+            getattr(agent_control_observability, "include_content", False)
+        ),
         connector_modes=connector_modes,
         connector_packs=connector_packs,
         connector_disabled=connector_disabled,
@@ -10196,6 +10271,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         scanner_overrides=_active_policy_scanner_overrides(
             str(getattr(config, "policy_dir", "") or "")
         ),
+        **runtime_fields,
     )
 
 
@@ -10680,6 +10756,69 @@ def _policy_posture(cfg: OverviewConfig | None) -> str:
     if mode == "action":
         return f"action: block CRIT, alert MED+ ({scanner})"
     return f"balanced: block CRIT, alert MED+ ({scanner})"
+
+
+def _agent_control_configuration_rows(
+    cfg: OverviewConfig | None,
+) -> tuple[tuple[str, str], ...]:
+    """Render the resolved central regex-policy posture without secrets."""
+
+    if cfg is None:
+        return ()
+    source = (cfg.regex_source or "local").strip().lower()
+    source_label = {
+        "local": "Local DefenseClaw",
+        "agent_control": "Agent Control managed",
+        "hybrid": "Hybrid (local + Agent Control)",
+    }.get(source, source or "unknown")
+    rows: list[tuple[str, str]] = [("Regex source", source_label)]
+    if not cfg.agent_control_enabled:
+        rows.append(("Agent Control", "disabled"))
+        return tuple(rows)
+
+    sync_status = (cfg.agent_control_sync_status or "not_initialized").replace("_", " ")
+    sync_parts = [sync_status]
+    if cfg.agent_control_matching_controls:
+        sync_parts.append(f"{cfg.agent_control_matching_controls} controls")
+    if cfg.agent_control_pending_restart:
+        sync_parts.append("restart pending")
+    rows.append(("Agent Control", " · ".join(sync_parts)))
+    rows.append(
+        (
+            "Deployment",
+            {
+                "cisco_cloud": "Cisco Enterprise Cloud",
+                "self_hosted": "Self-hosted",
+            }.get(cfg.agent_control_deployment, cfg.agent_control_deployment or "unknown"),
+        )
+    )
+    if cfg.agent_control_server_url:
+        rows.append(("AC endpoint", cfg.agent_control_server_url))
+    if cfg.agent_control_installation_id:
+        rows.append(("Installation", cfg.agent_control_installation_id))
+    if cfg.agent_control_opa_enabled:
+        precedence = cfg.agent_control_opa_precedence or "stricter"
+        rows.append(("OPA thresholds", f"Agent Control ({precedence})"))
+    else:
+        rows.append(("OPA thresholds", "Local DefenseClaw"))
+
+    if not cfg.agent_control_observability_enabled:
+        monitor_content = "disabled"
+    elif not cfg.agent_control_observability_include_content:
+        monitor_content = "metadata only"
+    elif cfg.privacy_disable_redaction:
+        monitor_content = "exact content (global redaction OFF)"
+    else:
+        monitor_content = "redacted content"
+    rows.append(("Monitor content", monitor_content))
+
+    if cfg.agent_control_observability_enabled:
+        delivery = cfg.agent_control_observability_status or "not initialized"
+        delivery += f" · {cfg.agent_control_sent_events} sent"
+        if cfg.agent_control_dropped_events:
+            delivery += f" · {cfg.agent_control_dropped_events} dropped"
+        rows.append(("Monitor delivery", delivery))
+    return tuple(rows)
 
 
 def _enforcement_label(cfg: OverviewConfig | None) -> str:

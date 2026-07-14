@@ -21,6 +21,7 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import copy
 import json as _json
 import os
 import secrets
@@ -3515,6 +3516,237 @@ def _resolve_judge_hook_gate(
     return None
 
 
+_REGEX_SOURCE_LABELS = {
+    "local": "Local DefenseClaw",
+    "agent_control": "Agent Control managed",
+    "hybrid": "Hybrid",
+}
+_AGENT_CONTROL_DEPLOYMENT_LABELS = {
+    "cisco_cloud": "Cisco Enterprise Cloud",
+    "self_hosted": "Self-hosted Agent Control",
+}
+
+
+def _remove_agent_control_overlay(app: AppContext) -> None:
+    """Remove only the managed Agent Control overlay from guardrail config."""
+    from defenseclaw.agent_control.publisher import ManagedPublisher
+
+    settings = app.cfg.agent_control
+    publisher = ManagedPublisher(
+        data_dir=app.cfg.data_dir,
+        policy_dir=app.cfg.policy_dir,
+        managed_dir=settings.managed_dir,
+        opa_enabled=settings.opa.enabled,
+    )
+    managed = os.path.normpath(str(publisher.rule_pack_root))
+    app.cfg.guardrail.rule_pack_overlay_dirs = [
+        value for value in app.cfg.guardrail.rule_pack_overlay_dirs if os.path.normpath(value.strip()) != managed
+    ]
+
+
+def _select_local_regex_source(app: AppContext, gc) -> None:
+    gc.regex_source = "local"
+    settings = getattr(app.cfg, "agent_control", None)
+    if settings is None:
+        return
+    settings.enabled = False
+    settings.rule_pack.enabled = False
+    _remove_agent_control_overlay(app)
+
+
+def _configure_agent_control_values(
+    app: AppContext,
+    gc,
+    *,
+    source: str,
+    deployment: str | None,
+    server_url: str | None,
+    installation_id: str | None,
+    api_key_env: str | None,
+    manage_opa: bool | None,
+    monitor_content: bool | None,
+) -> None:
+    from defenseclaw.commands.cmd_agent_control import default_installation_id
+
+    settings = app.cfg.agent_control
+    was_enabled = settings.enabled
+    gc.regex_source = source
+    settings.enabled = True
+    settings.rule_pack.enabled = True
+    settings.deployment = deployment or settings.deployment or "cisco_cloud"
+    settings.target_type = (
+        "log_stream" if settings.deployment == "cisco_cloud" else "defenseclaw.installation"
+    )
+    settings.api_key_header = "Galileo-API-Key" if settings.deployment == "cisco_cloud" else "X-API-Key"
+    if server_url is not None:
+        settings.server_url = server_url.strip().rstrip("/")
+    settings.installation_id = (installation_id or "").strip() or settings.installation_id.strip()
+    if not settings.installation_id and settings.deployment == "self_hosted":
+        settings.installation_id = default_installation_id()
+    settings.api_key_env = (api_key_env or settings.api_key_env or "AGENT_CONTROL_API_KEY").strip()
+    if manage_opa is not None:
+        settings.opa.enabled = manage_opa
+    elif not was_enabled:
+        settings.opa.enabled = False
+    if monitor_content is not None:
+        settings.observability.include_content = monitor_content
+    settings.validate()
+
+
+def _prompt_regex_policy_source(
+    app: AppContext,
+    gc,
+    *,
+    pending_secrets: dict[str, str] | None = None,
+) -> bool:
+    ux.section("Regex policy source")
+    ux.subhead("DefenseClaw can enforce bundled rules locally or receive rule buckets")
+    ux.subhead("from Agent Control.")
+    click.echo()
+    click.echo("    " + ux.bold("[1] Local DefenseClaw"))
+    click.echo("        " + ux.dim("Use bundled and locally configured regex rules."))
+    click.echo("    " + ux.bold("[2] Agent Control managed"))
+    click.echo("        " + ux.dim("Agent Control becomes the source of regex rules."))
+    click.echo("        " + ux.dim("The last-known-good managed policy remains active if connectivity fails."))
+    click.echo("    " + ux.bold("[3] Hybrid"))
+    click.echo("        " + ux.dim("Keep local regex rules and add Agent Control rules."))
+    configured_source = getattr(gc, "regex_source", "local")
+    current = configured_source if configured_source in _REGEX_SOURCE_LABELS else "local"
+    default = {"local": "1", "agent_control": "2", "hybrid": "3"}[current]
+    choice = click.prompt("  Select policy source", type=click.Choice(["1", "2", "3"]), default=default)
+    source = {"1": "local", "2": "agent_control", "3": "hybrid"}[choice]
+    if source == "local":
+        _select_local_regex_source(app, gc)
+        return True
+
+    settings = app.cfg.agent_control
+    ux.section("Agent Control deployment")
+    click.echo("    " + ux.bold("[1] Cisco Enterprise Cloud"))
+    click.echo("    " + ux.bold("[2] Self-hosted Agent Control"))
+    deployment_default = "2" if settings.deployment == "self_hosted" else "1"
+    deployment_choice = click.prompt(
+        "  Select deployment",
+        type=click.Choice(["1", "2"]),
+        default=deployment_default,
+    )
+    deployment = "cisco_cloud" if deployment_choice == "1" else "self_hosted"
+    default_url = settings.server_url
+    if not default_url and deployment == "self_hosted":
+        default_url = "http://127.0.0.1:8000"
+    server_url = click.prompt(
+        "  Agent Control URL",
+        default=default_url,
+        show_default=bool(default_url),
+    )
+    installation_label = "Galileo log stream ID" if deployment == "cisco_cloud" else "Installation ID"
+    installation_default = settings.installation_id
+    if not installation_default and deployment == "self_hosted":
+        from defenseclaw.commands.cmd_agent_control import default_installation_id
+
+        installation_default = default_installation_id()
+    installation_id = click.prompt(
+        f"  {installation_label}",
+        default=installation_default,
+        show_default=bool(installation_default),
+    )
+    api_key_env = _prompt_env_var_name(settings.api_key_env or "AGENT_CONTROL_API_KEY")
+    manage_opa = click.confirm("  Manage OPA thresholds through Agent Control?", default=False)
+    monitor_content = click.confirm(
+        "  Send blocked content to Agent Control Monitor (DefenseClaw redaction still applies)?",
+        default=True,
+    )
+    _configure_agent_control_values(
+        app,
+        gc,
+        source=source,
+        deployment=deployment,
+        server_url=server_url,
+        installation_id=installation_id,
+        api_key_env=api_key_env,
+        manage_opa=manage_opa,
+        monitor_content=monitor_content,
+    )
+
+    from defenseclaw.credentials import resolve
+
+    if not resolve(api_key_env, app.cfg.data_dir).is_set:
+        ux.warn(f"${api_key_env} is not set; Agent Control preflight requires it.", indent="  ")
+        if click.confirm("  Enter the API key for validation now?", default=True):
+            secret = click.prompt(f"  {api_key_env}", hide_input=True, show_default=False, default="")
+            if secret:
+                if pending_secrets is not None:
+                    pending_secrets[api_key_env] = secret
+                ux.subhead("The key will be saved only after you apply this configuration.")
+
+    if source == "agent_control":
+        ux.section("Agent Control managed mode")
+        ux.ok("Local regex enforcement will be replaced by Agent Control buckets", indent="  ")
+        ux.ok("Local judges, suppressions, HILT, hook fail mode, and connector settings remain local", indent="  ")
+        ux.ok("A validated managed policy will be downloaded before switching modes", indent="  ")
+        ux.ok("Last-known-good managed rules remain active during an outage", indent="  ")
+        click.echo()
+        if not click.confirm("  Continue?", default=True):
+            return False
+    return True
+
+
+def _render_guardrail_review(app: AppContext, gc) -> None:
+    ux.section("Guardrail configuration")
+    connector = gc.connector or "openclaw"
+    ux.kv("Connector", _CONNECTOR_META.get(connector, {}).get("label", connector))
+    ux.kv("Enforcement mode", gc.mode or "observe")
+    ux.kv("Regex policy source", _REGEX_SOURCE_LABELS.get(gc.regex_source, gc.regex_source))
+    if gc.regex_source in {"agent_control", "hybrid"}:
+        settings = app.cfg.agent_control
+        ux.kv("Agent Control", _AGENT_CONTROL_DEPLOYMENT_LABELS.get(settings.deployment, settings.deployment))
+        ux.kv("Endpoint", settings.server_url)
+        ux.kv("Policy target", f"{settings.resolved_target_type()}:{settings.installation_id}")
+        ux.kv("Policy activation", "automatic restart")
+        ux.kv("OPA thresholds", "Agent Control" if settings.opa.enabled else "local")
+        ux.kv("ControlSpan sink", settings.observability.sink)
+        ux.kv(
+            "Monitor content",
+            (
+                "exact / unredacted"
+                if settings.observability.include_content and app.cfg.privacy.disable_redaction
+                else "redacted by DefenseClaw"
+                if settings.observability.include_content
+                else "metadata only"
+            ),
+        )
+        ux.kv("Failure behavior", "last-known-good managed policy")
+
+
+def _preflight_guardrail_agent_control(
+    app: AppContext,
+    gc,
+    *,
+    api_key_override: str | None = None,
+) -> None:
+    if gc.regex_source not in {"agent_control", "hybrid"}:
+        return
+    from defenseclaw.commands.cmd_agent_control import configure_agent_control
+
+    settings = app.cfg.agent_control
+    configure_agent_control(
+        app,
+        deployment=settings.deployment,
+        server_url=settings.server_url,
+        installation_id=settings.installation_id,
+        api_key_env=settings.api_key_env,
+        target_type=settings.resolved_target_type(),
+        api_key_header=settings.resolved_api_key_header(),
+        enable_rule_pack=True,
+        manage_opa=settings.opa.enabled,
+        include_content=settings.observability.include_content,
+        observability_sink=settings.observability.sink,
+        otel_destination=settings.observability.otel_destination,
+        require_rules=gc.regex_source == "agent_control",
+        save_config=False,
+        api_key_override=api_key_override,
+    )
+
+
 # ---------------------------------------------------------------------------
 # setup guardrail
 # ---------------------------------------------------------------------------
@@ -3609,6 +3841,35 @@ def _resolve_judge_hook_gate(
         "per-connector when --connector names a multi-install peer, else "
         'global. Mutually exclusive with --rule-pack; pass "" to clear.'
     ),
+)
+@click.option(
+    "--regex-source",
+    type=click.Choice(["local", "agent_control", "hybrid"]),
+    default=None,
+    help="Regex policy source: local DefenseClaw, Agent Control managed, or hybrid.",
+)
+@click.option(
+    "--agent-control-deployment",
+    type=click.Choice(["cisco_cloud", "self_hosted"]),
+    default=None,
+    help="Agent Control deployment model.",
+)
+@click.option("--agent-control-url", default=None, help="Agent Control service URL.")
+@click.option("--agent-control-installation-id", default=None, help="Stable DefenseClaw installation ID.")
+@click.option(
+    "--agent-control-api-key-env",
+    default=None,
+    help="Environment variable holding the Agent Control API key.",
+)
+@click.option(
+    "--agent-control-manage-opa/--no-agent-control-manage-opa",
+    default=None,
+    help="Manage OPA thresholds through Agent Control.",
+)
+@click.option(
+    "--agent-control-monitor-content/--no-agent-control-monitor-content",
+    default=None,
+    help="Send exact blocked prompt content to Agent Control Monitor.",
 )
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
@@ -3803,6 +4064,13 @@ def setup_guardrail(
     detection_strategy_tool_call: str | None,
     rule_pack,
     rule_pack_dir,
+    regex_source: str | None,
+    agent_control_deployment: str | None,
+    agent_control_url: str | None,
+    agent_control_installation_id: str | None,
+    agent_control_api_key_env: str | None,
+    agent_control_manage_opa: bool | None,
+    agent_control_monitor_content: bool | None,
     judge_model,
     judge_api_base,
     judge_api_key_env,
@@ -3872,6 +4140,9 @@ def setup_guardrail(
         _disable_guardrail(app, gc, restart=True)
         return
 
+    original_guardrail = copy.deepcopy(app.cfg.guardrail)
+    original_agent_control = copy.deepcopy(app.cfg.agent_control)
+    pending_agent_control_secrets: dict[str, str] = {}
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -3925,6 +4196,39 @@ def setup_guardrail(
         else:
             gc.mode = guard_mode or gc.mode or "observe"
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
+        selected_regex_source = regex_source or gc.regex_source or "local"
+        agent_control_options_present = any(
+            value is not None
+            for value in (
+                agent_control_deployment,
+                agent_control_url,
+                agent_control_installation_id,
+                agent_control_api_key_env,
+                agent_control_manage_opa,
+                agent_control_monitor_content,
+            )
+        )
+        if selected_regex_source == "local":
+            if agent_control_options_present:
+                raise click.UsageError(
+                    "Agent Control options require --regex-source=agent_control or --regex-source=hybrid"
+                )
+            _select_local_regex_source(app, gc)
+        else:
+            try:
+                _configure_agent_control_values(
+                    app,
+                    gc,
+                    source=selected_regex_source,
+                    deployment=agent_control_deployment,
+                    server_url=agent_control_url,
+                    installation_id=agent_control_installation_id,
+                    api_key_env=agent_control_api_key_env,
+                    manage_opa=agent_control_manage_opa,
+                    monitor_content=agent_control_monitor_content,
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
         if cisco_api_key_env is not None:
@@ -4112,7 +4416,16 @@ def setup_guardrail(
                 gc.scanner_mode = "local"
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
-        _interactive_guardrail_setup(app, gc, agent_name=agent_name)
+        if not _interactive_guardrail_setup(
+            app,
+            gc,
+            agent_name=agent_name,
+            pending_secrets=pending_agent_control_secrets,
+        ):
+            app.cfg.guardrail = original_guardrail
+            app.cfg.agent_control = original_agent_control
+            click.echo("  Guardrail setup cancelled; existing configuration was not changed.")
+            return
         _apply_guardrail_extra_options(
             app,
             gc,
@@ -4122,6 +4435,18 @@ def setup_guardrail(
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             disable_redaction=disable_redaction,
+        )
+
+    first_managed_regex_transition = (
+        original_guardrail.regex_source == "local"
+        and gc.regex_source in {"agent_control", "hybrid"}
+    )
+    if first_managed_regex_transition and not restart:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise click.UsageError(
+            "The first switch to Agent Control-managed regex rules requires --restart "
+            "so the validated snapshot and source change activate together"
         )
 
     if not gc.enabled:
@@ -4134,7 +4459,34 @@ def setup_guardrail(
         explicit_connector=(target_connector if non_interactive else explicit_connector),
         allow_prompt=not non_interactive,
     ):
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
         return
+
+    # The managed-only transition is fail-safe: fetch, parse, validate, and
+    # publish the first last-known-good snapshot before config.yaml can switch
+    # off the local regex contribution. Any failure exits before save/restart.
+    try:
+        _preflight_guardrail_agent_control(
+            app,
+            gc,
+            api_key_override=pending_agent_control_secrets.get(app.cfg.agent_control.api_key_env),
+        )
+    except Exception:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise
+
+    # Interactive secrets are intentionally persisted only after the final
+    # review was accepted and the first managed snapshot validated. Declining
+    # either confirmation leaves both config.yaml and .env byte-for-byte alone.
+    try:
+        for env_name, secret in pending_agent_control_secrets.items():
+            _save_secret_to_dotenv(env_name, secret, app.cfg.data_dir)
+    except Exception:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise
 
     ok, warnings = execute_guardrail_setup(app, save_config=True, workspace_dir=workspace_dir)
     if not ok:
@@ -4206,6 +4558,22 @@ def setup_guardrail(
         rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
         rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+    rows.append(("guardrail.regex_source", gc.regex_source))
+    if gc.regex_source in {"agent_control", "hybrid"}:
+        settings = app.cfg.agent_control
+        rows.extend(
+            (
+                ("agent_control.deployment", settings.deployment),
+                ("agent_control.server_url", settings.server_url),
+                ("agent_control.installation_id", settings.installation_id),
+                ("agent_control.opa.enabled", str(bool(settings.opa.enabled)).lower()),
+                (
+                    "agent_control.observability.include_content",
+                    str(bool(settings.observability.include_content)).lower(),
+                ),
+                ("agent_control.failure_behavior", "last-known-good"),
+            )
+        )
     rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
@@ -7627,7 +7995,8 @@ def _interactive_guardrail_setup(
     gc,
     *,
     agent_name: str | None = None,
-) -> None:
+    pending_secrets: dict[str, str] | None = None,
+) -> bool:
     # Snapshot the entry-point ``gc.enabled`` BEFORE any prompt mutates
     # it. The wizard flips ``gc.enabled = True`` after the operator
     # confirms enabling, which means by the time we reach the fail-mode
@@ -7737,7 +8106,7 @@ def _interactive_guardrail_setup(
 
     if not click.confirm("  Enable guardrail?", default=True):
         gc.enabled = False
-        return
+        return False
 
     gc.enabled = True
 
@@ -7826,6 +8195,9 @@ def _interactive_guardrail_setup(
         hilt_applicable = gc.mode == "action"
     if hilt_applicable:
         _configure_hilt_interactive(gc, action_connectors=hilt_action_connectors)
+
+    if not _prompt_regex_policy_source(app, gc, pending_secrets=pending_secrets):
+        return False
 
     ux.section("Scanner engine")
     click.echo(
@@ -7979,6 +8351,11 @@ def _interactive_guardrail_setup(
         # can re-run ``defenseclaw setup guardrail`` (no flag
         # needed) and walk through to the action-mode block.
         _configure_redaction_interactive(app)
+
+    click.echo()
+    _render_guardrail_review(app, gc)
+    click.echo()
+    return click.confirm("  Apply this configuration?", default=True)
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:

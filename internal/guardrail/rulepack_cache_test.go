@@ -198,3 +198,77 @@ func TestRulePackCache_FallbackMatchesLoadRulePack(t *testing.T) {
 		t.Fatal("cache returned nil for a nonexistent dir; expected embedded fallback")
 	}
 }
+
+func TestRulePackCache_DeDupesOverlayCombination(t *testing.T) {
+	var loads int64
+	overlayLoader := func(string, []string) (*RulePack, error) {
+		atomic.AddInt64(&loads, 1)
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}, nil
+	}
+	c := newRulePackCacheWithLoaders(nil, overlayLoader)
+	first, err := c.LoadWithOverlays("/policies/strict", []string{"/managed/rules"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.LoadWithOverlays("/policies/strict/", []string{"/managed/./rules"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || atomic.LoadInt64(&loads) != 1 {
+		t.Fatalf("overlay combination was not cached: first=%p second=%p loads=%d", first, second, loads)
+	}
+}
+
+func TestRulePackCache_DoesNotCacheOverlayFailure(t *testing.T) {
+	var loads int64
+	overlayLoader := func(string, []string) (*RulePack, error) {
+		if atomic.AddInt64(&loads, 1) == 1 {
+			return nil, fmt.Errorf("invalid overlay")
+		}
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}, nil
+	}
+	c := newRulePackCacheWithLoaders(nil, overlayLoader)
+	if _, err := c.LoadWithOverlays("", []string{"/managed/rules"}); err == nil {
+		t.Fatal("expected first overlay load to fail")
+	}
+	if _, err := c.LoadWithOverlays("", []string{"/managed/rules"}); err != nil {
+		t.Fatalf("corrected overlay load was not retried: %v", err)
+	}
+	if atomic.LoadInt64(&loads) != 2 {
+		t.Fatalf("overlay loader calls = %d, want 2", loads)
+	}
+}
+
+func TestRulePackCache_OverlayLoadDoesNotBlockBaseLoad(t *testing.T) {
+	overlayStarted := make(chan struct{})
+	releaseOverlay := make(chan struct{})
+	overlayLoader := func(string, []string) (*RulePack, error) {
+		close(overlayStarted)
+		<-releaseOverlay
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}, nil
+	}
+	c := newRulePackCacheWithLoaders(func(string) *RulePack {
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+	}, overlayLoader)
+	overlayDone := make(chan error, 1)
+	go func() {
+		_, err := c.LoadWithOverlays("/policies/strict", []string{"/managed/rules"})
+		overlayDone <- err
+	}()
+	<-overlayStarted
+	baseDone := make(chan struct{})
+	go func() {
+		c.Load("/policies/permissive")
+		close(baseDone)
+	}()
+	select {
+	case <-baseDone:
+	case <-time.After(time.Second):
+		close(releaseOverlay)
+		t.Fatal("base load was blocked by unrelated overlay I/O")
+	}
+	close(releaseOverlay)
+	if err := <-overlayDone; err != nil {
+		t.Fatal(err)
+	}
+}

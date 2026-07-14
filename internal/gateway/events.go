@@ -41,8 +41,9 @@ import (
 // checks for nil so unit tests and libraries that import internal/
 // gateway without running the sidecar can no-op cleanly.
 var (
-	gatewayEventsMu sync.RWMutex
-	gatewayEvents   *gatewaylog.Writer
+	gatewayEventsMu         sync.RWMutex
+	gatewayEvents           *gatewaylog.Writer
+	agentControlEventWriter *gatewaylog.Writer
 
 	// judgeResponseStore persists v7-correlated judge rows when set
 	// (tests, or sidecar wiring). When nil, legacy judgePersistor may
@@ -119,6 +120,24 @@ func EventWriter() *gatewaylog.Writer {
 	gatewayEventsMu.RLock()
 	defer gatewayEventsMu.RUnlock()
 	return gatewayEvents
+}
+
+// SetAgentControlEventWriter installs the private, local-only event writer
+// consumed by the Agent Control synchronizer. Unlike EventWriter, this writer
+// normally receives exact content, but a managed-enterprise force-redact
+// directive still wins. It must never have OTel, webhook, Splunk, stderr, or
+// audit fanout attached.
+func SetAgentControlEventWriter(w *gatewaylog.Writer) {
+	gatewayEventsMu.Lock()
+	defer gatewayEventsMu.Unlock()
+	agentControlEventWriter = w
+}
+
+// AgentControlEventWriter returns the active private writer (may be nil).
+func AgentControlEventWriter() *gatewaylog.Writer {
+	gatewayEventsMu.RLock()
+	defer gatewayEventsMu.RUnlock()
+	return agentControlEventWriter
 }
 
 // emitEvent is the low-level helper that all other emitters delegate
@@ -235,7 +254,8 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 
 func emitEvent(ctx context.Context, e gatewaylog.Event) {
 	w := EventWriter()
-	if w == nil {
+	agentControlWriter := AgentControlEventWriter()
+	if w == nil && agentControlWriter == nil {
 		return
 	}
 	stampEventCorrelation(&e, ctx)
@@ -248,6 +268,13 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 	policy := sinkPolicyFor(ctx, e.RedactionEnabled)
 	if e.RedactionEnabled == nil {
 		e.RedactionEnabled = redactionDecisionFromContext(ctx)
+	}
+	// The private spool is created only for an operator's global redaction
+	// opt-out. Preserve its exact-content contract unless managed enterprise
+	// explicitly forces redaction for this inspection.
+	agentControlNeedsRedaction := agentControlWriter != nil && policy == redaction.SinkPolicyRedact
+	if agentControlWriter != nil && !agentControlNeedsRedaction {
+		agentControlWriter.EmitContext(ctx, e)
 	}
 	if v := e.Verdict; v != nil {
 		cp := *v
@@ -306,7 +333,14 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		e.HookDecision = &cp
 	}
-	w.EmitContext(ctx, e)
+	// A cloud force-redact directive overrides the local exact-content opt-out
+	// and writes only the already-redacted copy to the private spool.
+	if agentControlNeedsRedaction {
+		agentControlWriter.EmitContext(ctx, e)
+	}
+	if w != nil {
+		w.EmitContext(ctx, e)
+	}
 }
 
 // emitVerdictExtras carries optional verdict-event fields that

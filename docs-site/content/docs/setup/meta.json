@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "guardrail",
+    "agent-control",
     "unified-llm-key",
     "skill-scanner",
     "mcp-scanner",

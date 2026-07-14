@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
@@ -401,6 +402,7 @@ func NewGuardrailProxy(
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	inspector.SetRegexSource(cfg.EffectiveRegexSource())
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -459,6 +461,17 @@ func NewGuardrailProxy(
 	return p, nil
 }
 
+// SetPolicyEngine wires the proxy inspector to the sidecar's shared OPA
+// engine so authenticated hot reload affects the actual guardrail data path.
+func (p *GuardrailProxy) SetPolicyEngine(engine *policy.Engine) {
+	if p == nil || engine == nil {
+		return
+	}
+	if inspector, ok := p.inspector.(*GuardrailInspector); ok {
+		inspector.SetPolicyEngine(engine)
+	}
+}
+
 // SetConnectorSwitchState stores the registry and setup options so the proxy
 // can hot-swap connectors when config.yaml changes.
 func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
@@ -507,6 +520,9 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 		p.inspector.SetScannerMode(cfg.ScannerMode)
 	}
 	p.inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if sourceSetter, ok := p.inspector.(interface{ SetRegexSource(string) }); ok {
+		sourceSetter.SetRegexSource(cfg.EffectiveRegexSource())
+	}
 	if strategySetter, ok := p.inspector.(interface {
 		SetDetectionStrategy(global, prompt, completion, toolCall string, sweep bool)
 	}); ok {

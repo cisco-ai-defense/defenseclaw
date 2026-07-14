@@ -1332,7 +1332,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
-        def fake_interactive(app, gc):
+        def fake_interactive(app, gc, **_kwargs):
             gc.enabled = True
             gc.mode = "observe"
             gc.model = "anthropic/test-model"
@@ -1361,7 +1361,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
-        def fake_decline(app, gc):
+        def fake_decline(app, gc, **_kwargs):
             gc.enabled = False
 
         mock_interactive.side_effect = fake_decline
@@ -1388,7 +1388,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
-        def fake_interactive(app, gc):
+        def fake_interactive(app, gc, **_kwargs):
             gc.enabled = True
             gc.mode = "observe"
             gc.model = "anthropic/test-model"

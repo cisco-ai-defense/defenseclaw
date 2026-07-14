@@ -2059,6 +2059,12 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
     del cfg
     return (
         WizardGoal(
+            "regex-source",
+            "Choose the regex policy source",
+            summary="Use local rules, Agent Control-managed buckets, or both.",
+            fields=("--regex-source", "Agent Control"),
+        ),
+        WizardGoal(
             "mode",
             "Switch enforcement mode (observe / action)",
             summary="Toggle log-only (observe) vs blocking (action) enforcement.",
@@ -4209,6 +4215,56 @@ def _guardrail_wizard_fields_for(
         connector = ""
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
+    regex_source = str(get_config_value(cfg, "guardrail.regex_source", "local") or "local").strip().lower()
+    regex_source = str(overrides.get("--regex-source", regex_source) or "local").strip().lower()
+    if regex_source not in {"local", "agent_control", "hybrid"}:
+        regex_source = "local"
+    agent_control_deployment = str(
+        overrides.get(
+            "--agent-control-deployment",
+            get_config_value(cfg, "agent_control.deployment", "cisco_cloud") or "cisco_cloud",
+        )
+    ).strip().lower()
+    if agent_control_deployment not in {"cisco_cloud", "self_hosted"}:
+        agent_control_deployment = "cisco_cloud"
+    agent_control_url = str(
+        overrides.get(
+            "--agent-control-url",
+            get_config_value(cfg, "agent_control.server_url", "") or "",
+        )
+    ).strip()
+    if "--agent-control-url" not in overrides and not agent_control_url and agent_control_deployment == "self_hosted":
+        agent_control_url = "http://127.0.0.1:8000"
+    agent_control_installation_id = str(
+        overrides.get(
+            "--agent-control-installation-id",
+            get_config_value(cfg, "agent_control.installation_id", "") or "",
+        )
+    ).strip()
+    if (
+        regex_source in {"agent_control", "hybrid"}
+        and "--agent-control-installation-id" not in overrides
+        and not agent_control_installation_id
+        and agent_control_deployment == "self_hosted"
+    ):
+        # Keep the Textual wizard aligned with the Click setup wizard without
+        # accepting the API-key secret itself in this form.
+        from defenseclaw.commands.cmd_agent_control import default_installation_id  # noqa: PLC0415
+
+        agent_control_installation_id = default_installation_id()
+    agent_control_api_key_env = str(
+        overrides.get(
+            "--agent-control-api-key-env",
+            get_config_value(cfg, "agent_control.api_key_env", "AGENT_CONTROL_API_KEY")
+            or "AGENT_CONTROL_API_KEY",
+        )
+    ).strip()
+    agent_control_manage_opa = (
+        "yes" if bool(get_config_value(cfg, "agent_control.opa.enabled", False)) else "no"
+    )
+    agent_control_monitor_content = (
+        "yes" if bool(get_config_value(cfg, "agent_control.observability.include_content", True)) else "no"
+    )
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
     judge_provider = "bedrock"
     judge_model = ""
@@ -4259,6 +4315,9 @@ def _guardrail_wizard_fields_for(
     def j_strategy(dv: Mapping[str, str]) -> bool:
         return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
 
+    def agent_control_source(dv: Mapping[str, str]) -> bool:
+        return (dv.get("regex_source", "") or "").strip().lower() in {"agent_control", "hybrid"}
+
     def j_provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
         provider_visible = _provider_is(*names)
         return lambda dv: j_strategy(dv) and provider_visible(dv)
@@ -4299,6 +4358,87 @@ def _guardrail_wizard_fields_for(
         ),
         WizardFormField("Proxy Port", "int", "--port", value=str(get_config_value(cfg, "guardrail.port", "") or "")),
         WizardFormField("Detection", "section"),
+        WizardFormField(
+            "Regex Policy Source",
+            "choice",
+            "--regex-source",
+            value=regex_source,
+            default=regex_source,
+            options=("local", "agent_control", "hybrid"),
+            required=True,
+            hint=(
+                "local=DefenseClaw rules; agent_control=managed buckets only; "
+                "hybrid=local plus managed buckets."
+            ),
+        ),
+        WizardFormField("Agent Control", "section", visible_when=agent_control_source),
+        WizardFormField(
+            "Deployment",
+            "choice",
+            "--agent-control-deployment",
+            value=agent_control_deployment,
+            default=agent_control_deployment,
+            options=("cisco_cloud", "self_hosted"),
+            required=True,
+            hint="Cisco Enterprise Cloud or a self-hosted Agent Control deployment.",
+            visible_when=agent_control_source,
+        ),
+        WizardFormField(
+            "Agent Control URL",
+            "string",
+            "--agent-control-url",
+            value=agent_control_url,
+            default=agent_control_url,
+            required=True,
+            hint="HTTPS is required except for loopback development.",
+            visible_when=agent_control_source,
+        ),
+        WizardFormField(
+            "Policy Target ID",
+            "string",
+            "--agent-control-installation-id",
+            value=agent_control_installation_id,
+            default=agent_control_installation_id,
+            required=True,
+            hint="Galileo log stream ID for Cisco Cloud; stable DefenseClaw installation ID when self-hosted.",
+            visible_when=agent_control_source,
+        ),
+        WizardFormField(
+            "Agent Control API Key Env",
+            "string",
+            "--agent-control-api-key-env",
+            value=agent_control_api_key_env,
+            default=agent_control_api_key_env,
+            required=True,
+            hint=(
+                "Environment-variable name only. Store the secret with "
+                "`defenseclaw keys set <ENV_NAME>`; its prompt is hidden."
+            ),
+            visible_when=agent_control_source,
+        ),
+        WizardFormField(
+            "Manage OPA Thresholds",
+            "bool",
+            "--agent-control-manage-opa",
+            "--no-agent-control-manage-opa",
+            value=agent_control_manage_opa,
+            default=agent_control_manage_opa,
+            hint="Let Agent Control manage OPA thresholds; local ownership is the default.",
+            visible_when=agent_control_source,
+        ),
+        WizardFormField(
+            "Send Monitor Content",
+            "bool",
+            "--agent-control-monitor-content",
+            "--no-agent-control-monitor-content",
+            value=agent_control_monitor_content,
+            default=agent_control_monitor_content,
+            hint=(
+                "Send the blocked span to Agent Control Monitor (default: yes). "
+                "DefenseClaw redaction still applies unless globally disabled."
+            ),
+            visible_when=agent_control_source,
+        ),
         WizardFormField(
             "Strategy",
             "choice",
@@ -4493,6 +4633,7 @@ def _guardrail_wizard_fields_for(
             "provider": judge_provider,
             "bedrock_auth_mode": judge_bedrock_auth_mode,
             "strategy": strategy,
+            "regex_source": regex_source,
         },
     )
 

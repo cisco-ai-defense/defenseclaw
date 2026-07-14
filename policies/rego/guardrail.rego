@@ -61,7 +61,7 @@ _local_sev_rank := data.guardrail.severity_rank[input.local_result.severity] if 
 _cisco_sev_rank := data.guardrail.severity_rank[input.cisco_result.severity] if {
 	input.cisco_result
 	input.cisco_result.severity
-	data.guardrail.cisco_trust_level != "none"
+	_effective_cisco_trust_level != "none"
 } else := 0
 
 _highest_sev_rank := max({_local_sev_rank, _cisco_sev_rank, 0})
@@ -84,19 +84,19 @@ severity := effective_severity
 
 action := "alert" if {
 	input.mode == "observe"
-	_highest_sev_rank >= data.guardrail.alert_threshold
+	_highest_sev_rank >= _effective_alert_threshold
 } else := "alert" if {
-	data.guardrail.cisco_trust_level == "advisory"
-	_cisco_sev_rank >= data.guardrail.block_threshold
-	_local_sev_rank < data.guardrail.alert_threshold
+	_effective_cisco_trust_level == "advisory"
+	_cisco_sev_rank >= _effective_block_threshold
+	_local_sev_rank < _effective_alert_threshold
 } else := "block" if {
-	_highest_sev_rank >= data.guardrail.block_threshold
+	_highest_sev_rank >= _effective_block_threshold
 } else := "confirm" if {
 	input.mode == "action"
 	_hilt_enabled
 	_highest_sev_rank >= _hilt_min_rank
 } else := "alert" if {
-	_highest_sev_rank >= data.guardrail.alert_threshold
+	_highest_sev_rank >= _effective_alert_threshold
 } else := "allow"
 
 # Prefer the gateway-supplied input.hilt over data.guardrail.hilt so

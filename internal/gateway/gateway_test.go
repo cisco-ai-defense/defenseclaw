@@ -3710,6 +3710,194 @@ func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 	}
 }
 
+func TestAPIPolicyStatusUsesActiveProviders(t *testing.T) {
+	api := &APIServer{
+		health:     NewSidecarHealth(),
+		scannerCfg: &config.Config{PolicyDir: t.TempDir()},
+	}
+	api.SetPolicyStatusProvider(func() policy.EngineStatus {
+		return policy.EngineStatus{
+			Generation: 7,
+			AgentControl: policy.AgentControlPolicyStatus{
+				Present:        true,
+				Enabled:        true,
+				SchemaVersion:  1,
+				SourceDigest:   "sha256:source",
+				ArtifactDigest: "sha256:opa",
+			},
+		}
+	})
+	api.SetRulePackStatusProvider(func() guardrail.ManagedRulePackStatus {
+		return guardrail.ManagedRulePackStatus{
+			Present:        true,
+			ArtifactDigest: "sha256:rules",
+			RegexSource:    guardrail.RegexSourceAgentControl,
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/policy/status", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["generation"] != float64(7) {
+		t.Fatalf("generation = %#v", body["generation"])
+	}
+	agentControl := body["agent_control"].(map[string]interface{})
+	if agentControl["artifact_digest"] != "sha256:opa" {
+		t.Fatalf("Agent Control status = %#v", agentControl)
+	}
+	rulePack := body["rule_pack"].(map[string]interface{})
+	if rulePack["artifact_digest"] != "sha256:rules" {
+		t.Fatalf("rule-pack status = %#v", rulePack)
+	}
+	if rulePack["regex_source"] != guardrail.RegexSourceAgentControl {
+		t.Fatalf("rule-pack source = %#v", rulePack)
+	}
+}
+
+func TestAPIPolicyReloadReturnsActiveDigest(t *testing.T) {
+	api := &APIServer{
+		health:     NewSidecarHealth(),
+		scannerCfg: &config.Config{PolicyDir: t.TempDir()},
+	}
+	reloaded := false
+	api.SetPolicyReloader(func() error {
+		reloaded = true
+		return nil
+	})
+	api.SetPolicyStatusProvider(func() policy.EngineStatus {
+		return policy.EngineStatus{
+			Generation: 2,
+			AgentControl: policy.AgentControlPolicyStatus{
+				Present:        true,
+				Enabled:        true,
+				SchemaVersion:  1,
+				ArtifactDigest: "sha256:active",
+			},
+		}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/policy/reload", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, req)
+	if !reloaded || w.Code != http.StatusOK {
+		t.Fatalf("reloaded=%v status=%d body=%s", reloaded, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sha256:active") {
+		t.Fatalf("reload response missing active digest: %s", w.Body.String())
+	}
+}
+
+func TestAPIPolicyRestartRequestsSupervisorTransaction(t *testing.T) {
+	api := &APIServer{}
+	requested := false
+	api.SetPolicyRestartRequester(func() error {
+		requested = true
+		return nil
+	})
+	api.SetPolicyRestartSupportedProvider(func() bool { return true })
+	api.SetRulePackStatusProvider(func() guardrail.ManagedRulePackStatus {
+		return guardrail.ManagedRulePackStatus{Present: true, ArtifactDigest: "sha256:active-rules"}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/policy/restart", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyRestart(w, req)
+	if !requested || w.Code != http.StatusAccepted {
+		t.Fatalf("requested=%v status=%d body=%s", requested, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "restart_requested") ||
+		!strings.Contains(w.Body.String(), "sha256:active-rules") {
+		t.Fatalf("unexpected restart response: %s", w.Body.String())
+	}
+}
+
+func TestAPIPolicyRestartRejectsUnsupervisedGateway(t *testing.T) {
+	api := &APIServer{}
+	requested := false
+	api.SetPolicyRestartRequester(func() error {
+		requested = true
+		return nil
+	})
+	api.SetPolicyRestartSupportedProvider(func() bool { return false })
+	req := httptest.NewRequest(http.MethodPost, "/policy/restart", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyRestart(w, req)
+	if requested || w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("requested=%v status=%d body=%s", requested, w.Code, w.Body.String())
+	}
+}
+
+func TestAPIPolicyRestartRequesterError(t *testing.T) {
+	api := &APIServer{}
+	api.SetPolicyRestartSupportedProvider(func() bool { return true })
+	api.SetPolicyRestartRequester(func() error { return fmt.Errorf("restart unavailable") })
+	req := httptest.NewRequest(http.MethodPost, "/policy/restart", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyRestart(w, req)
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "restart unavailable") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPolicyProcessRestartSupportedRequiresExplicitSupervisor(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DAEMON", "")
+	t.Setenv("DEFENSECLAW_PROCESS_SUPERVISED", "")
+	s := &Sidecar{}
+	if s.policyProcessRestartSupported() {
+		t.Fatal("unsupervised foreground gateway reported restart support")
+	}
+	t.Setenv("DEFENSECLAW_PROCESS_SUPERVISED", "true")
+	if !s.policyProcessRestartSupported() {
+		t.Fatal("explicitly supervised gateway did not report restart support")
+	}
+}
+
+func TestAPIEvaluationUsesSharedReloadablePolicyEngine(t *testing.T) {
+	policyDir := t.TempDir()
+	rego := `package defenseclaw.guardrail
+
+action := data.configured_action
+severity := "NONE"
+reason := "shared engine"
+scanner_sources := []
+`
+	if err := os.WriteFile(filepath.Join(policyDir, "guardrail.rego"), []byte(rego), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataPath := filepath.Join(policyDir, "data.json")
+	if err := os.WriteFile(dataPath, []byte(`{"configured_action":"allow"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(policyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compile(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change only the on-disk data. A new per-request engine would observe
+	// "block", while the shared engine must keep the currently active store
+	// until its explicit Reload transaction succeeds.
+	if err := os.WriteFile(dataPath, []byte(`{"configured_action":"block"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{PolicyDir: policyDir}}
+	api.SetPolicyEngine(engine)
+	out, err := api.evaluateGuardrailPolicy(context.Background(), policy.GuardrailInput{Mode: "action"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Action != "allow" {
+		t.Fatalf("action = %q, want active shared-store action allow", out.Action)
+	}
+}
+
 func TestAPIServerRun(t *testing.T) {
 	health := NewSidecarHealth()
 	api := NewAPIServer("127.0.0.1:0", health, nil, nil, nil)

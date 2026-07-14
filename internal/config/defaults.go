@@ -198,6 +198,7 @@ func DefaultConfig() *Config {
 			ScannerMode:                 "both",
 			Host:                        "",
 			Port:                        4000,
+			RegexSource:                 RegexSourceLocal,
 			HookSelfHeal:                true,
 			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
@@ -214,6 +215,28 @@ func DefaultConfig() *Config {
 			HILT: HILTConfig{
 				Enabled:     false,
 				MinSeverity: "HIGH",
+			},
+		},
+		AgentControl: AgentControlConfig{
+			Deployment:          "cisco_cloud",
+			APIKeyEnv:           "AGENT_CONTROL_API_KEY",
+			AgentName:           "defenseclaw-policy-sync",
+			TargetType:          "defenseclaw.installation",
+			RefreshSeconds:      60,
+			CachePollSeconds:    2,
+			InitRetryMaxSeconds: 300,
+			OPA: AgentControlOPAConfig{
+				Enabled:    false,
+				Precedence: "stricter",
+				Activation: "reload",
+			},
+			RulePack: AgentControlRulePackConfig{
+				Activation: "restart",
+				MaxRules:   1000,
+			},
+			Observability: AgentControlObservabilityConfig{
+				Enabled:        true,
+				IncludeContent: true,
 			},
 		},
 		// AuditSinks is empty by default — operators opt in to forwarding

@@ -163,6 +163,8 @@ type GuardrailInspector struct {
 	strategyComplete  string
 	strategyToolCall  string
 	judgeSweep        bool
+	regexSourceMu     sync.RWMutex
+	regexSource       string
 
 	// hiltMu guards hilt — set by SetHILTConfig() at proxy boot and on
 	// every guardrail-config reload, read by finalize() under load. The
@@ -213,11 +215,30 @@ func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge 
 		scannerMode: scannerMode,
 		judge:       judge,
 		policyDir:   policyDir,
+		regexSource: guardrail.RegexSourceLocal,
 	}
 	if cisco != nil {
 		g.ciscoClient = cisco
 	}
 	return g
+}
+
+// SetRegexSource updates which regex authority the inspector executes. The
+// rule categories themselves are installed separately; this gate prevents the
+// process-global local-pattern/triage floor from leaking into managed mode.
+func (g *GuardrailInspector) SetRegexSource(source string) {
+	g.regexSourceMu.Lock()
+	g.regexSource = strings.ToLower(strings.TrimSpace(source))
+	if g.regexSource == "" {
+		g.regexSource = guardrail.RegexSourceLocal
+	}
+	g.regexSourceMu.Unlock()
+}
+
+func (g *GuardrailInspector) agentControlRegexOnly() bool {
+	g.regexSourceMu.RLock()
+	defer g.regexSourceMu.RUnlock()
+	return g.regexSource == guardrail.RegexSourceAgentControl
 }
 
 // SetCiscoInspector replaces the remote inspector after construction.
@@ -294,6 +315,32 @@ func demoteLocalBlockForManaged(v *ScanVerdict) *ScanVerdict {
 	// records what local pattern hit; only the enforceable action
 	// changes.
 	return &cp
+}
+
+// SetPolicyEngine installs the shared sidecar OPA engine. The API reload
+// endpoint, watcher admission path, and proxy guardrail must all observe the
+// same atomic store; otherwise a successful /policy/reload would not update
+// prompt/completion enforcement.
+func (g *GuardrailInspector) SetPolicyEngine(engine *policy.Engine) {
+	if g == nil || engine == nil {
+		return
+	}
+	setEngine := func() {
+		g.engineMu.Lock()
+		g.engine = engine
+		g.engineLoadErr = nil
+		g.engineMu.Unlock()
+	}
+	initializedHere := false
+	// Install the pointer inside the once closure so a concurrent first
+	// evaluation cannot observe "initialized" before the shared engine exists.
+	g.engineInitOnce.Do(func() {
+		setEngine()
+		initializedHere = true
+	})
+	if !initializedHere {
+		setEngine()
+	}
 }
 
 // SetTracerFunc installs the OTel span emitter. Pass nil to
@@ -733,7 +780,11 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	localResult = scanLocalPatterns(direction, content)
+	if g.agentControlRegexOnly() {
+		localResult = ruleEngineVerdict(content, "", "agent-control")
+	} else {
+		localResult = scanLocalPatterns(direction, content)
+	}
 	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart).Milliseconds())
 
 	// The local-HIGH short-circuit historically returned early without
@@ -746,7 +797,11 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	// enforceable Action is capped.
 	if sm == "local" || (localResult != nil && localResult.Severity == "HIGH" && !g.managedMode) {
 		if localResult != nil {
-			localResult.ScannerSources = []string{"local-pattern"}
+			if g.agentControlRegexOnly() {
+				localResult.ScannerSources = []string{"agent-control"}
+			} else {
+				localResult.ScannerSources = []string{"local-pattern"}
+			}
 		}
 		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
 	}
@@ -771,7 +826,10 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatterns(direction, content)
+	var signals []TriageSignal
+	if !g.agentControlRegexOnly() {
+		signals = triagePatterns(direction, content)
+	}
 	high, review, _ := partitionSignals(signals)
 
 	// Run the full rule engine for categories triage doesn't cover.
@@ -780,6 +838,10 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		action := guardrailFallbackActionForSeverity(maxSev)
+		scanner := "local-pattern"
+		if g.agentControlRegexOnly() {
+			scanner = "agent-control"
+		}
 		var ids []string
 		for _, f := range ruleFindings {
 			ids = append(ids, f.RuleID+":"+f.Title)
@@ -793,8 +855,8 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			Severity:       maxSev,
 			Reason:         "matched: " + strings.Join(top, ", "),
 			Findings:       ids,
-			Scanner:        "local-pattern",
-			ScannerSources: []string{"local-pattern"},
+			Scanner:        scanner,
+			ScannerSources: []string{scanner},
 		}
 	}
 	// Regex phase outcome is the stronger of triage/rule so the span
@@ -946,7 +1008,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatterns(direction, content)
+		var sigs []TriageSignal
+		if !g.agentControlRegexOnly() {
+			sigs = triagePatterns(direction, content)
+		}
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart).Milliseconds())
@@ -972,10 +1037,19 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		fmt.Fprintf(defaultLogWriter, "  [guardrail] judge_first: judge unavailable (%s dir=%s), falling back to regex_only\n", reason, direction)
 		fallbackStart := time.Now()
 		_, endFallback := g.startPhaseSpan(ctx, "regex.fallback")
-		localResult := scanLocalPatterns(direction, content)
+		var localResult *ScanVerdict
+		if g.agentControlRegexOnly() {
+			localResult = ruleEngineVerdict(content, "", "agent-control")
+		} else {
+			localResult = scanLocalPatterns(direction, content)
+		}
 		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart).Milliseconds())
 		if localResult != nil {
-			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
+			if g.agentControlRegexOnly() {
+				localResult.ScannerSources = []string{"agent-control", "judge-fallback"}
+			} else {
+				localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
+			}
 		}
 		// Also run Cisco remote on fallback for full parity with regex_only path.
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
@@ -1008,7 +1082,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	ruleFindings := ScanAllRules(content, "")
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
-		if severityRank[maxSev] >= severityRank["HIGH"] {
+		if g.agentControlRegexOnly() || severityRank[maxSev] >= severityRank["HIGH"] {
 			var ids []string
 			for _, f := range ruleFindings {
 				ids = append(ids, f.RuleID+":"+f.Title)
@@ -1017,12 +1091,19 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			if len(top) > 5 {
 				top = top[:5]
 			}
+			scanner := "local-pattern"
+			action := "block"
+			if g.agentControlRegexOnly() {
+				scanner = "agent-control"
+				action = guardrailFallbackActionForSeverity(maxSev)
+			}
 			rv := &ScanVerdict{
-				Action:   "block",
-				Severity: maxSev,
-				Reason:   "matched: " + strings.Join(top, ", "),
-				Findings: ids,
-				Scanner:  "local-pattern",
+				Action:         action,
+				Severity:       maxSev,
+				Reason:         "matched: " + strings.Join(top, ", "),
+				Findings:       ids,
+				Scanner:        scanner,
+				ScannerSources: []string{scanner},
 			}
 			merged = mergeVerdicts(merged, rv)
 		}
@@ -1040,6 +1121,34 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+}
+
+// ruleEngineVerdict converts the currently installed full-rule categories to
+// the same ScanVerdict shape used by the local triage scanner. It is used by
+// regex_only and judge-fallback paths in managed mode, where local triage is
+// intentionally disabled but Agent Control rules still must execute.
+func ruleEngineVerdict(content, toolName, scanner string) *ScanVerdict {
+	findings := ScanAllRules(content, toolName)
+	if len(findings) == 0 {
+		return allowVerdict(scanner)
+	}
+	severity := HighestSeverity(findings)
+	ids := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		ids = append(ids, finding.RuleID+":"+finding.Title)
+	}
+	top := ids
+	if len(top) > 5 {
+		top = top[:5]
+	}
+	return &ScanVerdict{
+		Action:         guardrailFallbackActionForSeverity(severity),
+		Severity:       severity,
+		Reason:         "matched: " + strings.Join(top, ", "),
+		Findings:       ids,
+		Scanner:        scanner,
+		ScannerSources: []string{scanner},
+	}
 }
 
 // phaseAction safely extracts the action from a potentially-nil verdict

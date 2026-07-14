@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.defenseclaw.agent-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-agent-control-launcher</string>
+  </array>
+  <!-- Match the managed gateway's root launchd identity so its private
+       0700/0600 Agent Control event spool is readable by this process. -->
+  <key>WorkingDirectory</key>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DEFENSECLAW_HOME</key>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
+    <key>DEFENSECLAW_CONFIG</key>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
+    <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+    <string>managed_enterprise</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/agent-control.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/agent-control.err.log</string>
+</dict>
+</plist>

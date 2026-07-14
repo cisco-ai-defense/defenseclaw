@@ -73,6 +73,9 @@ _SINK_KIND_HTTP_JSONL = "http_jsonl"
 # only requires non-empty but we additionally require a slug shape so
 # ``enable``/``disable``/``remove`` commands have a clean arg surface.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_UUID_RE = re.compile(
+    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
 
 # Go's configuration schema version that introduced named OTel destinations.
 # Only an explicitly stamped v6 file is advanced after the durable rewrite;
@@ -538,6 +541,8 @@ def _apply_otel_preset(
     if preset.id == "galileo":
         for field_name in ("project", "logstream"):
             _validate_literal_header_value(field_name, inputs.get(field_name, ""))
+            if _UUID_RE.fullmatch(inputs.get(field_name, "")):
+                headers[f"{field_name}id"] = headers.pop(field_name)
     # Honeycomb dataset lives in a separate header; stamp it at apply
     # time from inputs rather than at preset-decl time so per-environment
     # values work.
@@ -601,6 +606,13 @@ def _apply_otel_preset(
             )
             if headers:
                 merged_headers = copy.deepcopy(existing.get("headers") or {})
+                if preset.id == "galileo":
+                    # Routing names and IDs are mutually exclusive aliases.
+                    # Remove the previous form when setup switches between
+                    # name-based and ID-based routing.
+                    for routing_header in ("project", "projectid", "logstream", "logstreamid"):
+                        if routing_header not in headers:
+                            merged_headers.pop(routing_header, None)
                 merged_headers.update(headers)
                 merged["headers"] = merged_headers
             if preset.otel_tls_insecure:

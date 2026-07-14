@@ -112,6 +112,25 @@ class OverviewConfig:
     inspect_llm_provider: str = ""
     inspect_llm_model: str = ""
     cisco_ai_defense_endpoint: str = ""
+    # Central regex-policy posture. These fields deliberately contain no
+    # credential material: the Overview may show where policy comes from and
+    # whether the synchronizer is healthy, but never the configured API key.
+    regex_source: str = "local"
+    agent_control_enabled: bool = False
+    agent_control_deployment: str = ""
+    agent_control_server_url: str = ""
+    agent_control_installation_id: str = ""
+    agent_control_opa_enabled: bool = False
+    agent_control_opa_precedence: str = ""
+    agent_control_observability_enabled: bool = False
+    agent_control_observability_include_content: bool = False
+    agent_control_sync_status: str = "disabled"
+    agent_control_matching_controls: int = 0
+    agent_control_pending_restart: bool = False
+    agent_control_observability_status: str = "disabled"
+    agent_control_sent_events: int = 0
+    agent_control_dropped_events: int = 0
+    agent_control_last_error: str = ""
     # Multi-connector roster (WU10): ``(connector, effective_mode)`` pairs,
     # populated by the adapter only when more than one connector is active
     # (``Config.active_connectors()`` + ``GuardrailConfig.effective_mode``).

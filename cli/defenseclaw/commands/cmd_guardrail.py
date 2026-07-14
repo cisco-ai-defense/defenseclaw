@@ -523,6 +523,14 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     enabled_txt = "yes" if gc.enabled else "no"
     enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
     click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+    regex_source = getattr(gc, "regex_source", "local") or "local"
+    click.echo(f"  • {ux._style('regex source:', fg='bright_black', bold=True)} {ux.accent(regex_source)}")
+    if regex_source in {"agent_control", "hybrid"}:
+        settings = app.cfg.agent_control
+        click.echo(
+            f"  • {ux._style('Agent Control:', fg='bright_black', bold=True)} "
+            f"{settings.deployment} · {settings.installation_id} · last-known-good"
+        )
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()

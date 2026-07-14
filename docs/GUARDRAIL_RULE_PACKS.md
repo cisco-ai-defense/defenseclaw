@@ -13,6 +13,42 @@ DefenseClaw splits guardrail behavior across two separate layers:
 | OPA policy | Block / alert thresholds, severity-to-action behavior, enforcement rules | `defenseclaw policy activate default|strict|permissive` |
 | Guardrail rule pack | Judge prompts, PII category severity, pre-judge strips, `suppressions.yaml`, sensitive tool rules | `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml` |
 
+### Regex source and managed rules
+
+`guardrail.regex_source` chooses the regex authority explicitly. Agent Control
+stores its validated `rules/*.yaml` snapshot in
+`guardrail.rule_pack_overlay_dirs`, but that storage mechanism does not imply
+that managed rules are always added to local rules:
+
+```yaml
+guardrail:
+  regex_source: agent_control  # local | agent_control | hybrid
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+  rule_pack_overlay_dirs:
+    - ~/.defenseclaw/agent-control/rule-pack/current
+```
+
+| Source | Regex behavior |
+|---|---|
+| `local` | Run bundled rules, operator rule files, and local pattern families. Managed snapshots are not evaluated. |
+| `agent_control` | Run only the validated Agent Control snapshot. Local regex contributions are excluded, including local patterns and file-backed rules. |
+| `hybrid` | Run both sources. Duplicate file-backed IDs are rejected; overlapping patterns with different IDs may both report findings. |
+
+The source switch affects only regex detection. In every mode, the selected
+local profile still owns judge prompts, suppressions, sensitive-tool
+configuration, HILT, connector settings, and failure behavior. Selecting
+`agent_control` excludes local regex at evaluation time; it does not delete or
+rewrite the local pack.
+
+Managed overlays are strict: missing directories, unexpected files, unknown
+fields, duplicate rule IDs, invalid Go/RE2 patterns, unsupported severities,
+or exceeded size/count limits prevent activation. Rule packs are loaded into
+a process-lifetime cache, so changing an overlay requires a gateway restart.
+The synchronizer requests that restart through authenticated
+`POST /policy/restart`, waits for the gateway to return, and verifies the new
+exact digest through `GET /policy/status`. A restart request alone is not
+activation proof; failures restore and verify the previous overlay.
+
 The important gotcha is that these are **not the same switch**.
 
 `defenseclaw policy activate strict` updates the OPA-backed policy data, but it

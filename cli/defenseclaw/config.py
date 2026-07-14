@@ -22,9 +22,11 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -71,6 +74,9 @@ _log = logging.getLogger(__name__)
 _privacy_disable_redaction_warned = False
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -1850,7 +1856,15 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
+    # Selects which regex rule contribution is evaluated at runtime:
+    # local=bundled/operator rules, agent_control=managed snapshot only,
+    # hybrid=local plus the managed Agent Control overlay.
+    regex_source: str = "local"
     rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
+    # Strict rules-only overlays applied after every connector's effective
+    # base pack. Agent Control uses one managed entry here without replacing
+    # local suppressions, judge prompts, or profile selection.
+    rule_pack_overlay_dirs: list[str] = field(default_factory=list)
     connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``hook_fail_mode`` is the operator-chosen response-layer fail
@@ -2000,6 +2014,20 @@ class GuardrailConfig:
         loop. Raises :class:`ValueError` with a named message on the
         first violation.
         """
+        if self.regex_source not in {"local", "agent_control", "hybrid"}:
+            raise ValueError("guardrail.regex_source must be 'local', 'agent_control', or 'hybrid'")
+
+        seen_overlay_dirs: set[str] = set()
+        for index, directory in enumerate(self.rule_pack_overlay_dirs):
+            if not isinstance(directory, str) or not directory.strip():
+                raise ValueError(f"guardrail.rule_pack_overlay_dirs[{index}]: path cannot be empty")
+            normalized = os.path.normpath(directory.strip())
+            if normalized in seen_overlay_dirs:
+                raise ValueError(
+                    f"guardrail.rule_pack_overlay_dirs[{index}]: duplicate path {directory!r}"
+                )
+            seen_overlay_dirs.add(normalized)
+
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
@@ -2309,6 +2337,112 @@ def _normalize_connector_key(name: str | None) -> str:
 
 
 @dataclass
+class AgentControlOPAConfig:
+    enabled: bool = False
+    precedence: str = "stricter"
+    activation: str = "reload"
+
+
+@dataclass
+class AgentControlRulePackConfig:
+    enabled: bool = False
+    activation: str = "restart"
+    max_rules: int = 1000
+
+
+@dataclass
+class AgentControlObservabilityConfig:
+    """Report managed final block decisions through the Agent Control SDK."""
+
+    enabled: bool = True
+    include_content: bool = True
+    sink: str = "agent_control"
+    otel_destination: str = "galileo"
+
+
+@dataclass
+class AgentControlConfig:
+    """Optional Agent Control policy-distribution synchronizer settings."""
+
+    enabled: bool = False
+    deployment: str = "cisco_cloud"
+    server_url: str = ""
+    agent_name: str = "defenseclaw-policy-sync"
+    target_type: str = ""
+    installation_id: str = ""
+    api_key_env: str = "AGENT_CONTROL_API_KEY"
+    api_key_header: str = ""
+    refresh_seconds: int = 60
+    cache_poll_seconds: int = 2
+    init_retry_max_seconds: int = 300
+    managed_dir: str = ""
+    opa: AgentControlOPAConfig = field(default_factory=AgentControlOPAConfig)
+    rule_pack: AgentControlRulePackConfig = field(default_factory=AgentControlRulePackConfig)
+    observability: AgentControlObservabilityConfig = field(default_factory=AgentControlObservabilityConfig)
+
+    def resolved_target_type(self) -> str:
+        if self.target_type:
+            return self.target_type
+        return "log_stream" if self.deployment == "cisco_cloud" else "defenseclaw.installation"
+
+    def resolved_api_key_header(self) -> str:
+        if self.api_key_header:
+            return self.api_key_header
+        return "Galileo-API-Key" if self.deployment == "cisco_cloud" else "X-API-Key"
+
+    def validate(self) -> None:
+        if self.deployment not in {"cisco_cloud", "self_hosted"}:
+            raise ValueError("agent_control.deployment must be 'cisco_cloud' or 'self_hosted'")
+        if self.agent_name != "defenseclaw-policy-sync":
+            raise ValueError("agent_control.agent_name must be 'defenseclaw-policy-sync'")
+        if self.resolved_target_type() not in {"defenseclaw.installation", "log_stream"}:
+            raise ValueError("agent_control.target_type must be 'defenseclaw.installation' or 'log_stream'")
+        if len(self.installation_id) > 255:
+            raise ValueError("agent_control.installation_id cannot exceed 255 characters")
+        if self.enabled and not self.installation_id.strip():
+            raise ValueError("agent_control.installation_id is required when integration is enabled")
+        if self.enabled and not self.server_url.strip():
+            raise ValueError("agent_control.server_url is required when integration is enabled")
+        if self.server_url:
+            parsed = urlsplit(self.server_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("agent_control.server_url must be an absolute HTTP(S) URL")
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError("agent_control.server_url must not contain credentials")
+            host_is_loopback = parsed.hostname.lower() == "localhost"
+            try:
+                host_is_loopback = host_is_loopback or ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                pass
+            if self.deployment == "cisco_cloud" and parsed.scheme != "https":
+                raise ValueError("Cisco Enterprise Cloud requires an HTTPS URL")
+            if parsed.scheme != "https" and not host_is_loopback:
+                raise ValueError("agent_control.server_url requires HTTPS except for loopback development")
+        if not _ENV_VAR_NAME_RE.fullmatch(self.api_key_env):
+            raise ValueError("agent_control.api_key_env must be an environment variable name")
+        if not _HTTP_HEADER_NAME_RE.fullmatch(self.resolved_api_key_header()):
+            raise ValueError("agent_control.api_key_header must be a valid HTTP header name")
+        if self.refresh_seconds <= 0:
+            raise ValueError("agent_control.refresh_seconds must be greater than zero")
+        if self.cache_poll_seconds <= 0:
+            raise ValueError("agent_control.cache_poll_seconds must be greater than zero")
+        if self.init_retry_max_seconds <= 0:
+            raise ValueError("agent_control.init_retry_max_seconds must be greater than zero")
+        if self.opa.precedence not in {"stricter", "remote"}:
+            raise ValueError("agent_control.opa.precedence must be 'stricter' or 'remote'")
+        if self.opa.activation not in {"reload", "manual"}:
+            raise ValueError("agent_control.opa.activation must be 'reload' or 'manual'")
+        if self.rule_pack.activation not in {"restart", "manual"}:
+            raise ValueError("agent_control.rule_pack.activation must be 'restart' or 'manual'")
+        if not 1 <= self.rule_pack.max_rules <= 1000:
+            raise ValueError("agent_control.rule_pack.max_rules must be between 1 and 1000")
+        if self.observability.sink not in {"agent_control", "otel"}:
+            raise ValueError("agent_control.observability.sink must be 'agent_control' or 'otel'")
+        if not self.observability.otel_destination.strip():
+            raise ValueError("agent_control.observability.otel_destination cannot be empty")
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -2336,6 +2470,7 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
+    agent_control: AgentControlConfig = field(default_factory=AgentControlConfig)
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
     otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
@@ -2948,6 +3083,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    if not guardrail.get("rule_pack_overlay_dirs"):
+        guardrail.pop("rule_pack_overlay_dirs", None)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
@@ -2990,6 +3127,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             for entry in conns.values():
                 if isinstance(entry, dict) and entry.get("enabled") is None:
                     entry.pop("enabled", None)
+    if cfg.agent_control == AgentControlConfig():
+        d.pop("agent_control", None)
     # v4: the legacy top-level `splunk:` block is rejected by the Go
     # gateway at startup (see internal/config/config.go::detectLegacySplunk).
     # The Python dataclass retains a SplunkConfig for backwards-compatible
@@ -4077,6 +4216,11 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
         return GuardrailConfig()
+    raw_overlay_dirs = raw.get("rule_pack_overlay_dirs", [])
+    if raw_overlay_dirs is None:
+        raw_overlay_dirs = []
+    if not isinstance(raw_overlay_dirs, list):
+        raise ValueError("guardrail.rule_pack_overlay_dirs must be a list")
     hilt_raw = raw.get("hilt")
     if hilt_raw is None:
         hilt_raw = raw.get("hitl")
@@ -4099,12 +4243,94 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
+        regex_source=str(raw.get("regex_source", "local") or "local"),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        rule_pack_overlay_dirs=[str(value) for value in raw_overlay_dirs],
         connector=raw.get("connector", ""),
         hilt=_merge_hilt(hilt_raw),
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
         llm_role=_normalize_llm_role(raw.get("llm_role", "")),
         connectors=_merge_guardrail_connectors(raw.get("connectors")),
+    )
+
+
+def _merge_agent_control(raw: Any) -> AgentControlConfig:
+    if raw is None:
+        return AgentControlConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("agent_control must be a mapping")
+    allowed = {
+        "enabled",
+        "deployment",
+        "server_url",
+        "agent_name",
+        "target_type",
+        "installation_id",
+        "api_key_env",
+        "api_key_header",
+        "refresh_seconds",
+        "cache_poll_seconds",
+        "init_retry_max_seconds",
+        "managed_dir",
+        "opa",
+        "rule_pack",
+        "observability",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"agent_control contains unsupported keys: {unknown}")
+    opa_value = raw.get("opa")
+    if opa_value is not None and not isinstance(opa_value, dict):
+        raise ValueError("agent_control.opa must be a mapping")
+    opa_raw = opa_value or {}
+    rule_value = raw.get("rule_pack")
+    if rule_value is not None and not isinstance(rule_value, dict):
+        raise ValueError("agent_control.rule_pack must be a mapping")
+    rule_raw = rule_value or {}
+    observability_value = raw.get("observability")
+    if observability_value is not None and not isinstance(observability_value, dict):
+        raise ValueError("agent_control.observability must be a mapping")
+    observability_raw = observability_value or {}
+    unknown_opa = sorted(set(opa_raw) - {"enabled", "precedence", "activation"})
+    if unknown_opa:
+        raise ValueError(f"agent_control.opa contains unsupported keys: {unknown_opa}")
+    unknown_rule = sorted(set(rule_raw) - {"enabled", "activation", "max_rules"})
+    if unknown_rule:
+        raise ValueError(f"agent_control.rule_pack contains unsupported keys: {unknown_rule}")
+    unknown_observability = sorted(
+        set(observability_raw) - {"enabled", "include_content", "sink", "otel_destination"}
+    )
+    if unknown_observability:
+        raise ValueError(f"agent_control.observability contains unsupported keys: {unknown_observability}")
+    return AgentControlConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        deployment=str(raw.get("deployment", "cisco_cloud") or ""),
+        server_url=str(raw.get("server_url", "") or ""),
+        agent_name=str(raw.get("agent_name", "defenseclaw-policy-sync") or ""),
+        target_type=str(raw.get("target_type", "") or ""),
+        installation_id=str(raw.get("installation_id", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "AGENT_CONTROL_API_KEY") or ""),
+        api_key_header=str(raw.get("api_key_header", "") or ""),
+        refresh_seconds=int(raw.get("refresh_seconds", 60)),
+        cache_poll_seconds=int(raw.get("cache_poll_seconds", 2)),
+        init_retry_max_seconds=int(raw.get("init_retry_max_seconds", 300)),
+        managed_dir=str(raw.get("managed_dir", "") or ""),
+        opa=AgentControlOPAConfig(
+            enabled=_coerce_bool(opa_raw.get("enabled", False)),
+            precedence=str(opa_raw.get("precedence", "stricter") or ""),
+            activation=str(opa_raw.get("activation", "reload") or ""),
+        ),
+        rule_pack=AgentControlRulePackConfig(
+            enabled=_coerce_bool(rule_raw.get("enabled", False)),
+            activation=str(rule_raw.get("activation", "restart") or ""),
+            max_rules=int(rule_raw.get("max_rules", 1000)),
+        ),
+        observability=AgentControlObservabilityConfig(
+            enabled=_coerce_bool(observability_raw.get("enabled", True), default=True),
+            include_content=_coerce_bool(observability_raw.get("include_content", True), default=True),
+            sink=str(observability_raw.get("sink", "agent_control") or ""),
+            otel_destination=str(observability_raw.get("otel_destination", "galileo") or ""),
+        ),
     )
 
 
@@ -4762,6 +4988,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             anchor_name=raw.get("firewall", {}).get("anchor_name", "com.defenseclaw"),
         ),
         guardrail=_merge_guardrail(raw.get("guardrail"), data_dir),
+        agent_control=_merge_agent_control(raw.get("agent_control")),
         splunk=SplunkConfig(
             hec_endpoint=splunk_raw.get("hec_endpoint", "https://localhost:8088/services/collector/event"),
             hec_token=splunk_raw.get("hec_token", ""),
@@ -4816,6 +5043,14 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    cfg.agent_control.validate()
+    if cfg.guardrail.regex_source in {"agent_control", "hybrid"}:
+        if not cfg.agent_control.enabled or not cfg.agent_control.rule_pack.enabled:
+            raise ValueError(
+                "guardrail.regex_source requires agent_control.enabled and agent_control.rule_pack.enabled"
+            )
+    elif cfg.agent_control.rule_pack.enabled:
+        raise ValueError("agent_control.rule_pack.enabled requires guardrail.regex_source agent_control or hybrid")
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.

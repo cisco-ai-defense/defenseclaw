@@ -380,17 +380,30 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 // This function is idempotent: it always starts from defaultRuleCategories,
 // so repeated calls (config reload, tests) converge on the same state.
 func ApplyRulePackOverrides(rp *guardrail.RulePack) {
+	ApplyRulePackOverridesForSource(rp, guardrail.RegexSourceLocal)
+}
+
+// ApplyRulePackOverridesForSource installs the process-global rule set for the
+// selected regex authority. Managed-only mode deliberately starts from an
+// empty baseline so compiled defaults cannot leak into central policy.
+func ApplyRulePackOverridesForSource(rp *guardrail.RulePack, source string) {
 	if rp == nil || len(rp.RuleFiles) == 0 {
-		return
+		if !strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
+			return
+		}
 	}
 
-	merged, overridden, added := mergeRulePackCategories(rp)
+	merged, overridden, added := mergeRulePackCategoriesForSource(rp, source)
 
 	ruleCategoriesMu.Lock()
 	allRuleCategories = merged
 	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		overridden, added, len(defaultRuleCategories)-overridden)
+	retained := len(defaultRuleCategories) - overridden
+	if strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
+		retained = 0
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: source=%s, %d categories overridden, %d added, %d defaults retained\n",
+		source, overridden, added, retained)
 }
 
 // ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
@@ -405,18 +418,28 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 // to install. Connectors with no entry fall back to allRuleCategories via
 // ScanAllRulesForConnector. Empty connector names are ignored.
 func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
+	ApplyConnectorRulePackOverridesForSource(connector, rp, guardrail.RegexSourceLocal)
+}
+
+// ApplyConnectorRulePackOverridesForSource is the connector-scoped analogue
+// of ApplyRulePackOverridesForSource.
+func ApplyConnectorRulePackOverridesForSource(connector string, rp *guardrail.RulePack, source string) {
 	connector = strings.TrimSpace(connector)
 	if connector == "" {
 		return
 	}
 
-	merged, overridden, added := mergeRulePackCategories(rp)
+	merged, overridden, added := mergeRulePackCategoriesForSource(rp, source)
 
 	ruleCategoriesMu.Lock()
 	connectorRuleCategories[connector] = merged
 	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
-		connector, overridden, added, len(defaultRuleCategories)-overridden)
+	retained := len(defaultRuleCategories) - overridden
+	if strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
+		retained = 0
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: source=%s, %d categories overridden, %d added, %d defaults retained\n",
+		connector, source, overridden, added, retained)
 }
 
 // mergeRulePackCategories builds a full rule-category slice by merging the
@@ -426,8 +449,14 @@ func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
 // (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
 // pack or one with no rule files yields a copy of defaultRuleCategories.
 func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int) {
-	merged = make([]ruleCategory, len(defaultRuleCategories))
-	copy(merged, defaultRuleCategories)
+	return mergeRulePackCategoriesForSource(rp, guardrail.RegexSourceLocal)
+}
+
+func mergeRulePackCategoriesForSource(rp *guardrail.RulePack, source string) (merged []ruleCategory, overridden, added int) {
+	if !strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
+		merged = make([]ruleCategory, len(defaultRuleCategories))
+		copy(merged, defaultRuleCategories)
+	}
 	if rp == nil || len(rp.RuleFiles) == 0 {
 		return merged, 0, 0
 	}
@@ -439,6 +468,9 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 
 	for _, rf := range rp.RuleFiles {
 		if rf == nil || rf.Category == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) && rf.Category != "agent-control" {
 			continue
 		}
 		var compiled []PatternRule

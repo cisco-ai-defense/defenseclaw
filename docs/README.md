@@ -57,6 +57,7 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 |-------|-------------|
 | [Free From Day 1 Requirement](requirements/FREE_FROM_DAY1.md) | Local Splunk Free-mode requirement and validation notes |
 | [CLI UX Quickstart](design/cli-ux-quickstart.md) | CLI quickstart design notes |
+| [Agent Control Policy Synchronization](design/agent-control-defenseclaw-sync-spec.md) | Complementary DefenseClaw design for translating Agent Control controls into OPA data and rule-pack overlays |
 | [OpenShell Standalone Sandbox](design/openshell-standalone-sandbox.md) | Standalone sandbox design notes |
 | [Sandbox Productization](design/sandbox-productization.md) | Sandbox packaging and productization notes |
 | [Sandbox Scanning](design/sandbox-scanning.md) | Sandbox scanner integration notes |

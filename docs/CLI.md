@@ -689,3 +689,67 @@ defenseclaw doctor [--json]
 
 Runs connectivity and credential checks against all configured services
 (sidecar, guardrail proxy, Cisco AI Defense, Splunk, scanners).
+## Agent Control synchronization
+
+```text
+defenseclaw setup guardrail [--regex-source local|agent_control|hybrid]
+  [--agent-control-deployment cisco_cloud|self_hosted]
+  [--agent-control-url URL]
+  [--agent-control-installation-id ID]
+  [--agent-control-api-key-env ENV]
+defenseclaw agent-control setup --server-url URL
+  [--deployment cisco_cloud|self_hosted]
+  [--installation-id ID] [--api-key-env ENV]
+  [--target-type log_stream|defenseclaw.installation]
+  [--api-key-header HEADER]
+  [--enable-rule-pack --regex-source agent_control|hybrid]
+  [--observability-sink agent_control|otel]
+  [--otel-destination NAME]
+defenseclaw agent-control sync --once
+defenseclaw agent-control sync --watch
+defenseclaw agent-control status [--json-output]
+defenseclaw agent-control validate SNAPSHOT.json
+```
+
+`setup guardrail` makes the regex authority explicit: `local` uses bundled and
+operator rules, `agent_control` uses only the validated managed snapshot, and
+`hybrid` combines both sources. For a managed source, store the bucket-scoped
+member key with `defenseclaw keys set AGENT_CONTROL_API_KEY`; the command reads
+the value from a hidden prompt, so the secret is not placed in shell history.
+Setup passes the configured URL and resolved key explicitly to the SDK,
+downloads and validates an initial target-effective snapshot, saves
+last-known-good artifacts, and only then switches configuration and restarts.
+The lower-level `agent-control setup` command exposes the same preflight for
+automation and requires `--regex-source` whenever rule buckets are enabled.
+For Cisco Enterprise Cloud, `--installation-id` is the Galileo log-stream ID,
+the default target type is `log_stream`, and the SDK authenticates with
+`Galileo-API-Key`. Self-hosted Agent Control defaults to the
+`defenseclaw.installation` target and `X-API-Key` header.
+
+The same database-managed member key authenticates both the SDK and Agent
+Control UI. Its grants limit the effective rule buckets and visible execution
+history, and the UI is read-only for controls. Only the environment-provisioned
+bootstrap administrator key is unscoped and allowed to manage users, keys,
+grants, and controls; never install that key on a DefenseClaw endpoint.
+
+`sync --watch` is a separate Python process: it owns
+one Agent Control SDK session and polls that SDK's in-process cache. The Go
+sidecar never polls Agent Control. After publishing changed native artifacts,
+the synchronizer sends authenticated loopback requests to reload OPA or
+restart for rule-pack changes and verifies the resulting digest. While running
+in watch mode, it also tails new final block verdicts from the Agent Control
+private spool and reports blocks caused by Agent Control-managed rules through
+the SDK observability sink. Exact blocked input, raw request body, and
+enforcement reason are included by default; set
+`agent_control.observability.include_content: false` for metadata-only export.
+Set `agent_control.observability.sink: otel` to send the same SDK
+`ControlSpan`s through a named DefenseClaw OTLP destination instead of Agent
+Control Monitor. The named destination supplies the endpoint and routing
+headers; for Galileo, UUID project/log-stream values are written as
+`projectid`/`logstreamid` headers. Run `defenseclaw setup galileo` first, then
+select that destination with `otel_destination: galileo`.
+Other sinks continue to follow the global `privacy.disable_redaction` setting.
+`status` shows event delivery counters but never prints credentials or raw
+policy/content. `validate` runs both the
+closed Python schema checks and the gateway's authoritative Go/Rego validators
+against temporary candidate files without publishing or activating them.

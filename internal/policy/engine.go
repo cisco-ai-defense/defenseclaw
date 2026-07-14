@@ -48,6 +48,7 @@ type Engine struct {
 	regoDir string
 	store   storage.Store
 	otel    *telemetry.Provider
+	status  EngineStatus
 }
 
 // New creates an Engine. regoDir is the path to the directory containing
@@ -56,11 +57,18 @@ type Engine struct {
 // subdirectory is used instead.
 func New(regoDir string) (*Engine, error) {
 	regoDir = resolveRegoDir(regoDir)
-	store, err := loadStore(regoDir)
+	store, agentControlStatus, err := loadStoreWithStatus(regoDir)
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{regoDir: regoDir, store: store}, nil
+	return &Engine{
+		regoDir: regoDir,
+		store:   store,
+		status: EngineStatus{
+			Generation:   1,
+			AgentControl: agentControlStatus,
+		},
+	}, nil
 }
 
 // SetOTelProvider attaches the shared telemetry provider for policy.evaluate
@@ -121,7 +129,7 @@ func hasRegoFiles(dir string) bool {
 // store atomically. Returns a compilation error if the new modules fail
 // to compile so the caller can decide whether to keep the old state.
 func (e *Engine) Reload() error {
-	store, err := loadStore(e.regoDir)
+	store, agentControlStatus, err := loadStoreWithStatus(e.regoDir)
 	if err != nil {
 		return err
 	}
@@ -136,6 +144,8 @@ func (e *Engine) Reload() error {
 
 	e.mu.Lock()
 	e.store = store
+	e.status.Generation++
+	e.status.AgentControl = agentControlStatus
 	e.mu.Unlock()
 	return nil
 }
@@ -143,6 +153,17 @@ func (e *Engine) Reload() error {
 // RegoDir returns the directory the engine loads Rego files from.
 func (e *Engine) RegoDir() string {
 	return e.regoDir
+}
+
+// Status returns the generation and exact Agent Control artifact metadata
+// atomically associated with the active OPA store.
+func (e *Engine) Status() EngineStatus {
+	if e == nil {
+		return EngineStatus{}
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.status
 }
 
 // ---------------------------------------------------------------------------
@@ -427,19 +448,31 @@ func (e *Engine) emitPolicyLoadOrEvalError(ctx context.Context, err error) {
 }
 
 func loadStore(regoDir string) (storage.Store, error) {
+	store, _, err := loadStoreWithStatus(regoDir)
+	return store, err
+}
+
+func loadStoreWithStatus(regoDir string) (storage.Store, AgentControlPolicyStatus, error) {
 	raw, err := readDataJSON(regoDir)
 	if err != nil {
-		return nil, fmt.Errorf("policy: read data.json: %w", err)
+		return nil, AgentControlPolicyStatus{}, fmt.Errorf("policy: read data.json: %w", err)
 	}
 
 	var data map[string]interface{}
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("policy: parse data.json: %w", err)
+		return nil, AgentControlPolicyStatus{}, fmt.Errorf("policy: parse data.json: %w", err)
+	}
+	if data == nil {
+		return nil, AgentControlPolicyStatus{}, fmt.Errorf("policy: parse data.json: top-level value must be an object")
 	}
 
 	mergeSupplementalData(regoDir, data, "data-sandbox.json")
+	agentControlStatus, err := loadAgentControlData(regoDir, data)
+	if err != nil {
+		return nil, AgentControlPolicyStatus{}, err
+	}
 
-	return inmem.NewFromObject(data), nil
+	return inmem.NewFromObject(data), agentControlStatus, nil
 }
 
 // mergeSupplementalData reads a JSON file from regoDir and merges its

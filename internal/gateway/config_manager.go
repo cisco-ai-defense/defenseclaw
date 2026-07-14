@@ -276,6 +276,15 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("audit_sinks", oldCfg.AuditSinks, newCfg.AuditSinks)
 	add("webhooks", oldCfg.Webhooks, newCfg.Webhooks)
 	add("observability", oldCfg.Observability, newCfg.Observability)
+	add("agent_control.observability", []bool{
+		oldCfg.AgentControl.Enabled,
+		oldCfg.AgentControl.Observability.Enabled,
+		oldCfg.AgentControl.Observability.IncludeContent,
+	}, []bool{
+		newCfg.AgentControl.Enabled,
+		newCfg.AgentControl.Observability.Enabled,
+		newCfg.AgentControl.Observability.IncludeContent,
+	})
 	add("privacy", oldCfg.Privacy, newCfg.Privacy)
 	add("ai_discovery", oldCfg.AIDiscovery, newCfg.AIDiscovery)
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)

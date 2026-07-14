@@ -1225,6 +1225,22 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_PROCESS_SUPERVISED",
+      "category": "hook_internal",
+      "purpose": "Assert that the gateway is running under a process supervisor that will restart it after an Agent Control rule-pack activation request.",
+      "default": "unset (automatic restart refused)",
+      "accepted_values": ["1", "true", "yes", "on", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/sidecar.go", "description": "Gates the authenticated policy-restart endpoint so an unsupervised foreground gateway cannot terminate without being restarted"},
+        {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Set by the managed systemd unit"},
+        {"location": "packaging/launchd/com.defenseclaw.gateway.plist", "description": "Set by the managed launchd job"}
+      ],
+      "since": "0.8.0",
+      "security_note": "This is a supervisor assertion, not an authorization credential. Only trusted service definitions should set it."
+    },
+    {
       "name": "DEFENSECLAW_SKILL_SCANNER_LLM_KEY",
       "category": "credential",
       "purpose": "Override the LLM key used by the skill scanner only. Falls back to DEFENSECLAW_LLM_KEY when unset.",

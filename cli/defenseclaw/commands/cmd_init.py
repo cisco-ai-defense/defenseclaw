@@ -2405,8 +2405,12 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
 
     Returns True if guardrail was successfully configured.
     """
+    import copy
+
     from defenseclaw.commands.cmd_setup import (
         _interactive_guardrail_setup,
+        _preflight_guardrail_agent_control,
+        _save_secret_to_dotenv,
         execute_guardrail_setup,
     )
     from defenseclaw.context import AppContext
@@ -2416,14 +2420,39 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
     app.cfg = cfg
     app.logger = logger
 
+    original_guardrail = copy.deepcopy(cfg.guardrail)
+    original_agent_control = copy.deepcopy(cfg.agent_control)
     gc = cfg.guardrail
-    _interactive_guardrail_setup(app, gc)
-
-    if not gc.enabled:
+    pending_agent_control_secrets: dict[str, str] = {}
+    accepted = _interactive_guardrail_setup(
+        app,
+        gc,
+        pending_secrets=pending_agent_control_secrets,
+    )
+    if accepted is False or not gc.enabled:
+        cfg.guardrail = original_guardrail
+        cfg.agent_control = original_agent_control
         click.echo("  Guardrail not enabled.")
         click.echo("  You can enable it later with 'defenseclaw setup guardrail'.")
         return False
 
+    try:
+        _preflight_guardrail_agent_control(
+            app,
+            gc,
+            api_key_override=pending_agent_control_secrets.get(cfg.agent_control.api_key_env),
+        )
+    except Exception:
+        cfg.guardrail = original_guardrail
+        cfg.agent_control = original_agent_control
+        raise
+    try:
+        for env_name, secret in pending_agent_control_secrets.items():
+            _save_secret_to_dotenv(env_name, secret, cfg.data_dir)
+    except Exception:
+        cfg.guardrail = original_guardrail
+        cfg.agent_control = original_agent_control
+        raise
     ok, warnings = execute_guardrail_setup(app, save_config=False)
 
     if warnings:

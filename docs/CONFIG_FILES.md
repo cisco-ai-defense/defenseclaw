@@ -506,3 +506,119 @@ notifications:
 | **Set by** | `defenseclaw setup notifications` (preferred) or operator via `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()` → `notifier.New(cfg.Notifications)` (wired into hooks, proxy, asset runtime, and `HILTApprovalManager`). **Python CLI** via `config.load()` for round-trip preservation; the Python side does not emit notifications itself. |
 | **Effect** | The dispatcher fires `internal/notify.SendNotification` in a goroutine so request latency is unaffected. On macOS this calls `osascript` (`display notification … with title …`); on Linux it calls `notify-send`; on unsupported platforms it falls back to a structured stderr log line. State (dedup LRU + token bucket) is per-process and resets on gateway restart. |
+## Agent Control policy synchronization
+
+The optional `agent_control` block configures the persistent policy
+synchronizer. Credentials are environment variables and must not be stored in
+this block.
+
+```yaml
+guardrail:
+  regex_source: agent_control  # local | agent_control | hybrid
+
+agent_control:
+  enabled: true
+  deployment: cisco_cloud      # cisco_cloud | self_hosted
+  server_url: https://agent-control.example.internal
+  installation_id: 281be261-4e70-4a89-ad4a-68f511335401  # Galileo log-stream ID for cloud
+  api_key_env: AGENT_CONTROL_API_KEY
+  api_key_header: Galileo-API-Key
+  agent_name: defenseclaw-policy-sync
+  target_type: log_stream
+  refresh_seconds: 60
+  cache_poll_seconds: 2
+  init_retry_max_seconds: 300
+  managed_dir: ""
+  opa:
+    enabled: false
+    precedence: stricter
+    activation: reload
+  rule_pack:
+    enabled: true
+    activation: restart
+    max_rules: 1000
+  observability:
+    enabled: true
+    include_content: true
+    sink: otel                 # agent_control | otel
+    otel_destination: galileo
+```
+
+`guardrail.regex_source` is the explicit regex authority. `local` uses only
+bundled/operator rules and disables managed rule sync; `agent_control` excludes
+all local regex contributions; `hybrid` adds managed rules after local rules.
+All modes retain local judges, suppressions, sensitive tools, HILT, connector
+topology, and failure settings.
+
+`api_key_env` names the single active key for a bucket-scoped, database-managed
+Agent Control member,
+not the unscoped bootstrap administrator key. Store it with
+`defenseclaw keys set AGENT_CONTROL_API_KEY`; the default interactive form uses
+a hidden prompt and does not put the value in the command line. The same member
+key authenticates the SDK and read-only Agent Control UI. User-level grants limit the
+rule buckets returned to DefenseClaw and the member-owned execution history
+visible in Monitor; it cannot mutate controls. Rotating the credential keeps
+those grants and the user's history intact.
+
+Deployment defaults are explicit: Cisco Enterprise Cloud uses target type
+`log_stream` with `Galileo-API-Key`, while self-hosted Agent Control uses
+`defenseclaw.installation` with `X-API-Key`. The cloud target ID is the Galileo
+log-stream ID, not a generated DefenseClaw hostname.
+
+`stricter` keeps whichever local/remote threshold activates earlier and the
+stricter Cisco trust level. `remote` uses the remote threshold/trust values
+while a control is present. HILT, guardrail mode, hook fail mode, scanner
+strategy, and the local policy baseline remain local in both modes.
+
+`observability.enabled` asynchronously reports final block decisions caused by
+Agent Control-managed rule IDs through the SDK's control-event sink. The
+synchronizer sends control identity, decision, correlation, rule IDs, severity,
+direction, and latency. With `include_content: true`, content follows the global
+privacy setting: the standard redacted gateway stream is used while
+`privacy.disable_redaction: false`; exact blocked prompts, raw request bodies,
+and enforcement reasons come from the protected
+`<data_dir>/agent-control/gateway-events-unredacted.jsonl` spool only while
+`privacy.disable_redaction: true`. Content fields are capped at 64 KiB. Disable
+observability to keep Agent Control policy distribution one-way. The setting
+does not affect local enforcement.
+
+`observability.sink: agent_control` sends SDK events to Agent Control Monitor.
+`observability.sink: otel` instead asks the Agent Control SDK to emit native
+`ControlSpan`s to the named DefenseClaw OTLP destination. DefenseClaw resolves
+the destination's environment-backed headers in memory and never copies the
+API key into `config.yaml`. The OTLP destination must be enabled for traces,
+use HTTPS and OTLP/HTTP, and include Galileo API-key, project, and log-stream
+routing headers. These sink choices are mutually exclusive for this SDK
+session.
+
+Set `observability.include_content: false` to export decision/correlation
+metadata only. In that mode the synchronizer tails the standard
+`<data_dir>/gateway.jsonl` and omits content regardless of its redaction state.
+When `observability.include_content: true`, Agent Control follows the same
+global behavior as other sinks: content is redacted when
+`privacy.disable_redaction: false` and exact when it is `true`. Confirm
+self-hosted or Cisco Cloud Control authorization, data residency, access,
+retention, and deletion requirements before enabling production traffic.
+Changes to `agent_control.enabled`, `observability.enabled`,
+`observability.include_content`, or `privacy.disable_redaction` require
+restarting both the gateway and the synchronizer because the selected event
+source is process-scoped. Exact-content
+mode also requires both processes to run under the same OS
+identity so the synchronizer can read the intentionally private `0700`/`0600`
+spool. The packaged systemd services use `defenseclaw` for both; the Cisco
+Secure Client launchd jobs both use the default root identity.
+
+Run `defenseclaw agent-control setup` instead of editing the target identity
+or managed overlay path manually.
+
+Persistent service templates are provided at
+`packaging/systemd/defenseclaw-agent-control.service` and
+`packaging/launchd/com.defenseclaw.agent-control.plist`. The systemd unit
+requires `/etc/defenseclaw/agent-control.env`. On macOS, the LaunchDaemon uses
+the owner/mode-checking `defenseclaw-agent-control-launcher` and reads
+`/opt/cisco/secureclient/defenseclaw/etc/agent-control.env`. Both platforms
+require the credential file to be a regular, single-link `root:defenseclaw`
+file with mode `0640`; the service refuses to start if validation fails. Both
+platforms also use the normal DefenseClaw data-directory `.env` loading. Keep Agent
+Control and gateway credentials in those protected environment files, never
+in `config.yaml` or the service definition.

@@ -1,0 +1,10 @@
+version: 1
+category: agent-control
+rules:
+  - id: AC-CMD-RM-RF
+    pattern: '(?i)rm\s+-rf'
+    title: Recursive deletion
+    severity: HIGH
+    confidence: 0.99
+    tags:
+      - filesystem

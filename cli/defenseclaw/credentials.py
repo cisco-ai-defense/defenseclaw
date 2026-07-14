@@ -278,6 +278,13 @@ def _cisco_ai_defense_key(cfg: Config) -> Requirement:
     return Requirement.NOT_USED
 
 
+def _agent_control_key(cfg: Config) -> Requirement:
+    settings = getattr(cfg, "agent_control", None)
+    if settings is None or not getattr(settings, "enabled", False):
+        return Requirement.NOT_USED
+    return Requirement.REQUIRED
+
+
 def _virustotal_key(cfg: Config) -> Requirement:
     sc = getattr(cfg, "scanners", None)
     if sc is None:
@@ -361,6 +368,16 @@ def _cisco_env(cfg: Config) -> str:
     return cad.api_key_env if cad is not None else ""
 
 
+def _agent_control_env(cfg: Config) -> str:
+    settings = getattr(cfg, "agent_control", None)
+    return getattr(settings, "api_key_env", "") if settings is not None else ""
+
+
+def _agent_control_endpoint(cfg: Config) -> str:
+    settings = getattr(cfg, "agent_control", None)
+    return getattr(settings, "server_url", "") if settings is not None else ""
+
+
 def _cisco_endpoint(cfg: Config) -> str:
     """Return the configured AI Defense region endpoint.
 
@@ -442,6 +459,14 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         required=_cisco_ai_defense_key,
         effective_env_name=_cisco_env,
         bound_endpoint=_cisco_endpoint,
+    ),
+    CredentialSpec(
+        env_name="AGENT_CONTROL_API_KEY",
+        feature="agent_control",
+        description="Runtime credential for Agent Control policy synchronization",
+        required=_agent_control_key,
+        effective_env_name=_agent_control_env,
+        bound_endpoint=_agent_control_endpoint,
     ),
     CredentialSpec(
         env_name="VIRUSTOTAL_API_KEY",

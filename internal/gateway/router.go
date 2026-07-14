@@ -388,7 +388,20 @@ func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, 
 
 // SetRulePack configures the guardrail rule pack for tool result inspection.
 func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
+	r.configMu.Lock()
 	r.rp = rp
+	r.configMu.Unlock()
+}
+
+// RulePackSnapshot returns the immutable process-lifetime rule-pack pointer
+// under the same lock used by config reloads.
+func (r *EventRouter) RulePackSnapshot() *guardrail.RulePack {
+	if r == nil {
+		return nil
+	}
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.rp
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -1504,10 +1517,11 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 //     logged once per call so the operator can see the degraded state —
 //     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
-	if r.rp == nil || payload.Output == "" {
+	rp := r.RulePackSnapshot()
+	if rp == nil || payload.Output == "" {
 		return
 	}
-	stool := r.rp.LookupSensitiveTool(payload.Tool)
+	stool := rp.LookupSensitiveTool(payload.Tool)
 	if stool == nil || !stool.ResultInspection {
 		return
 	}

@@ -29,6 +29,7 @@ import click
 
 from defenseclaw import __version__
 from defenseclaw.commands.cmd_agent import agent
+from defenseclaw.commands.cmd_agent_control import agent_control_cmd
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
@@ -184,6 +185,7 @@ def cleanup(ctx: click.Context, *_args, **_kwargs) -> None:
 # Register all commands
 cli.add_command(init_cmd, "init")
 cli.add_command(agent)
+cli.add_command(agent_control_cmd)
 cli.add_command(quickstart_cmd)
 cli.add_command(setup)
 cli.add_command(skill)
