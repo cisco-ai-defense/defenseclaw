@@ -41,6 +41,14 @@ if (-not $IsWindows) {
     throw 'The setup wizard probe requires native Windows.'
 }
 
+$setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
+if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
+    if (-not (Test-Path -LiteralPath $setupStandardUserLauncherSource -PathType Leaf)) {
+        throw "Windows Setup standard-user launcher source is missing: $setupStandardUserLauncherSource"
+    }
+    Add-Type -TypeDefinition (Get-Content -LiteralPath $setupStandardUserLauncherSource -Raw -Encoding UTF8)
+}
+
 $setup = [IO.Path]::GetFullPath($SetupPath)
 if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Setup executable not found: $setup"
@@ -211,6 +219,33 @@ function Assert-UnicodeWindowTextInterop {
     }
 }
 
+function Start-SetupWizardProcess([string]$Application, [string]$WorkingDirectory) {
+    if (-not [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $Application
+        $startInfo.WorkingDirectory = $WorkingDirectory
+        $startInfo.UseShellExecute = $false
+        return [Diagnostics.Process]::Start($startInfo)
+    }
+
+    # GitHub-hosted Windows runners execute this job with an elevated token,
+    # while user-scope Setup deliberately refuses elevation. Launch the exact
+    # Setup image on the interactive desktop with a verified restricted LUA
+    # token, matching the lifecycle acceptance boundary. Environment entries
+    # are copied verbatim so Known Folder, diagnostics, and runner contracts
+    # still describe the same user rather than an over-the-shoulder account.
+    $environment = @(
+        [Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
+            ForEach-Object { '{0}={1}' -f [string]$_.Key, [string]$_.Value }
+    )
+    return [DefenseClaw.SetupStandardUserLauncher]::StartRestricted(
+        $Application,
+        [string[]]@(),
+        $WorkingDirectory,
+        [string[]]$environment
+    )
+}
+
 function Get-WizardControl([IntPtr]$Window, [int]$ControlId, [string]$Label) {
     $control = [DefenseClaw.SetupWizardSmokeNativeMethods]::GetDlgItem($Window, $ControlId)
     if ($control -eq [IntPtr]::Zero) {
@@ -377,11 +412,7 @@ if ($InteropSelfTestOnly) {
     return
 }
 try {
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $setup
-    $startInfo.WorkingDirectory = $state
-    $startInfo.UseShellExecute = $false
-    $process = [Diagnostics.Process]::Start($startInfo)
+    $process = Start-SetupWizardProcess $setup $state
     if ($null -eq $process) {
         throw 'Starting the setup wizard returned no process.'
     }
