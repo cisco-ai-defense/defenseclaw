@@ -539,6 +539,49 @@ func codexConfigPath() string {
 	return filepath.Join(codexHomeDir(), "config.toml")
 }
 
+// ownedHookContractPresent performs the Codex-specific runtime guardian check.
+// A command substring is insufficient: Codex only executes a handler when its
+// complete event shape is valid and its position-aware trusted_hash entry is
+// still enabled. Reuse the same authoritative verifier Setup applies to the
+// bytes it persists so guardian repair cannot mistake a partial, moved,
+// disabled, asynchronous, or untrusted matrix for active protection.
+func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	configPath := codexConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
+	}
+	if rawFeatures, exists := cfg["features"]; exists {
+		features, ok := rawFeatures.(map[string]interface{})
+		if !ok {
+			return false, nil
+		}
+		for _, key := range []string{"hooks", "codex_hooks"} {
+			if rawEnabled, exists := features[key]; exists {
+				enabled, ok := rawEnabled.(bool)
+				if !ok || !enabled {
+					return false, nil
+				}
+			}
+		}
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks")); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
 // config.toml subtrees Setup() modifies — [hooks], [otel], and the
 // top-level `notify` array — so Teardown can restore them verbatim or
