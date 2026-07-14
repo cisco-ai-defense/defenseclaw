@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -179,9 +180,7 @@ func readNativeHookInstallState(statePath string) (nativeHookInstallState, bool)
 }
 
 func sameWindowsHookPath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+	return pathidentity.Same(left, right)
 }
 
 func windowsHookPathHasNoReparsePoints(path string) bool {

@@ -32,6 +32,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -347,9 +349,7 @@ func validNativeWindowsTransactionID(value string) bool {
 }
 
 func sameWindowsInstallPath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+	return pathidentity.Same(left, right)
 }
 
 func stableNativeWindowsPE(path string) bool {
@@ -532,8 +532,7 @@ func isDefenseClawHookExecutable(exe string) bool {
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	} {
-		if strings.TrimSpace(owned) != "" &&
-			strings.EqualFold(filepath.Clean(exe), filepath.Clean(owned)) {
+		if strings.TrimSpace(owned) != "" && pathidentity.Same(exe, owned) {
 			return true
 		}
 	}

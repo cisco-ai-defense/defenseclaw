@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -229,7 +230,7 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 		if err != nil {
 			return false
 		}
-		if info.Executable != "" && !strings.EqualFold(filepath.Clean(exePath), filepath.Clean(info.Executable)) {
+		if info.Executable != "" && !pathidentity.Same(exePath, info.Executable) {
 			return false
 		}
 		return true

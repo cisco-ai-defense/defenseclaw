@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"golang.org/x/mod/semver"
 )
@@ -588,9 +589,7 @@ func pathExists(path string) bool {
 }
 
 func samePath(a, b string) bool {
-	aFull, aErr := filepath.Abs(a)
-	bFull, bErr := filepath.Abs(b)
-	return aErr == nil && bErr == nil && strings.EqualFold(aFull, bFull)
+	return pathidentity.Same(a, b)
 }
 
 func validConnector(value string) bool {

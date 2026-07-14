@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
@@ -200,7 +201,7 @@ func structuredNativeExecHookReferences(entry map[string]interface{}, needles []
 		return false
 	}
 	command := strings.TrimSpace(stringValue(entry["command"]))
-	if command == "" || !strings.EqualFold(filepath.Clean(command), filepath.Clean(defenseclawHookBinary())) {
+	if command == "" || !pathidentity.Same(command, defenseclawHookBinary()) {
 		return false
 	}
 	rawArgs, ok := entry["args"].([]interface{})

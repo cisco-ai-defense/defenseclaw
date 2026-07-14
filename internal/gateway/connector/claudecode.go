@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -714,7 +715,7 @@ func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAs
 	if runtime.GOOS == "windows" {
 		command, _ := handler["command"].(string)
 		return isClaudeCodeNativeExecHook(handler) &&
-			strings.EqualFold(filepath.Clean(command), filepath.Clean(defenseclawHookBinary()))
+			pathidentity.Same(command, defenseclawHookBinary())
 	}
 	command, _ := handler["command"].(string)
 	expected := hookInvocationCommand(

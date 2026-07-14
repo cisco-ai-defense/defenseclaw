@@ -97,15 +97,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 	if state.PID <= 0 || strings.TrimSpace(state.Executable) == "" {
 		return false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
 	}
-	expected, err := filepath.Abs(gatewayPath)
-	if err != nil {
-		return false, err
-	}
-	recorded, err := filepath.Abs(state.Executable)
-	if err != nil {
-		return false, err
-	}
-	if !strings.EqualFold(recorded, expected) {
+	if !pathidentity.Same(state.Executable, gatewayPath) {
 		return false, nil
 	}
 	livePath, identity, err := processIdentity(uint32(state.PID))
@@ -115,11 +107,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	live, err := filepath.Abs(livePath)
-	if err != nil {
-		return false, err
-	}
-	if !strings.EqualFold(live, expected) {
+	if !pathidentity.Same(livePath, gatewayPath) {
 		return false, nil
 	}
 	if state.StartIdentity != "" && state.StartIdentity != identity {

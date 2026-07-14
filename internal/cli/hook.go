@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 func init() {
@@ -116,7 +117,7 @@ func openCursorHookInputFile(hookDir, path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Cursor hook input: %w", err)
 	}
-	if !strings.EqualFold(filepath.Clean(filepath.Dir(cleanPath)), filepath.Clean(cleanDir)) {
+	if !pathidentity.Same(filepath.Dir(cleanPath), cleanDir) {
 		return nil, fmt.Errorf("Cursor hook input must be inside the DefenseClaw hooks directory")
 	}
 	base := filepath.Base(cleanPath)
