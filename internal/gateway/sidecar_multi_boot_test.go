@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // bootStubConnector embeds stubConnector (full connector.Connector) and lets a
@@ -245,6 +246,7 @@ func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *tes
 // agent contract changed.
 func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *testing.T) {
 	s := multiBootSidecar(t)
+	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"codex": {Mode: "action"},
@@ -271,12 +273,9 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	if err := os.WriteFile(artifact, []byte("stale generated hook"), 0o600); err != nil {
 		t.Fatalf("write stale hook: %v", err)
 	}
-	previous := connector.HookContractLockEntry{
-		Connector:              "codex",
-		RawAgentVersion:        "codex-cli 0.142.4",
-		NormalizedAgentVersion: "0.142.4",
-		ContractID:             "codex-hooks-v1",
-		HookScriptDigests:      map[string]string{"codex-hook.sh": "sha256:previous-generated-build"},
+	previous := stageCodexExecutableEvidenceFixture(t, s.cfg.DataDir)
+	previous.HookScriptDigests = map[string]string{
+		"codex-hook.sh": "sha256:previous-generated-build",
 	}
 	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, previous); err != nil {
 		t.Fatalf("save previous lock: %v", err)

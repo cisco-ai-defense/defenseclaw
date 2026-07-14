@@ -1003,8 +1003,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})
 	foundOther := false
 	for _, path := range paths {
-		text := fmt.Sprint(path)
-		if strings.Contains(text, "defenseclaw") {
+		if isDefenseClawLoadPath(path) {
 			t.Fatalf("DefenseClaw load path survived uninstall: %v", paths)
 		}
 		if s, _ := path.(string); s == otherPath {
@@ -1469,6 +1468,304 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 	}
 }
 
+func claudeCodePR520ExecMatrix(command string) map[string]interface{} {
+	hooks := map[string]interface{}{}
+	for _, group := range hookGroups {
+		handler := map[string]interface{}{
+			"type":    "command",
+			"command": command,
+			"args":    []interface{}{"hook", "--connector", "claudecode"},
+			"timeout": group.timeout,
+		}
+		if group.async {
+			handler["async"] = true
+		}
+		entry := map[string]interface{}{
+			"hooks": []interface{}{handler},
+		}
+		if group.matcher != "" {
+			entry["matcher"] = group.matcher
+		}
+		hooks[group.eventType] = []interface{}{entry}
+	}
+	return hooks
+}
+
+func claudeCodeFirstTestHookGroup(
+	hooks map[string]interface{},
+	eventType string,
+) map[string]interface{} {
+	return hooks[eventType].([]interface{})[0].(map[string]interface{})
+}
+
+func claudeCodeFirstTestHookHandler(
+	hooks map[string]interface{},
+	eventType string,
+) map[string]interface{} {
+	group := claudeCodeFirstTestHookGroup(hooks, eventType)
+	return group["hooks"].([]interface{})[0].(map[string]interface{})
+}
+
+func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactPR520Shape(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
+	exact := claudeCodePR520ExecMatrix(command)
+	commands, err := inferPreTrackedClaudeCodeManagedCommands(exact, map[string]interface{}{}, true)
+	if err != nil {
+		t.Fatalf("infer exact predecessor matrix: %v", err)
+	}
+	if len(commands) != 1 || commands[0] != command {
+		t.Fatalf("exact predecessor commands = %#v, want [%q]", commands, command)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]interface{})
+	}{
+		{
+			name: "matcher mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookGroup(hooks, "SessionStart")["matcher"] = "startup"
+			},
+		},
+		{
+			name: "empty matcher serialized",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookGroup(hooks, "UserPromptSubmit")["matcher"] = ""
+			},
+		},
+		{
+			name: "timeout mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				handler := claudeCodeFirstTestHookHandler(hooks, "PreToolUse")
+				handler["timeout"] = handler["timeout"].(int) + 1
+			},
+		},
+		{
+			name: "asynchronous handler omitted",
+			mutate: func(hooks map[string]interface{}) {
+				delete(claudeCodeFirstTestHookHandler(hooks, "MessageDisplay"), "async")
+			},
+		},
+		{
+			name: "explicit false async on blocking handler",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["async"] = false
+			},
+		},
+		{
+			name: "async alias present",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["asyncRewake"] = false
+			},
+		},
+		{
+			name: "handler type mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["type"] = "prompt"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hooks := claudeCodePR520ExecMatrix(command)
+			tt.mutate(hooks)
+			commands, err := inferPreTrackedClaudeCodeManagedCommands(
+				hooks,
+				map[string]interface{}{},
+				true,
+			)
+			if err != nil {
+				t.Fatalf("infer wrong-shape predecessor matrix: %v", err)
+			}
+			if len(commands) != 0 {
+				t.Fatalf("inferred wrong-shape predecessor commands = %#v, want none", commands)
+			}
+		})
+	}
+}
+
+func TestInferPreTrackedClaudeCodeManagedCommandsRejectsPristineIdentity(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
+	current := claudeCodePR520ExecMatrix(command)
+	pristine := claudeCodePR520ExecMatrix(command)
+	claudeCodeFirstTestHookHandler(pristine, "SessionStart")["timeout"] = 1
+
+	commands, err := inferPreTrackedClaudeCodeManagedCommands(current, pristine, true)
+	if err != nil {
+		t.Fatalf("infer matrix with ambiguous pristine identity: %v", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("inferred ambiguous pristine commands = %#v, want none", commands)
+	}
+}
+
+func TestClaudeCode_SetupMigratesPR520ExecMatrixAfterBinaryMove(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PR520 native exec migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
+	newBinary := filepath.Join(dir, "new-install", windowsHookBinaryName)
+	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
+	hooks := claudeCodePR520ExecMatrix(oldBinary)
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":        "command",
+				"command":     foreignBinary,
+				"args":        []interface{}{"hook", "--connector", "claudecode"},
+				"timeout":     15,
+				"user_option": "preserve-me",
+			},
+		},
+	})
+	raw, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+	if err != nil {
+		t.Fatalf("marshal PR520 settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write PR520 settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = newBinary
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	// PR520 wrote this protected backup but intentionally did not populate the
+	// Windows managed-command list.
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("save PR520 backup: %v", err)
+	}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read migrated settings: %v", err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse migrated settings: %v", err)
+	}
+	oldCount := 0
+	newCount := 0
+	foreignCount := 0
+	for _, rawGroups := range settings["hooks"].(map[string]interface{}) {
+		for _, rawGroup := range rawGroups.([]interface{}) {
+			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				switch handler["command"] {
+				case oldBinary:
+					oldCount++
+				case newBinary:
+					newCount++
+				case foreignBinary:
+					foreignCount++
+					if handler["user_option"] != "preserve-me" {
+						t.Fatalf("foreign handler metadata changed: %#v", handler)
+					}
+				}
+			}
+		}
+	}
+	if oldCount != 0 || newCount != len(hookGroups) || foreignCount != 1 {
+		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, len(hookGroups))
+	}
+}
+
+func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows exec-form ownership is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	foreignCommand := `C:\OtherProduct\defenseclaw-hook.exe`
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"args":        []interface{}{"hook", "--connector", "claudecode"},
+		"timeout":     15,
+		"user_option": "preserve-me",
+	}
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks":   []interface{}{foreignHandler},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "managed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	foreignCount := 0
+	managedCount := 0
+	for _, rawEntry := range entries {
+		entry := rawEntry.(map[string]interface{})
+		for _, rawHandler := range entry["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			switch handler["command"] {
+			case foreignCommand:
+				foreignCount++
+				if handler["user_option"] != "preserve-me" {
+					t.Fatalf("foreign handler metadata changed: %#v", handler)
+				}
+			case defenseclawHookBinaryOverride:
+				managedCount++
+			}
+		}
+	}
+	if foreignCount != 1 || managedCount != 1 {
+		t.Fatalf("PreToolUse foreign=%d managed=%d, want 1 each: %#v", foreignCount, managedCount, entries)
+	}
+}
+
 func TestClaudeCode_SetupRefreshPreservesForeignHandlerInManagedMatcherGroup(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "claude-settings.json")
@@ -1554,7 +1851,7 @@ func TestClaudeCode_SetupRefreshPreservesForeignHandlerInManagedMatcherGroup(t *
 	}
 }
 
-func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t *testing.T) {
+func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepoPath(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("canonical native install command is Windows-specific")
 	}
@@ -1564,7 +1861,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	) + " " + nativeHookFlag + "claudecode"
 	repoCommand := `"C:\Users\test\src\defenseclaw\defenseclaw-gateway.exe" hook --connector claudecode`
-	foreignCommand := `"C:\Tools\team-hook.exe" --notify`
+	foreignCommand := `"C:\OtherProduct\defenseclaw-gateway.exe" hook --connector claudecode`
 	hooks := map[string]interface{}{}
 	for _, group := range hookGroups {
 		hooks[group.eventType] = []interface{}{
@@ -1605,10 +1902,15 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 		defenseclawHookBinaryOverride = previousBinaryOverride
 	})
 
-	// Simulate the pre-managed-command backup schema already present on an
-	// upgraded installation. This is the state behind the live 28 -> 56 report.
+	// PR520 deliberately left ManagedHookCommands empty on Windows. This is the
+	// predecessor backup state behind the live duplicate report. The canonical
+	// installed path remains provably ours; the arbitrary source-tree path lacks
+	// the exact PR520 matcher/timeout/async evidence required for migration and
+	// must remain foreign, just like the isolated third-party hook above.
 	c := NewClaudeCodeConnector()
-	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+	if err := c.saveBackup(dir, claudeCodeBackup{
+		HadHooksKey: false,
+	}); err != nil {
 		t.Fatalf("seed legacy backup: %v", err)
 	}
 	opts := SetupOpts{
@@ -1668,8 +1970,11 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 			}
 		}
 	}
-	if installedFound || repoFound {
-		t.Fatal("pre-upgrade managed commands survived refresh")
+	if installedFound {
+		t.Fatal("known installed pre-upgrade managed command survived refresh")
+	}
+	if !repoFound {
+		t.Fatal("untracked source-tree command was claimed without exact migration evidence")
 	}
 	if managedCount != len(hookGroups) {
 		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
@@ -1683,10 +1988,10 @@ func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("legacy native command signature is Windows-specific")
 	}
+	knownLegacyGateway := filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName)
 	valid := []string{
-		`"C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
-		`& "C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
-		`"C:\Users\test\src\defenseclaw-gateway.exe" hook --connector claudecode`,
+		windowsQuoteExe(knownLegacyGateway) + " " + nativeHookFlag + "claudecode",
+		"& " + windowsQuoteExe(knownLegacyGateway) + " " + nativeHookFlag + "claudecode",
 		`defenseclaw-gateway.exe hook --connector claudecode`,
 	}
 	for _, command := range valid {
@@ -1697,6 +2002,8 @@ func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
 
 	invalid := []string{
 		`"C:\Tools\team-hook.exe" hook --connector claudecode`,
+		`"C:\OtherProduct\defenseclaw-hook.exe" hook --connector claudecode`,
+		`"C:\OtherProduct\defenseclaw-gateway.exe" hook --connector claudecode`,
 		`"C:\Tools\defenseclaw-gateway.exe" hook --connector codex`,
 		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode --extra`,
 		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode & whoami`,
@@ -1708,6 +2015,47 @@ func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
 		if isLegacyClaudeCodeNativeHookCommand(command) {
 			t.Errorf("non-exact command was recognized as managed: %q", command)
 		}
+	}
+}
+
+func TestTrackedClaudeCodeLegacyCommandNormalizesCallOperatorAndQuotes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("legacy PowerShell command normalization is Windows-specific")
+	}
+	executable := `C:\Users\test user\src\defenseclaw-gateway.exe`
+	doubleQuoted := `"` + executable + `" hook --connector claudecode`
+	calledSingleQuoted := `& '` + executable + `' hook --connector claudecode`
+	cases := []struct {
+		name    string
+		current string
+		managed string
+	}{
+		{name: "operator-added-call-operator", current: calledSingleQuoted, managed: doubleQuoted},
+		{name: "operator-removed-call-operator", current: doubleQuoted, managed: calledSingleQuoted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := map[string]interface{}{"type": "command", "command": tc.current}
+			if !hookUsesTrackedClaudeCodeCommand(handler, []string{tc.managed}) {
+				t.Fatalf("semantically identical legacy command was not tracked\ncurrent: %s\nmanaged: %s", tc.current, tc.managed)
+			}
+		})
+	}
+	foreign := map[string]interface{}{
+		"type":    "command",
+		"command": `& 'C:\OtherProduct\defenseclaw-gateway.exe' hook --connector claudecode`,
+	}
+	if hookUsesTrackedClaudeCodeCommand(foreign, []string{doubleQuoted}) {
+		t.Fatal("different executable path matched the protected legacy command")
+	}
+	execCommand := `C:\moved\defenseclaw-hook.exe`
+	wrongExecArgs := map[string]interface{}{
+		"type":    "command",
+		"command": execCommand,
+		"args":    []interface{}{"hook", "--connector", "codex"},
+	}
+	if hookUsesTrackedClaudeCodeCommand(wrongExecArgs, []string{execCommand}) {
+		t.Fatal("backup-recorded exec path matched a different argument vector")
 	}
 }
 
@@ -1886,6 +2234,76 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 	messageHandler["async"] = false
 	if err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks")); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
 		t.Fatalf("verification error = %v, want MessageDisplay async requirement", err)
+	}
+}
+
+func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	if err := NewClaudeCodeConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	preToolHandler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	expectedCommand := preToolHandler["command"].(string)
+	var expectedArgs []string
+	if rawArgs, exists := preToolHandler["args"].([]interface{}); exists {
+		for _, rawArg := range rawArgs {
+			expectedArgs = append(expectedArgs, rawArg.(string))
+		}
+	}
+	baseline, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatalf("marshal baseline hooks: %v", err)
+	}
+	cases := map[string]struct {
+		value interface{}
+		want  string
+	}{
+		"event": {
+			value: map[string]interface{}{"hooks": []interface{}{}},
+			want:  "UnexpectedEvent: event groups have unsupported type",
+		},
+		"group": {
+			value: []interface{}{"malformed-group"},
+			want:  "UnexpectedEvent: event group 0 has unsupported type",
+		},
+		"hooks": {
+			value: []interface{}{map[string]interface{}{"hooks": "malformed-handlers"}},
+			want:  "UnexpectedEvent: event group 0 hooks have unsupported type",
+		},
+		"handler": {
+			value: []interface{}{map[string]interface{}{"hooks": []interface{}{"malformed-handler"}}},
+			want:  "UnexpectedEvent: event group 0 handler 0 has unsupported type",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			candidate := map[string]interface{}{}
+			if err := json.Unmarshal(baseline, &candidate); err != nil {
+				t.Fatalf("clone baseline hooks: %v", err)
+			}
+			candidate["UnexpectedEvent"] = tc.value
+			err := verifyClaudeCodeHookMatrix(candidate, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("verification error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -2419,6 +2837,226 @@ func TestClaudeCode_Teardown_UsesTrackedManagedCommandsDuringSurgicalCleanup(t *
 	}
 	if err := c.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean after surgical teardown: %v", err)
+	}
+}
+
+func TestClaudeCode_TeardownRejectsUnsupportedHookShapesWithoutRewritingSettings(t *testing.T) {
+	cases := map[string]func(map[string]interface{}){
+		"non-array-event": func(settings map[string]interface{}) {
+			hooks := settings["hooks"].(map[string]interface{})
+			hooks["UnexpectedEvent"] = map[string]interface{}{"future": "shape"}
+		},
+		"non-map-root": func(settings map[string]interface{}) {
+			settings["hooks"] = "future-hook-schema"
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "claude-settings.json")
+			if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+				t.Fatalf("write initial settings: %v", err)
+			}
+			previousSettingsOverride := ClaudeCodeSettingsPathOverride
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			raw, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("read configured settings: %v", err)
+			}
+			settings := map[string]interface{}{}
+			if err := json.Unmarshal(raw, &settings); err != nil {
+				t.Fatalf("parse configured settings: %v", err)
+			}
+			mutate(settings)
+			malformed, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal malformed settings: %v", err)
+			}
+			if err := os.WriteFile(settingsPath, malformed, 0o600); err != nil {
+				t.Fatalf("write malformed settings: %v", err)
+			}
+
+			err = c.Teardown(context.Background(), opts)
+			if err == nil || !strings.Contains(err.Error(), "unsupported type") {
+				t.Fatalf("Teardown error = %v, want unsupported-shape refusal", err)
+			}
+			after, readErr := os.ReadFile(settingsPath)
+			if readErr != nil {
+				t.Fatalf("read settings after refusal: %v", readErr)
+			}
+			if !bytes.Equal(after, malformed) {
+				t.Fatalf("Teardown rewrote unsupported settings\nbefore:\n%s\nafter:\n%s", malformed, after)
+			}
+		})
+	}
+}
+
+func TestClaudeCode_TeardownMigratesPreTrackingExecMatrixAfterBinaryMove(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
+	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
+	hooks := claudeCodePR520ExecMatrix(oldBinary)
+	// Drift after the predecessor Setup forces surgical restore. This isolated
+	// same-basename exec hook was never part of DefenseClaw's complete matrix.
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":        "command",
+				"command":     foreignBinary,
+				"args":        []interface{}{"hook", "--connector", "claudecode"},
+				"timeout":     15,
+				"user_option": "preserve-me",
+			},
+		},
+	})
+	raw, err := json.MarshalIndent(map[string]interface{}{"hooks": hooks}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal predecessor settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write predecessor settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "new-install", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	// This is the real PR520 Windows backup shape: protected, but without a
+	// command allow-list.
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("save predecessor backup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	restoredSettings := map[string]interface{}{}
+	if err := json.Unmarshal(restored, &restoredSettings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	oldCount := 0
+	foreignCount := 0
+	for _, rawGroups := range restoredSettings["hooks"].(map[string]interface{}) {
+		for _, rawGroup := range rawGroups.([]interface{}) {
+			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				switch handler["command"] {
+				case oldBinary:
+					oldCount++
+				case foreignBinary:
+					foreignCount++
+					if handler["user_option"] != "preserve-me" {
+						t.Fatalf("foreign handler metadata changed: %#v", handler)
+					}
+				}
+			}
+		}
+	}
+	if oldCount != 0 || foreignCount != 1 {
+		t.Fatalf("restored old=%d foreign=%d, want 0/1:\n%s", oldCount, foreignCount, restored)
+	}
+}
+
+func TestClaudeCode_TeardownPreservesForeignSameBasenameExecHook(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows exec-form ownership is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "managed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	foreignCommand := `C:\OtherProduct\defenseclaw-hook.exe`
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"args":        []interface{}{"hook", "--connector", "claudecode"},
+		"timeout":     15,
+		"user_option": "preserve-me",
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	hooks["PreToolUse"] = append(entries, map[string]interface{}{
+		"matcher": "*",
+		"hooks":   []interface{}{foreignHandler},
+	})
+	updated, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal drifted settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, updated, 0o600); err != nil {
+		t.Fatalf("write drifted settings: %v", err)
+	}
+	// Simulate an upgrade moving the active launcher after registration. The
+	// protected backup must still identify the exact old exec-form path, while
+	// the unrelated same-basename executable remains foreign.
+	defenseclawHookBinaryOverride = filepath.Join(dir, "new-install", windowsHookBinaryName)
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	if err := json.Unmarshal(restored, &settings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	hooks = settings["hooks"].(map[string]interface{})
+	entries = hooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("PreToolUse group count=%d, want only foreign group: %#v", len(entries), entries)
+	}
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != "preserve-me" {
+		t.Fatalf("foreign same-basename handler was removed or changed: %#v", handler)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean treated foreign same-basename handler as managed: %v", err)
 	}
 }
 
@@ -3571,7 +4209,11 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	}
 	hooks := buildCodexHooksTable(configPath, hookPath)
 	hooks["state"] = state
-	if removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath)) {
+	removed, err := removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("inspect user replacement trust: %v", err)
+	}
+	if removed {
 		t.Fatalf("user replacement trust state was removed: %v", hooks)
 	}
 	if _, ok := state[key]; !ok {
@@ -3583,7 +4225,11 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 		t.Fatalf("locate owned hook: locations=%v err=%v", locations, err)
 	}
 	state[key] = map[string]interface{}{"trusted_hash": locations[0].currentHash}
-	if !removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath)) {
+	removed, err = removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("remove DefenseClaw trust: %v", err)
+	}
+	if !removed {
 		t.Fatal("DefenseClaw-owned trust state was not removed")
 	}
 	if _, ok := state[key]; ok {
@@ -3596,7 +4242,11 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	state[key] = map[string]interface{}{
 		"trusted_hash": legacyHashForOwnedCodexLocation("pre_tool_use", locations[0]),
 	}
-	if !removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath)) {
+	removed, err = removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("remove legacy DefenseClaw trust: %v", err)
+	}
+	if !removed {
 		t.Fatal("legacy DefenseClaw trust state was not removed during upgrade")
 	}
 	if _, ok := state[key]; ok {
@@ -3681,6 +4331,217 @@ func TestCodexSetupPreservesUnrelatedStateAndUsesMergedPositions(t *testing.T) {
 	}
 	if _, exists := restoredState[defenseClawKey]; exists {
 		t.Fatalf("DefenseClaw trust state survived teardown: %v", restoredState)
+	}
+}
+
+func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read initial config: %v", err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse initial config: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	groups := hooks["PreToolUse"].([]interface{})
+	if len(groups) != 1 {
+		t.Fatalf("initial PreToolUse group count = %d, want 1", len(groups))
+	}
+	userHandler := map[string]interface{}{
+		"type":    "command",
+		"command": "user-policy.exe",
+		"timeout": int64(7),
+		"async":   false,
+	}
+	userGroup := map[string]interface{}{
+		"matcher": "^Shell$",
+		"hooks":   []interface{}{userHandler},
+	}
+	hooks["PreToolUse"] = append(groups, userGroup)
+	userHash, err := codexCommandHookHashForPlatform(runtime.GOOS, "pre_tool_use", "^Shell$", userHandler)
+	if err != nil {
+		t.Fatalf("hash user hook: %v", err)
+	}
+	userKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+	state := hooks["state"].(map[string]interface{})
+	userState := map[string]interface{}{"trusted_hash": userHash, "enabled": true, "note": "preserve"}
+	state[userKey] = userState
+	edited, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal user edit: %v", err)
+	}
+	if err := os.WriteFile(configPath, edited, 0o600); err != nil {
+		t.Fatalf("write user edit: %v", err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repairedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	repaired := map[string]interface{}{}
+	if err := toml.Unmarshal(repairedRaw, &repaired); err != nil {
+		t.Fatalf("parse repaired config: %v", err)
+	}
+	repairedHooks := repaired["hooks"].(map[string]interface{})
+	repairedGroups := repairedHooks["PreToolUse"].([]interface{})
+	if len(repairedGroups) != 2 {
+		t.Fatalf("repaired group count = %d, want 2: %#v", len(repairedGroups), repairedGroups)
+	}
+	firstHandlers := repairedGroups[0].(map[string]interface{})["hooks"].([]interface{})
+	if !isOwnedHookHandler(firstHandlers[0], filepath.Join(dir, "hooks")) {
+		t.Fatalf("DefenseClaw handler moved out of group 0: %#v", repairedGroups)
+	}
+	secondHandlers := repairedGroups[1].(map[string]interface{})["hooks"].([]interface{})
+	if got := secondHandlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
+		t.Fatalf("trusted user hook moved or changed: got %#v", got)
+	}
+	repairedState := repairedHooks["state"].(map[string]interface{})
+	if got := repairedState[userKey]; !codexValueMatches(got, userState) {
+		t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
+	}
+	if err := verifyTrustedCodexHookMatrix(repairedHooks, configPath, filepath.Join(dir, "hooks")); err != nil {
+		t.Fatalf("repaired DefenseClaw matrix is not trusted: %v", err)
+	}
+}
+
+func TestCodexSetupAndTeardownRejectMalformedOwnedTrustIdentityWithoutRewritingConfig(t *testing.T) {
+	mutations := map[string]func(map[string]interface{}){
+		"timeout": func(handler map[string]interface{}) { handler["timeout"] = "thirty" },
+		"async":   func(handler map[string]interface{}) { handler["async"] = "false" },
+		"command": func(handler map[string]interface{}) {
+			if _, exists := handler["command_windows"]; !exists {
+				handler["command_windows"] = handler["command"]
+			}
+			handler["command"] = int64(7)
+		},
+	}
+	for operation, run := range map[string]func(Connector, SetupOpts) error{
+		"setup": func(conn Connector, opts SetupOpts) error {
+			return conn.Setup(context.Background(), opts)
+		},
+		"teardown": func(conn Connector, opts SetupOpts) error {
+			return conn.Teardown(context.Background(), opts)
+		},
+	} {
+		for field, mutate := range mutations {
+			t.Run(operation+"/"+field, func(t *testing.T) {
+				dir := t.TempDir()
+				configPath := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+					t.Fatalf("write empty config: %v", err)
+				}
+				previous := CodexConfigPathOverride
+				CodexConfigPathOverride = configPath
+				t.Cleanup(func() { CodexConfigPathOverride = previous })
+				conn := NewCodexConnector()
+				opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("initial Setup: %v", err)
+				}
+				raw, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("read configured file: %v", err)
+				}
+				cfg := map[string]interface{}{}
+				if err := toml.Unmarshal(raw, &cfg); err != nil {
+					t.Fatalf("parse configured file: %v", err)
+				}
+				hooks := cfg["hooks"].(map[string]interface{})
+				groups := hooks["PreToolUse"].([]interface{})
+				handler := groups[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+				mutate(handler)
+				malformed, err := toml.Marshal(cfg)
+				if err != nil {
+					t.Fatalf("marshal malformed config: %v", err)
+				}
+				if err := os.WriteFile(configPath, malformed, 0o600); err != nil {
+					t.Fatalf("write malformed config: %v", err)
+				}
+
+				err = run(conn, opts)
+				if err == nil || (!strings.Contains(err.Error(), "unsupported type") &&
+					!strings.Contains(err.Error(), "empty command")) {
+					t.Fatalf("%s error = %v, want owned identity type rejection", operation, err)
+				}
+				after, readErr := os.ReadFile(configPath)
+				if readErr != nil {
+					t.Fatalf("read config after rejection: %v", readErr)
+				}
+				if !bytes.Equal(after, malformed) {
+					t.Fatalf("%s rewrote malformed config despite discovery failure\nbefore:\n%s\nafter:\n%s", operation, malformed, after)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexRepairRefusesSharedMatcherDriftWithoutChangingUserHandlerSemantics(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read configured file: %v", err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse configured file: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	groups := hooks["PreToolUse"].([]interface{})
+	shared := groups[0].(map[string]interface{})
+	shared["matcher"] = "^UserSelectedMatcher$"
+	shared["user_metadata"] = "preserve"
+	handlers := shared["hooks"].([]interface{})
+	shared["hooks"] = append(handlers, map[string]interface{}{
+		"type":    "command",
+		"command": "user-policy.exe",
+		"timeout": int64(7),
+	})
+	edited, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal shared matcher edit: %v", err)
+	}
+	if err := os.WriteFile(configPath, edited, 0o600); err != nil {
+		t.Fatalf("write shared matcher edit: %v", err)
+	}
+
+	err = conn.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "unrelated handler semantics") {
+		t.Fatalf("repair error = %v, want shared matcher refusal", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read config after refusal: %v", readErr)
+	}
+	if !bytes.Equal(after, edited) {
+		t.Fatalf("repair changed shared user handler semantics despite refusal\nbefore:\n%s\nafter:\n%s", edited, after)
 	}
 }
 

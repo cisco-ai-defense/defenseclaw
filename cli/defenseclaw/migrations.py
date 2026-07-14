@@ -484,16 +484,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         new_lines.append(line)
     if rewritten == 0:
         return
-    try:
-        # Atomic rewrite via tempfile + rename to avoid a partial
-        # write if the operator interrupts us mid-migration.
-        tmp = config_path + ".tmp-f3395"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(new_lines)
-        os.chmod(tmp, 0o600)
-        replace_file_durable(tmp, config_path)
-    except OSError as exc:
-        ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
+    if not _atomic_write_text(config_path, "".join(new_lines), mode=0o600):
         return
     ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 

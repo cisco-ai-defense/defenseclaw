@@ -66,6 +66,15 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 	return ""
 }
 
+func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
+	want := windowsSystemPowerShellExe()
+	t.Setenv("SystemRoot", filepath.Join(t.TempDir(), "poisoned-system-root"))
+	t.Setenv("WINDIR", filepath.Join(t.TempDir(), "poisoned-windir"))
+	if got := windowsSystemPowerShellExe(); got != want {
+		t.Fatalf("system PowerShell path changed with mutable environment: got %q, want %q", got, want)
+	}
+}
+
 func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
@@ -793,8 +802,19 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 			t.Errorf("event %s command = %q, want %q", group.eventType, got, wantCommand)
 		}
 		if runtime.GOOS == "windows" {
-			if got := h0["command_windows"].(string); got != windowsCodexHookCommand() {
+			generic := h0["command"].(string)
+			windowsCommand := h0["command_windows"].(string)
+			if windowsCommand != windowsCodexHookCommand() {
+				got := windowsCommand
 				t.Errorf("event %s command_windows = %q, want %q", group.eventType, got, windowsCodexHookCommand())
+			}
+			if generic != windowsCommand {
+				t.Errorf(
+					"event %s generic command and command_windows differ; Codex 0.129.x and newer would derive different trust hashes: %q != %q",
+					group.eventType,
+					generic,
+					windowsCommand,
+				)
 			}
 		}
 	}

@@ -133,7 +133,6 @@ func readTrustedAt(paths Paths, executable string) (state State, recognized bool
 	if !samePath(executable, paths.Launcher) {
 		return State{}, false, nil
 	}
-	recognized = true
 	if err := safefile.ValidatePrivateDirectory(paths.Root); err != nil {
 		return State{}, true, fmt.Errorf("validate stable hook runtime directory: %w", err)
 	}

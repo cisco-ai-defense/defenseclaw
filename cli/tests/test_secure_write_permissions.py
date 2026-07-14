@@ -142,6 +142,8 @@ def test_atomic_writers_close_and_remove_staging_file_on_failure(
     else:
         if module is file_permissions:
             monkeypatch.setattr(file_permissions, "replace_file_durable", fail)
+        elif module is setup_writer:
+            monkeypatch.setattr(setup_writer, "replace_file_durable", fail)
         else:
             monkeypatch.setattr(os, "replace", fail)
 
@@ -198,6 +200,27 @@ def test_durable_delete_removes_live_name_and_tombstone(tmp_path):
 
     assert not target.exists()
     assert list(tmp_path.glob(".legacy-runtime.json.deleted.*")) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="write-through delete tombstones are Windows-specific")
+def test_windows_durable_delete_reports_retained_tombstone(monkeypatch, tmp_path):
+    target = tmp_path / "legacy-runtime.json"
+    target.write_bytes(b"legacy")
+    real_unlink = os.unlink
+
+    def reject_tombstone(path):
+        if ".deleted." in os.path.basename(os.fspath(path)):
+            raise PermissionError("injected tombstone retention")
+        return real_unlink(path)
+
+    monkeypatch.setattr(file_permissions.os, "unlink", reject_tombstone)
+    with pytest.raises(OSError, match="removed live path but could not delete durable tombstone") as caught:
+        file_permissions.delete_file_durable(target)
+
+    retained = list(tmp_path.glob(".legacy-runtime.json.deleted.*"))
+    assert not target.exists()
+    assert len(retained) == 1
+    assert os.fspath(retained[0]) in str(caught.value)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native long-path contract is Windows-specific")

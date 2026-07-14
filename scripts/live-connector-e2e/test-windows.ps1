@@ -1,4 +1,4 @@
-# Copyright 2026 Cisco Systems, Inc. and its affiliates
+﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 [CmdletBinding()]
@@ -38,6 +38,57 @@ try {
         Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
     }
     . $harness -NoRun
+
+    Assert-True ((Get-CodexVersionNumber 'codex-cli 0.124.0') -eq [Version]'0.124.0') `
+        'Codex version parser accepts the pinned minimum client format'
+    Assert-True (@(Get-CodexExpectedHookEvents ([Version]'0.124.0')).Count -eq 6) `
+        'Codex 0.124.x contract exposes exactly six events'
+    Assert-True (@(Get-CodexExpectedHookEvents ([Version]'0.129.0')).Count -eq 8) `
+        'Codex 0.129.x contract exposes exactly eight events'
+    Assert-True (@(Get-CodexExpectedHookEvents ([Version]'0.133.0')).Count -eq 10) `
+        'Codex 0.133+ contract exposes the complete ten-event matrix'
+    $codexSpecs = @(Get-CodexExpectedHookSpecs ([Version]'0.133.0'))
+    $preToolSpec = @($codexSpecs | Where-Object Event -ceq 'preToolUse')
+    $stopSpec = @($codexSpecs | Where-Object Event -ceq 'stop')
+    Assert-True ($preToolSpec.Count -eq 1 -and $preToolSpec[0].Matcher -ceq '*' -and
+        $preToolSpec[0].TimeoutSec -eq 30) 'Codex PreToolUse metadata requires broad matching and a 30s budget'
+    Assert-True ($stopSpec.Count -eq 1 -and $null -eq $stopSpec[0].Matcher -and
+        $stopSpec[0].TimeoutSec -eq 90) 'Codex Stop metadata requires no matcher and a 90s budget'
+    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-config.toml'))
+    $metadataCommand = 'managed-codex-hook-command'
+    $healthyMetadata = [pscustomobject]@{
+        eventName = 'preToolUse'
+        sourcePath = $metadataConfig
+        handlerType = 'command'
+        enabled = $true
+        isManaged = $false
+        source = 'user'
+        command = $metadataCommand
+        matcher = '*'
+        timeoutSec = 30
+        statusMessage = $null
+        key = $metadataConfig + ':pre_tool_use:0:0'
+        trustStatus = 'trusted'
+        currentHash = 'sha256:' + ('a' * 64)
+    }
+    Assert-CodexHookMetadata $healthyMetadata $preToolSpec[0] $metadataCommand $metadataConfig 'fixture' `
+        ([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+    foreach ($mutation in @(
+        [pscustomobject]@{ Name = 'narrow matcher'; Property = 'matcher'; Value = 'Bash' },
+        [pscustomobject]@{ Name = 'short timeout'; Property = 'timeoutSec'; Value = 1 },
+        [pscustomobject]@{ Name = 'status override'; Property = 'statusMessage'; Value = 'tampered' }
+    )) {
+        $candidate = $healthyMetadata.PSObject.Copy()
+        $candidate.($mutation.Property) = $mutation.Value
+        $rejected = $false
+        try {
+            Assert-CodexHookMetadata $candidate $preToolSpec[0] $metadataCommand $metadataConfig 'fixture' `
+                ([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+        } catch {
+            $rejected = $true
+        }
+        Assert-True $rejected "Codex metadata validator rejects $($mutation.Name)"
+    }
 
     $originalUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
     $originalCodexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME')
@@ -238,6 +289,64 @@ try {
     $block = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'block') -TimeoutSeconds 5 -AllowedExitCodes @(2)
     Assert-True ($block.ExitCode -eq 2 -and $block.StdOut -match 'block') 'mock block decision'
 
+    $healthyOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $healthyOutput.SetResult('complete')
+    $faultedOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $faultedOutput.SetException([IO.IOException]::new('injected output read failure'))
+    Assert-True (Test-RedirectedOutputTasksHealthy $healthyOutput.Task $healthyOutput.Task) `
+        'completed redirected output tasks are healthy'
+    Assert-True (-not (Test-RedirectedOutputTasksHealthy $faultedOutput.Task $healthyOutput.Task)) `
+        'faulted redirected output is classified as a harness failure'
+
+    $missingInputRoot = Join-Path $temp 'missing-input-preflight'
+    [IO.Directory]::CreateDirectory($missingInputRoot) | Out-Null
+    $missingInputRejected = $false
+    try {
+        Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $missingInputRoot
+        ) -InputPath (Join-Path $missingInputRoot 'missing.json') -TimeoutSeconds 2 | Out-Null
+    } catch {
+        $missingInputRejected = $_.Exception.Message -match 'Cannot find path'
+    }
+    Assert-True $missingInputRejected 'missing stdin payload is rejected before process start'
+
+    $oversizedInput = Join-Path $temp 'oversized-input.bin'
+    [IO.File]::WriteAllBytes($oversizedInput, [byte[]]::new(1048577))
+    $oversizedInputRejected = $false
+    try {
+        Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $missingInputRoot
+        ) -InputPath $oversizedInput -TimeoutSeconds 2 | Out-Null
+    } catch {
+        $oversizedInputRejected = $_.Exception.Message -match 'exceeds the 1 MiB limit'
+    }
+    Assert-True $oversizedInputRejected 'oversized stdin payload is rejected before process start'
+
+    $blockedInputRoot = Join-Path $temp 'blocked-stdin'
+    [IO.Directory]::CreateDirectory($blockedInputRoot) | Out-Null
+    $blockedInput = Join-Path $blockedInputRoot 'payload.bin'
+    [IO.File]::WriteAllBytes($blockedInput, [byte[]]::new(1048576))
+    $blockedInputTimedOut = $false
+    $blockedInputStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $blockedInputRoot
+        ) -InputPath $blockedInput -TimeoutSeconds 2 | Out-Null
+    } catch {
+        $blockedInputTimedOut = $_.Exception.Message -match 'timed out after 2s'
+    } finally {
+        $blockedInputStopwatch.Stop()
+    }
+    Assert-True $blockedInputTimedOut 'non-reading child cannot block stdin beyond the process deadline'
+    Assert-True ($blockedInputStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(10)) `
+        'stdin timeout cleanup is bounded'
+    $blockedInputLeaks = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine.IndexOf($mock, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $_.CommandLine.IndexOf($blockedInputRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    Assert-True ($blockedInputLeaks.Count -eq 0) 'stdin timeout left no matching process alive'
+
     $payloadPath = Join-Path $temp 'hook-payload.json'
     $payload = '{"hook":"stdin-sentinel"}'
     [IO.File]::WriteAllText($payloadPath, $payload)
@@ -261,6 +370,44 @@ try {
     Assert-True (Test-Path -LiteralPath $childPidPath) 'mock timeout child started'
     $childPid = [int][IO.File]::ReadAllText($childPidPath)
     Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
+
+    $unrelatedRoot = Join-Path $temp 'unrelated-process'
+    $drainRoot = Join-Path $temp 'drain-timeout'
+    [IO.Directory]::CreateDirectory($unrelatedRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($drainRoot) | Out-Null
+    $unrelated = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $unrelatedRoot
+    ) -PassThru -WindowStyle Hidden
+    try {
+        $unrelatedStarted = $unrelated.StartTime.ToUniversalTime()
+        $drainTimedOut = $false
+        $drainStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+                '-NoProfile', '-File', $mock, '-Action', 'drain-timeout', '-StateRoot', $drainRoot
+            ) -TimeoutSeconds 2 | Out-Null
+        } catch {
+            $drainTimedOut = $_.Exception.Message -match 'timed out after 2s'
+        } finally {
+            $drainStopwatch.Stop()
+        }
+        Assert-True $drainTimedOut 'inherited redirected handles consume the same bounded timeout'
+        Assert-True ($drainStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(10)) `
+            'inherited-handle timeout and exact tree cleanup are bounded'
+        $drainChildPidPath = Join-Path $drainRoot 'drain-child.pid'
+        Assert-True (Test-Path -LiteralPath $drainChildPidPath -PathType Leaf) `
+            'inherited-handle timeout child started'
+        $drainChildPid = [int][IO.File]::ReadAllText($drainChildPidPath)
+        Assert-True ($null -eq (Get-Process -Id $drainChildPid -ErrorAction SilentlyContinue)) `
+            'inherited-handle timeout killed its exact descendant'
+        $unrelatedLive = Get-Process -Id $unrelated.Id -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $unrelatedLive -and
+            [Math]::Abs(($unrelatedLive.StartTime.ToUniversalTime() - $unrelatedStarted).TotalMilliseconds) -lt 1) `
+            'timeout tree cleanup preserved an unrelated same-image process'
+    } finally {
+        Stop-Process -Id $unrelated.Id -Force -ErrorAction SilentlyContinue
+        $unrelated.Dispose()
+    }
 
     $descendant = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden
     try {
@@ -506,6 +653,14 @@ try {
         $contractFunction -match 'Assert-UserPathRegistrySnapshot' -and
         $contractFunction -match 'restore the original user PATH exactly') `
         'native Setup connector contract proves uninstall restores exact PATH registry existence, type, and value'
+    $setupAcceptanceFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-SetupAcceptance\b.*?(?=\r?\nfunction Invoke-Contract)'
+    ).Value
+    Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
+        $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
+        $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
+        'native Setup acceptance executes the cached Apps & Features binary and proves deferred self-delete removes InstallerCache'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
         $nativeHarnessText -match '-AllowNativeDataRoot' -and
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
@@ -551,6 +706,21 @@ try {
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
     Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
         'unversioned fixture override is removed before Doctor tamper validation'
+    $liveRun = [regex]::Match($harnessText, '(?s)function Invoke-LiveRun\b.*?\n\}').Value
+    Assert-True ($contractRun -notmatch 'Assert-CodexPinnedTrustMatrix' -and
+        $liveRun -match 'Assert-CodexPinnedTrustMatrix') `
+        'official npm trust probes stay in manual live-client certification, not mandatory deterministic CI'
+    Assert-True ($harnessText -match "@\('0\.129\.0', '0\.133\.0', '0\.144\.3'\)" -and
+        $harnessText -match "method = 'hooks/list'" -and
+        $harnessText -match "trustStatus -cne 'trusted'" -and
+        $harnessText -match '\$hook\.command -cne \$expectedCommand' -and
+        $harnessText -match "Properties\['matcher'\]" -and
+        $harnessText -match "Properties\['timeoutSec'\]" -and
+        $harnessText -match "Properties\['statusMessage'\]" -and
+        $harnessText -match '\^sha256:\[0-9a-f\]\{64\}\$') `
+        'Codex trust matrix pins transition/current clients and validates exact app-server command/shape/trust evidence'
+    Assert-True ($harnessText -notmatch '(?i)dangerously-bypass-hook-trust|bypass-hook-trust') `
+        'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)

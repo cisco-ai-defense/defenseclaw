@@ -5,12 +5,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetupLockSubprocessHelper(t *testing.T) {
@@ -29,7 +31,9 @@ func TestSetupLockSubprocessHelper(t *testing.T) {
 }
 
 func TestSetupLockIsExclusiveAndReusable(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSetupLockSubprocessHelper$")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetupLockSubprocessHelper$")
 	cmd.Env = append(os.Environ(), "DEFENSECLAW_SETUP_LOCK_TEST_HELPER=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -51,6 +55,9 @@ func TestSetupLockIsExclusiveAndReusable(t *testing.T) {
 	})
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatal("setup-lock helper handshake exceeded 15-second deadline")
+		}
 		t.Fatalf("wait for setup-lock helper: %v", err)
 	}
 	if strings.TrimSpace(line) != "LOCKED" {
@@ -64,6 +71,9 @@ func TestSetupLockIsExclusiveAndReusable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := cmd.Wait(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatal("setup-lock helper exit exceeded 15-second deadline")
+		}
 		t.Fatalf("setup-lock helper failed: %v", err)
 	}
 

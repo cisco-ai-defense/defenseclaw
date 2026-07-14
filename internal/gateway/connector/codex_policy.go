@@ -28,9 +28,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -55,7 +55,7 @@ var codexPolicyInspector = inspectCodexEffectivePolicy
 var codexSystemRequirementsPathForInspection = codexSystemRequirementsPath
 
 var codexAppServerCommand = func(ctx context.Context, executable string) *exec.Cmd {
-	return processutil.CommandContext(ctx, executable, "app-server", "--stdio")
+	return newCodexAppServerCommand(ctx, executable)
 }
 
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
@@ -79,8 +79,20 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffectivePolicy, error) {
 	executable := strings.TrimSpace(opts.AgentExecutable)
 	if executable != "" {
-		if strings.ContainsAny(executable, "\x00\r\n") || !filepath.IsAbs(executable) {
-			return codexEffectivePolicy{}, fmt.Errorf("selected Codex executable is not absolute: %q", executable)
+		if runtime.GOOS == "windows" {
+			validated, err := validateCodexPolicyExecutable(opts)
+			if err != nil {
+				return codexEffectivePolicy{}, err
+			}
+			executable = validated
+		} else {
+			// Preserve the established macOS/Linux discovery contract. Those
+			// installers do not create the Windows-only protected selection
+			// receipt, but the executable must still be an absolute clean path.
+			if strings.ContainsAny(executable, "\x00\r\n") || !filepath.IsAbs(executable) {
+				return codexEffectivePolicy{}, fmt.Errorf("selected Codex executable is not absolute: %q", executable)
+			}
+			executable = filepath.Clean(executable)
 		}
 		policy, err := inspectCodexPolicyWithAppServer(ctx, executable, codexHomeDir())
 		if err != nil {
@@ -89,10 +101,111 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		return policy, nil
 	}
 
-	// Tests, pre-provisioning, and older Codex installs may not have a runnable
-	// app-server path. In that case still honor the documented system source.
-	// This fallback deliberately does not claim to have inspected cloud policy.
+	if runtime.GOOS == "windows" {
+		if _, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
+			return codexEffectivePolicy{}, errors.New(
+				"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
+			)
+		}
+		if path := filepath.Join(opts.DataDir, agentSelectionFile); strings.TrimSpace(opts.DataDir) != "" {
+			if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+				return codexEffectivePolicy{}, errors.New(
+					"Codex setup selection receipt is invalid or expired; rerun fresh trusted setup discovery",
+				)
+			}
+		}
+
+		// A native Windows registration is executable-specific: setup must first
+		// select, hash, and protect the exact codex.exe that will own the hook
+		// contract. Falling back to a generic system-requirements read here would
+		// let Setup publish a lock with no executable evidence, which the next
+		// reconcile must correctly reject. Refuse before any registration mutation.
+		return codexEffectivePolicy{}, errors.New(
+			"Codex policy inspection requires a fresh setup-selected native executable; rerun trusted connector setup or repair",
+		)
+	}
+
+	// Tests, pre-provisioning, and older non-Windows Codex installs may not have
+	// a runnable app-server path. In that case still honor the documented system
+	// source. This fallback deliberately does not claim to inspect cloud policy.
 	return inspectCodexSystemRequirements()
+}
+
+func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
+	executable := strings.TrimSpace(opts.AgentExecutable)
+	if strings.ContainsAny(executable, "\x00\r\n") || !filepath.IsAbs(executable) {
+		return "", fmt.Errorf("selected Codex executable is not absolute: %q", executable)
+	}
+	executable = filepath.Clean(executable)
+	name := strings.ToLower(filepath.Base(executable))
+	extension := strings.ToLower(filepath.Ext(name))
+	product := strings.TrimSuffix(name, extension)
+	if product != "codex" {
+		return "", fmt.Errorf("selected Codex executable has unexpected product name: %s", executable)
+	}
+	if runtime.GOOS == "windows" {
+		if extension != ".exe" {
+			return "", fmt.Errorf(
+				"selected Codex policy executable is not a native Windows .exe image: %s",
+				executable,
+			)
+		}
+	}
+
+	expectedPath := ""
+	expectedVersion := ""
+	expectedDigest := ""
+	if entry, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
+		if !validCodexAgentExecutableEvidence(entry) {
+			return "", errors.New("Codex hook contract has invalid setup-selected executable evidence")
+		}
+		expectedPath = entry.AgentExecutable
+		expectedVersion = entry.RawAgentVersion
+		expectedDigest = entry.AgentExecutableSHA256
+	} else if selection, ok := loadSetupAgentSelection(opts.DataDir, "codex"); ok {
+		expectedPath = selection.Executable
+		expectedVersion = selection.RawVersion
+		expectedDigest = selection.SHA256
+	} else {
+		return "", errors.New("Codex policy inspection requires protected setup-selected executable evidence")
+	}
+	if !sameCodexExecutablePath(executable, expectedPath) {
+		return "", fmt.Errorf("selected Codex executable does not match protected evidence: %s", executable)
+	}
+	if strings.TrimSpace(opts.AgentVersion) != strings.TrimSpace(expectedVersion) {
+		return "", errors.New("selected Codex executable evidence is bound to a different agent version")
+	}
+
+	info, err := os.Lstat(executable)
+	if err != nil {
+		return "", fmt.Errorf("inspect selected Codex executable: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("selected Codex executable is not a regular non-link file: %s", executable)
+	}
+	if err := hookAPIValidateDirectory(filepath.Dir(executable)); err != nil {
+		return "", fmt.Errorf("validate selected Codex executable ancestry: %w", err)
+	}
+	if err := hookAPIValidateOwner(executable, info); err != nil {
+		return "", fmt.Errorf("validate selected Codex executable ACL: %w", err)
+	}
+	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok || !sameCodexExecutablePath(stablePath, executable) {
+		return "", fmt.Errorf("selected Codex executable changed during validation: %s", executable)
+	}
+	if digest != expectedDigest {
+		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s", executable)
+	}
+	return executable, nil
+}
+
+func sameCodexExecutablePath(left, right string) bool {
+	left = filepath.Clean(strings.TrimSpace(left))
+	right = filepath.Clean(strings.TrimSpace(right))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func inspectCodexSystemRequirements() (codexEffectivePolicy, error) {
@@ -137,6 +250,11 @@ type codexRequirementsReadResult struct {
 	} `json:"requirements"`
 }
 
+type codexRPCEvent struct {
+	Envelope codexRPCEnvelope
+	Err      error
+}
+
 func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHome string) (policy codexEffectivePolicy, retErr error) {
 	ctx, cancel := context.WithTimeout(parent, codexPolicyInspectionTimeout)
 	defer cancel()
@@ -157,20 +275,17 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 	}
 	stderr := &boundedDiagnosticBuffer{limit: 64 << 10}
 	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
+	cleanup, err := startCodexAppServerTree(cmd)
+	if err != nil {
 		return policy, fmt.Errorf("start app-server: %w", err)
 	}
 	defer func() {
 		_ = stdin.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
+		cleanup()
 	}()
 
-	responses := make(chan codexRPCEnvelope, 8)
-	decodeErr := make(chan error, 1)
-	go decodeCodexRPC(stdout, responses, decodeErr)
+	events := make(chan codexRPCEvent, 3)
+	go decodeCodexRPC(stdout, events)
 
 	encoder := json.NewEncoder(stdin)
 	if err := encoder.Encode(map[string]any{
@@ -186,7 +301,7 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 	}); err != nil {
 		return policy, fmt.Errorf("send initialize: %w", err)
 	}
-	if _, err := waitCodexRPC(ctx, responses, decodeErr, 1); err != nil {
+	if _, err := waitCodexRPC(ctx, events, 1); err != nil {
 		return policy, withCodexStderr(err, stderr.String())
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
@@ -199,7 +314,7 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 	}); err != nil {
 		return policy, fmt.Errorf("send configRequirements/read: %w", err)
 	}
-	envelope, err := waitCodexRPC(ctx, responses, decodeErr, 2)
+	envelope, err := waitCodexRPC(ctx, events, 2)
 	if err != nil {
 		return policy, withCodexStderr(err, stderr.String())
 	}
@@ -214,37 +329,52 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 	return policy, nil
 }
 
-func decodeCodexRPC(reader io.Reader, responses chan<- codexRPCEnvelope, decodeErr chan<- error) {
-	decoder := json.NewDecoder(io.LimitReader(reader, codexPolicyMessageLimit))
+func decodeCodexRPC(reader io.Reader, events chan<- codexRPCEvent) {
+	defer close(events)
+	limited := &io.LimitedReader{R: reader, N: codexPolicyMessageLimit + 1}
+	decoder := json.NewDecoder(limited)
+	seen := map[int]bool{}
 	for {
 		var envelope codexRPCEnvelope
 		if err := decoder.Decode(&envelope); err != nil {
-			decodeErr <- err
+			if limited.N <= 0 {
+				err = fmt.Errorf("app-server response exceeds %d bytes", codexPolicyMessageLimit)
+			}
+			events <- codexRPCEvent{Err: err}
 			return
 		}
-		if len(envelope.ID) == 0 {
+		var id int
+		if err := json.Unmarshal(envelope.ID, &id); err != nil || (id != 1 && id != 2) || seen[id] {
 			continue
 		}
-		responses <- envelope
+		seen[id] = true
+		events <- codexRPCEvent{Envelope: envelope}
 	}
 }
 
 func waitCodexRPC(
 	ctx context.Context,
-	responses <-chan codexRPCEnvelope,
-	decodeErr <-chan error,
+	events <-chan codexRPCEvent,
 	wantID int,
 ) (codexRPCEnvelope, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return codexRPCEnvelope{}, fmt.Errorf("timed out waiting for response %d: %w", wantID, ctx.Err())
-		case err := <-decodeErr:
-			return codexRPCEnvelope{}, fmt.Errorf("read app-server response: %w", err)
-		case envelope := <-responses:
+		case event, ok := <-events:
+			if !ok {
+				return codexRPCEnvelope{}, errors.New("app-server response stream closed")
+			}
+			if event.Err != nil {
+				return codexRPCEnvelope{}, fmt.Errorf("read app-server response: %w", event.Err)
+			}
+			envelope := event.Envelope
 			var id int
-			if err := json.Unmarshal(envelope.ID, &id); err != nil || id != wantID {
-				continue
+			if err := json.Unmarshal(envelope.ID, &id); err != nil {
+				return codexRPCEnvelope{}, fmt.Errorf("decode app-server response id: %w", err)
+			}
+			if id != wantID {
+				return codexRPCEnvelope{}, fmt.Errorf("received app-server response %d while waiting for %d", id, wantID)
 			}
 			if envelope.Error != nil {
 				return codexRPCEnvelope{}, fmt.Errorf(
@@ -291,11 +421,14 @@ func withCodexStderr(err error, stderr string) error {
 }
 
 type boundedDiagnosticBuffer struct {
+	mu     sync.Mutex
 	buffer bytes.Buffer
 	limit  int
 }
 
 func (w *boundedDiagnosticBuffer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	original := len(p)
 	remaining := w.limit - w.buffer.Len()
 	if remaining > 0 {
@@ -307,4 +440,8 @@ func (w *boundedDiagnosticBuffer) Write(p []byte) (int, error) {
 	return original, nil
 }
 
-func (w *boundedDiagnosticBuffer) String() string { return w.buffer.String() }
+func (w *boundedDiagnosticBuffer) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
+}

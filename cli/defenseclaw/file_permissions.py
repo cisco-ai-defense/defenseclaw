@@ -101,7 +101,10 @@ def delete_file_durable(path: str | os.PathLike[str]) -> None:
     On Windows, first write-through rename the file to a unique sibling. A
     crash can therefore leave only an inert tombstone, never the live legacy
     filename that a downgraded process would consume again. The tombstone is
-    then unlinked immediately. POSIX unlinks and fsyncs the parent directory.
+    then unlinked immediately. We deliberately do not glob-delete tombstones
+    on a later run: without a durable ownership record, a matching filename is
+    not sufficient proof that DefenseClaw owns an artifact. POSIX unlinks and
+    fsyncs the parent directory.
     """
 
     target = os.path.abspath(os.fspath(path))

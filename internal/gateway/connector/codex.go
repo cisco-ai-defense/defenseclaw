@@ -729,13 +729,19 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		// under hooks.state. Remove only state records that can be proven to belong
 		// to the currently installed DefenseClaw handlers before re-indexing them;
 		// unrelated and operator-edited state is never rewritten.
-		removeOwnedCodexHookState(hooks, configPath, hooksDir)
+		if _, err := removeOwnedCodexHookState(hooks, configPath, hooksDir); err != nil {
+			return fmt.Errorf("inspect existing DefenseClaw Codex hook trust: %w", err)
+		}
+		generatedHooks := buildCodexHooksTable(configPath, hookScript)
 		for eventType, value := range hooks {
 			if eventType == "state" {
 				continue
 			}
 			if _, ok := value.([]interface{}); !ok {
 				return fmt.Errorf("Codex hooks.%s has unsupported type %T; refusing to replace it", eventType, value)
+			}
+			if _, generated := generatedHooks[eventType]; generated {
+				continue
 			}
 			remaining := removeOwnedHooks(value, hooksDir)
 			if len(remaining) == 0 {
@@ -744,11 +750,14 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				hooks[eventType] = remaining
 			}
 		}
-		generatedHooks := buildCodexHooksTable(configPath, hookScript)
 		for eventType, value := range generatedHooks {
 			newEntries, _ := value.([]interface{})
 			existing, _ := hooks[eventType].([]interface{})
-			hooks[eventType] = append(existing, newEntries...)
+			merged, err := replaceOwnedCodexHookInPlace(existing, newEntries, hooksDir)
+			if err != nil {
+				return fmt.Errorf("repair Codex hooks.%s: %w", eventType, err)
+			}
+			hooks[eventType] = merged
 		}
 		if err := trustOwnedCodexHooks(hooks, configPath, hooksDir); err != nil {
 			return fmt.Errorf("trust DefenseClaw Codex hooks: %w", err)
@@ -846,7 +855,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		}
 
 		exactBackupSafe := true
-		if err := atomicTransformFile(configPath, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
+		if err := atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, raw, exists) {
 				exactBackupSafe = false
 			}
@@ -1466,7 +1475,11 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 			hooksDir := filepath.Join(opts.DataDir, "hooks")
 			// Trust keys are position-aware, so inspect and remove exactly owned
 			// records before filtering their corresponding handlers out of the table.
-			if removeOwnedCodexHookState(hooks, configPath, hooksDir) {
+			stateRemoved, err := removeOwnedCodexHookState(hooks, configPath, hooksDir)
+			if err != nil {
+				return fmt.Errorf("restore Codex hook trust: %w", err)
+			}
+			if stateRemoved {
 				removedOwnedHooks = true
 			}
 			for eventType, val := range hooks {
@@ -1544,7 +1557,7 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 		return nil
 	}
 	if err := withFileLock(configPath, func() error {
-		return atomicTransformFile(configPath, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if err := render(raw, exists); err != nil {
 				return atomicTransformResult{}, err
 			}
@@ -1683,10 +1696,13 @@ type codexOwnedHookLocation struct {
 // points at a currently present DefenseClaw handler and whose hash matches that
 // handler. A state entry at the same key with an operator-edited hash is left
 // untouched. This must run before the owned handlers are filtered from hooks.
-func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hooksDir string) bool {
-	state, ok := hooks["state"].(map[string]interface{})
-	if !ok {
-		return false
+// Discovery and hashing errors are returned even when hooks.state is absent:
+// otherwise Setup/Teardown could silently mutate a malformed owned handler
+// after failing to compute the exact positional trust identity Codex uses.
+func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hooksDir string) (bool, error) {
+	state, stateExists := hooks["state"].(map[string]interface{})
+	if rawState, present := hooks["state"]; present && !stateExists {
+		return false, fmt.Errorf("hooks.state has unsupported type %T", rawState)
 	}
 	removed := false
 	keySource := codexHookStateKeySource(configPath)
@@ -1695,7 +1711,13 @@ func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hooksDi
 			continue
 		}
 		eventKey := codexHookEventKeyLabel(eventType)
-		locations, _ := ownedCodexHookLocations(runtime.GOOS, eventKey, rawGroups, hooksDir)
+		locations, err := ownedCodexHookLocations(runtime.GOOS, eventKey, rawGroups, hooksDir)
+		if err != nil {
+			return false, fmt.Errorf("hooks.%s: %w", eventType, err)
+		}
+		if !stateExists {
+			continue
+		}
 		for _, location := range locations {
 			key := codexHookStateKey(keySource, eventKey, location.groupIndex, location.handlerIndex)
 			entry, ok := state[key].(map[string]interface{})
@@ -1711,12 +1733,86 @@ func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hooksDi
 			removed = true
 		}
 	}
-	if len(state) == 0 {
+	if stateExists && len(state) == 0 {
 		delete(hooks, "state")
-	} else {
+	} else if stateExists {
 		hooks["state"] = state
 	}
-	return removed
+	return removed, nil
+}
+
+// replaceOwnedCodexHookInPlace refreshes the generated handler without moving
+// its positional Codex trust identity. This matters when an operator adds a
+// trusted hook after DefenseClaw: remove+append would compact the user hook into
+// DefenseClaw's old slot and then collide with the user's still-valid state key.
+//
+// If an operator deliberately placed another handler in the same matcher group,
+// preserve that handler and all group metadata. The generated matcher and owned
+// handler shape are refreshed in their original slots; no unrelated group or
+// handler is re-indexed.
+func replaceOwnedCodexHookInPlace(existing, generated []interface{}, hooksDir string) ([]interface{}, error) {
+	if len(generated) != 1 {
+		return nil, fmt.Errorf("generated group count = %d, want 1", len(generated))
+	}
+	generatedGroup, ok := generated[0].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("generated group has unsupported type %T", generated[0])
+	}
+	generatedHandlers, ok := generatedGroup["hooks"].([]interface{})
+	if !ok || len(generatedHandlers) != 1 {
+		return nil, fmt.Errorf("generated handler count = %d, want 1", len(generatedHandlers))
+	}
+
+	result := make([]interface{}, 0, len(existing)+1)
+	replaced := false
+	for _, rawGroup := range existing {
+		group, ok := rawGroup.(map[string]interface{})
+		if !ok {
+			result = append(result, rawGroup)
+			continue
+		}
+		handlers, ok := group["hooks"].([]interface{})
+		if !ok {
+			result = append(result, rawGroup)
+			continue
+		}
+		updatedHandlers := make([]interface{}, 0, len(handlers))
+		groupReplaced := false
+		for _, handler := range handlers {
+			if !isOwnedCodexHookHandler(handler, hooksDir) {
+				updatedHandlers = append(updatedHandlers, handler)
+				continue
+			}
+			if replaced {
+				// Removing a duplicate would re-index any later user hook and
+				// invalidate its positional trust state. Stop before publishing
+				// any transformed bytes instead.
+				return nil, fmt.Errorf("multiple DefenseClaw handlers require manual repair")
+			}
+			updatedHandlers = append(updatedHandlers, generatedHandlers[0])
+			replaced = true
+			groupReplaced = true
+		}
+		if groupReplaced {
+			matcher, generatedMatcherPresent := generatedGroup["matcher"]
+			currentMatcher, currentMatcherPresent := group["matcher"]
+			if len(updatedHandlers) > 1 &&
+				(currentMatcherPresent != generatedMatcherPresent || !codexValueMatches(currentMatcher, matcher)) {
+				return nil, fmt.Errorf("shared DefenseClaw matcher group was edited; refusing to change unrelated handler semantics")
+			}
+			if generatedMatcherPresent {
+				group["matcher"] = matcher
+			} else {
+				delete(group, "matcher")
+			}
+		}
+		group["hooks"] = updatedHandlers
+		result = append(result, group)
+	}
+	if !replaced {
+		result = append(result, generated[0])
+	}
+	return result, nil
 }
 
 func legacyHashForOwnedCodexLocation(eventKey string, location codexOwnedHookLocation) string {
@@ -1737,6 +1833,31 @@ func legacyHashForOwnedCodexLocation(eventKey string, location codexOwnedHookLoc
 		}
 	}
 	return legacyCodexCommandHookHash(eventKey, location.matcher, command, timeout)
+}
+
+// isOwnedCodexHookHandler also recognizes a valid DefenseClaw command_windows
+// when the generic command field is malformed. Codex requires both fields to be
+// valid, but the native override still proves which product wrote the handler;
+// treating it as foreign would let repair append a second handler and publish a
+// configuration Codex cannot parse instead of returning the discovery error.
+func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
+	if isOwnedHookHandler(rawHook, hooksDir) {
+		return true
+	}
+	handler, ok := rawHook.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"commandWindows", "command_windows"} {
+		candidate, ok := handler[key].(string)
+		if !ok || strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		if isOwnedHookHandler(map[string]interface{}{"command": candidate}, hooksDir) {
+			return true
+		}
+	}
+	return false
 }
 
 func ownedCodexHookLocations(
@@ -1761,7 +1882,7 @@ func ownedCodexHookLocations(
 			continue
 		}
 		for handlerIndex, rawHandler := range handlers {
-			if !isOwnedHookHandler(rawHandler, hooksDir) {
+			if !isOwnedCodexHookHandler(rawHandler, hooksDir) {
 				continue
 			}
 			handler, ok := rawHandler.(map[string]interface{})
@@ -1871,7 +1992,10 @@ func verifyTrustedCodexHookMatrix(hooks map[string]interface{}, configPath, hook
 		if _, expected := expectedEvents[eventType]; expected {
 			continue
 		}
-		locations, _ := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
+		locations, err := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
+		if err != nil {
+			return fmt.Errorf("%s: %w", eventType, err)
+		}
 		if len(locations) > 0 {
 			return fmt.Errorf("unexpected event %s has %d DefenseClaw handlers", eventType, len(locations))
 		}

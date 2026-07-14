@@ -154,6 +154,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		copyState := *oldState
 		previousState = &copyState
 	}
+	previousConnectors := normalizeStringSlice(connectorsForNativeUninstall(oldState, dataRoot))
 	targetConnector := opts.Connector
 	targetServices := requestedServices(opts, previousServices)
 	if action == "uninstall" {
@@ -181,23 +182,22 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	previousCodexHome := defaultCodexHome
-	previousClaudeConfigDir := defaultClaudeConfigDir
+	previousCodexState, previousClaudeState := "", ""
 	if oldState != nil {
-		if oldState.CodexHome != "" {
-			previousCodexHome = oldState.CodexHome
-		} else if inferred, inferErr := inferManagedConnectorHome(dataRoot, "codex", "config.toml", defaultCodexHome); inferErr != nil {
-			return setupTransaction{}, inferErr
-		} else {
-			previousCodexHome = inferred
-		}
-		if oldState.ClaudeConfigDir != "" {
-			previousClaudeConfigDir = oldState.ClaudeConfigDir
-		} else if inferred, inferErr := inferManagedConnectorHome(dataRoot, "claudecode", "settings.json", defaultClaudeConfigDir); inferErr != nil {
-			return setupTransaction{}, inferErr
-		} else {
-			previousClaudeConfigDir = inferred
-		}
+		previousCodexState = oldState.CodexHome
+		previousClaudeState = oldState.ClaudeConfigDir
+	}
+	previousCodexHome, err := resolvePreviousConnectorHome(
+		previousCodexState, previousConnectors, dataRoot, "codex", "config.toml", defaultCodexHome,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousClaudeConfigDir, err := resolvePreviousConnectorHome(
+		previousClaudeState, previousConnectors, dataRoot, "claudecode", "settings.json", defaultClaudeConfigDir,
+	)
+	if err != nil {
+		return setupTransaction{}, err
 	}
 	maintenanceSHA256 := ""
 	maintenanceExisted, previousMaintenanceSHA256, err := snapshotMaintenanceFile(maintenancePath)
@@ -233,7 +233,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		PreviousPath:              pathSnapshot,
 		PreviousAutoStart:         autoStartSnapshot,
 		PreviousServices:          previousServices,
-		PreviousConnectors:        normalizeStringSlice(connectorsForNativeUninstall(oldState, dataRoot)),
+		PreviousConnectors:        previousConnectors,
 		TargetConnector:           targetConnector,
 		TargetMode:                opts.Mode,
 		TargetServices:            targetServices,
@@ -338,6 +338,27 @@ func inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallback st
 		return "", fmt.Errorf("%s managed backup has an invalid target path", connectorName)
 	}
 	return filepath.Dir(filepath.Clean(binding.Path)), nil
+}
+
+func resolvePreviousConnectorHome(
+	configured string,
+	previousConnectors []string,
+	dataRoot, connectorName, logicalName, fallback string,
+) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+	managed := false
+	for _, previous := range previousConnectors {
+		if previous == connectorName {
+			managed = true
+			break
+		}
+	}
+	if !managed {
+		return fallback, nil
+	}
+	return inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallback)
 }
 
 func transactionChildEnv(transaction setupTransaction) []string {
@@ -1075,7 +1096,7 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 				return err
 			}
 		}
-		if err := unregisterInstalledAppOwned(transaction.InstallRoot); err != nil {
+		if err := unregisterInstalledAppOwned(transaction.InstallRoot, transaction.PreviousState); err != nil {
 			return err
 		}
 		return nil
@@ -1173,14 +1194,26 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	pathAdded, reusedSeparator, valueCreated, pathMutationErr := addUserPath(
 		filepath.Join(transaction.InstallRoot, "bin"),
 	)
-	if pathAdded {
+	pathOwned := pathAdded
+	if !pathOwned && !state.PathEntryOwned {
+		currentPath, captureErr := captureUserPath()
+		if captureErr != nil {
+			return errors.Join(pathMutationErr, fmt.Errorf("inspect user PATH ownership after convergence: %w", captureErr))
+		}
+		pathOwned, reusedSeparator, valueCreated = replayedTransactionPathOwnership(
+			transaction.PreviousPath,
+			currentPath,
+			filepath.Join(transaction.InstallRoot, "bin"),
+		)
+	}
+	if pathOwned {
 		if err := updateInstalledPathOwnership(
 			transaction.InstallRoot,
 			true,
 			reusedSeparator,
 			valueCreated,
 		); err != nil {
-			return fmt.Errorf("record user PATH ownership: %w", err)
+			return errors.Join(pathMutationErr, fmt.Errorf("record user PATH ownership: %w", err))
 		}
 	}
 	if pathMutationErr != nil {
@@ -1192,6 +1225,7 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		state.Version,
 		transaction.ID,
 		state.UnsignedLocalArtifact,
+		transaction.PreviousState,
 	); err != nil {
 		return err
 	}
@@ -1205,6 +1239,34 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		return err
 	}
 	return nil
+}
+
+// replayedTransactionPathOwnership recognizes the exact PATH mutation implied
+// by the transaction's durable pre-mutation snapshot. This repairs ownership
+// metadata after a crash between the registry write and install-state update,
+// without claiming a path that already existed or was subsequently edited.
+func replayedTransactionPathOwnership(
+	previous, current userPathSnapshot,
+	commandDir string,
+) (owned, reusedSeparator, valueCreated bool) {
+	if !current.Existed || pathContains(strings.Split(previous.Value, ";"), commandDir) {
+		return false, false, false
+	}
+	want, reusedSeparator := prependUserPathEntry(previous.Value, commandDir)
+	if current.Value != want {
+		return false, false, false
+	}
+	if previous.Existed {
+		if current.ValueType != previous.ValueType {
+			return false, false, false
+		}
+		return true, reusedSeparator, false
+	}
+	// addUserPath creates a missing per-user PATH value as REG_SZ (1).
+	if previous.Value != "" || previous.ValueType != 0 || current.ValueType != 1 {
+		return false, false, false
+	}
+	return true, reusedSeparator, true
 }
 
 func teardownSupersededConnectors(
@@ -1675,7 +1737,16 @@ func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
 		return err
 	}
 	if samePath(self, transaction.MaintenancePath) && pathExists(maintenanceRoot) {
-		if err := removeDirectoryAfterExit(maintenanceRoot, os.Getpid()); err != nil {
+		transactionRoot, err := defaultTransactionRoot()
+		if err != nil {
+			return err
+		}
+		if err := removeDirectoryAfterExit(
+			maintenanceRoot,
+			journalPaths(transactionRoot).Journal,
+			os.Getpid(),
+			transaction.ID,
+		); err != nil {
 			return fmt.Errorf("schedule installer-cache cleanup: %w", err)
 		}
 		return errTransactionCleanupDeferred

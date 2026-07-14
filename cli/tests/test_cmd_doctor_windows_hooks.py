@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import (
@@ -22,11 +30,17 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
 )
 from defenseclaw.doctor_hooks import (
+    _CODEX_HOOK_SPECS,
+    _codex_command_hook_hash,
+    _codex_hook_state_key_source,
+    _codex_policy_executable,
     _commands_from_hooks,
+    _inspect_codex_effective_hook_policy,
     _InspectionError,
     _packaged_windows_install_root,
     _read_claude_registry_policy,
     _split_windows,
+    _validate_codex_hook_contract,
     resolve_windows_command,
     validate_windows_hook_registration,
 )
@@ -43,6 +57,12 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.data.mkdir()
         self.cfg = MagicMock()
         self.cfg.data_dir = str(self.data)
+        self.policy_inspector = patch(
+            "defenseclaw.doctor_hooks._codex_effective_policy_inspector",
+            return_value=(False, "test effective requirements"),
+        )
+        self.policy_inspector_mock = self.policy_inspector.start()
+        self.addCleanup(self.policy_inspector.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -60,19 +80,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
         config: Path,
         *,
         version: str = "v6",
+        contract: str | None = None,
         runtime_paths: list[str] | None = None,
     ) -> None:
-        contract = "codex-hooks-v1" if connector == "codex" else "claudecode-hooks-v1"
+        if contract is None:
+            contract = "codex-hooks-v1" if connector == "codex" else "claudecode-hooks-v1"
+        normalized_agent_version = {
+            "codex-hooks-v1": "0.124.0",
+            "codex-hooks-v2": "0.129.0",
+            "codex-hooks-v3": "0.133.0",
+            "claudecode-hooks-v1": "2.1.152",
+        }[contract]
         locations = {"hook_config_paths": [str(config)]}
         if runtime_paths is not None:
             locations["hook_script_paths"] = runtime_paths
         (self.data / "hook_contract_lock.json").write_text(
             json.dumps(
                 {
+                    "version": 2,
                     "connectors": {
                         connector: {
                             "contract_id": contract,
                             "compatibility_status": "known",
+                            "raw_agent_version": normalized_agent_version,
+                            "normalized_agent_version": normalized_agent_version,
                             "hook_script_version": version,
                             "locations": locations,
                         }
@@ -86,18 +117,32 @@ class WindowsHookDoctorTests(unittest.TestCase):
         if connector == "codex":
             path = self.profile / ".codex" / "config.toml"
             path.parent.mkdir(exist_ok=True)
-            extra = ""
-            if extra_command:
-                escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
-                extra = (
-                    '\nPostToolUse = [{ hooks = [{ type = "command", '
-                    f'command = "{escaped_extra}", timeout = 30 }}] }}]'
-                )
+            escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
             escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+            specs = (
+                ("SessionStart", "startup|resume|clear", 30),
+                ("UserPromptSubmit", None, 30),
+                ("PreToolUse", "*", 30),
+                ("PermissionRequest", "*", 30),
+                ("PostToolUse", "*", 30),
+                ("SubagentStart", "*", 30),
+                ("SubagentStop", "*", 90),
+                ("PreCompact", None, 30),
+                ("PostCompact", None, 30),
+                ("Stop", None, 90),
+            )
+            rows = []
+            for event, matcher, timeout in specs:
+                matcher_text = "" if matcher is None else f'matcher = "{matcher}", '
+                groups = (
+                    f'{event} = [{{ {matcher_text}hooks = [{{ type = "command", '
+                    f'command = "{escaped}", command_windows = "{escaped}", timeout = {timeout} }}] }}'
+                )
+                if event == "PostToolUse" and escaped_extra:
+                    groups += f', {{ hooks = [{{ type = "command", command = "{escaped_extra}", timeout = 30 }}] }}'
+                rows.append(groups + "]")
             path.write_text(
-                "[features]\nhooks = true\n\n[hooks]\n"
-                'PreToolUse = [{ hooks = [{ type = "command", '
-                f'command = "{escaped}", timeout = 30 }}] }}]' + extra + "\n",
+                "[features]\nhooks = true\n\n[hooks]\n" + "\n".join(rows) + "\n",
                 encoding="utf-8",
             )
         else:
@@ -180,6 +225,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         search_path: str = "",
         pathext: str = ".EXE;.CMD",
         managed_settings_paths: tuple[str, ...] | None = (),
+        inspect_effective_policy: bool = True,
     ):
         return validate_windows_hook_registration(
             connector=connector,
@@ -189,6 +235,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             search_path=search_path,
             pathext=pathext,
             claude_managed_settings_paths=managed_settings_paths,
+            inspect_effective_policy=inspect_effective_policy,
         )
 
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
@@ -267,6 +314,372 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(exe)))
 
+    def test_codex_native_hash_matches_vendor_canonical_identity(self) -> None:
+        self.assertEqual(
+            _codex_command_hook_hash(
+                "pre_tool_use",
+                "*",
+                {
+                    "type": "command",
+                    "command": "generic-command",
+                    "command_windows": "windows-command",
+                    "timeout": 30,
+                    "async": False,
+                    "statusMessage": "Checking DefenseClaw policy",
+                },
+            ),
+            "sha256:00d233bf308896ec04f67e2fee61ac2962df3c0afbe80c9d8bc6975ec3697786",
+        )
+
+    def test_codex_current_contract_requires_exact_native_trust_matrix(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector codex'
+        config = self._config("codex", command)
+        document = tomllib.loads(config.read_text(encoding="utf-8"))
+        source = _codex_hook_state_key_source(str(config))
+        state = {}
+        for event, (event_key, _matcher, _timeout) in _CODEX_HOOK_SPECS.items():
+            group = document["hooks"][event][0]
+            hook = group["hooks"][0]
+            key = f"{source}:{event_key}:0:0"
+            state[key] = {"trusted_hash": _codex_command_hook_hash(event_key, group.get("matcher"), hook)}
+        state_lines = ["", "[hooks.state]"]
+        state_lines.extend(
+            f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(value['trusted_hash'])} }}"
+            for key, value in state.items()
+        )
+        config.write_text(
+            config.read_text(encoding="utf-8") + "\n".join(state_lines) + "\n",
+            encoding="utf-8",
+        )
+        self._lock("codex", config, contract="codex-hooks-v3")
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+
+        tampered = config.read_text(encoding="utf-8").replace(
+            next(iter(state.values()))["trusted_hash"],
+            "sha256:" + "0" * 64,
+            1,
+        )
+        config.write_text(tampered, encoding="utf-8")
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("trust state does not match", check.detail)
+
+    def test_codex_post_install_policy_change_and_inspection_failure_are_blocking(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        original = config.read_bytes()
+
+        healthy = self._validate("codex", config)
+        self.assertEqual(healthy.state, "healthy", healthy.detail)
+
+        with patch(
+            "defenseclaw.doctor_hooks._codex_effective_policy_inspector",
+            return_value=(True, "changed cloud requirements"),
+        ):
+            blocked = self._validate("codex", config)
+        self.assertEqual(blocked.state, "policy-blocked", blocked.detail)
+        self.assertIn("allow_managed_hooks_only=true", blocked.detail)
+        self.assertIn("changed cloud requirements", blocked.detail)
+
+        with patch(
+            "defenseclaw.doctor_hooks._codex_effective_policy_inspector",
+            side_effect=OSError("app-server unavailable"),
+        ):
+            unavailable = self._validate("codex", config)
+        self.assertEqual(unavailable.state, "policy-blocked", unavailable.detail)
+        self.assertIn("cannot inspect effective Codex policy", unavailable.detail)
+        self.assertEqual(config.read_bytes(), original)
+
+    def test_passive_codex_registration_check_never_starts_policy_inspector(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        self.policy_inspector_mock.reset_mock()
+
+        check = self._validate("codex", config, inspect_effective_policy=False)
+
+        self.assertTrue(check.healthy, check.detail)
+        self.policy_inspector_mock.assert_not_called()
+
+    def test_codex_effective_policy_inspector_uses_bounded_app_server_rpc(self) -> None:
+        class RecordingBytesIO(io.BytesIO):
+            recorded = b""
+            bytes_read = 0
+
+            def read(self, size: int = -1) -> bytes:
+                value = super().read(size)
+                self.bytes_read += len(value)
+                return value
+
+            def close(self) -> None:
+                self.recorded = self.getvalue()
+                super().close()
+
+        stdin = RecordingBytesIO()
+        stdout = io.BytesIO(
+            b'{"id":1,"result":{"codexHome":"C:\\\\Users\\\\test\\\\.codex"}}\n'
+            b'{"id":2,"result":{"requirements":{"allowManagedHooksOnly":true}}}\n'
+        )
+        stderr = RecordingBytesIO(b"x" * (96 * 1024))
+        process = SimpleNamespace(
+            pid=1234,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            poll=MagicMock(return_value=0),
+            wait=MagicMock(return_value=0),
+            terminate=MagicMock(),
+            kill=MagicMock(),
+        )
+        job = MagicMock()
+        job.terminate_sync.return_value = True
+        executable = str(self.install / "codex.exe")
+        config = self.profile / ".codex" / "config.toml"
+        with (
+            patch("defenseclaw.doctor_hooks._codex_policy_executable", return_value=executable),
+            patch("defenseclaw.doctor_hooks.subprocess.Popen", return_value=process) as popen,
+            patch("defenseclaw.tui.windows_process.WindowsJob", return_value=job) as job_type,
+        ):
+            managed_only, source = _inspect_codex_effective_hook_policy(str(self.data), str(config))
+
+        self.assertTrue(managed_only)
+        self.assertIn(executable, source)
+        messages = [json.loads(line) for line in stdin.recorded.splitlines()]
+        self.assertEqual([message.get("method") for message in messages], [
+            "initialize",
+            "initialized",
+            "configRequirements/read",
+        ])
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv, [executable, "app-server", "--stdio"])
+        self.assertFalse(popen.call_args.kwargs["shell"])
+        self.assertEqual(popen.call_args.kwargs["env"]["CODEX_HOME"], str(config.parent))
+        creationflags = popen.call_args.kwargs["creationflags"]
+        self.assertTrue(creationflags & getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertTrue(creationflags & getattr(subprocess, "CREATE_SUSPENDED", 0x00000004))
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        job_type.assert_called_once_with(1234, allow_breakaway=False)
+        job.terminate_sync.assert_called_once_with(timeout=2)
+        job.close.assert_called_once()
+        self.assertEqual(stderr.bytes_read, 96 * 1024)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object cleanup contract")
+    def test_codex_policy_cleanup_closes_nonempty_job_before_descendant_held_pipes(self) -> None:
+        job_closed = threading.Event()
+
+        class JobHeldStdout:
+            def __init__(self) -> None:
+                self.responses = iter(
+                    (
+                        b'{"id":1,"result":{}}\n',
+                        b'{"id":2,"result":{"requirements":null}}\n',
+                    )
+                )
+                self.closed = False
+
+            def readline(self, _limit: int) -> bytes:
+                try:
+                    return next(self.responses)
+                except StopIteration:
+                    job_closed.wait(5)
+                    return b""
+
+            def close(self) -> None:
+                if not job_closed.is_set():
+                    raise AssertionError("stdout closed before kill-on-close Job handle")
+                self.closed = True
+
+        class JobHeldStderr:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def read(self, _size: int) -> bytes:
+                job_closed.wait(5)
+                return b""
+
+            def close(self) -> None:
+                if not job_closed.is_set():
+                    raise AssertionError("stderr closed before kill-on-close Job handle")
+                self.closed = True
+
+        stdin = io.BytesIO()
+        stdout = JobHeldStdout()
+        stderr = JobHeldStderr()
+        process = SimpleNamespace(
+            pid=1234,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            poll=MagicMock(return_value=0),
+            wait=MagicMock(return_value=0),
+            terminate=MagicMock(),
+            kill=MagicMock(),
+        )
+        job = MagicMock()
+        job.terminate_sync.return_value = False
+        job.close.side_effect = job_closed.set
+        executable = str(self.install / "codex.exe")
+        config = self.profile / ".codex" / "config.toml"
+
+        with (
+            patch("defenseclaw.doctor_hooks._codex_policy_executable", return_value=executable),
+            patch("defenseclaw.doctor_hooks.subprocess.Popen", return_value=process),
+            patch("defenseclaw.tui.windows_process.WindowsJob", return_value=job),
+            self.assertRaises(_InspectionError) as raised,
+        ):
+            _inspect_codex_effective_hook_policy(str(self.data), str(config))
+
+        self.assertIn("Job Object did not become empty", raised.exception.detail)
+        job.close.assert_called_once()
+        self.assertTrue(stdout.closed)
+        self.assertTrue(stderr.closed)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object cleanup contract")
+    def test_codex_policy_cleanup_preserves_primary_rpc_error(self) -> None:
+        process = SimpleNamespace(
+            pid=1234,
+            stdin=io.BytesIO(),
+            stdout=io.BytesIO(
+                b'{"id":1,"result":{}}\n'
+                b'{"id":2,"error":{"code":-32000,"message":"primary failure"}}\n'
+            ),
+            stderr=io.BytesIO(),
+            poll=MagicMock(return_value=0),
+            wait=MagicMock(return_value=0),
+            terminate=MagicMock(),
+            kill=MagicMock(),
+        )
+        job = MagicMock()
+        job.terminate_sync.side_effect = OSError("secondary cleanup failure")
+        executable = str(self.install / "codex.exe")
+        config = self.profile / ".codex" / "config.toml"
+
+        with (
+            patch("defenseclaw.doctor_hooks._codex_policy_executable", return_value=executable),
+            patch("defenseclaw.doctor_hooks.subprocess.Popen", return_value=process),
+            patch("defenseclaw.tui.windows_process.WindowsJob", return_value=job),
+            self.assertRaises(_InspectionError) as raised,
+        ):
+            _inspect_codex_effective_hook_policy(str(self.data), str(config))
+
+        self.assertIn("Codex policy RPC 2 failed", raised.exception.detail)
+        self.assertIn("primary failure", raised.exception.detail)
+        self.assertNotIn("secondary cleanup failure", raised.exception.detail)
+        job.close.assert_called_once()
+
+    def test_codex_policy_executable_admits_exact_setup_selected_lock_evidence(self) -> None:
+        executable = self.install / "codex.exe"
+        executable.write_bytes(b"MZnative-codex")
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        lock = {
+            "version": 2,
+            "connectors": {
+                "codex": {
+                    "contract_id": "codex-hooks-v3",
+                    "compatibility_status": "known",
+                    "raw_agent_version": "codex-cli 0.144.3",
+                    "normalized_agent_version": "0.144.3",
+                    "agent_executable": str(executable),
+                    "agent_executable_source": "setup-selected",
+                    "agent_executable_sha256": digest,
+                }
+            },
+        }
+        (self.data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        with (
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch("defenseclaw.agent_selection.stable_executable_sha256", return_value=digest),
+        ):
+            selected = _codex_policy_executable(str(self.data))
+
+        self.assertEqual(os.path.normcase(selected), os.path.normcase(str(executable)))
+
+    def test_codex_policy_executable_rejects_command_processor_wrapper(self) -> None:
+        executable = self.install / "codex.cmd"
+        executable.write_text("@echo off\r\n", encoding="utf-8")
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        lock = {
+            "version": 2,
+            "connectors": {
+                "codex": {
+                    "contract_id": "codex-hooks-v3",
+                    "compatibility_status": "known",
+                    "raw_agent_version": "codex-cli 0.144.3",
+                    "normalized_agent_version": "0.144.3",
+                    "agent_executable": str(executable),
+                    "agent_executable_source": "setup-selected",
+                    "agent_executable_sha256": digest,
+                }
+            },
+        }
+        (self.data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+        with self.assertRaises(_InspectionError) as raised:
+            _codex_policy_executable(str(self.data))
+
+        self.assertEqual(raised.exception.state, "policy-blocked")
+        self.assertIn("native Windows .exe", raised.exception.detail)
+
+    def test_codex_policy_executable_never_uses_automatic_discovery_cache(self) -> None:
+        (self.data / "agent_discovery.json").write_text(
+            json.dumps({"agents": {"codex": {"binary_path": str(self.install / "codex.cmd")}}}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(_InspectionError) as raised:
+            _codex_policy_executable(str(self.data))
+
+        self.assertEqual(raised.exception.state, "policy-blocked")
+        self.assertIn("protected Codex executable evidence", raised.exception.detail)
+
+    def test_codex_contract_lock_cannot_downgrade_a_current_agent(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        lock_path = self.data / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["connectors"]["codex"]["normalized_agent_version"] = "0.144.3"
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("does not match the recorded agent version", check.detail)
+
+    def test_codex_requires_complete_exact_installed_hook_matrix(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector codex'
+        mutations = {
+            "missing-event": lambda document: document["hooks"].pop("PermissionRequest"),
+            "narrow-matcher": lambda document: document["hooks"]["PreToolUse"][0].update({"matcher": "Bash"}),
+            "async-enforcement": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"async": True}
+            ),
+            "wrong-timeout": lambda document: document["hooks"]["Stop"][0]["hooks"][0].update({"timeout": 30}),
+            "split-native-identity": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"command_windows": command + " --different"}
+            ),
+            "duplicate-owned-handler": lambda document: document["hooks"]["PreToolUse"][0]["hooks"].append(
+                dict(document["hooks"]["PreToolUse"][0]["hooks"][0])
+            ),
+            "unexpected-owned-event": lambda document: document["hooks"].update(
+                {"FutureEvent": document["hooks"]["PreToolUse"]}
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                config = self._config("codex", command)
+                document = tomllib.loads(config.read_text(encoding="utf-8"))
+                mutate(document)
+
+                with self.assertRaises(_InspectionError) as raised:
+                    _validate_codex_hook_contract(document, "codex-hooks-v1", str(config))
+
+                self.assertEqual(raised.exception.state, "stale")
+
     def test_codex_explicitly_disabled_hooks_raise_malformed(self) -> None:
         document = {
             "features": {"hooks": False},
@@ -291,14 +704,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
-        config = self._config("codex", "codex-hook.sh")
-        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-        config.write_text(
-            "[hooks]\n"
-            'PreToolUse = [{ hooks = [{ type = "command", command = "codex-hook.sh", '
-            f'command_windows = "{escaped}", timeout = 30 }}] }}]\n',
-            encoding="utf-8",
-        )
+        config = self._config("codex", command)
 
         check = self._validate("codex", config)
         self.assertEqual(check.state, "healthy", check.detail)
@@ -316,14 +722,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
-        config = self._config("codex", "codex-hook.sh")
-        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-        config.write_text(
-            "[hooks]\n"
-            'PreToolUse = [{ hooks = [{ type = "command", command = "codex-hook.sh", '
-            f'command_windows = "{escaped}", timeout = 30 }}] }}]\n',
-            encoding="utf-8",
-        )
+        config = self._config("codex", command)
 
         check = self._validate("codex", config)
         self.assertEqual(check.state, "stale", check.detail)
@@ -375,6 +774,15 @@ class WindowsHookDoctorTests(unittest.TestCase):
         managed = f'"{runtime}" hook --connector claudecode'
         config = self._config("claudecode", managed, extra_command='"C:\\Tools\\formatter.exe" --quiet')
         check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_codex_complete_contract_allows_unrelated_foreign_hook(self) -> None:
+        runtime = self._runtime()
+        managed = f'"{runtime}" hook --connector codex'
+        config = self._config("codex", managed, extra_command='"C:\\Tools\\formatter.exe" --quiet')
+
+        check = self._validate("codex", config)
+
         self.assertEqual(check.state, "healthy", check.detail)
 
     def test_foreign_hook_with_managed_text_is_not_classified_as_owned(self) -> None:

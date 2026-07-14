@@ -252,21 +252,6 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 	return packagedWindowsHookBinaryAtLayout(executable, expectedRoot, expectedRoot, false)
 }
 
-// packagedWindowsHookBinaryAtUninstallRoot recognizes the exact random trash
-// tree created by native setup after its durable uninstall commit. Connector
-// teardown runs the gateway from that tree because InstallRoot has already
-// been atomically removed. The embedded install state continues to bind every
-// logical path to expectedRoot, and only a strict `.uninstall.<128-bit hex>`
-// sibling is accepted. This lets teardown recognize the stable hook command
-// without trusting an environment variable or arbitrary relocated checkout.
-func packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot string) string {
-	physicalRoot := packagedWindowsUninstallPhysicalRoot(executable, expectedRoot)
-	if physicalRoot == "" {
-		return ""
-	}
-	return packagedWindowsHookBinaryAtLayout(executable, physicalRoot, expectedRoot, false)
-}
-
 func packagedWindowsUninstallPhysicalRoot(executable, expectedRoot string) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
@@ -470,14 +455,10 @@ func windowsNativePowerShellHookCommand(connector string) string {
 }
 
 func windowsSystemPowerShellExe() string {
-	root := strings.TrimSpace(os.Getenv("SystemRoot"))
-	if root == "" {
-		root = strings.TrimSpace(os.Getenv("WINDIR"))
-	}
-	if root == "" {
-		root = `C:\Windows`
-	}
-	return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	// The system directory is resolved by a Windows API, never by mutable
+	// SystemRoot/WINDIR values inherited from the project launching an agent.
+	// Build this as a Windows path even in OS-parameterized tests.
+	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
 }
 
 func powershellEncodedCommand(script string) string {

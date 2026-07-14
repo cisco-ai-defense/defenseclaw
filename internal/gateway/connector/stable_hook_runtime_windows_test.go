@@ -16,6 +16,17 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// packagedWindowsHookBinaryAtUninstallRoot is a test-only strict resolver for
+// exercising uninstall-trash layout validation without adding an otherwise
+// unused production wrapper around the two production primitives.
+func packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot string) string {
+	physicalRoot := packagedWindowsUninstallPhysicalRoot(executable, expectedRoot)
+	if physicalRoot == "" {
+		return ""
+	}
+	return packagedWindowsHookBinaryAtLayout(executable, physicalRoot, expectedRoot, false)
+}
+
 func TestCanonicalNativeWindowsInstallRootIgnoresConnectorEnvironmentOverrides(t *testing.T) {
 	want := canonicalNativeWindowsInstallRoot()
 	if strings.TrimSpace(want) == "" {
@@ -167,15 +178,15 @@ func TestPackagedWindowsRunningGatewayUsesExactInstalledSiblingWhileImageIsLocke
 	if err != nil {
 		t.Fatalf("lock packaged hook image: %v", err)
 	}
-	released := make(chan error, 1)
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		released <- windows.CloseHandle(hookHandle)
-	}()
-
 	if got := packagedWindowsHookBinaryAtRoot(gateway, root); got != "" {
 		t.Fatalf("non-running strict resolver accepted a sharing-locked gateway: %q", got)
 	}
+
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		released <- windows.CloseHandle(hookHandle)
+	}()
 	if got := packagedWindowsHookBinaryForRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
 		t.Fatalf("running packaged resolver = %q, want exact installed sibling %q", got, hook)
 	}

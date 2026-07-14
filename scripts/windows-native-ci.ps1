@@ -1,4 +1,4 @@
-# Copyright 2026 Cisco Systems, Inc. and its affiliates
+﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 <#
@@ -287,6 +287,147 @@ function Write-BoundedText([string]$Path, [AllowNull()][string]$Text, [int]$MaxB
     [IO.File]::WriteAllText($Path, $safe, [Text.UTF8Encoding]::new($false))
 }
 
+function Get-WindowsNativeProcessTreeSnapshot([int[]]$RootProcessIds) {
+    $processes = @(Get-CimInstance Win32_Process -OperationTimeoutSec 1 -ErrorAction Stop)
+    $descendants = @()
+    $frontier = @($RootProcessIds | Select-Object -Unique)
+    while ($frontier.Count -gt 0) {
+        $children = @($processes | Where-Object {
+            [int]$_.ParentProcessId -in $frontier -and [int]$_.ProcessId -notin $RootProcessIds
+        })
+        $descendants += $children
+        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+    }
+    return @($descendants | ForEach-Object {
+        [pscustomobject]@{
+            ProcessId = [int]$_.ProcessId
+            ParentProcessId = [int]$_.ParentProcessId
+            CreationDate = ([DateTime]$_.CreationDate).ToUniversalTime().ToString('O')
+            ExecutablePath = [string]$_.ExecutablePath
+        }
+    })
+}
+
+function Add-WindowsNativeProcessTreeSnapshot([hashtable]$Tracked, [int]$RootProcessId) {
+    $roots = @($RootProcessId) + @($Tracked.Values | ForEach-Object { [int]$_.ProcessId })
+    try {
+        foreach ($process in @(Get-WindowsNativeProcessTreeSnapshot $roots)) {
+            $key = "$($process.ProcessId)|$($process.CreationDate)"
+            $Tracked[$key] = $process
+        }
+    } catch {
+        Write-Warning (Protect-WindowsNativeText "process tree snapshot failed: $($_.Exception.Message)")
+    }
+}
+
+function Test-WindowsNativeProcessIdentity([object]$RecordedProcess) {
+    $native = $null
+    try {
+        $native = [Diagnostics.Process]::GetProcessById([int]$RecordedProcess.ProcessId)
+        $expected = [DateTime]::Parse(
+            [string]$RecordedProcess.CreationDate,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+        if ([Math]::Abs(($native.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -ge 1) {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExecutablePath)) {
+            $currentImage = [string]$native.MainModule.FileName
+            if (-not [string]::Equals(
+                $currentImage,
+                [string]$RecordedProcess.ExecutablePath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                return $false
+            }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $native) { $native.Dispose() }
+    }
+}
+
+function Stop-WindowsNativeExactProcessTree([object[]]$Descendants) {
+    foreach ($recorded in @($Descendants)) {
+        if (-not (Test-WindowsNativeProcessIdentity $recorded)) { continue }
+        $native = $null
+        try {
+            $native = [Diagnostics.Process]::GetProcessById([int]$recorded.ProcessId)
+            $started = $native.StartTime.ToUniversalTime()
+            $expected = [DateTime]::Parse(
+                [string]$recorded.CreationDate,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            if ([Math]::Abs(($started - $expected).TotalMilliseconds) -ge 1) { continue }
+            $native.Kill($true)
+        } catch {
+            Write-Warning (Protect-WindowsNativeText "could not stop tracked PID $($recorded.ProcessId): $($_.Exception.Message)")
+        } finally {
+            if ($null -ne $native) { $native.Dispose() }
+        }
+    }
+}
+
+function Wait-WindowsNativeProcessTreeExit([object[]]$Descendants, [int]$TimeoutMilliseconds = 5000) {
+    if (@($Descendants).Count -eq 0) { return }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $alive = @($Descendants | Where-Object { Test-WindowsNativeProcessIdentity $_ })
+        if ($alive.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+}
+
+function Get-WindowsNativeTrackedProcessIdentitySummary([object[]]$Descendants) {
+    $rows = @($Descendants | Sort-Object ProcessId, CreationDate | Select-Object -First 16 | ForEach-Object {
+        $image = if ([string]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
+            'unknown'
+        } else {
+            [IO.Path]::GetFileName([string]$_.ExecutablePath)
+        }
+        "pid=$($_.ProcessId),created=$($_.CreationDate),image=$image"
+    })
+    if (@($Descendants).Count -gt 16) { $rows += 'additional-identities=truncated' }
+    if ($rows.Count -eq 0) { return 'none' }
+    return $rows -join ';'
+}
+
+function Write-WindowsNativeProcessPhase([string]$FilePath, [int]$ProcessId, [string]$Phase, [string]$Detail = '') {
+    $name = [IO.Path]::GetFileName($FilePath)
+    $line = "[native-process:$Phase] file=$name pid=$ProcessId"
+    if (-not [string]::IsNullOrWhiteSpace($Detail)) { $line += " $Detail" }
+    [Console]::Out.WriteLine((Protect-WindowsNativeText $line))
+    [Console]::Out.Flush()
+}
+
+function Wait-WindowsNativeOutputTask([Threading.Tasks.Task]$Task, [DateTime]$Deadline) {
+    if ($Task.IsCompleted) { return $true }
+    $remaining = [int][Math]::Max(0, [Math]::Min([int]::MaxValue, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds))
+    if ($remaining -le 0) { return $false }
+    try { return $Task.Wait($remaining) }
+    catch { return $true }
+}
+
+function Read-WindowsNativeOutputTask([Threading.Tasks.Task[string]]$Task) {
+    if (-not $Task.IsCompleted) { return '[redirected output drain did not complete]' }
+    try { return [string]$Task.GetAwaiter().GetResult() }
+    catch { return "[redirected output unavailable: $($_.Exception.Message)]" }
+}
+
+function Test-WindowsNativeOutputTasksHealthy(
+    [Threading.Tasks.Task[string]]$StdOutTask,
+    [Threading.Tasks.Task[string]]$StdErrTask
+) {
+    return -not (
+        $StdOutTask.IsFaulted -or $StdOutTask.IsCanceled -or
+        $StdErrTask.IsFaulted -or $StdErrTask.IsCanceled
+    )
+}
+
 function Invoke-WindowsNativeProcess {
     [CmdletBinding()]
     param(
@@ -309,32 +450,78 @@ function Invoke-WindowsNativeProcess {
     foreach ($argument in $ArgumentList) { [void]$start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
-    if (-not $process.Start()) { throw "failed to start $FilePath" }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
-    if ($timedOut) {
-        try { $process.Kill($true) } catch { Write-Warning (Protect-WindowsNativeText $_.Exception.Message) }
-        $process.WaitForExit()
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw "failed to start $FilePath"
     }
-    $stdout = Limit-WindowsNativeText $stdoutTask.GetAwaiter().GetResult()
-    $stderr = Limit-WindowsNativeText $stderrTask.GetAwaiter().GetResult()
-    $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
-    $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
-    if ($combined) { Write-Host $combined }
-    if ($LogPath) { Write-BoundedText -Path $LogPath -Text $combined }
-    $result = [pscustomobject]@{
-        ExitCode = $exitCode
-        StdOut = $stdout
-        StdErr = $stderr
-        TimedOut = $timedOut
-        ProcessId = $process.Id
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $trackedDescendants = @{}
+        $timeoutIdentitySummary = 'none'
+        Write-WindowsNativeProcessPhase $FilePath $process.Id 'started'
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        $timeoutPhase = 'parent'
+        if (-not $timedOut) {
+            Write-WindowsNativeProcessPhase $FilePath $process.Id 'parent-exited'
+            $drainGrace = [DateTime]::UtcNow.AddSeconds(5)
+            $drainDeadline = if ($drainGrace -lt $deadline) { $drainGrace } else { $deadline }
+            $stdoutComplete = Wait-WindowsNativeOutputTask $stdoutTask $drainDeadline
+            $stderrComplete = Wait-WindowsNativeOutputTask $stderrTask $drainDeadline
+            if (-not ($stdoutComplete -and $stderrComplete)) {
+                $timedOut = $true
+                $timeoutPhase = 'output-drain'
+            }
+        }
+        $outputReadFailed = -not $timedOut -and
+            -not (Test-WindowsNativeOutputTasksHealthy $stdoutTask $stderrTask)
+        if ($timedOut) {
+            Add-WindowsNativeProcessTreeSnapshot $trackedDescendants $process.Id
+            $timeoutIdentitySummary = Get-WindowsNativeTrackedProcessIdentitySummary @($trackedDescendants.Values)
+            Write-WindowsNativeProcessPhase $FilePath $process.Id "timeout-$timeoutPhase" "descendants=$timeoutIdentitySummary"
+            if (-not $process.HasExited) {
+                try { $process.Kill($true) } catch { Write-Warning (Protect-WindowsNativeText $_.Exception.Message) }
+                $null = $process.WaitForExit(1000)
+            }
+            Add-WindowsNativeProcessTreeSnapshot $trackedDescendants $process.Id
+            $timeoutIdentitySummary = Get-WindowsNativeTrackedProcessIdentitySummary @($trackedDescendants.Values)
+            Stop-WindowsNativeExactProcessTree @($trackedDescendants.Values)
+            Wait-WindowsNativeProcessTreeExit @($trackedDescendants.Values) 1000
+            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(1)
+            $null = Wait-WindowsNativeOutputTask $stdoutTask $cleanupDeadline
+            $null = Wait-WindowsNativeOutputTask $stderrTask $cleanupDeadline
+            if (-not $stdoutTask.IsCompleted) { $process.StandardOutput.Dispose() }
+            if (-not $stderrTask.IsCompleted) { $process.StandardError.Dispose() }
+        }
+        $stdout = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stdoutTask)
+        $stderr = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stderrTask)
+        if ($timedOut) {
+            $stderr = @($stderr, "[timeout descendants: $timeoutIdentitySummary]" | Where-Object { $_ }) -join [Environment]::NewLine
+        }
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
+        if ($combined) { Write-Host $combined }
+        if ($LogPath) { Write-BoundedText -Path $LogPath -Text $combined }
+        $result = [pscustomobject]@{
+            ExitCode = $exitCode
+            StdOut = $stdout
+            StdErr = $stderr
+            TimedOut = $timedOut
+            ProcessId = $process.Id
+        }
+        Write-WindowsNativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($outputReadFailed) { 'failed-output' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
+        if ($outputReadFailed) {
+            throw "$FilePath redirected output capture failed`n$combined"
+        }
+        if ($exitCode -notin $AllowedExitCodes) {
+            $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
+            throw "$FilePath $reason`n$combined"
+        }
+        return $result
+    } finally {
+        $process.Dispose()
     }
-    if ($exitCode -notin $AllowedExitCodes) {
-        $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
-        throw "$FilePath $reason`n$combined"
-    }
-    return $result
 }
 
 function Get-RequiredCommand([string]$Name) {
@@ -1240,7 +1427,11 @@ function New-WizardAgentFixtures([string]$Root) {
         [pscustomobject]@{
             Name = 'codex.exe'
             ClassName = 'CodexVersionFixture'
-            Version = 'codex-cli 0.124.0'
+            # The wizard contract installs the complete ten-event matrix, whose
+            # first truthful minimum is Codex 0.133.0. Older supported tiers are
+            # covered independently by boundary and real-client compatibility
+            # probes instead of being mislabeled as full-matrix certification.
+            Version = 'codex-cli 0.133.0'
         },
         [pscustomobject]@{
             Name = 'claude.exe'
@@ -2062,10 +2253,23 @@ function Invoke-SetupAcceptance {
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-reinstall.log') | Out-Null
-        Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+        $cachedSetup = Join-Path $cacheRoot 'DefenseClawSetup-x64.exe'
+        if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
+            throw "reinstall did not publish the self-servicing setup executable: $cachedSetup"
+        }
+        # Exercise the exact Apps & Features self-delete path. The cached
+        # executable cannot remove its own directory until its process exits,
+        # so the transaction-bound deferred helper must finish the deletion.
+        Invoke-WindowsNativeProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
+        for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
+            Start-Sleep -Milliseconds 250
+        }
+        if (Test-Path -LiteralPath $cacheRoot) {
+            throw "cached setup self-uninstall left installer cache behind: $cacheRoot"
+        }
         Assert-NoGatewayAutoStart
     } finally {
         $env:PATH = $processPathBefore
@@ -2218,18 +2422,22 @@ function Invoke-Contract {
             throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
         }
     } finally {
-        $cleanupError = $null
+        $cleanupErrors = [Collections.Generic.List[object]]::new()
         try {
             if ($installed -and (Test-Path -LiteralPath $gateway -PathType Leaf)) {
                 Invoke-WindowsNativeProcess $gateway @('stop') -AllowedExitCodes @(0, 1) `
                     -TimeoutSeconds 90 -LogPath (Join-Path $root 'setup-contract-stop.log') | Out-Null
             }
+        } catch {
+            $cleanupErrors.Add($_)
+        }
+        try {
             if ($installed -or (Test-Path -LiteralPath $installRoot)) {
                 Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
                     -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
             }
         } catch {
-            $cleanupError = $_
+            $cleanupErrors.Add($_)
         }
         $currentNames = @(
             [Environment]::GetEnvironmentVariables('Process').Keys |
@@ -2251,11 +2459,12 @@ function Invoke-Contract {
             Assert-UserPathRegistrySnapshot $userPathBefore `
                 'native Setup contract did not restore the original user PATH exactly'
         } catch {
-            if ($null -eq $cleanupError) {
-                $cleanupError = $_
-            }
+            $cleanupErrors.Add($_)
         }
-        if ($null -ne $cleanupError) { throw $cleanupError }
+        if ($cleanupErrors.Count -gt 0) {
+            $messages = @($cleanupErrors | ForEach-Object { $_.Exception.Message })
+            throw "native Setup contract cleanup failed: $($messages -join '; ')"
+        }
     }
 }
 
@@ -2373,6 +2582,63 @@ function Invoke-SelfTest {
         }
     }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'tools\uv.exe') -PathType Leaf)) { throw 'uv was not isolated' }
+
+    $healthyOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $healthyOutput.SetResult('complete')
+    $faultedOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $faultedOutput.SetException([IO.IOException]::new('injected output read failure'))
+    if (-not (Test-WindowsNativeOutputTasksHealthy $healthyOutput.Task $healthyOutput.Task)) {
+        throw 'native process helper rejected completed redirected output tasks'
+    }
+    if (Test-WindowsNativeOutputTasksHealthy $faultedOutput.Task $healthyOutput.Task) {
+        throw 'native process helper accepted a faulted redirected output task'
+    }
+
+    $pwsh = (Get-Process -Id $PID).Path
+    $mock = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\testdata\windows-mock.ps1'
+    $processTestRoot = Join-Path $root 'native-process-timeout-test'
+    $unrelatedRoot = Join-Path $processTestRoot 'unrelated'
+    $drainRoot = Join-Path $processTestRoot 'drain'
+    foreach ($path in @($unrelatedRoot, $drainRoot)) {
+        [IO.Directory]::CreateDirectory($path) | Out-Null
+    }
+    $unrelated = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $unrelatedRoot
+    ) -PassThru -WindowStyle Hidden
+    try {
+        $unrelatedStarted = $unrelated.StartTime.ToUniversalTime()
+        $timedOut = $false
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            Invoke-WindowsNativeProcess $pwsh @(
+                '-NoProfile', '-File', $mock, '-Action', 'drain-timeout', '-StateRoot', $drainRoot
+            ) -TimeoutSeconds 2 | Out-Null
+        } catch {
+            $timedOut = $_.Exception.Message -match 'timed out after 2s'
+        } finally {
+            $stopwatch.Stop()
+        }
+        if (-not $timedOut) { throw 'native process helper did not bound inherited redirected handles' }
+        if ($stopwatch.Elapsed -ge [TimeSpan]::FromSeconds(10)) {
+            throw "native process helper exceeded its bounded timeout cleanup: $($stopwatch.Elapsed)"
+        }
+        $childPidPath = Join-Path $drainRoot 'drain-child.pid'
+        if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) {
+            throw 'native process helper timeout child did not start'
+        }
+        $childPid = [int][IO.File]::ReadAllText($childPidPath)
+        if ($null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
+            throw "native process helper left its exact descendant running: $childPid"
+        }
+        $unrelatedLive = Get-Process -Id $unrelated.Id -ErrorAction SilentlyContinue
+        if ($null -eq $unrelatedLive -or
+            [Math]::Abs(($unrelatedLive.StartTime.ToUniversalTime() - $unrelatedStarted).TotalMilliseconds) -ge 1) {
+            throw 'native process helper stopped an unrelated same-image process'
+        }
+    } finally {
+        Stop-Process -Id $unrelated.Id -Force -ErrorAction SilentlyContinue
+        $unrelated.Dispose()
+    }
 
     $junctionTarget = Join-Path $root 'junction-target'
     $cleanupFixture = Join-Path $root 'cleanup-fixture'

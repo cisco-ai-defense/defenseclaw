@@ -18,6 +18,8 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -211,15 +213,7 @@ func renameDurableFile(source, destination string) error {
 }
 
 func replaceDurableFile(source, destination string) error {
-	from, err := winpath.UTF16Ptr(source)
-	if err != nil {
-		return err
-	}
-	to, err := winpath.UTF16Ptr(destination)
-	if err != nil {
-		return err
-	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	return safefile.ReplaceFile(source, destination)
 }
 
 func validatePrivateTransactionPath(path string, wantDirectory bool) error {
@@ -325,29 +319,112 @@ func waitForProcessExit(pid uint32, timeout time.Duration) error {
 	return nil
 }
 
-func removeDirectoryAfterExit(path string, parentPID int) error {
+const deferredCleanupWaitTimeout = 2 * time.Minute
+
+func removeDirectoryAfterExit(path, journalPath string, parentPID int, transactionID string) error {
 	powerShell, err := systemPowerShellPath()
 	if err != nil {
 		return err
 	}
-	cmd := directoryCleanupCommand(powerShell, path, parentPID)
+	cmd := directoryCleanupCommand(
+		powerShell,
+		path,
+		journalPath,
+		parentPID,
+		transactionID,
+		deferredCleanupWaitTimeout,
+	)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return cmd.Process.Release()
 }
 
-func directoryCleanupCommand(powerShell, path string, parentPID int) *exec.Cmd {
-	const script = "$target=$env:DEFENSECLAW_CLEANUP_TARGET; $parent=[int]$env:DEFENSECLAW_CLEANUP_PARENT_PID; " +
-		"try { Wait-Process -Id $parent -Timeout 120 -ErrorAction SilentlyContinue } catch {}; " +
-		"if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }"
+func directoryCleanupCommand(
+	powerShell, path, journalPath string,
+	parentPID int,
+	transactionID string,
+	waitTimeout time.Duration,
+) *exec.Cmd {
+	const script = `
+$target=$env:DEFENSECLAW_CLEANUP_TARGET
+$journal=$env:DEFENSECLAW_CLEANUP_JOURNAL
+$expectedID=$env:DEFENSECLAW_CLEANUP_TRANSACTION_ID
+$parent=[int]$env:DEFENSECLAW_CLEANUP_PARENT_PID
+$waitMilliseconds=[int]$env:DEFENSECLAW_CLEANUP_WAIT_MS
+
+function Test-CleanupOwnership([object]$marker) {
+    if ($null -eq $marker -or $null -eq $marker.transaction) { return $false }
+    $maintenancePath=[string]$marker.transaction.maintenance_path
+    if ([string]::IsNullOrWhiteSpace($maintenancePath)) { return $false }
+    try {
+        $markerTarget=[IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($maintenancePath)).TrimEnd([char[]]@('\','/'))
+        $expectedTarget=[IO.Path]::GetFullPath($target).TrimEnd([char[]]@('\','/'))
+    } catch {
+        return $false
+    }
+    return $marker.phase -ceq 'converged' -and
+        $marker.transaction.action -ceq 'uninstall' -and
+        $marker.transaction.id -ceq $expectedID -and
+        [string]::Equals($markerTarget, $expectedTarget, [StringComparison]::OrdinalIgnoreCase)
+}
+
+$parentExited=$false
+$parentProcess=$null
+try {
+    $parentProcess=[Diagnostics.Process]::GetProcessById($parent)
+    $parentExited=$parentProcess.WaitForExit($waitMilliseconds)
+} catch {
+    $parentExited=$_.Exception -is [ArgumentException] -or
+        $_.Exception.InnerException -is [ArgumentException]
+} finally {
+    if ($null -ne $parentProcess) { $parentProcess.Dispose() }
+}
+if (-not $parentExited) { exit 0 }
+
+# Validate once immediately after the parent exits.
+try {
+    $marker=([IO.File]::ReadAllText($journal) | ConvertFrom-Json)
+    if (-not (Test-CleanupOwnership $marker)) { exit 0 }
+} catch {
+    exit 0
+}
+
+# Re-read under a handle that denies write/delete sharing. Keeping that handle
+# open through Remove-Item prevents a new setup transaction from replacing the
+# ownership marker between the final identity check and deletion.
+$markerLock=$null
+$reader=$null
+try {
+    $markerLock=[IO.File]::Open(
+        $journal,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $reader=[IO.StreamReader]::new($markerLock, [Text.Encoding]::UTF8, $true, 4096, $true)
+    $marker=($reader.ReadToEnd() | ConvertFrom-Json)
+    if (-not (Test-CleanupOwnership $marker)) { exit 0 }
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+    }
+} catch {
+    exit 0
+} finally {
+    if ($null -ne $reader) { $reader.Dispose() }
+    if ($null -ne $markerLock) { $markerLock.Dispose() }
+}
+`
 	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 	// PowerShell treats tokens following -Command as more command text rather
 	// than reliably exposing them through $args. Environment variables keep the
 	// cleanup path byte-for-byte intact without shell interpolation.
 	cmd.Env = append(os.Environ(),
 		"DEFENSECLAW_CLEANUP_TARGET="+path,
+		"DEFENSECLAW_CLEANUP_JOURNAL="+journalPath,
+		"DEFENSECLAW_CLEANUP_TRANSACTION_ID="+transactionID,
 		"DEFENSECLAW_CLEANUP_PARENT_PID="+strconv.Itoa(parentPID),
+		"DEFENSECLAW_CLEANUP_WAIT_MS="+strconv.FormatInt(waitTimeout.Milliseconds(), 10),
 	)
 	return cmd
 }
@@ -579,6 +656,12 @@ func removeUserPathEntry(current, commandDir string, reusedSeparator bool) strin
 
 func removeOwnedUserPathEntry(current, commandDir string, reusedSeparator bool) (string, error) {
 	entries := strings.Split(current, ";")
+	// Seeing the managed path at both ownership endpoints is ambiguous: one may
+	// be the installer entry and the other may be an operator-added duplicate.
+	// Refuse instead of guessing which occurrence is safe to remove.
+	if len(entries) > 1 && samePathEntry(entries[0], commandDir) && samePathEntry(entries[len(entries)-1], commandDir) {
+		return current, errors.New("managed PATH entry was reordered or is no longer uniquely owned; refusing removal")
+	}
 	if len(entries) > 0 && samePathEntry(entries[0], commandDir) {
 		next := append([]string(nil), entries[1:]...)
 		if reusedSeparator {
@@ -663,18 +746,14 @@ func pathContains(entries []string, needle string) bool {
 }
 
 func samePathEntry(a, b string) bool {
-	clean := func(value string) string {
+	prepare := func(value string) string {
 		expanded := strings.Trim(value, ` "`)
 		if value, err := registry.ExpandString(expanded); err == nil {
 			expanded = value
 		}
-		full, err := filepath.Abs(expanded)
-		if err == nil {
-			expanded = full
-		}
-		return strings.TrimRight(strings.ToLower(expanded), `\/`)
+		return expanded
 	}
-	return clean(a) == clean(b)
+	return pathidentity.Same(prepare(a), prepare(b))
 }
 
 const (
@@ -683,38 +762,122 @@ const (
 	installedAppOwnerValue  = "DefenseClawTransactionID"
 )
 
-func registerInstalledApp(maintenancePath, installRoot, version, transactionID string, unsigned bool) error {
+var ntDeleteRegistryKey = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtDeleteKey")
+
+func registerInstalledAppAt(
+	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	previousState *installState,
+) error {
+	return registerInstalledAppAtWithHooks(
+		registryPath,
+		registryKey,
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		previousState,
+		nil,
+		nil,
+	)
+}
+
+func registerInstalledAppAtWithHook(
+	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	previousState *installState,
+	beforeMutation func(),
+) error {
+	return registerInstalledAppAtWithHooks(
+		registryPath,
+		registryKey,
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		previousState,
+		beforeMutation,
+		nil,
+	)
+}
+
+func registerInstalledAppAtWithHooks(
+	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	previousState *installState,
+	beforeExistingMutation func(),
+	beforeFreshPublication func(),
+) error {
 	if !validSetupTransactionID(transactionID) {
 		return errors.New("refusing Apps & Features registration without a valid transaction identity")
 	}
-	exists, owned, ownerTransaction, err := installedAppRegistration(installRoot)
-	if err != nil {
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+registryKey,
+		registry.QUERY_VALUE|registry.SET_VALUE,
+	)
+	if err == nil {
+		owned, ownershipErr := installedAppMutationOwnershipFromKey(
+			key,
+			installRoot,
+			previousState,
+			transactionID,
+		)
+		if ownershipErr != nil {
+			return errors.Join(ownershipErr, key.Close())
+		}
+		if !owned {
+			return errors.Join(
+				errors.New("refusing to replace an unrelated Apps & Features registration named DefenseClaw"),
+				key.Close(),
+			)
+		}
+		if beforeExistingMutation != nil {
+			beforeExistingMutation()
+		}
+		writeErr := writeInstalledAppValues(
+			key,
+			maintenancePath,
+			installRoot,
+			version,
+			transactionID,
+			unsigned,
+		)
+		closeErr := key.Close()
+		if writeErr != nil || closeErr != nil {
+			return errors.Join(writeErr, closeErr)
+		}
+		matches, verifyErr := installedAppValuesMatchAt(
+			registryPath,
+			registryKey,
+			maintenancePath,
+			installRoot,
+			version,
+			transactionID,
+			unsigned,
+		)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if !matches {
+			return errors.New("Apps & Features registration changed during handle-bound update")
+		}
+		return nil
+	}
+	if err != registry.ErrNotExist {
 		return err
 	}
-	if exists {
-		if !owned && ownerTransaction != transactionID {
-			return errors.New("refusing to replace an unrelated Apps & Features registration named DefenseClaw")
-		}
-		key, err := registry.OpenKey(
-			registry.CURRENT_USER,
-			uninstallRegistryPath+`\`+installedAppRegistryKey,
-			registry.SET_VALUE,
-		)
-		if err != nil {
-			return err
-		}
-		defer key.Close()
-		return writeInstalledAppValues(key, maintenancePath, installRoot, version, transactionID, unsigned)
-	}
 
-	stagingName := installedAppRegistryKey + ".pending." + transactionID
-	stagingPath := uninstallRegistryPath + `\` + stagingName
+	stagingName := registryKey + ".pending." + transactionID
+	stagingPath := registryPath + `\` + stagingName
 	// A retry owns this exact random staging name through the durable setup
 	// journal, including the create-before-first-value crash boundary.
 	if err := registry.DeleteKey(registry.CURRENT_USER, stagingPath); err != nil && err != registry.ErrNotExist {
 		return err
 	}
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, stagingPath, registry.SET_VALUE)
+	key, _, err = registry.CreateKey(registry.CURRENT_USER, stagingPath, registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
@@ -725,30 +888,61 @@ func registerInstalledApp(maintenancePath, installRoot, version, transactionID s
 		return errors.Join(writeErr, closeErr)
 	}
 
-	parent, err := registry.OpenKey(registry.CURRENT_USER, uninstallRegistryPath, registry.ALL_ACCESS)
+	parent, err := registry.OpenKey(registry.CURRENT_USER, registryPath, registry.ALL_ACCESS)
 	if err != nil {
 		_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
 		return err
 	}
 	defer parent.Close()
-	if exists, _, _, checkErr := installedAppRegistration(installRoot); checkErr != nil {
+	if exists, _, _, checkErr := installedAppRegistrationAt(registryPath, registryKey, installRoot); checkErr != nil {
 		_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
 		return checkErr
 	} else if exists {
 		_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
 		return errors.New("Apps & Features registration appeared concurrently")
 	}
-	if err := renameRegistrySubkey(parent, stagingName, installedAppRegistryKey); err != nil {
+	if beforeFreshPublication != nil {
+		beforeFreshPublication()
+	}
+	if err := renameRegistrySubkey(parent, stagingName, registryKey); err != nil {
 		// RegRenameKey may become visible before a later registry I/O error.
 		// A complete transaction-owned destination can be re-flushed safely;
 		// anything else remains pending without touching the concurrent key.
-		_, finalOwned, finalTransaction, inspectErr := installedAppRegistration(installRoot)
-		if inspectErr != nil || !finalOwned || finalTransaction != transactionID {
-			_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
+		matches, inspectErr := installedAppValuesMatchAt(
+			registryPath,
+			registryKey,
+			maintenancePath,
+			installRoot,
+			version,
+			transactionID,
+			unsigned,
+		)
+		if inspectErr != nil || !matches {
+			// Retain the transaction-owned pending key as evidence. The next
+			// recovery retry can validate/delete that exact journal-derived name;
+			// a partial same-ID destination is never accepted as success.
 			return errors.Join(err, inspectErr)
 		}
 	}
-	return flushRegistryKey(parent)
+	if err := flushRegistryKey(parent); err != nil {
+		return err
+	}
+	matches, err := installedAppValuesMatchAt(
+		registryPath,
+		registryKey,
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+	)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return errors.New("Apps & Features registration changed after publication")
+	}
+	return nil
 }
 
 func writeInstalledAppValues(
@@ -797,10 +991,89 @@ func writeInstalledAppValues(
 	return flushRegistryKey(key)
 }
 
-func installedAppRegistration(installRoot string) (bool, bool, string, error) {
+func installedAppValuesMatchKey(
+	key registry.Key,
+	maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+) (bool, error) {
+	displayName := productName
+	if unsigned {
+		displayName += " (Unsigned Local Test Build)"
+	}
+	expectedStrings := map[string]string{
+		installedAppOwnerValue: transactionID,
+		"InstallLocation":      installRoot,
+		"DisplayName":          displayName,
+		"DisplayVersion":       version,
+		"Publisher":            defaultPublisher,
+		"DisplayIcon":          filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+		"UninstallString":      quote(maintenancePath) + " /uninstall",
+		"QuietUninstallString": quote(maintenancePath) + " /uninstall /quiet",
+		"ModifyPath":           quote(maintenancePath) + " /repair",
+		"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
+	}
+	for name, want := range expectedStrings {
+		got, valueType, err := key.GetStringValue(name)
+		if err != nil {
+			if err == registry.ErrNotExist {
+				return false, nil
+			}
+			return false, err
+		}
+		if valueType != registry.SZ || got != want {
+			return false, nil
+		}
+	}
+	for name, want := range map[string]uint64{
+		"NoModify":      0,
+		"EstimatedSize": uint64(estimateInstallKB(installRoot)),
+	} {
+		got, valueType, err := key.GetIntegerValue(name)
+		if err != nil {
+			if err == registry.ErrNotExist {
+				return false, nil
+			}
+			return false, err
+		}
+		if valueType != registry.DWORD || got != want {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func installedAppValuesMatchAt(
+	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+) (bool, error) {
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
-		uninstallRegistryPath+`\`+installedAppRegistryKey,
+		registryPath+`\`+registryKey,
+		registry.QUERY_VALUE,
+	)
+	if err == registry.ErrNotExist {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	matches, matchErr := installedAppValuesMatchKey(
+		key,
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+	)
+	return matches, errors.Join(matchErr, key.Close())
+}
+
+func installedAppRegistrationAt(
+	registryPath, registryKey, installRoot string,
+) (bool, bool, string, error) {
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+registryKey,
 		registry.QUERY_VALUE,
 	)
 	if err == registry.ErrNotExist {
@@ -810,27 +1083,160 @@ func installedAppRegistration(installRoot string) (bool, bool, string, error) {
 		return false, false, "", err
 	}
 	defer key.Close()
+	marked, ownerTransaction, err := installedAppRegistrationFromKey(key, installRoot)
+	return true, marked, ownerTransaction, err
+}
+
+func installedAppRegistrationFromKey(
+	key registry.Key,
+	installRoot string,
+) (bool, string, error) {
 	ownerTransaction, _, ownerErr := key.GetStringValue(installedAppOwnerValue)
 	if ownerErr != nil && ownerErr != registry.ErrNotExist {
-		return true, false, "", ownerErr
+		return false, "", ownerErr
 	}
 	location, _, err := key.GetStringValue("InstallLocation")
 	if err == registry.ErrNotExist {
-		return true, false, ownerTransaction, nil
+		return false, ownerTransaction, nil
 	}
 	if err != nil {
-		return true, false, ownerTransaction, err
+		return false, ownerTransaction, err
 	}
-	return true, samePath(location, installRoot), ownerTransaction, nil
+	marked := validSetupTransactionID(ownerTransaction) && samePath(location, installRoot)
+	return marked, ownerTransaction, nil
 }
 
-func installedAppOwnership(installRoot string) (bool, bool, error) {
-	exists, owned, _, err := installedAppRegistration(installRoot)
-	return exists, owned, err
+// legacyInstalledAppRegistrationMatchesKey permits one narrowly proven
+// migration from the original native Setup, which predated the durable owner
+// marker. A same-location key alone is never ownership: the validated legacy
+// install state must have no transaction identity, and every identifying
+// string written by that Setup must still match exactly.
+func legacyInstalledAppRegistrationMatchesKey(
+	key registry.Key,
+	installRoot string,
+	previousState *installState,
+) (bool, error) {
+	if previousState == nil || previousState.TransactionID != "" ||
+		!samePath(previousState.InstallRoot, installRoot) {
+		return false, nil
+	}
+	if _, _, ownerErr := key.GetStringValue(installedAppOwnerValue); ownerErr == nil {
+		// Any marker, including an invalid one, takes this out of the legacy
+		// migration path. Only installedAppRegistrationAt may recognize it.
+		return false, nil
+	} else if ownerErr != registry.ErrNotExist {
+		return false, ownerErr
+	}
+
+	displayName := productName
+	if previousState.UnsignedLocalArtifact {
+		displayName += " (Unsigned Local Test Build)"
+	}
+	expected := map[string]string{
+		"DisplayName":          displayName,
+		"DisplayVersion":       previousState.Version,
+		"Publisher":            defaultPublisher,
+		"UninstallString":      quote(previousState.MaintenancePath) + " /uninstall",
+		"QuietUninstallString": quote(previousState.MaintenancePath) + " /uninstall /quiet",
+		"ModifyPath":           quote(previousState.MaintenancePath) + " /repair",
+		"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
+	}
+	for name, want := range expected {
+		got, _, valueErr := key.GetStringValue(name)
+		if valueErr != nil {
+			if valueErr == registry.ErrNotExist {
+				return false, nil
+			}
+			return false, valueErr
+		}
+		if got != want {
+			return false, nil
+		}
+	}
+	for name, want := range map[string]string{
+		"InstallLocation": previousState.InstallRoot,
+		"DisplayIcon":     filepath.Join(previousState.InstallRoot, "bin", "defenseclaw.exe"),
+	} {
+		got, _, valueErr := key.GetStringValue(name)
+		if valueErr != nil {
+			if valueErr == registry.ErrNotExist {
+				return false, nil
+			}
+			return false, valueErr
+		}
+		if !samePath(got, want) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
-func validateInstalledAppMutation(installRoot string) error {
-	exists, owned, err := installedAppOwnership(installRoot)
+func installedAppMutationOwnershipAt(
+	registryPath, registryKey, installRoot string,
+	previousState *installState,
+	currentTransactionID string,
+) (bool, bool, error) {
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+registryKey,
+		registry.QUERY_VALUE,
+	)
+	if err == registry.ErrNotExist {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	defer key.Close()
+	owned, err := installedAppMutationOwnershipFromKey(
+		key,
+		installRoot,
+		previousState,
+		currentTransactionID,
+	)
+	return true, owned, err
+}
+
+func installedAppMutationOwnershipFromKey(
+	key registry.Key,
+	installRoot string,
+	previousState *installState,
+	currentTransactionID string,
+) (bool, error) {
+	marked, ownerTransaction, err := installedAppRegistrationFromKey(key, installRoot)
+	if err != nil {
+		return false, err
+	}
+	// A syntactically valid marker is not ownership by itself. Bind it to an
+	// identity already protected by durable installer state: the previous
+	// install state during upgrade/uninstall, or the current transaction during
+	// an idempotent registration retry.
+	previousOwned := marked && previousState != nil &&
+		validSetupTransactionID(previousState.TransactionID) &&
+		ownerTransaction == previousState.TransactionID
+	currentOwned := marked && validSetupTransactionID(currentTransactionID) &&
+		ownerTransaction == currentTransactionID
+	if previousOwned || currentOwned {
+		return true, nil
+	}
+	return legacyInstalledAppRegistrationMatchesKey(
+		key,
+		installRoot,
+		previousState,
+	)
+}
+
+func validateInstalledAppMutationAt(
+	registryPath, registryKey, installRoot string,
+	previousState *installState,
+) error {
+	exists, owned, err := installedAppMutationOwnershipAt(
+		registryPath,
+		registryKey,
+		installRoot,
+		previousState,
+		"",
+	)
 	if err != nil {
 		return err
 	}
@@ -840,14 +1246,36 @@ func validateInstalledAppMutation(installRoot string) error {
 	return nil
 }
 
-func registerInstalledAppOwned(maintenancePath, installRoot, version, transactionID string, unsigned bool) error {
-	return registerInstalledApp(maintenancePath, installRoot, version, transactionID, unsigned)
+func validateInstalledAppMutation(installRoot string, previousState *installState) error {
+	return validateInstalledAppMutationAt(
+		uninstallRegistryPath,
+		installedAppRegistryKey,
+		installRoot,
+		previousState,
+	)
 }
 
-func unregisterInstalledApp() error {
+func registerInstalledAppOwned(
+	maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	previousState *installState,
+) error {
+	return registerInstalledAppAt(
+		uninstallRegistryPath,
+		installedAppRegistryKey,
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		previousState,
+	)
+}
+
+func flushInstalledAppParent(registryPath string) error {
 	parent, parentErr := registry.OpenKey(
 		registry.CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Uninstall`,
+		registryPath,
 		registry.QUERY_VALUE,
 	)
 	if parentErr != nil && parentErr != registry.ErrNotExist {
@@ -856,36 +1284,93 @@ func unregisterInstalledApp() error {
 	if parentErr == nil {
 		defer parent.Close()
 	}
-	err := registry.DeleteKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw`)
-	if err == registry.ErrNotExist {
-		if parentErr == nil {
-			return flushRegistryKey(parent)
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
 	if parentErr == nil {
 		return flushRegistryKey(parent)
 	}
 	return nil
 }
 
-func unregisterInstalledAppOwned(installRoot string) error {
-	exists, owned, err := installedAppOwnership(installRoot)
+func unregisterInstalledAppOwnedAt(
+	registryPath, registryKey, installRoot string,
+	previousState *installState,
+) error {
+	return unregisterInstalledAppOwnedAtWithHook(
+		registryPath,
+		registryKey,
+		installRoot,
+		previousState,
+		nil,
+	)
+}
+
+func unregisterInstalledAppOwnedAtWithHook(
+	registryPath, registryKey, installRoot string,
+	previousState *installState,
+	beforeDelete func(),
+) error {
+	child, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+registryKey,
+		registry.QUERY_VALUE|windows.DELETE,
+	)
+	if err == registry.ErrNotExist {
+		// Complete an interrupted delete by flushing the parent key even when
+		// the child is already absent on this retry.
+		return flushInstalledAppParent(registryPath)
+	}
 	if err != nil {
 		return err
 	}
-	if !exists {
-		// Complete an interrupted delete by flushing the parent key even when
-		// the child is already absent on this retry.
-		return unregisterInstalledApp()
+	owned, ownershipErr := installedAppMutationOwnershipFromKey(
+		child,
+		installRoot,
+		previousState,
+		"",
+	)
+	if ownershipErr != nil {
+		return errors.Join(ownershipErr, child.Close())
 	}
 	if !owned {
-		return nil
+		return child.Close()
 	}
-	return unregisterInstalledApp()
+	parent, parentErr := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath,
+		registry.QUERY_VALUE,
+	)
+	if parentErr != nil {
+		return errors.Join(parentErr, child.Close())
+	}
+	if beforeDelete != nil {
+		beforeDelete()
+	}
+	deleteErr := deleteInstalledAppRegistryKeyHandle(child)
+	// NtDeleteKey deletes the exact validated key object even when a concurrent
+	// process renames it and recreates the public DefenseClaw name. Close the
+	// delete-pending handle before flushing the parent so that exact deletion is
+	// durable; no path-based delete is permitted after validation.
+	childCloseErr := child.Close()
+	flushErr := flushRegistryKey(parent)
+	parentCloseErr := parent.Close()
+	return errors.Join(deleteErr, childCloseErr, flushErr, parentCloseErr)
+}
+
+func deleteInstalledAppRegistryKeyHandle(key registry.Key) error {
+	statusValue, _, _ := ntDeleteRegistryKey.Call(uintptr(key))
+	status := windows.NTStatus(uint32(statusValue))
+	if status != 0 {
+		return fmt.Errorf("delete exact Apps & Features registry key handle: %w", status)
+	}
+	return nil
+}
+
+func unregisterInstalledAppOwned(installRoot string, previousState *installState) error {
+	return unregisterInstalledAppOwnedAt(
+		uninstallRegistryPath,
+		installedAppRegistryKey,
+		installRoot,
+		previousState,
+	)
 }
 
 const gatewayAutoStartValueName = "DefenseClawGateway"

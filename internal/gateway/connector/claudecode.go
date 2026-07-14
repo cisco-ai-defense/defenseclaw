@@ -766,7 +766,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		var backupToSave claudeCodeBackup
 		var transformed []byte
 		exactBackupSafe := true
-		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
 				exactBackupSafe = false
 			}
@@ -804,14 +804,32 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 				backup.EnvBackupCaptured = true
 			}
 
-			hooks, _ := settings["hooks"].(map[string]interface{})
-			if hooks == nil {
-				hooks = map[string]interface{}{}
+			hooks := map[string]interface{}{}
+			if rawHooks, present := settings["hooks"]; present {
+				var ok bool
+				hooks, ok = rawHooks.(map[string]interface{})
+				if !ok {
+					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks)
+				}
 			}
 			hooksDir := filepath.Join(opts.DataDir, "hooks")
 			managedCommands := append([]string(nil), backup.ManagedHookCommands...)
+			pristineHooks, pristineHooksTrusted := claudeCodePristineHooksForMigration(backup, backupExists)
+			migrationCommands, err := inferPreTrackedClaudeCodeManagedCommands(
+				hooks,
+				pristineHooks,
+				pristineHooksTrusted,
+			)
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("inspect pre-tracking Claude hooks: %w", err)
+			}
+			managedCommands = append(managedCommands, migrationCommands...)
 			for key, hk := range hooks {
-				hooks[key] = removeOwnedClaudeCodeHooks(hk, hooksDir, managedCommands)
+				remaining, err := removeOwnedClaudeCodeHooks(hk, hooksDir, managedCommands)
+				if err != nil {
+					return atomicTransformResult{}, fmt.Errorf("inspect Claude hooks.%s: %w", key, err)
+				}
+				hooks[key] = remaining
 			}
 			for _, group := range hookGroups {
 				handler := map[string]interface{}{
@@ -855,14 +873,12 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			if err := verifyClaudeCodeHookMatrix(renderedHooks, hookCommand, hookArgs, hooksDir); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("verify rendered DefenseClaw Claude Code hooks: %w", err)
 			}
-			if runtime.GOOS == "windows" {
-				// Exec-form hooks are recognized by their exact argument vector. Keep
-				// this legacy list empty so an unrelated use of the same executable
-				// with different arguments can never be removed by command alone.
-				backup.ManagedHookCommands = nil
-			} else {
-				backup.ManagedHookCommands = []string{hookCommand}
-			}
+			// Persist the exact command written by this Setup. On Windows this is
+			// the absolute exec-form launcher path; ownership additionally requires
+			// the exact Claude Code argv below, so another use of that executable is
+			// never removed by command alone. Recording the path lets a later Setup
+			// or Teardown recognize the prior launcher after an upgrade moves it.
+			backup.ManagedHookCommands = []string{hookCommand}
 			backupToSave = backup
 			transformed = append([]byte(nil), out...)
 			if exactBackupSafe {
@@ -1016,7 +1032,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		backupNeedsSave := false
 		var transformed []byte
 		exactBackupSafe := true
-		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
 				exactBackupSafe = false
 			}
@@ -1237,6 +1253,7 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	settingsPath := claudeCodeSettingsPath()
 	backup, err := c.loadBackup(opts.DataDir)
+	backupAvailable := err == nil
 	if err != nil {
 		if !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "[claudecode] backup unavailable; falling back to surgical cleanup: %v\n", err)
@@ -1254,7 +1271,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	}
 
 	err = withFileLock(settingsPath, func() error {
-		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if exact, ok := managedFileBackupTransform(managedBackup, data, exists); ok {
 				return exact, nil
 			}
@@ -1266,10 +1283,28 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
 			}
 
-			if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
+			if rawHooks, present := settings["hooks"]; present {
+				hooks, ok := rawHooks.(map[string]interface{})
+				if !ok {
+					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks)
+				}
 				hooksDir := filepath.Join(opts.DataDir, "hooks")
+				managedCommands := append([]string(nil), backup.ManagedHookCommands...)
+				pristineHooks, pristineHooksTrusted := claudeCodePristineHooksForMigration(backup, backupAvailable)
+				migrationCommands, err := inferPreTrackedClaudeCodeManagedCommands(
+					hooks,
+					pristineHooks,
+					pristineHooksTrusted,
+				)
+				if err != nil {
+					return atomicTransformResult{}, fmt.Errorf("inspect pre-tracking Claude hooks for restore: %w", err)
+				}
+				managedCommands = append(managedCommands, migrationCommands...)
 				for eventType, val := range hooks {
-					remaining := removeOwnedClaudeCodeHooks(val, hooksDir, backup.ManagedHookCommands)
+					remaining, err := removeOwnedClaudeCodeHooks(val, hooksDir, managedCommands)
+					if err != nil {
+						return atomicTransformResult{}, fmt.Errorf("inspect Claude hooks.%s for restore: %w", eventType, err)
+					}
 					if len(remaining) == 0 {
 						delete(hooks, eventType)
 					} else {
@@ -1281,8 +1316,6 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				} else {
 					settings["hooks"] = hooks
 				}
-			} else if !backup.HadHooksKey {
-				delete(settings, "hooks")
 			}
 
 			// Restore each env key only when its current value is still the exact
@@ -1421,20 +1454,25 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	return scriptHasMarker(command)
 }
 
-// isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape.
-// Both the executable basename and the complete argument vector must match so
-// teardown cannot claim an unrelated invocation of the DefenseClaw launcher.
+// isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape only
+// when its executable is the active DefenseClaw launcher or a narrowly scoped
+// legacy install path. A matching basename is not ownership: another product
+// may ship a different C:\OtherProduct\defenseclaw-hook.exe.
 func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
 	if runtime.GOOS != "windows" {
 		return false
 	}
 	command, _ := hook["command"].(string)
-	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
-	// Setup now writes defenseclaw-hook.exe, but teardown must also recognize
-	// defenseclaw-gateway.exe entries created by earlier Windows releases.
-	if base != strings.ToLower(windowsHookBinaryName) && base != "defenseclaw-gateway.exe" {
+	if !isDefenseClawHookExecutable(command) {
 		return false
 	}
+	return hasClaudeCodeNativeExecArgs(hook)
+}
+
+// hasClaudeCodeNativeExecArgs validates the complete argv that Setup writes.
+// Callers that already established an exact backup-recorded executable path may
+// use this independently of the active install path.
+func hasClaudeCodeNativeExecArgs(hook map[string]interface{}) bool {
 	var args []string
 	switch rawArgs := hook["args"].(type) {
 	case []interface{}:
@@ -1479,18 +1517,18 @@ func ownedClaudeCodeHookLocations(rawGroups interface{}, hooksDir string) ([]cla
 	for groupIndex, rawGroup := range groups {
 		group, ok := rawGroup.(map[string]interface{})
 		if !ok {
-			continue
+			return nil, fmt.Errorf("event group %d has unsupported type %T", groupIndex, rawGroup)
 		}
 		handlers, ok := group["hooks"].([]interface{})
 		if !ok {
-			continue
+			return nil, fmt.Errorf("event group %d hooks have unsupported type %T", groupIndex, group["hooks"])
 		}
 		for handlerIndex, rawHandler := range handlers {
-			if !isOwnedHookHandler(rawHandler, hooksDir) {
-				continue
-			}
 			handler, ok := rawHandler.(map[string]interface{})
 			if !ok {
+				return nil, fmt.Errorf("event group %d handler %d has unsupported type %T", groupIndex, handlerIndex, rawHandler)
+			}
+			if !isOwnedHookHandler(rawHandler, hooksDir) {
 				continue
 			}
 			locations = append(locations, claudeCodeOwnedHookLocation{
@@ -1599,7 +1637,10 @@ func verifyClaudeCodeHookMatrix(
 		if _, expected := expectedEvents[eventType]; expected {
 			continue
 		}
-		locations, _ := ownedClaudeCodeHookLocations(rawGroups, hooksDir)
+		locations, err := ownedClaudeCodeHookLocations(rawGroups, hooksDir)
+		if err != nil {
+			return fmt.Errorf("%s: %w", eventType, err)
+		}
 		if len(locations) > 0 {
 			return fmt.Errorf("unexpected event %s has %d DefenseClaw handlers", eventType, len(locations))
 		}
@@ -1636,12 +1677,309 @@ func removeOwnedClaudeCodeHooks(
 	hookEventValue interface{},
 	hooksDir string,
 	managedCommands []string,
-) []interface{} {
+) ([]interface{}, error) {
+	if err := validateClaudeCodeHookEventShape(hookEventValue); err != nil {
+		return nil, err
+	}
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
 		return isOwnedHookHandler(rawHook, hooksDir) ||
-			hookUsesExactCommand(rawHook, managedCommands) ||
+			hookUsesTrackedClaudeCodeCommand(rawHook, managedCommands) ||
 			hookUsesLegacyClaudeCodeNativeCommand(rawHook)
-	})
+	}), nil
+}
+
+func validateClaudeCodeHookEventShape(hookEventValue interface{}) error {
+	groups, ok := hookEventValue.([]interface{})
+	if !ok {
+		return fmt.Errorf("event groups have unsupported type %T", hookEventValue)
+	}
+	for groupIndex, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("event group %d has unsupported type %T", groupIndex, rawGroup)
+		}
+		handlers, ok := group["hooks"].([]interface{})
+		if !ok {
+			return fmt.Errorf("event group %d hooks have unsupported type %T", groupIndex, group["hooks"])
+		}
+		for handlerIndex, rawHandler := range handlers {
+			if _, ok := rawHandler.(map[string]interface{}); !ok {
+				return fmt.Errorf("event group %d handler %d has unsupported type %T", groupIndex, handlerIndex, rawHandler)
+			}
+		}
+	}
+	return nil
+}
+
+// claudeCodePristineHooksForMigration returns the protected pre-Setup hook
+// snapshot recorded by predecessor releases. A missing hooks key is a trusted
+// empty snapshot only when the backup itself exists; a missing/corrupt backup
+// must never authorize broad legacy ownership.
+func claudeCodePristineHooksForMigration(
+	backup claudeCodeBackup,
+	backupAvailable bool,
+) (map[string]interface{}, bool) {
+	if !backupAvailable {
+		return nil, false
+	}
+	if !backup.HadHooksKey {
+		return map[string]interface{}{}, true
+	}
+	if len(bytes.TrimSpace(backup.OriginalHooks)) == 0 {
+		return nil, false
+	}
+	var hooks map[string]interface{}
+	if err := json.Unmarshal(backup.OriginalHooks, &hooks); err != nil || hooks == nil {
+		return nil, false
+	}
+	return hooks, true
+}
+
+type claudeCodePreTrackedInvocation struct {
+	executable string
+	execForm   bool
+}
+
+// inferPreTrackedClaudeCodeManagedCommands handles the one-time upgrade from
+// Windows releases that deliberately left ManagedHookCommands empty. It never
+// falls back to basename ownership for an isolated hook. Instead, a candidate
+// must form the complete DefenseClaw event matrix and must be absent from the
+// protected pristine snapshot for every required event. This distinguishes the
+// old generated registration from a third-party binary with the same basename.
+func inferPreTrackedClaudeCodeManagedCommands(
+	hooks map[string]interface{},
+	pristineHooks map[string]interface{},
+	pristineHooksTrusted bool,
+) ([]string, error) {
+	if runtime.GOOS != "windows" || !pristineHooksTrusted {
+		return nil, nil
+	}
+
+	type candidate struct {
+		commands map[string]struct{}
+	}
+	candidates := map[claudeCodePreTrackedInvocation]*candidate{}
+	for eventIndex, group := range hookGroups {
+		rawCurrent, present := hooks[group.eventType]
+		if !present {
+			return nil, nil
+		}
+		current, err := claudeCodePreTrackedInvocations(rawCurrent, group)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", group.eventType, err)
+		}
+
+		pristine := map[claudeCodePreTrackedInvocation]map[string]struct{}{}
+		if rawPristine, present := pristineHooks[group.eventType]; present {
+			// Any matching native invocation in the protected pre-Setup
+			// snapshot makes the candidate ambiguous, even when that original
+			// user hook did not have DefenseClaw's generated matcher/timeout
+			// shape. This keeps migration inference conservative while requiring
+			// the current candidate itself to match the predecessor exactly.
+			pristine, err = claudeCodePreTrackedPristineInvocations(rawPristine)
+			if err != nil {
+				// An unfamiliar pristine shape cannot safely prove ownership. Keep
+				// every candidate foreign and let ordinary exact ownership apply.
+				return nil, nil
+			}
+		}
+
+		if eventIndex == 0 {
+			for identity, commands := range current {
+				if _, existedBeforeSetup := pristine[identity]; existedBeforeSetup {
+					continue
+				}
+				copied := make(map[string]struct{}, len(commands))
+				for command := range commands {
+					copied[command] = struct{}{}
+				}
+				candidates[identity] = &candidate{commands: copied}
+			}
+			continue
+		}
+
+		for identity, candidate := range candidates {
+			commands, present := current[identity]
+			_, existedBeforeSetup := pristine[identity]
+			if !present || existedBeforeSetup {
+				delete(candidates, identity)
+				continue
+			}
+			for command := range commands {
+				candidate.commands[command] = struct{}{}
+			}
+		}
+		if len(candidates) == 0 {
+			return nil, nil
+		}
+	}
+
+	commands := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		for command := range candidate.commands {
+			commands = append(commands, command)
+		}
+	}
+	return commands, nil
+}
+
+func claudeCodePreTrackedInvocations(
+	rawGroups interface{},
+	expected claudeCodeHookGroup,
+) (map[claudeCodePreTrackedInvocation]map[string]struct{}, error) {
+	if err := validateClaudeCodeHookEventShape(rawGroups); err != nil {
+		return nil, err
+	}
+	result := map[claudeCodePreTrackedInvocation]map[string]struct{}{}
+	for _, rawGroup := range rawGroups.([]interface{}) {
+		group := rawGroup.(map[string]interface{})
+		if !claudeCodePreTrackedGroupMatches(group, expected) {
+			continue
+		}
+		for _, rawHandler := range group["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			if !claudeCodePreTrackedHandlerMatches(handler, expected) {
+				continue
+			}
+			identity, command, ok := claudeCodePreTrackedInvocationIdentity(handler)
+			if !ok {
+				continue
+			}
+			commands := result[identity]
+			if commands == nil {
+				commands = map[string]struct{}{}
+				result[identity] = commands
+			}
+			commands[command] = struct{}{}
+		}
+	}
+	return result, nil
+}
+
+// claudeCodePreTrackedPristineInvocations deliberately ignores generated
+// matcher/timeout metadata. A protected pristine hook with the same native
+// invocation is enough to make automatic ownership inference unsafe.
+func claudeCodePreTrackedPristineInvocations(
+	rawGroups interface{},
+) (map[claudeCodePreTrackedInvocation]map[string]struct{}, error) {
+	if err := validateClaudeCodeHookEventShape(rawGroups); err != nil {
+		return nil, err
+	}
+	result := map[claudeCodePreTrackedInvocation]map[string]struct{}{}
+	for _, rawGroup := range rawGroups.([]interface{}) {
+		group := rawGroup.(map[string]interface{})
+		for _, rawHandler := range group["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			identity, command, ok := claudeCodePreTrackedInvocationIdentity(handler)
+			if !ok {
+				continue
+			}
+			commands := result[identity]
+			if commands == nil {
+				commands = map[string]struct{}{}
+				result[identity] = commands
+			}
+			commands[command] = struct{}{}
+		}
+	}
+	return result, nil
+}
+
+// claudeCodePreTrackedGroupMatches requires the exact group metadata emitted
+// by the predecessor Windows release. In particular, an empty matcher was
+// omitted rather than serialized as an empty string.
+func claudeCodePreTrackedGroupMatches(
+	group map[string]interface{},
+	expected claudeCodeHookGroup,
+) bool {
+	matcher, present := group["matcher"]
+	if expected.matcher == "" {
+		return !present
+	}
+	value, ok := matcher.(string)
+	return present && ok && value == expected.matcher
+}
+
+// claudeCodePreTrackedHandlerMatches recognizes only the exact command,
+// timeout, and async shape DefenseClaw generated before command tracking was
+// introduced. Equivalent-but-user-authored variants remain foreign.
+func claudeCodePreTrackedHandlerMatches(
+	handler map[string]interface{},
+	expected claudeCodeHookGroup,
+) bool {
+	kind, ok := handler["type"].(string)
+	if !ok || kind != "command" {
+		return false
+	}
+	timeout, ok := claudeCodeHookInteger(handler["timeout"])
+	if !ok || timeout != expected.timeout {
+		return false
+	}
+	for _, alias := range []string{"asyncRewake", "async_rewake"} {
+		if _, present := handler[alias]; present {
+			return false
+		}
+	}
+	async, present := handler["async"]
+	if expected.async {
+		value, ok := async.(bool)
+		return present && ok && value
+	}
+	return !present
+}
+
+func claudeCodePreTrackedInvocationIdentity(
+	hook map[string]interface{},
+) (claudeCodePreTrackedInvocation, string, bool) {
+	if kind, _ := hook["type"].(string); kind != "command" {
+		return claudeCodePreTrackedInvocation{}, "", false
+	}
+	command, _ := hook["command"].(string)
+	if command == "" {
+		return claudeCodePreTrackedInvocation{}, "", false
+	}
+
+	executable := ""
+	execForm := false
+	if _, hasArgs := hook["args"]; hasArgs {
+		if !hasClaudeCodeNativeExecArgs(hook) {
+			return claudeCodePreTrackedInvocation{}, "", false
+		}
+		executable = strings.TrimSpace(command)
+		execForm = true
+	} else {
+		var ok bool
+		executable, ok = parseLegacyClaudeCodeNativeHookCommand(command)
+		if !ok {
+			return claudeCodePreTrackedInvocation{}, "", false
+		}
+	}
+	if !hasDefenseClawHookExecutableBasename(executable) {
+		return claudeCodePreTrackedInvocation{}, "", false
+	}
+	return claudeCodePreTrackedInvocation{
+		executable: normalizeWindowsHookExecutable(executable),
+		execForm:   execForm,
+	}, command, true
+}
+
+func hasDefenseClawHookExecutableBasename(executable string) bool {
+	normalized := strings.ReplaceAll(strings.TrimSpace(executable), `\`, "/")
+	if slash := strings.LastIndex(normalized, "/"); slash >= 0 {
+		normalized = normalized[slash+1:]
+	}
+	switch strings.ToLower(normalized) {
+	case windowsHookBinaryName, "defenseclaw-hook", windowsGatewayBinaryName, "defenseclaw-gateway":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeWindowsHookExecutable(executable string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(executable))
+	cleaned = strings.ReplaceAll(cleaned, "/", `\`)
+	return strings.ToLower(cleaned)
 }
 
 // removeMatchingHookHandlers surgically filters handlers inside each matcher
@@ -1706,14 +2044,18 @@ func hookUsesLegacyClaudeCodeNativeCommand(rawHook interface{}) bool {
 }
 
 // isLegacyClaudeCodeNativeHookCommand recognizes the exact native command
-// signature written by pre-command-tracking Windows releases, even when the
-// gateway executable moved between the canonical install and a source build.
-// It is deliberately scoped to Claude Code refresh: generic ownership checks
-// remain tied to the current executable path.
+// signature written by pre-command-tracking Windows releases, but only at the
+// active launcher or a known legacy user install path. Arbitrary absolute paths
+// are owned only when the protected backup recorded that exact command.
 func isLegacyClaudeCodeNativeHookCommand(command string) bool {
 	if runtime.GOOS != "windows" {
 		return false
 	}
+	executable, ok := parseLegacyClaudeCodeNativeHookCommand(command)
+	return ok && isDefenseClawHookExecutable(executable)
+}
+
+func parseLegacyClaudeCodeNativeHookCommand(command string) (string, bool) {
 	command = strings.TrimSpace(command)
 	// Accept commands operators repaired manually by adding PowerShell's call
 	// operator, so Setup can replace them with the current managed launcher
@@ -1724,34 +2066,37 @@ func isLegacyClaudeCodeNativeHookCommand(command string) bool {
 	marker := " " + nativeHookFlag
 	idx := strings.LastIndex(command, marker)
 	if idx <= 0 || strings.TrimSpace(command[idx+len(marker):]) != "claudecode" {
-		return false
+		return "", false
 	}
 
 	executable := strings.TrimSpace(command[:idx])
 	if strings.ContainsAny(executable, "&|<>;\r\n") {
-		return false
+		return "", false
 	}
-	quoted := false
+	quoted := byte(0)
 	if strings.HasPrefix(executable, `"`) || strings.HasSuffix(executable, `"`) {
 		if len(executable) < 2 || !strings.HasPrefix(executable, `"`) || !strings.HasSuffix(executable, `"`) {
-			return false
+			return "", false
 		}
-		quoted = true
+		quoted = '"'
 		executable = executable[1 : len(executable)-1]
+	} else if strings.HasPrefix(executable, `'`) || strings.HasSuffix(executable, `'`) {
+		if len(executable) < 2 || !strings.HasPrefix(executable, `'`) || !strings.HasSuffix(executable, `'`) {
+			return "", false
+		}
+		quoted = '\''
+		executable = strings.ReplaceAll(executable[1:len(executable)-1], `''`, `'`)
 	}
-	if executable == "" || strings.ContainsAny(executable, `"'`) {
-		return false
+	if executable == "" || strings.Contains(executable, `"`) {
+		return "", false
 	}
-	if !quoted && strings.ContainsAny(executable, " \t") {
-		return false
+	if quoted == 0 && strings.ContainsAny(executable, " \t") {
+		return "", false
 	}
-
-	normalized := strings.ReplaceAll(executable, `\`, "/")
-	base := strings.ToLower(filepath.Base(normalized))
-	return base == "defenseclaw-gateway.exe" || base == "defenseclaw-gateway"
+	return executable, true
 }
 
-func hookUsesExactCommand(rawHook interface{}, commands []string) bool {
+func hookUsesTrackedClaudeCodeCommand(rawHook interface{}, commands []string) bool {
 	hook, ok := rawHook.(map[string]interface{})
 	if !ok || len(commands) == 0 {
 		return false
@@ -1761,9 +2106,36 @@ func hookUsesExactCommand(rawHook interface{}, commands []string) bool {
 		return false
 	}
 	for _, managed := range commands {
-		if managed != "" && command == managed {
+		if managed == "" {
+			continue
+		}
+		if runtime.GOOS != "windows" {
+			if command == managed {
+				return true
+			}
+			continue
+		}
+		if _, hasArgs := hook["args"]; hasArgs {
+			if command == managed && hasClaudeCodeNativeExecArgs(hook) {
+				return true
+			}
+			continue
+		}
+		currentExecutable, currentLegacyShape := parseLegacyClaudeCodeNativeHookCommand(command)
+		if !currentLegacyShape {
+			continue
+		}
+		if command == managed {
+			return true
+		}
+		managedExecutable, managedLegacyShape := parseLegacyClaudeCodeNativeHookCommand(managed)
+		if managedLegacyShape && sameWindowsHookExecutable(currentExecutable, managedExecutable) {
 			return true
 		}
 	}
 	return false
+}
+
+func sameWindowsHookExecutable(left, right string) bool {
+	return normalizeWindowsHookExecutable(left) == normalizeWindowsHookExecutable(right)
 }

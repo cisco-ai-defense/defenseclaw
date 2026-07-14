@@ -1548,8 +1548,8 @@ def _collect_filesystem_category(
 def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector agent enumeration.
 
-    * claudecode — ``~/.claude/agents/*.md`` (sub-agent prompt files)
-    * codex      — ``~/.codex/agents/*`` (when present)
+    * claudecode — ``agents/*.md`` below the precedence-aware connector home
+    * codex      — ``agents/*`` below the precedence-aware connector home
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
     * geminicli  — ``.gemini/agents`` and ``~/.gemini/agents``
     * copilot    — ``.github/agents`` and ``~/.copilot/agents``
@@ -1584,8 +1584,8 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
 def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector tool enumeration.
 
-    * claudecode — ``~/.claude/settings.json`` ``tools`` field
-    * codex      — ``~/.codex/config.toml`` ``[tools]`` table
+    * claudecode — connector-home ``settings.json`` ``tools`` field
+    * codex      — connector-home ``config.toml`` ``[tools]`` table
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` (tools are inline)
     * opencode   — ``opencode.json`` tool map + ``tools/`` JS/TS files
     * antigravity — plugin/global slash command files as invokable tools
@@ -1651,7 +1651,9 @@ def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector memory backend enumeration.
 
     Memory backends are rarely declarative across these frameworks;
-    the conservative shape is "report the directory if present".
+    the conservative shape is "report the directory if present". Claude Code
+    and Codex memory/history paths are resolved below their precedence-aware
+    connector homes.
     """
     home = os.path.expanduser("~")
     name = (connector or "").lower()

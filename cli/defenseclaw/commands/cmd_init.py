@@ -636,6 +636,37 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     primary = connector_settings[0]
     extras = connector_settings[1:]
+    # The short-lived executable receipt authorizes the Windows-only Codex
+    # app-server policy probe. It is not part of the macOS/Linux connector
+    # lifecycle, and Claude Code never consumes this authority. Keeping the
+    # gate this narrow avoids making an installed agent executable a new
+    # prerequisite for those otherwise-supported setup paths.
+    selected_agent_connectors = [
+        item["connector"]
+        for item in connector_settings
+        if platform_support.host_os() == "windows"
+        and connector_paths.normalize(item["connector"]) == "codex"
+    ]
+    if selected_agent_connectors:
+        from defenseclaw.agent_selection import record_setup_agent_selections
+
+        try:
+            _selections, selection_errors = record_setup_agent_selections(
+                data_dir,
+                selected_agent_connectors,
+            )
+        except OSError as exc:
+            raise click.ClickException(
+                f"could not protect explicit agent executable selection: {exc}"
+            ) from exc
+        if selection_errors:
+            details = "; ".join(
+                f"{name}: {detail}" for name, detail in sorted(selection_errors.items())
+            )
+            raise click.ClickException(
+                "cannot configure native hooks without a freshly verified selected agent executable "
+                f"({details})"
+            )
     # When extra connectors will be merged in after the primary bootstrap,
     # defer the gateway start to a single reconcile at the end so its
     # set-difference setup wires hooks for EVERY connector in one pass

@@ -190,7 +190,7 @@ function Get-TrustedTimestampUrl {
     return $uri.AbsoluteUri
 }
 
-function Sign-FilesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
+function Set-FileSignaturesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
     if (-not $Paths -or $Paths.Count -eq 0) {
         throw 'Authenticode signing requires at least one file.'
     }
@@ -449,7 +449,7 @@ Remove-SafeTree $gatewayPayloadDir $build
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
-$payloadSigned = Sign-FilesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
+$payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
 Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
 
@@ -519,7 +519,7 @@ try {
     Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
 }
 
-$setupSigned = Sign-FilesIfConfigured @($setupPath) $build
+$setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
 $signed = $setupSigned -and $payloadSigned
 
 $shaPath = "$setupPath.sha256"

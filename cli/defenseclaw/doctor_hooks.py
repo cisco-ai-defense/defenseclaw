@@ -1,25 +1,33 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Passive validation for Windows-native Codex and Claude Code hooks.
+"""Validation for Windows-native Codex and Claude Code hooks.
 
-This module deliberately never starts a configured command.  Agent hook
-configuration is untrusted input, so Doctor only parses the command line and
-inspects the resolved launcher and setup evidence on disk.
+This module never starts a configured hook command. Agent hook configuration is
+untrusted input, so Doctor only parses those command lines and inspects their
+resolved launcher/setup evidence on disk. Codex is the narrow exception to a
+fully passive check: explicit Setup evidence binds one trusted Codex executable
+into the protected hook contract lock, and Doctor may start that exact binary's
+app-server with a bounded/no-console RPC to re-read effective cloud/admin hook
+policy. The registered hook command remains data and is never executed.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import ntpath
 import os
+import queue
 import re
 import shlex
 import stat
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,14 +36,30 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from defenseclaw.connector_contracts import resolve_connector_contract
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 _SAFE_PATHEXT = (".exe", ".cmd")
 _MANAGED_MARKER = re.compile(r"(?im)^\s*(?:#|rem\s+)\s*defenseclaw-managed-hook\s+v(\d+)\b")
-_EXPECTED_CONTRACT = {
-    "codex": "codex-hooks-v1",
-    "claudecode": "claudecode-hooks-v1",
+_EXPECTED_CONTRACTS = {
+    "codex": frozenset({"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3"}),
+    "claudecode": frozenset({"claudecode-hooks-v1"}),
 }
+_CODEX_HOOK_SPECS = {
+    "SessionStart": ("session_start", "startup|resume|clear", 30),
+    "UserPromptSubmit": ("user_prompt_submit", None, 30),
+    "PreToolUse": ("pre_tool_use", "*", 30),
+    "PermissionRequest": ("permission_request", "*", 30),
+    "PostToolUse": ("post_tool_use", "*", 30),
+    "SubagentStart": ("subagent_start", "*", 30),
+    "SubagentStop": ("subagent_stop", "*", 90),
+    "PreCompact": ("pre_compact", None, 30),
+    "PostCompact": ("post_compact", None, 30),
+    "Stop": ("stop", None, 90),
+}
+_CODEX_TRUSTED_CONTRACTS = frozenset({"codex-hooks-v2", "codex-hooks-v3"})
+_CODEX_POLICY_TIMEOUT_SECONDS = 20.0
+_CODEX_POLICY_MESSAGE_LIMIT = 2 * 1024 * 1024
 _CLAUDE_FILE_CHANGED_MATCHER = (
     "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
     "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
@@ -384,6 +408,360 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
     return document
 
 
+def _codex_policy_executable(data_dir: str) -> str:
+    """Resolve Setup's exact protected Codex executable evidence.
+
+    ``agent_discovery.json`` is deliberately excluded: it is an automatic,
+    expiring inventory cache and therefore cannot grant process-launch
+    authority. Only the version/contract-bound lock written after an explicit
+    Setup selection is accepted here.
+    """
+
+    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
+    try:
+        raw = _stable_regular_file(
+            lock_path,
+            os.path.abspath(data_dir),
+            read_limit=_CODEX_POLICY_MESSAGE_LIMIT + 1,
+        )
+        if len(raw) > _CODEX_POLICY_MESSAGE_LIMIT:
+            raise OSError("hook contract lock is too large")
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (_InspectionError, OSError, UnicodeError, ValueError) as exc:
+        detail = exc.detail if isinstance(exc, _InspectionError) else str(exc)
+        raise _InspectionError(
+            "policy-blocked", f"cannot inspect protected Codex executable evidence: {detail}"
+        ) from exc
+    if not isinstance(payload, dict) or type(payload.get("version")) is not int:
+        raise _InspectionError("policy-blocked", "Codex hook contract lock schema is malformed")
+    if payload["version"] not in {1, 2}:
+        raise _InspectionError("policy-blocked", "Codex hook contract lock schema is unsupported")
+    connectors = payload.get("connectors")
+    entry = connectors.get("codex") if isinstance(connectors, dict) else None
+    if not isinstance(entry, dict):
+        raise _InspectionError("policy-blocked", "Codex hook contract lock entry is missing")
+
+    executable = str(entry.get("agent_executable") or "").strip()
+    source = str(entry.get("agent_executable_source") or "").strip()
+    expected_digest = str(entry.get("agent_executable_sha256") or "").strip()
+    raw_version = str(entry.get("raw_agent_version") or "").strip()
+    normalized_version = str(entry.get("normalized_agent_version") or "").strip()
+    contract_id = str(entry.get("contract_id") or "").strip()
+    if source != "setup-selected":
+        raise _InspectionError(
+            "policy-blocked", "Codex executable evidence was not created by an explicit Setup selection"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise _InspectionError("policy-blocked", "Codex executable evidence has no valid SHA-256 digest")
+    compatibility = resolve_connector_contract("codex", raw_version)
+    resolved_contract = compatibility.contract.contract_id if compatibility.contract is not None else ""
+    if (
+        not raw_version
+        or not normalized_version
+        or compatibility.normalized_version != normalized_version
+        or compatibility.status != "known"
+        or resolved_contract != contract_id
+    ):
+        raise _InspectionError(
+            "policy-blocked", "Codex executable evidence is not bound to the recorded agent contract/version"
+        )
+    if not os.path.isabs(executable) or any(char in executable for char in "\x00\r\n"):
+        raise _InspectionError("policy-blocked", f"selected Codex executable is not absolute: {executable!r}")
+    executable = os.path.abspath(executable)
+    if os.path.splitext(executable)[1].casefold() != ".exe":
+        raise _InspectionError(
+            "policy-blocked",
+            "selected Codex policy executable is not a native Windows .exe image",
+        )
+
+    from defenseclaw.agent_selection import is_setup_trusted_binary, stable_executable_sha256
+    from defenseclaw.inventory.agent_discovery import _binary_command_name
+
+    if _binary_command_name(executable) != "codex":
+        raise _InspectionError(
+            "policy-blocked", f"selected Codex executable has an unexpected product name: {executable}"
+        )
+    if not is_setup_trusted_binary(executable, data_dir):
+        raise _InspectionError(
+            "policy-blocked",
+            f"selected Codex executable is no longer in a trusted executable location: {executable}",
+        )
+    try:
+        actual_digest = stable_executable_sha256(executable)
+    except OSError as exc:
+        raise _InspectionError(
+            "policy-blocked", f"cannot revalidate selected Codex executable: {exc}"
+        ) from exc
+    if actual_digest != expected_digest:
+        raise _InspectionError(
+            "policy-blocked", "selected Codex executable no longer matches protected Setup evidence"
+        )
+    return executable
+
+
+def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tuple[bool, str]:
+    """Read Codex's merged system/cloud/MDM hook policy through app-server."""
+
+    executable = _codex_policy_executable(data_dir)
+    env = dict(os.environ)
+    env["CODEX_HOME"] = os.path.dirname(os.path.abspath(config_path))
+    creationflags = 0
+    windows_job = None
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+            subprocess, "CREATE_SUSPENDED", 0x00000004
+        )
+    try:
+        process = subprocess.Popen(
+            [executable, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=env,
+            creationflags=creationflags,
+        )
+    except (OSError, ValueError) as exc:
+        raise _InspectionError("policy-blocked", f"cannot start Codex policy inspector: {exc}") from exc
+    if os.name == "nt":
+        from defenseclaw.tui.windows_process import WindowsJob
+
+        try:
+            # Popen created the native image suspended. Assign it before resume
+            # so none of its descendants can escape in the start-to-assignment
+            # race.
+            windows_job = WindowsJob(process.pid, allow_breakaway=False)
+        except BaseException as exc:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise _InspectionError(
+                "policy-blocked", f"cannot contain Codex policy inspector process tree: {exc}"
+            ) from exc
+
+    responses: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=4)
+    stderr_bytes = bytearray()
+    stderr_lock = threading.Lock()
+
+    def emit_response(kind: str, payload: Any) -> None:
+        try:
+            responses.put_nowait((kind, payload))
+        except queue.Full:
+            # Only IDs 1 and 2 are admitted below, so a full queue is itself a
+            # bounded protocol failure rather than a reason to block this pump.
+            return
+
+    def read_responses() -> None:
+        total = 0
+        assert process.stdout is not None
+        while True:
+            try:
+                line = process.stdout.readline(_CODEX_POLICY_MESSAGE_LIMIT + 1)
+            except OSError as exc:
+                emit_response("error", f"cannot read Codex policy response: {exc}")
+                return
+            if not line:
+                emit_response("error", "Codex policy inspector closed stdout before replying")
+                return
+            total += len(line)
+            if len(line) > _CODEX_POLICY_MESSAGE_LIMIT or total > _CODEX_POLICY_MESSAGE_LIMIT:
+                emit_response("error", "Codex policy response exceeds the bounded message limit")
+                return
+            try:
+                message = json.loads(line)
+            except (UnicodeError, ValueError) as exc:
+                emit_response("error", f"cannot parse Codex policy response: {exc}")
+                return
+            if (
+                isinstance(message, dict)
+                and type(message.get("id")) is int
+                and message["id"] in {1, 2}
+            ):
+                emit_response("message", message)
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        try:
+            while True:
+                chunk = process.stderr.read(4096)
+                if not chunk:
+                    return
+                with stderr_lock:
+                    remaining = (64 * 1024) - len(stderr_bytes)
+                    if remaining > 0:
+                        stderr_bytes.extend(chunk[:remaining])
+        except OSError:
+            return
+
+    response_thread = threading.Thread(target=read_responses, name="codex-policy-stdout", daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, name="codex-policy-stderr", daemon=True)
+    response_thread.start()
+    stderr_thread.start()
+
+    deadline = time.monotonic() + _CODEX_POLICY_TIMEOUT_SECONDS
+
+    def diagnostic(detail: str) -> str:
+        with stderr_lock:
+            stderr = bytes(stderr_bytes).decode("utf-8", errors="replace").strip()
+        return f"{detail} (stderr: {stderr})" if stderr else detail
+
+    def send(message: dict[str, Any]) -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
+            process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise _InspectionError("policy-blocked", diagnostic(f"cannot send Codex policy RPC: {exc}")) from exc
+
+    def wait_for(response_id: int) -> dict[str, Any]:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _InspectionError(
+                    "policy-blocked",
+                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                )
+            try:
+                kind, payload = responses.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise _InspectionError(
+                    "policy-blocked",
+                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                ) from exc
+            if kind == "error":
+                raise _InspectionError("policy-blocked", diagnostic(str(payload)))
+            if payload.get("id") != response_id:
+                continue
+            error = payload.get("error")
+            if error is not None:
+                raise _InspectionError("policy-blocked", diagnostic(f"Codex policy RPC {response_id} failed: {error}"))
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise _InspectionError(
+                    "policy-blocked", diagnostic(f"Codex policy RPC {response_id} returned no object result")
+                )
+            return result
+
+    try:
+        send(
+            {
+                "method": "initialize",
+                "id": 1,
+                "params": {
+                    "clientInfo": {"name": "defenseclaw", "title": "DefenseClaw", "version": "1"}
+                },
+            }
+        )
+        wait_for(1)
+        send({"method": "initialized"})
+        send({"method": "configRequirements/read", "id": 2, "params": {}})
+        result = wait_for(2)
+        requirements = result.get("requirements")
+        if requirements is None:
+            return False, f"Codex app-server {executable} effective requirements"
+        if not isinstance(requirements, dict):
+            raise _InspectionError("policy-blocked", "Codex effective requirements are malformed")
+        managed_only = requirements.get("allowManagedHooksOnly")
+        if managed_only is not None and type(managed_only) is not bool:
+            raise _InspectionError("policy-blocked", "Codex allowManagedHooksOnly requirement is malformed")
+        return managed_only is True, f"Codex app-server {executable} effective requirements"
+    finally:
+        active_exception = sys.exception()
+        cleanup_errors: list[str] = []
+        job_closed = False
+
+        def close_windows_job() -> None:
+            nonlocal job_closed
+            if windows_job is None or job_closed:
+                return
+            # Mark first so an exceptional fake/OS close cannot trigger an
+            # unbounded retry from a later cleanup branch.
+            job_closed = True
+            try:
+                windows_job.close()
+            except OSError as exc:
+                cleanup_errors.append(f"close Codex policy inspector Job Object: {exc}")
+
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError as exc:
+                cleanup_errors.append(f"close stdin: {exc}")
+        if windows_job is not None:
+            try:
+                if not windows_job.terminate_sync(timeout=2):
+                    cleanup_errors.append("Codex policy inspector Job Object did not become empty")
+                    # A descendant may still own stdout/stderr. Closing the
+                    # kill-on-close handle before touching those streams keeps
+                    # the remaining cleanup bounded.
+                    close_windows_job()
+            except OSError as exc:
+                cleanup_errors.append(f"terminate Codex policy inspector Job Object: {exc}")
+                close_windows_job()
+        elif process.poll() is None:
+            try:
+                process.terminate()
+            except OSError as exc:
+                cleanup_errors.append(f"terminate Codex policy inspector: {exc}")
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            close_windows_job()
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                cleanup_errors.append(f"reap Codex policy inspector: {exc}")
+        except OSError as exc:
+            cleanup_errors.append(f"reap Codex policy inspector: {exc}")
+            close_windows_job()
+
+        for thread in (response_thread, stderr_thread):
+            thread.join(timeout=2)
+        for thread, stream in (
+            (response_thread, process.stdout),
+            (stderr_thread, process.stderr),
+        ):
+            if thread.is_alive():
+                # Closing a buffered pipe while another thread is blocked in a
+                # read can itself wait on that stream's internal lock. The job
+                # has already been killed/closed above; leave the daemon reader
+                # to observe EOF instead of turning cleanup into an unbounded
+                # close.
+                cleanup_errors.append(f"{thread.name} did not stop")
+                continue
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError as exc:
+                    cleanup_errors.append(f"close Codex policy stream: {exc}")
+        close_windows_job()
+        if active_exception is None and cleanup_errors:
+            raise _InspectionError("policy-blocked", "; ".join(cleanup_errors))
+
+
+_codex_effective_policy_inspector = _inspect_codex_effective_hook_policy
+
+
+def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> None:
+    """Fail closed when current effective policy ignores user hook config."""
+
+    try:
+        managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
+    except _InspectionError:
+        raise
+    except Exception as exc:
+        raise _InspectionError("policy-blocked", f"cannot inspect effective Codex policy: {exc}") from exc
+    if managed_only:
+        raise _InspectionError(
+            "policy-blocked",
+            "Codex effective policy sets allow_managed_hooks_only=true from "
+            f"{source}, so the user-scoped DefenseClaw hooks are ignored",
+        )
+
+
 def _default_claude_managed_settings_paths() -> tuple[str, ...]:
     """Return locally inspectable Windows file-policy sources in merge order."""
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -648,9 +1026,7 @@ def _validate_claude_hook_contract(
         expected_async = event in _CLAUDE_ASYNC_EVENTS
         if type(async_value) is not bool or async_value != expected_async:
             rejected[event] = (
-                "observational handler is not asynchronous"
-                if expected_async
-                else "enforcement handler is asynchronous"
+                "observational handler is not asynchronous" if expected_async else "enforcement handler is asynchronous"
             )
             continue
         async_rewake = hook.get("asyncRewake", False)
@@ -678,6 +1054,188 @@ def _validate_claude_hook_contract(
         f"Claude Code hook contract is incomplete; missing broad DefenseClaw registrations "
         f"with the expected execution mode for: {detail}",
     )
+
+
+def _codex_hook_state_key_source(config_path: str) -> str:
+    """Mirror Codex's Windows AbsolutePathBuf display normalization."""
+
+    source = os.path.abspath(config_path)
+    for prefix in ("\\\\?\\UNC\\", "\\\\.\\UNC\\"):
+        if source.startswith(prefix):
+            return "\\\\" + source[len(prefix) :]
+    for prefix in ("\\\\?\\", "\\\\.\\"):
+        if source.startswith(prefix):
+            candidate = source[len(prefix) :]
+            if re.match(r"(?i)^[a-z]:[\\/]", candidate):
+                return candidate
+    return source
+
+
+def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str, Any]) -> str:
+    """Return Codex's canonical command-handler fingerprint for native Windows."""
+
+    command = hook.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise _InspectionError("stale", "Codex command handler has an empty generic command")
+    windows_command = hook.get("command_windows", command)
+    if not isinstance(windows_command, str) or not windows_command.strip():
+        raise _InspectionError("stale", "Codex command handler has an empty native command")
+
+    timeout = hook.get("timeout", 600)
+    if type(timeout) is not int or timeout < 0:  # bool is intentionally not accepted as an integer.
+        raise _InspectionError("stale", "Codex command handler has an invalid timeout")
+    timeout = max(timeout, 1)
+    async_value = hook.get("async", False)
+    if type(async_value) is not bool:
+        raise _InspectionError("stale", "Codex command handler has an invalid async value")
+    status_message = hook.get("statusMessage")
+    if status_message is not None and not isinstance(status_message, str):
+        raise _InspectionError("stale", "Codex command handler has an invalid statusMessage")
+
+    normalized_handler = {
+        "async": async_value,
+        "command": windows_command,
+        "timeout": timeout,
+        "type": "command",
+    }
+    if status_message is not None:
+        normalized_handler["statusMessage"] = status_message
+    identity: dict[str, Any] = {
+        "event_name": event_key,
+        "hooks": [normalized_handler],
+    }
+    if event_key not in {"user_prompt_submit", "stop"} and matcher is not None:
+        if not isinstance(matcher, str):
+            raise _InspectionError("stale", "Codex hook matcher is not a string")
+        identity["matcher"] = matcher
+    canonical_text = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    # Go's encoding/json always escapes the two JavaScript line separators,
+    # even when SetEscapeHTML(false) leaves <, >, and & untouched. Codex uses
+    # that serializer for its identity hash, so preserve the distinction for
+    # valid Windows paths containing either code point.
+    canonical = canonical_text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_codex_hook_contract(
+    document: dict[str, Any],
+    contract_id: str,
+    config_path: str,
+) -> None:
+    """Require the complete installed Codex matrix and native trust evidence.
+
+    Setup deliberately renders the current ten-row registration on every
+    supported version. Older clients expose only the contract-tier subset at
+    runtime, but keeping the installed superset makes upgrades deterministic.
+    Codex 0.129+ understands ``hooks.state``; for those tiers Doctor also
+    reproduces the vendor's positional hash contract instead of merely checking
+    that some state value exists.
+    """
+
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        raise _InspectionError("missing", "hook registration has no hooks table")
+    state = hooks.get("state")
+    if contract_id in _CODEX_TRUSTED_CONTRACTS and not isinstance(state, dict):
+        raise _InspectionError("stale", "Codex hook trust state is missing or malformed")
+
+    key_source = _codex_hook_state_key_source(config_path)
+    managed_commands: list[str] = []
+    expected_events = set(_CODEX_HOOK_SPECS)
+    for event, (event_key, expected_matcher, expected_timeout) in _CODEX_HOOK_SPECS.items():
+        raw_groups = hooks.get(event)
+        if not isinstance(raw_groups, list):
+            raise _InspectionError("stale", f"Codex hook contract is missing {event}")
+        owned: list[tuple[int, int, dict[str, Any], dict[str, Any], str]] = []
+        for group_index, group in enumerate(raw_groups):
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            for handler_index, hook in enumerate(handlers):
+                if not isinstance(hook, dict):
+                    continue
+                command = hook.get("command_windows")
+                if not isinstance(command, str) or not command.strip():
+                    command = hook.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    continue
+                if _managed_hook_command(command, "codex"):
+                    owned.append((group_index, handler_index, group, hook, command))
+        if len(owned) != 1:
+            raise _InspectionError(
+                "stale",
+                f"Codex hook contract has {len(owned)} DefenseClaw handlers for {event}; expected exactly one",
+            )
+
+        group_index, handler_index, group, hook, command = owned[0]
+        if hook.get("type") != "command":
+            raise _InspectionError("stale", f"Codex {event} handler type is not command")
+        generic_command = hook.get("command")
+        windows_command = hook.get("command_windows")
+        if (
+            not isinstance(generic_command, str)
+            or not generic_command.strip()
+            or not isinstance(windows_command, str)
+            or not windows_command.strip()
+            or generic_command != windows_command
+        ):
+            raise _InspectionError(
+                "stale",
+                f"Codex {event} generic and native commands are not byte-identical",
+            )
+        async_value = hook.get("async", False)
+        if type(async_value) is not bool or async_value:
+            raise _InspectionError("stale", f"Codex {event} enforcement handler is asynchronous")
+        if hook.get("statusMessage") is not None:
+            raise _InspectionError("stale", f"Codex {event} has an unexpected statusMessage")
+        actual_matcher = group.get("matcher")
+        if actual_matcher != expected_matcher:
+            raise _InspectionError(
+                "stale",
+                f"Codex {event} matcher is {actual_matcher!r}; expected {expected_matcher!r}",
+            )
+        timeout = hook.get("timeout")
+        if type(timeout) is not int or timeout != expected_timeout:
+            raise _InspectionError(
+                "stale",
+                f"Codex {event} timeout is {timeout!r}; expected {expected_timeout}",
+            )
+        current_hash = _codex_command_hook_hash(event_key, actual_matcher, hook)
+        if contract_id in _CODEX_TRUSTED_CONTRACTS:
+            key = f"{key_source}:{event_key}:{group_index}:{handler_index}"
+            trust = state.get(key) if isinstance(state, dict) else None
+            if not isinstance(trust, dict):
+                raise _InspectionError("stale", f"Codex {event} trust state is missing")
+            enabled = trust.get("enabled", True)
+            if type(enabled) is not bool or not enabled:
+                raise _InspectionError("stale", f"Codex {event} trust state is disabled")
+            if trust.get("trusted_hash") != current_hash:
+                raise _InspectionError("stale", f"Codex {event} trust state does not match its native handler")
+        managed_commands.append(command)
+
+    for event, raw_groups in hooks.items():
+        if event == "state" or event in expected_events or not isinstance(raw_groups, list):
+            continue
+        for group in raw_groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                continue
+            for hook in handlers:
+                if not isinstance(hook, dict):
+                    continue
+                command = hook.get("command_windows") or hook.get("command")
+                if isinstance(command, str) and _managed_hook_command(command, "codex"):
+                    raise _InspectionError("stale", f"Codex has an unexpected DefenseClaw handler for {event}")
+
+    if len(set(managed_commands)) != 1:
+        raise _InspectionError("stale", "DefenseClaw Codex hook entries use inconsistent commands")
 
 
 def _commands_from_hooks(
@@ -838,7 +1396,7 @@ def _resolve_target(raw_target: str, kind: str, *, search_path: str, pathext: st
     return _case_insensitive_file(directory, filename)
 
 
-def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple[str, str]:
+def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple[str, str, str]:
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     try:
         with open(lock_path, encoding="utf-8") as handle:
@@ -855,11 +1413,27 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
     contract = str(entry.get("contract_id") or "")
     status = str(entry.get("compatibility_status") or "")
     version = str(entry.get("hook_script_version") or "")
-    if contract != _EXPECTED_CONTRACT[connector] or status not in {"known", "unversioned"} or not version:
+    if contract not in _EXPECTED_CONTRACTS[connector] or status not in {"known", "unversioned"} or not version:
         evidence = f"contract={contract or '?'}, status={status or '?'}, version={version or '?'}"
         raise _InspectionError(
             "stale",
             f"hook contract evidence is stale ({evidence})",
+        )
+    normalized_agent_version = str(entry.get("normalized_agent_version") or "")
+    if status == "known" and not normalized_agent_version:
+        raise _InspectionError("stale", "known hook contract evidence has no normalized agent version")
+    compatibility = resolve_connector_contract(
+        connector,
+        normalized_agent_version if status == "known" else "",
+    )
+    resolved_contract = compatibility.contract.contract_id if compatibility.contract is not None else ""
+    if compatibility.status != status or resolved_contract != contract:
+        evidence = (
+            f"contract={contract or '?'}, status={status or '?'}, agent_version={normalized_agent_version or '?'}"
+        )
+        raise _InspectionError(
+            "stale",
+            f"hook contract evidence does not match the recorded agent version ({evidence})",
         )
     locations = entry.get("locations")
     configured = locations.get("hook_config_paths") if isinstance(locations, dict) else None
@@ -868,7 +1442,7 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
         actual = os.path.normcase(os.path.realpath(os.path.abspath(config_path)))
         if actual not in expected:
             raise _InspectionError("stale", "hook contract lock points at a different registration file")
-    return f"contract={contract} version={version} status={status}", version
+    return f"contract={contract} version={version} status={status}", version, contract
 
 
 def validate_windows_hook_registration(
@@ -880,8 +1454,16 @@ def validate_windows_hook_registration(
     search_path: str,
     pathext: str,
     claude_managed_settings_paths: tuple[str, ...] | None = None,
+    inspect_effective_policy: bool = True,
 ) -> WindowsHookCheck:
-    """Return a classified, side-effect-free Windows registration result."""
+    """Return a classified Windows registration and effective-policy result.
+
+    Registered hook commands are never executed. Codex validation may start the
+    independently trusted Codex app-server for the bounded policy RPC described
+    in the module docstring. Passive UI callers set ``inspect_effective_policy``
+    false and surface that policy state as unverified rather than spawning from
+    a render path.
+    """
     connector = connector.strip().lower()
     command = ""
     target = ""
@@ -893,6 +1475,8 @@ def validate_windows_hook_registration(
             connector,
             claude_managed_settings_paths=claude_managed_settings_paths,
         )
+        if connector == "codex" and inspect_effective_policy:
+            _validate_codex_effective_hook_policy(data_dir, config_path)
         command = commands[0]
         raw_target, _args, kind = _command_target(command, connector)
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
@@ -900,7 +1484,9 @@ def validate_windows_hook_registration(
             raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
         target = resolved
         basename = ntpath.basename(resolved).casefold()
-        evidence, expected_runtime_version = _contract_evidence(data_dir, connector, config_path)
+        evidence, expected_runtime_version, contract_id = _contract_evidence(data_dir, connector, config_path)
+        if connector == "codex":
+            _validate_codex_hook_contract(document, contract_id, config_path)
         if kind == "powershell":
             if not basename.endswith(".ps1") or basename not in {"defenseclaw-hook.ps1", "defenseclaw-gateway.ps1"}:
                 raise _InspectionError("foreign", f"PowerShell hook target is not DefenseClaw-owned: {resolved}")

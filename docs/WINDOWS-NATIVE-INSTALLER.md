@@ -155,10 +155,12 @@ Those installations must be serviced by the enterprise deployment channel.
 ## Release and certification gate
 
 The release workflow builds setup on `windows-latest`, requires real signing
-credentials, runs the full native install/repair/connector/uninstall acceptance
-suite against that exact signed EXE (including installed-publisher validation),
-emits SHA-256, SBOM, and provenance outputs, and adds the signed EXE to the final
-checksum manifest before the immutable release is created.
+credentials, emits SHA-256, SBOM, and provenance outputs, and adds the signed
+EXE to the final checksum manifest before the immutable release is created.
+Running the full native install/repair/connector/uninstall acceptance suite
+against that exact signed EXE (including installed-publisher validation) remains
+a required certification follow-up; it is not yet an active release-workflow
+gate.
 macOS and Linux artifacts continue through their existing build path.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the

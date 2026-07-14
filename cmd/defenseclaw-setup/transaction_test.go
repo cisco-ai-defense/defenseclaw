@@ -201,6 +201,70 @@ func TestRollbackUninstallRestoresRenamedTreeIdempotently(t *testing.T) {
 	}
 }
 
+func TestReplayedTransactionPathOwnership(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	apps := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
+	tests := []struct {
+		name        string
+		previous    userPathSnapshot
+		current     userPathSnapshot
+		wantOwned   bool
+		wantReused  bool
+		wantCreated bool
+	}{
+		{
+			name:        "missing value published before crash",
+			current:     userPathSnapshot{Existed: true, Value: commandDir, ValueType: 1},
+			wantOwned:   true,
+			wantCreated: true,
+		},
+		{
+			name:      "existing value published before crash",
+			previous:  userPathSnapshot{Existed: true, Value: apps, ValueType: 1},
+			current:   userPathSnapshot{Existed: true, Value: commandDir + ";" + apps, ValueType: 1},
+			wantOwned: true,
+		},
+		{
+			name:       "leading separator replay",
+			previous:   userPathSnapshot{Existed: true, Value: ";" + apps, ValueType: 2},
+			current:    userPathSnapshot{Existed: true, Value: commandDir + ";" + apps, ValueType: 2},
+			wantOwned:  true,
+			wantReused: true,
+		},
+		{
+			name:     "entry predated transaction",
+			previous: userPathSnapshot{Existed: true, Value: commandDir + ";" + apps, ValueType: 1},
+			current:  userPathSnapshot{Existed: true, Value: commandDir + ";" + apps, ValueType: 1},
+		},
+		{
+			name:     "operator edited value after publication",
+			previous: userPathSnapshot{Existed: true, Value: apps, ValueType: 1},
+			current:  userPathSnapshot{Existed: true, Value: commandDir + ";" + apps + `;C:\Tools`, ValueType: 1},
+		},
+		{
+			name:     "registry type changed after publication",
+			previous: userPathSnapshot{Existed: true, Value: apps, ValueType: 2},
+			current:  userPathSnapshot{Existed: true, Value: commandDir + ";" + apps, ValueType: 1},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			owned, reused, created := replayedTransactionPathOwnership(test.previous, test.current, commandDir)
+			if owned != test.wantOwned || reused != test.wantReused || created != test.wantCreated {
+				t.Fatalf(
+					"ownership = (%t, %t, %t), want (%t, %t, %t)",
+					owned,
+					reused,
+					created,
+					test.wantOwned,
+					test.wantReused,
+					test.wantCreated,
+				)
+			}
+		})
+	}
+}
+
 func TestCommittedInstallCleanupPreservesNewTreeAndRemovesArtifacts(t *testing.T) {
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
@@ -801,6 +865,46 @@ func TestInferManagedConnectorHomeUsesBoundTarget(t *testing.T) {
 	}
 	if !samePath(got, want) {
 		t.Fatalf("inferred managed connector home = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *testing.T) {
+	for _, test := range []struct {
+		connector, logicalName, legacyBackup string
+	}{
+		{"codex", "config.toml", "codex_config_backup.json"},
+		{"claudecode", "settings.json", "claudecode_backup.json"},
+	} {
+		t.Run(test.connector, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataRoot, test.legacyBackup), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			managedBackup := filepath.Join(
+				dataRoot, "connector_backups", test.connector, test.logicalName+".json",
+			)
+			if err := os.MkdirAll(filepath.Dir(managedBackup), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(t.TempDir(), test.connector+"-custom-home")
+			if err := os.WriteFile(
+				managedBackup,
+				[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, test.logicalName))),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			previous := connectorsForNativeUninstall(nil, dataRoot)
+			got, err := resolvePreviousConnectorHome(
+				"", previous, dataRoot, test.connector, test.logicalName, `C:\fallback`,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !samePath(got, want) {
+				t.Fatalf("resolved previous connector home = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

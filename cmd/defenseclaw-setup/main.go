@@ -284,7 +284,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		)
 	}
 	upgradeFrom = migrationSource(oldState, payload.Manifest.Version, upgradeFrom)
-	if err := validateInstalledAppMutation(installRoot); err != nil {
+	if err := validateInstalledAppMutation(installRoot, oldState); err != nil {
 		return 1, err
 	}
 	transaction, err := newSetupTransaction(
@@ -882,10 +882,6 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion string)
 		return fmt.Errorf("reported version %q does not exactly match packaged version %q", report.Version, expectedVersion)
 	}
 	return nil
-}
-
-func runInitialConfiguration(root, dataRoot string, opts options) error {
-	return runInitialConfigurationWithEnv(root, dataRoot, opts, managedChildEnv(dataRoot))
 }
 
 func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []string) error {

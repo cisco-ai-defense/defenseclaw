@@ -43,18 +43,39 @@ func TestOwnedUserPathRemovalPreservesLaterEntries(t *testing.T) {
 	}
 }
 
-func TestOwnedUserPathRemovalPreservesDuplicateAddedLater(t *testing.T) {
+func TestOwnedUserPathRemovalRefusesAmbiguousEndpointDuplicates(t *testing.T) {
 	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
 	other := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
 	current := commandDir + ";" + other + ";" + commandDir
 
 	got, err := removeOwnedUserPathEntry(current, commandDir, false)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("ambiguous managed PATH endpoints were removed without an ownership proof")
 	}
-	want := other + ";" + commandDir
-	if got != want {
-		t.Fatalf("PATH after owned removal = %q, want %q", got, want)
+	if got != current {
+		t.Fatalf("PATH changed on ambiguous removal: %q", got)
+	}
+}
+
+func TestOwnedUserPathRemovalKeepsKelvinSignPathDistinct(t *testing.T) {
+	owned := filepath.Join(t.TempDir(), "missing-K", "bin")
+	foreign := strings.Replace(owned, "missing-K", "missing-K", 1)
+	if !strings.EqualFold(owned, foreign) {
+		t.Fatal("test precondition: Go EqualFold should conflate K and Kelvin sign")
+	}
+	current := owned + ";" + foreign
+	got, err := removeOwnedUserPathEntry(current, owned, false)
+	if err != nil {
+		t.Fatalf("remove owned ordinal path: %v", err)
+	}
+	if got != foreign {
+		t.Fatalf("PATH after removal = %q, want distinct foreign entry %q", got, foreign)
+	}
+	if pathContains([]string{foreign}, owned) {
+		t.Fatal("PATH ownership comparison conflated ASCII K and Kelvin sign")
+	}
+	if !samePathEntry(owned+`\`, owned) {
+		t.Fatal("PATH ownership comparison did not preserve filepath.Clean trailing-separator semantics")
 	}
 }
 
@@ -80,6 +101,7 @@ func TestOwnedUserPathRemovalPlanDeletesOnlySetupCreatedEmptyValue(t *testing.T)
 		valueCreated bool
 		want         string
 		wantDelete   bool
+		wantErr      bool
 	}{
 		{name: "setup-created value", current: commandDir, valueCreated: true, wantDelete: true},
 		{name: "pre-existing empty value", current: commandDir, valueCreated: false},
@@ -93,7 +115,8 @@ func TestOwnedUserPathRemovalPlanDeletesOnlySetupCreatedEmptyValue(t *testing.T)
 			name:         "later duplicate",
 			current:      commandDir + ";" + commandDir,
 			valueCreated: true,
-			want:         commandDir,
+			want:         commandDir + ";" + commandDir,
+			wantErr:      true,
 		},
 		{
 			name:         "later empty entry",
@@ -104,8 +127,8 @@ func TestOwnedUserPathRemovalPlanDeletesOnlySetupCreatedEmptyValue(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, deleteValue, err := planOwnedUserPathRemoval(test.current, commandDir, false, test.valueCreated)
-			if err != nil {
-				t.Fatal(err)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("removal error = %v, want error %t", err, test.wantErr)
 			}
 			if got != test.want || deleteValue != test.wantDelete {
 				t.Fatalf("removal plan = value %q delete:%t, want value %q delete:%t", got, deleteValue, test.want, test.wantDelete)
@@ -167,7 +190,7 @@ func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
 			if err := removeOwnedUserPathValue(key, commandDir, false, test.valueCreated); err != nil {
 				t.Fatal(err)
 			}
-			got, _, err := key.GetStringValue("Path")
+			got, gotType, err := key.GetStringValue("Path")
 			if !test.wantExists {
 				if err != registry.ErrNotExist {
 					t.Fatalf("Path still exists as %q: %v", got, err)
@@ -179,6 +202,13 @@ func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
 			}
 			if got != test.want {
 				t.Fatalf("Path = %q, want %q", got, test.want)
+			}
+			wantType := uint32(registry.SZ)
+			if test.expand {
+				wantType = registry.EXPAND_SZ
+			}
+			if gotType != wantType {
+				t.Fatalf("Path registry type = %d, want %d", gotType, wantType)
 			}
 		})
 	}

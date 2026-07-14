@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import time
 from ctypes import wintypes
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -184,6 +185,25 @@ class WindowsJob:
             empty = False
         if not empty:
             self.close()
+
+    def terminate_sync(self, *, exit_code: int = 130, timeout: float = 2.0) -> bool:
+        """Terminate and synchronously reap every process assigned to the job.
+
+        Small synchronous callers such as Doctor's bounded Codex policy probe
+        cannot use :meth:`cancel`, but need the same descendant guarantee. The
+        retained job handle makes this identity-safe and avoids PID walks.
+        """
+
+        if self._closed:
+            return True
+        if not self._kernel32.TerminateJobObject(self._job, exit_code):
+            self._raise_last_error("TerminateJobObject")
+        deadline = time.monotonic() + max(0.0, timeout)
+        while self.active_processes:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     async def _close_and_wait(self, process: asyncio.subprocess.Process, timeout: float) -> None:
         """Apply the kill-on-close fallback and bound the root-process wait."""
