@@ -123,3 +123,17 @@ func TestPrivateUpstreamObserverNeverAuditsHardDeniedPeer(t *testing.T) {
 		t.Fatalf("hard-denied peer was audited as allowlisted: %v", peers)
 	}
 }
+
+func TestProviderHTTPClientBlocksRedirects(t *testing.T) {
+	if providerHTTPClient.CheckRedirect == nil {
+		t.Fatal("providerHTTPClient must refuse redirects so validated upstreams cannot pivot after preflight")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "https://private-upstream.example/v1", nil)
+	err := providerHTTPClient.CheckRedirect(req, []*http.Request{
+		httptest.NewRequest(http.MethodGet, "https://public-provider.example/v1", nil),
+	})
+	if err != netguard.ErrRedirectBlocked {
+		t.Fatalf("CheckRedirect error = %v, want %v", err, netguard.ErrRedirectBlocked)
+	}
+}
