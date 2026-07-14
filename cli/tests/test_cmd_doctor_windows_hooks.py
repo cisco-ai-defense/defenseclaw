@@ -196,6 +196,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
         pathext: str = ".EXE;.CMD",
         managed_settings_paths: tuple[str, ...] | None = (),
         inspect_effective_policy: bool = True,
+        workspace_dir: str = "",
+        cli_settings: str | None = None,
+        remote_settings_path: str | None = None,
+        managed_enterprise: bool = False,
     ):
         return validate_windows_hook_registration(
             connector=connector,
@@ -206,6 +210,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
             pathext=pathext,
             claude_managed_settings_paths=managed_settings_paths,
             inspect_effective_policy=inspect_effective_policy,
+            workspace_dir=workspace_dir,
+            claude_cli_settings=cli_settings,
+            claude_remote_settings_path=remote_settings_path,
+            managed_enterprise=managed_enterprise,
         )
 
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
@@ -964,6 +972,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(policy, {"allowManagedHooksOnly": True})
         fake_winreg.OpenKey.assert_called_once()
 
+        fake_winreg.QueryValueEx.return_value = ("   ", 3)
+        with (
+            patch.dict(sys.modules, {"winreg": fake_winreg}),
+            patch("defenseclaw.doctor_hooks.os.name", "nt"),
+        ):
+            policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
+        self.assertIsNone(policy)
+
     def test_claude_ignores_policy_helper_from_hkcu_user_settings(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
@@ -980,6 +996,126 @@ class WindowsHookDoctorTests(unittest.TestCase):
             check = self._validate("claudecode", config, managed_settings_paths=None)
 
         self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_claude_workspace_and_cli_sources_follow_precedence(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        workspace = self.root / "workspace"
+        settings_dir = workspace / ".claude"
+        settings_dir.mkdir(parents=True)
+        project = settings_dir / "settings.json"
+        local = settings_dir / "settings.local.json"
+        project.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+
+        check = self._validate("claudecode", config, workspace_dir=str(workspace))
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn(str(project), check.detail)
+
+        local.write_text(json.dumps({"disableAllHooks": False}), encoding="utf-8")
+        check = self._validate("claudecode", config, workspace_dir=str(workspace))
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn(f"workspace={workspace}", check.detail)
+
+        check = self._validate(
+            "claudecode",
+            config,
+            workspace_dir=str(workspace),
+            cli_settings=json.dumps({"disableAllHooks": True}),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("CLI --settings", check.detail)
+
+    def test_claude_remote_source_replaces_lower_managed_tiers(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        managed = self.root / "managed-settings.json"
+        managed.write_text(json.dumps({"allowManagedHooksOnly": False}), encoding="utf-8")
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"allowManagedHooksOnly": True}), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+        self.assertIn(str(remote), check.detail)
+
+    def test_claude_policy_helper_only_blocks_when_its_file_tier_is_active(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        managed = self.root / "managed-settings.json"
+        managed.write_text(
+            json.dumps({"policyHelper": {"path": r"C:\Program Files\Policy\helper.exe"}}),
+            encoding="utf-8",
+        )
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"allowManagedHooksOnly": False}), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+
+        remote.write_text("{}", encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("dynamic policyHelper", check.detail)
+        self.assertIn(str(managed), check.detail)
+
+    def test_claude_managed_enterprise_validates_the_winning_hook_matrix(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for groups in document["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    handler["args"].append("--enterprise-managed")
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("managed_source=explicit managed settings", check.detail)
+
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"model": "remote-wins"}), encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            remote_settings_path=str(remote),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+        self.assertIn("no hooks table", check.detail)
+
+        remote.write_text("{}", encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            remote_settings_path=str(remote),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("managed_source=explicit managed settings", check.detail)
 
     def test_codex_requires_complete_trusted_event_matrix(self) -> None:
         runtime = self._runtime()

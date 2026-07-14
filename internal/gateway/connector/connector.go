@@ -132,6 +132,13 @@ type SetupOpts struct {
 	// so a privileged policy write never captures the caller's PATH or profile.
 	HookExecutable string
 
+	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
+	// Claude Code through --settings for the invocation being inspected. An
+	// empty value means no command-line settings source is part of that
+	// invocation. The passive guardian cannot infer flags for future processes;
+	// callers validating a concrete launch must pass the value explicitly.
+	ClaudeSettingsOverride string
+
 	// HookContractID optionally pins setup/profile resolution to a specific
 	// known contract. A non-empty value that does not match the resolved
 	// contract marks the profile incompatible instead of silently using a

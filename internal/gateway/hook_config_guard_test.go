@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,8 +414,9 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	t.Cleanup(guard.Stop)
 
 	// Queue a target-file removal and then replace its watched directory
-	// before the debounce fires. Setup must recreate the owned hooks while
-	// preserving the disabling setting, so verification still fails.
+	// before the debounce fires. The effective-policy resolver must diagnose
+	// the explicit disabling source without trying to fight administrator/user
+	// policy by rewriting hooks underneath it.
 	if err := os.Remove(settingsPath); err != nil {
 		t.Fatalf("remove Claude settings: %v", err)
 	}
@@ -430,18 +432,27 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		data, readErr := os.ReadFile(settingsPath)
-		var current map[string]interface{}
-		if readErr == nil && json.Unmarshal(data, &current) == nil {
-			_, hooksRestored := current["hooks"].(map[string]interface{})
-			if hooksRestored && current["disableAllHooks"] == true {
-				break
-			}
+		guard.mu.Lock()
+		failure := guard.lastPolicyFailure
+		guard.mu.Unlock()
+		if strings.Contains(failure, "disableAllHooks=true") && strings.Contains(failure, settingsPath) {
+			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("guard did not attempt the policy-blocked repair (readErr=%v settings=%v)", readErr, current)
+			t.Fatalf("guard did not report the exact policy-blocked source (last failure=%q)", failure)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked map[string]interface{}
+	if err := json.Unmarshal(data, &blocked); err != nil {
+		t.Fatal(err)
+	}
+	if _, hooksRestored := blocked["hooks"]; hooksRestored {
+		t.Fatal("guard rewrote hooks even though the effective source explicitly disabled them")
 	}
 
 	select {
@@ -450,7 +461,7 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	default:
 	}
 
-	// The failed verification must not strand the watcher on the deleted
+	// The blocked evaluation must not strand the watcher on the deleted
 	// directory object. Let the normal self-write suppression expire, then
 	// remove the policy and strip the hooks; the running guard must observe and
 	// heal this edit.
@@ -496,6 +507,40 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	}
 
 	guard.Stop()
+}
+
+func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *testing.T) {
+	settingsDir := filepath.Join(t.TempDir(), "claude")
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	managedRoot := filepath.Join(t.TempDir(), "managed")
+	previousSettings := connector.ClaudeCodeSettingsPathOverride
+	previousManaged := connector.ClaudeCodeManagedSettingsRootOverride
+	connector.ClaudeCodeSettingsPathOverride = settingsPath
+	connector.ClaudeCodeManagedSettingsRootOverride = managedRoot
+	t.Cleanup(func() {
+		connector.ClaudeCodeSettingsPathOverride = previousSettings
+		connector.ClaudeCodeManagedSettingsRootOverride = previousManaged
+	})
+
+	opts := connector.SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	conn := connector.NewClaudeCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// A one-hour filesystem debounce proves the repair comes from the policy
+	// audit ticker rather than the ordinary fsnotify processing path.
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	guard.policyAudit = 20 * time.Millisecond
+	guard.Start(ctx, conn, opts)
+	t.Cleanup(guard.Stop)
+
+	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip Claude hooks: %v", err)
+	}
+	waitForPresence(t, conn, opts, true, 3*time.Second)
 }
 
 func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {

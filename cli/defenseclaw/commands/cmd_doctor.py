@@ -1391,6 +1391,11 @@ def _windows_native_hook_check(
         install_root=install_root,
         search_path=os.environ.get("PATH", "") if search_path is None else search_path,
         pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
+        workspace_dir=_workspace_dir(cfg) if connector == "claudecode" else "",
+        managed_enterprise=(
+            connector == "claudecode"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
     )
 
 

@@ -610,35 +610,7 @@ var hookGroups = []claudeCodeHookGroup{
 // Claude can keep that command under an irrelevant event, a narrow matcher, or
 // an asynchronous handler while all blockable surfaces remain unprotected.
 func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
-	data, err := os.ReadFile(claudeCodeSettingsPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false, fmt.Errorf("parse Claude Code settings: %w", err)
-	}
-	if rawDisabled, exists := settings["disableAllHooks"]; exists {
-		disabled, ok := rawDisabled.(bool)
-		if !ok || disabled {
-			return false, nil
-		}
-	}
-	hooks, ok := settings["hooks"].(map[string]interface{})
-	if !ok {
-		return false, nil
-	}
-
-	for _, group := range hookGroups {
-		entries, ok := hooks[group.eventType].([]interface{})
-		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, opts) {
-			return false, nil
-		}
-	}
-	return true, nil
+	return claudeCodeEffectiveHookContract(opts)
 }
 
 func claudeCodeEventHasEnforcingHook(
@@ -716,8 +688,19 @@ func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAs
 	}
 	if runtime.GOOS == "windows" {
 		command, _ := handler["command"].(string)
-		return isClaudeCodeNativeExecHook(handler) &&
-			pathidentity.Same(command, defenseclawHookBinary())
+		expectedCommand := strings.TrimSpace(opts.HookExecutable)
+		if expectedCommand == "" {
+			expectedCommand = defenseclawHookBinary()
+		}
+		args, ok := claudeCodeNativeExecArguments(handler)
+		if !ok || !pathidentity.Same(command, expectedCommand) {
+			return false
+		}
+		expectedArgs := []string{"hook", "--connector", "claudecode"}
+		if opts.ManagedEnterprise {
+			expectedArgs = append(expectedArgs, "--enterprise-managed")
+		}
+		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
 	expected := hookInvocationCommand(
@@ -759,6 +742,9 @@ func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string,
 func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
+	}
+	if err := validateClaudeCodeManagedFileDestination(); err != nil {
+		return nil, err
 	}
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)
 	if runtime.GOOS == "windows" && (hookExecutable == "" || !filepath.IsAbs(hookExecutable)) {
@@ -1539,20 +1525,8 @@ func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
 // Callers that already established an exact backup-recorded executable path may
 // use this independently of the active install path.
 func hasClaudeCodeNativeExecArgs(hook map[string]interface{}) bool {
-	var args []string
-	switch rawArgs := hook["args"].(type) {
-	case []interface{}:
-		args = make([]string, len(rawArgs))
-		for i, raw := range rawArgs {
-			arg, ok := raw.(string)
-			if !ok {
-				return false
-			}
-			args[i] = arg
-		}
-	case []string:
-		args = rawArgs
-	default:
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok {
 		return false
 	}
 	if len(args) != 3 && len(args) != 4 {
@@ -1568,6 +1542,26 @@ func hasClaudeCodeNativeExecArgs(hook map[string]interface{}) bool {
 		return false
 	}
 	return true
+}
+
+func claudeCodeNativeExecArguments(hook map[string]interface{}) ([]string, bool) {
+	var args []string
+	switch rawArgs := hook["args"].(type) {
+	case []interface{}:
+		args = make([]string, len(rawArgs))
+		for i, raw := range rawArgs {
+			arg, ok := raw.(string)
+			if !ok {
+				return nil, false
+			}
+			args[i] = arg
+		}
+	case []string:
+		args = append([]string(nil), rawArgs...)
+	default:
+		return nil, false
+	}
+	return args, true
 }
 
 type claudeCodeOwnedHookLocation struct {

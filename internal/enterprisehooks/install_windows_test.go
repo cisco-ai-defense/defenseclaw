@@ -56,6 +56,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	originalWriter := windowsManagedPolicyWriter
 	originalProfile := windowsEnterpriseProfilePathResolver
 	originalTransaction := windowsClaudeManagedPolicyTransaction
+	originalConnectorPolicyRoot := connector.ClaudeCodeManagedSettingsRootOverride
 	windowsEnterpriseAdministratorCheck = func() error { return nil }
 	windowsClaudeHigherPolicyCheck = func() error { return nil }
 	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
@@ -70,6 +71,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	policyPath := filepath.Join(dropin, windowsClaudeManagedPolicyFile)
 	windowsClaudeManagedPolicyPathResolver = func() (string, error) { return policyPath, nil }
 	windowsEnterpriseProfilePathResolver = func() (string, error) { return home, nil }
+	connector.ClaudeCodeManagedSettingsRootOverride = policyRoot
 
 	for _, path := range []string{policyRoot, dropin} {
 		if err := setWindowsManagedPolicyProtection(path, true, false); err != nil {
@@ -119,6 +121,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 		windowsManagedPolicyWriter = originalWriter
 		windowsEnterpriseProfilePathResolver = originalProfile
 		windowsClaudeManagedPolicyTransaction = originalTransaction
+		connector.ClaudeCodeManagedSettingsRootOverride = originalConnectorPolicyRoot
 	})
 	return windowsManagedInstallFixture{home: home, policyPath: policyPath, hookExe: hookExe, targetSID: targetSID}
 }
@@ -435,14 +438,19 @@ func TestInstallWindowsClaudeRejectsHigherPriorityAndDisabledPolicy(t *testing.T
 	t.Run("disable all hooks", func(t *testing.T) {
 		fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true, "disableAllHooks": true})
 		_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
-		if err == nil || !strings.Contains(err.Error(), "disables all hooks") {
+		basePolicyPath := filepath.Join(filepath.Dir(filepath.Dir(fixture.policyPath)), "managed-settings.json")
+		if err == nil || !strings.Contains(err.Error(), "disableAllHooks=true") ||
+			!strings.Contains(err.Error(), basePolicyPath) {
 			t.Fatalf("Install error = %v", err)
 		}
 	})
 	t.Run("policy helper", func(t *testing.T) {
 		fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"policyHelper": map[string]interface{}{"path": `C:\Program Files\Policy\helper.exe`}})
 		_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
-		if err == nil || !strings.Contains(err.Error(), "policyHelper supersedes") {
+		basePolicyPath := filepath.Join(filepath.Dir(filepath.Dir(fixture.policyPath)), "managed-settings.json")
+		if err == nil || !strings.Contains(err.Error(), "policyHelper") ||
+			!strings.Contains(err.Error(), "supersedes file-based managed hooks") ||
+			!strings.Contains(err.Error(), basePolicyPath) {
 			t.Fatalf("Install error = %v", err)
 		}
 	})
