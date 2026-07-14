@@ -30,10 +30,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.12.10"
+$PythonVersion = "3.14.6"
+$PythonTargetVersion = "3.14"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3"
+$PythonEmbedSha256 = "DF901E84A896FF1EE720AD03377E0C8D8C2244FDA79808AEEAFF6316DF1CB75C"
+# Force the runtime owner to review the pinned binary at least quarterly. A
+# release after this deadline must deliberately move the deadline (and normally
+# the version/hash) after checking Python's current security release line.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-09-10T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'
@@ -121,6 +126,35 @@ function Get-GitSourceCommit([string]$RepositoryRoot) {
         throw "Git returned an invalid installer source commit: $commit"
     }
     return $commit
+}
+
+function Get-GitSourceEpoch([string]$RepositoryRoot, [string]$Commit) {
+    $git = (Get-Command 'git.exe' -ErrorAction Stop).Source
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $git
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @('-C', $RepositoryRoot, 'show', '-s', '--format=%ct', $Commit)) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Could not resolve the installer source timestamp: $($stderr.Trim())"
+        }
+    } finally {
+        $process.Dispose()
+    }
+    $epoch = $stdout.Trim()
+    if ($epoch -notmatch '^\d{9,}$') {
+        throw "Git returned an invalid installer source timestamp: $epoch"
+    }
+    return $epoch
 }
 
 function Copy-RequiredFile([string]$Source, [string]$Destination) {
@@ -264,6 +298,9 @@ if (-not $IsWindows) {
 if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
     throw "The native Windows installer build supports only Windows x64."
 }
+if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
+    throw "Pinned CPython $PythonVersion security review expired at $($PythonRuntimeReviewDeadlineUTC.ToString('o')); review the current Python 3.14 Windows release and update the pin."
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
@@ -274,6 +311,7 @@ The public Windows installer builder cannot produce a managed-enterprise artifac
 '@
 }
 $sourceCommit = Get-GitSourceCommit $repoRoot
+$sourceDateEpoch = Get-GitSourceEpoch $repoRoot $sourceCommit
 
 $dist = Resolve-FullPath $DistRoot
 $out = Resolve-FullPath $OutRoot
@@ -328,6 +366,42 @@ Remove-SafeTree $build $state
 $payload = Join-Path $build "payload"
 [IO.Directory]::CreateDirectory($payload) | Out-Null
 
+# yara-python's last published Windows wheel targets CPython 3.13. Build the
+# repository-owned, pure-Python MCP Scanner compatibility adapter twice from
+# clean copies. SOURCE_DATE_EPOCH plus byte-for-byte equality makes a
+# non-reproducible adapter wheel a hard release failure. Runtime dependencies
+# still enter site-packages exclusively as hash-verified binary wheels.
+$yaraCompatSource = Join-Path $repoRoot 'packages\yara-python-compat'
+if (-not (Test-Path -LiteralPath (Join-Path $yaraCompatSource 'src\yara\__init__.py') -PathType Leaf)) {
+    throw 'Windows Python 3.14 YARA compatibility source is missing.'
+}
+$yaraCompatHashes = @()
+$yaraCompatWheels = @()
+$savedSourceDateEpoch = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH')
+try {
+    [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $sourceDateEpoch)
+    foreach ($attempt in @('a', 'b')) {
+        $sourceCopy = Join-Path $build "yara-python-compat-source-$attempt"
+        $wheelRoot = Join-Path $build "yara-python-compat-wheel-$attempt"
+        Copy-Item -LiteralPath $yaraCompatSource -Destination $sourceCopy -Recurse -Force
+        [IO.Directory]::CreateDirectory($wheelRoot) | Out-Null
+        Invoke-CheckedProcess 'uv' @('build', '--wheel', $sourceCopy, '--out-dir', $wheelRoot)
+        $builtWheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter 'yara_python-4.5.4.post1-py3-none-any.whl' -File)
+        if ($builtWheels.Count -ne 1) {
+            throw "YARA compatibility build $attempt did not produce exactly one expected wheel."
+        }
+        $yaraCompatWheels += $builtWheels[0].FullName
+        $yaraCompatHashes += Get-FileHashHex $builtWheels[0].FullName
+    }
+} finally {
+    [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $savedSourceDateEpoch)
+}
+if ($yaraCompatHashes[0] -ne $yaraCompatHashes[1]) {
+    throw 'Windows Python 3.14 YARA compatibility wheel is not reproducible.'
+}
+$yaraCompatWheel = $yaraCompatWheels[0]
+$yaraCompatSha256 = $yaraCompatHashes[0]
+
 $downloadDir = Join-Path $state "downloads"
 [IO.Directory]::CreateDirectory($downloadDir) | Out-Null
 $pythonZip = Join-Path $downloadDir $PythonEmbedName
@@ -356,15 +430,27 @@ $requirements = Join-Path $build "requirements-release.txt"
 Invoke-CheckedProcess "uv" @(
     "export", "--frozen", "--no-dev", "--no-emit-project", "--no-header",
     "--no-emit-package", "win-unicode-console",
+    "--no-emit-package", "yara-python",
     "--format", "requirements.txt", "--output-file", $requirements
 )
+
+$yaraCompatRequirements = Join-Path $build 'requirements-yara-compat.txt'
+$yaraCompatUri = ([Uri]$yaraCompatWheel).AbsoluteUri
+"yara-python @ $yaraCompatUri --hash=sha256:$yaraCompatSha256`r`n" |
+    Set-Content -LiteralPath $yaraCompatRequirements -Encoding ascii -NoNewline
 
 $sitePackages = Join-Path $build "site-packages"
 [IO.Directory]::CreateDirectory($sitePackages) | Out-Null
 Invoke-CheckedProcess "uv" @(
     "pip", "sync", "--target", $sitePackages,
-    "--python-version", "3.12", "--python-platform", "windows",
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
     "--only-binary", ":all:", "--require-hashes", $requirements
+)
+Invoke-CheckedProcess "uv" @(
+    "pip", "install", "--target", $sitePackages,
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
+    "--only-binary", ":all:", "--require-hashes", "--no-deps",
+    "--requirements", $yaraCompatRequirements
 )
 $winUnicodeExtract = Join-Path $build 'win-unicode-console-source'
 $sourceArchive = [IO.Compression.ZipFile]::OpenRead($winUnicodeSource)
@@ -389,7 +475,7 @@ foreach ($name in @('win_unicode_console', 'win_unicode_console.egg-info')) {
 }
 Invoke-CheckedProcess "uv" @(
     "pip", "install", "--target", $sitePackages,
-    "--python-version", "3.12", "--python-platform", "windows",
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
     "--only-binary", ":all:", "--no-deps", "--strict", $wheel
 )
 
@@ -425,8 +511,16 @@ for dist in metadata.distributions():
             problems.append(f'{dist.metadata.get("Name")}: {requirement.name} {version} violates {requirement.specifier}')
 if problems:
     raise SystemExit('\n'.join(problems))
-for module in ('defenseclaw', 'skill_scanner', 'mcpscanner'):
+for module in ('defenseclaw', 'skill_scanner', 'mcpscanner', 'yara'):
     __import__(module)
+import asyncio
+import yara
+from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
+if not getattr(yara, '__defenseclaw_yarax_compat__', False):
+    raise SystemExit('Windows CPython 3.14 payload did not select the YARA-X compatibility adapter')
+findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
+if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
+    raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
 print(f'validated {len(installed)} embedded distributions')
 '@
 Invoke-CheckedProcess (Join-Path $validationRuntime 'python.exe') @('-I', '-c', $dependencyCheck)
@@ -457,6 +551,7 @@ Copy-RequiredFile $wheel (Join-Path $payload (Split-Path -Leaf $wheel))
 Copy-RequiredFile $pythonZip (Join-Path $payload $PythonEmbedName)
 Copy-RequiredFile $cosignVerifier (Join-Path $payload 'cosign.exe')
 Copy-RequiredFile $requirements (Join-Path $payload "requirements-release.txt")
+Copy-RequiredFile $yaraCompatWheel (Join-Path $payload (Split-Path -Leaf $yaraCompatWheel))
 Copy-RequiredFile $upgradeManifest (Join-Path $payload 'upgrade-manifest.json')
 
 $files = [ordered]@{}
@@ -474,6 +569,7 @@ $manifest = [ordered]@{
     gateway_archive = (Split-Path -Leaf $gatewayZip)
     wheel = (Split-Path -Leaf $wheel)
     python_embed = $PythonEmbedName
+    yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
     upgrade_manifest = 'upgrade-manifest.json'
     site_packages = "site-packages.zip"
     launcher = "defenseclaw-launcher.exe"
@@ -485,6 +581,8 @@ $manifest = [ordered]@{
         uv = (& uv --version)
         python_embed_url = $PythonEmbedUrl
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+        python_runtime_review_deadline_utc = $PythonRuntimeReviewDeadlineUTC.ToString('o')
+        yara_compat_sha256 = $yaraCompatSha256
         win_unicode_console_source_url = $WinUnicodeSourceUrl
         win_unicode_console_source_sha256 = $WinUnicodeSourceSha256.ToLowerInvariant()
         cosign_version = $CosignVersion
@@ -543,6 +641,8 @@ $provenance = [ordered]@{
         wheel_sha256 = Get-FileHashHex $wheel
         python_embed = $PythonEmbedName
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+        yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
+        yara_compat_wheel_sha256 = $yaraCompatSha256
     }
     toolchain = $manifest.toolchain
 }
