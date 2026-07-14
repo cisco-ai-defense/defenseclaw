@@ -23,6 +23,7 @@ namespace DefenseClaw
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         private const uint TOKEN_QUERY = 0x0008;
         private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private const int JobObjectBasicAccountingInformation = 1;
         private const int JobObjectExtendedLimitInformation = 9;
         private const int TokenTypeInformation = 8;
         private const int TokenElevation = 20;
@@ -127,6 +128,19 @@ namespace DefenseClaw
             public UIntPtr PeakJobMemoryUsed;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
         [DllImport(
             "advapi32.dll",
             EntryPoint = "CreateProcessWithLogonW",
@@ -199,6 +213,19 @@ namespace DefenseClaw
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information,
+            uint informationLength,
+            out uint returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
@@ -521,6 +548,29 @@ namespace DefenseClaw
             }
         }
 
+        private static uint GetActiveJobProcessCount(IntPtr job)
+        {
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information;
+            uint returned;
+            if (!QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                out information,
+                (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)),
+                out returned))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "QueryInformationJobObject(active processes) failed");
+            }
+            if (returned < Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)))
+            {
+                throw new InvalidOperationException(
+                    "QueryInformationJobObject(active processes) returned truncated data");
+            }
+            return information.ActiveProcesses;
+        }
+
         private static byte[] ReadUserObjectDacl(IntPtr userObject, string label)
         {
             uint information = DACL_SECURITY_INFORMATION;
@@ -720,18 +770,53 @@ namespace DefenseClaw
                 return process.WaitForExit(milliseconds);
             }
 
-            public void Terminate()
+            public uint ActiveProcessCount
             {
+                get { return job == IntPtr.Zero ? 0 : GetActiveJobProcessCount(job); }
+            }
+
+            // Closing a kill-on-close handle is not enough evidence for a
+            // privileged caller to begin traversing child-writable paths. CI
+            // explicitly terminates the job, observes ActiveProcesses reach
+            // zero, and only then releases the handle.
+            public void TerminateAndDrain(int milliseconds)
+            {
+                if (disposed) return;
+                if (milliseconds < 1)
+                {
+                    throw new ArgumentOutOfRangeException("milliseconds");
+                }
                 if (job != IntPtr.Zero)
                 {
+                    if (!TerminateJobObject(job, 1603))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "TerminateJobObject failed for disposable standard-user harness");
+                    }
+                    Stopwatch timer = Stopwatch.StartNew();
+                    while (GetActiveJobProcessCount(job) != 0)
+                    {
+                        if (timer.ElapsedMilliseconds >= milliseconds)
+                        {
+                            throw new InvalidOperationException(
+                                "disposable standard-user job retained active processes after termination");
+                        }
+                        System.Threading.Thread.Sleep(50);
+                    }
                     CloseHandle(job);
                     job = IntPtr.Zero;
                 }
-                if (!process.HasExited && !process.WaitForExit(30000))
+                if (!process.HasExited && !process.WaitForExit(milliseconds))
                 {
                     throw new InvalidOperationException(
-                        "disposable standard-user process tree did not exit after job termination");
+                        "disposable standard-user root process did not exit after job termination");
                 }
+            }
+
+            public void Terminate()
+            {
+                TerminateAndDrain(30000);
             }
 
             public void Dispose()

@@ -12,6 +12,8 @@ $nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
 $wizardHarness = Join-Path $root 'scripts\test-windows-setup-wizard.ps1'
 $standardUserCI = Join-Path $root 'scripts\invoke-windows-setup-standard-user-ci.ps1'
 $standardUserLauncher = Join-Path $root 'scripts\windows-disposable-standard-user-launcher.cs'
+$standardUserSafety = Join-Path $root 'scripts\windows-disposable-user-safety.ps1'
+$standardUserSafetyTest = Join-Path $root 'scripts\test-windows-disposable-user-safety.ps1'
 $setupStandardUserLauncher = Join-Path $root 'scripts\windows-setup-standard-user-launcher.cs'
 $nativePathHelpers = Join-Path $root 'scripts\windows-native-paths.ps1'
 $nativePathInitializer = Join-Path $root 'scripts\initialize-windows-native-ci-paths.ps1'
@@ -73,6 +75,8 @@ try {
         $nativeHarness,
         $wizardHarness,
         $standardUserCI,
+        $standardUserSafety,
+        $standardUserSafetyTest,
         $nativePathHelpers,
         $nativePathInitializer,
         $installer
@@ -80,6 +84,27 @@ try {
         $tokens = $null; $errors = $null
         [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
         Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
+    }
+    & $standardUserSafetyTest
+    if (-not ('DefenseClaw.DisposableStandardUserLauncher' -as [type])) {
+        Add-Type -Path $standardUserLauncher
+    }
+    if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
+        Add-Type -Path $setupStandardUserLauncher
+    }
+    $launcherType = [DefenseClaw.DisposableStandardUserLauncher]
+    $privateStatic = [Reflection.BindingFlags]'NonPublic,Static'
+    $createEmptyJob = $launcherType.GetMethod('CreateKillOnCloseJob', $privateStatic)
+    $readActiveCount = $launcherType.GetMethod('GetActiveJobProcessCount', $privateStatic)
+    $closeJob = $launcherType.GetMethod('CloseHandle', $privateStatic)
+    Assert-True ($null -ne $createEmptyJob -and $null -ne $readActiveCount -and
+        $null -ne $closeJob) 'disposable-user launcher exposes its compiled job accounting implementation'
+    $emptyJob = [IntPtr]$createEmptyJob.Invoke($null, @())
+    try {
+        Assert-True ([uint32]$readActiveCount.Invoke($null, @($emptyJob)) -eq 0) `
+            'new disposable-user job reports ActiveProcesses=0'
+    } finally {
+        [void]$closeJob.Invoke($null, @($emptyJob))
     }
     . $harness -NoRun
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
@@ -714,14 +739,19 @@ try {
         $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $nativeWorkflowText -match '-Mode setup-acceptance') `
         'required lifecycle certification no longer routes through the legacy wheel materializer'
+    $standardUserSafetyText = Get-Content -LiteralPath $standardUserSafety -Raw
     Assert-True ($standardUserCIText -match 'New-LocalUser' -and
         $standardUserCIText -match 'Remove-DisposableProfileAndAccount' -and
         $standardUserCIText -match 'DefenseClaw disposable Setup CI account' -and
         $standardUserCIText -match '\^dcacc\[0-9a-f\]\{10\}\$' -and
         $standardUserCIText -match 'private disposable-user sandbox layout' -and
-        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$workspace \$sidObject' -and
-        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$scripts \$sidObject' -and
-        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$childArtifacts \$sidObject' -and
+        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$sandbox' -and
+        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$workspace' -and
+        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$childArtifacts' -and
+        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$directory \$sidObject' -and
+        $standardUserCIText -match 'Assert-DisposableChildAcl \$sandbox' -and
+        $standardUserCIText -match '\$childResults = Join-Path \$sandbox ''results''' -and
+        $standardUserCIText -match '\$result = Join-Path \$childResults ''result\.json''' -and
         $standardUserCIText -match 'GrantInteractiveDesktop' -and
         $standardUserCIText -match 'Get-LocalGroupMember -SID \$administratorsSid' -and
         $standardUserCIText -match '-Operation setup-acceptance' -and
@@ -734,15 +764,44 @@ try {
         $standardUserLauncherText -match 'LOGON_WITH_PROFILE' -and
         $standardUserLauncherText -match 'SecureString password' -and
         $standardUserLauncherText -match 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE' -and
+        $standardUserLauncherText -match 'QueryInformationJobObject' -and
+        $standardUserLauncherText -match 'TerminateAndDrain' -and
+        $standardUserLauncherText -match 'ActiveProcesses' -and
         $standardUserLauncherText -match 'InteractiveDesktopGrant' -and
         $standardUserLauncherText -match 'TokenIsElevated != 0') `
         'disposable-user launcher validates identity/elevation and bounds the complete process tree'
+    Assert-True ($standardUserCIText -match 'Disable-LocalUser' -and
+        $standardUserCIText -match 'GetOwnerSid' -and
+        $standardUserCIText -match 'Stop-AndVerifyDisposableSidProcesses' -and
+        $standardUserCIText -match 'Remove-AndVerifyDisposableScheduledTasks' -and
+        $standardUserCIText -match 'WMI escape fixture' -and
+        $standardUserCIText -match 'wmi-escape-pid\.txt' -and
+        $standardUserCIText -match 'Complete-DisposableExecutionBoundary' -and
+        $standardUserCIText -notmatch 'Copy-Item[^\r\n]*-Recurse') `
+        'privileged handoff drains the job, disables the account, sweeps exact-SID escapes, and avoids recursive copies'
+    Assert-True ($standardUserSafetyText -match 'Copy-BoundedDisposableDiagnostics' -and
+        $standardUserSafetyText -match 'MaximumFileBytes' -and
+        $standardUserSafetyText -match 'MaximumTotalBytes' -and
+        $standardUserSafetyText -match 'ReparsePoint' -and
+        $standardUserSafetyText -match 'Remove-DisposableTreeSafely' -and
+        $standardUserSafetyText -match 'FileMode\]::CreateNew') `
+        'diagnostic and sandbox handoff uses bounded regular files and reparse-safe cleanup'
     Assert-True ($setupStandardUserLauncherText -match 'TokenLinkedToken' -and
         $setupStandardUserLauncherText -match 'TokenElevationTypeLimited' -and
         $setupStandardUserLauncherText -match 'ValidateStandardUserPrimaryToken' -and
         $setupStandardUserLauncherText -match 'CurrentElevatedTokenHasLinkedLimitedToken' -and
+        $setupStandardUserLauncherText -match 'allowRestrictedLuaFallback' -and
+        $setupStandardUserLauncherText -notmatch 'TryGetLinkedToken' -and
+        $nativeHarnessText -match 'restricted LUA fallback is prohibited' -and
+        $nativeHarnessText -match 'verified-linked-limited-token' -and
         $nativeHarnessText -match 'requires-disposable-standard-user') `
-        'Setup launcher prefers and verifies a linked limited token and reports UAC-disabled hosts honestly'
+        'Setup launcher fails linked-token query errors and prohibits restricted-LUA fallback in certification'
+    Assert-True ([regex]::Matches(
+            $standardUserCIText,
+            'Get-FileHash -LiteralPath \$(?:setupSource|childSetup) -Algorithm SHA256'
+        ).Count -ge 3 -and
+        $standardUserCIText -match 'exact Setup artifact hash changed during') `
+        'disposable acceptance revalidates the exact Setup hash before and after the lifecycle'
     Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $releaseWorkflowText -match '-Mode setup-acceptance' -and
         $releaseWorkflowText -notmatch '(?s)Validate the exact signed installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `

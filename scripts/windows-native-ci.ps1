@@ -613,7 +613,8 @@ function Invoke-WindowsSetupStandardUserProcess {
         [int[]]$AllowedExitCodes = @(0),
         [ValidateRange(1, 1800)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
-        [string]$WorkingDirectory = ''
+        [string]$WorkingDirectory = '',
+        [switch]$AllowRestrictedLuaFallback
     )
     if ($FilePath.IndexOf([char]0) -ge 0 -or $WorkingDirectory.IndexOf([char]0) -ge 0 -or
         @($ArgumentList | Where-Object { $null -eq $_ -or $_.IndexOf([char]0) -ge 0 }).Count -ne 0) {
@@ -644,11 +645,22 @@ function Invoke-WindowsSetupStandardUserProcess {
         [Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
             ForEach-Object { '{0}={1}' -f [string]$_.Key, [string]$_.Value }
     )
+    $hasLinkedLimitedToken = `
+        [DefenseClaw.SetupStandardUserLauncher]::CurrentElevatedTokenHasLinkedLimitedToken()
+    if (-not $hasLinkedLimitedToken -and -not $AllowRestrictedLuaFallback) {
+        throw 'certification requires a real standard user or UAC-linked limited token; restricted LUA fallback is prohibited'
+    }
+    $launchContext = if ($hasLinkedLimitedToken) {
+        'verified-linked-limited-token'
+    } else {
+        'verified-restricted-lua-default-token-noncertification'
+    }
     $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestricted(
         $application,
         [string[]]$ArgumentList,
         $working,
-        [string[]]$environment
+        [string[]]$environment,
+        [bool]$AllowRestrictedLuaFallback
     )
     $timedOut = $false
     $cleanupFailure = $null
@@ -667,7 +679,7 @@ function Invoke-WindowsSetupStandardUserProcess {
             StdErr = ''
             TimedOut = $timedOut
             ProcessId = $process.Id
-            LaunchContext = 'verified-standard-user-token'
+            LaunchContext = $launchContext
         }
     } catch {
         $cleanupFailure = $_
@@ -787,7 +799,7 @@ $payload = [ordered]@{
         throw 'standard-user Setup launcher smoke child was neither limited nor restricted'
     }
     $expectedContext = if ($parentElevated) {
-        'verified-standard-user-token'
+        'verified-linked-limited-token'
     } else {
         'inherited-standard'
     }

@@ -12,9 +12,10 @@ namespace DefenseClaw
 {
     // Native release jobs need administrator authority for machine policy, but
     // user-scope Setup deliberately rejects elevation. This helper prefers the
-    // elevated user's linked limited primary token, falls back to a filtered
-    // LUA token when no linked token exists, verifies the suspended child, and
-    // only then lets the exact Setup image execute.
+    // elevated user's linked limited primary token. A filtered LUA token is
+    // available only when a caller explicitly opts into the UAC-disabled
+    // default-token compatibility path; release certification prohibits it.
+    // The helper verifies the suspended child before the exact image executes.
     public static class SetupStandardUserLauncher
     {
         private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
@@ -243,9 +244,8 @@ namespace DefenseClaw
             return value;
         }
 
-        private static bool TryGetLinkedToken(IntPtr sourceToken, out IntPtr linkedToken)
+        private static IntPtr GetLinkedToken(IntPtr sourceToken)
         {
-            linkedToken = IntPtr.Zero;
             TOKEN_LINKED_TOKEN linked;
             int returned;
             if (!GetTokenInformationLinkedToken(
@@ -255,7 +255,9 @@ namespace DefenseClaw
                 Marshal.SizeOf(typeof(TOKEN_LINKED_TOKEN)),
                 out returned))
             {
-                return false;
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "GetTokenInformation(TokenLinkedToken) failed for a full elevated token");
             }
             if (returned < Marshal.SizeOf(typeof(TOKEN_LINKED_TOKEN)) || linked.LinkedToken == IntPtr.Zero)
             {
@@ -263,8 +265,7 @@ namespace DefenseClaw
                 throw new InvalidOperationException(
                     "GetTokenInformation(TokenLinkedToken) returned an invalid token handle");
             }
-            linkedToken = linked.LinkedToken;
-            return true;
+            return linked.LinkedToken;
         }
 
         private static IntPtr DuplicatePrimaryToken(IntPtr token, string label)
@@ -321,6 +322,7 @@ namespace DefenseClaw
 
         private static IntPtr OpenStandardUserPrimaryToken(
             IntPtr sourceToken,
+            bool allowRestrictedLuaFallback,
             out LaunchTokenKind kind)
         {
             int sourceElevationType = GetTokenInteger(
@@ -332,30 +334,27 @@ namespace DefenseClaw
             {
                 if (sourceElevationType == TokenElevationTypeFull)
                 {
-                    IntPtr linkedToken;
-                    if (TryGetLinkedToken(sourceToken, out linkedToken))
+                    IntPtr linkedToken = GetLinkedToken(sourceToken);
+                    try
                     {
-                        try
+                        if (GetTokenInteger(linkedToken, TokenTypeInformation, "TokenType") == TokenPrimary)
                         {
-                            if (GetTokenInteger(linkedToken, TokenTypeInformation, "TokenType") == TokenPrimary)
-                            {
-                                launchToken = linkedToken;
-                                linkedToken = IntPtr.Zero;
-                            }
-                            else
-                            {
-                                launchToken = DuplicatePrimaryToken(linkedToken, "linked limited Setup");
-                            }
-                            kind = LaunchTokenKind.LinkedLimited;
-                            ValidateStandardUserPrimaryToken(launchToken, kind, "linked limited Setup");
-                            IntPtr result = launchToken;
-                            launchToken = IntPtr.Zero;
-                            return result;
+                            launchToken = linkedToken;
+                            linkedToken = IntPtr.Zero;
                         }
-                        finally
+                        else
                         {
-                            if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+                            launchToken = DuplicatePrimaryToken(linkedToken, "linked limited Setup");
                         }
+                        kind = LaunchTokenKind.LinkedLimited;
+                        ValidateStandardUserPrimaryToken(launchToken, kind, "linked limited Setup");
+                        IntPtr result = launchToken;
+                        launchToken = IntPtr.Zero;
+                        return result;
+                    }
+                    finally
+                    {
+                        if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
                     }
                 }
                 else if (sourceElevationType != TokenElevationTypeDefault)
@@ -363,6 +362,13 @@ namespace DefenseClaw
                     throw new InvalidOperationException(
                         "elevated Setup launcher has an inconsistent token elevation type " +
                         sourceElevationType);
+                }
+
+                if (!allowRestrictedLuaFallback)
+                {
+                    throw new InvalidOperationException(
+                        "restricted LUA default-token fallback is disabled for certification; " +
+                        "use a real standard user or a UAC-linked limited token");
                 }
 
                 kind = LaunchTokenKind.RestrictedLua;
@@ -420,7 +426,7 @@ namespace DefenseClaw
                 {
                     return false;
                 }
-                if (!TryGetLinkedToken(sourceToken, out linkedToken)) return false;
+                linkedToken = GetLinkedToken(sourceToken);
                 return !IsElevated(linkedToken) &&
                     GetTokenInteger(linkedToken, TokenElevationType, "TokenElevationType") ==
                         TokenElevationTypeLimited;
@@ -531,7 +537,8 @@ namespace DefenseClaw
             string applicationPath,
             string[] arguments,
             string workingDirectory,
-            string[] environmentEntries)
+            string[] environmentEntries,
+            bool allowRestrictedLuaFallback)
         {
             if (String.IsNullOrWhiteSpace(applicationPath) || !Path.IsPathRooted(applicationPath))
             {
@@ -568,7 +575,10 @@ namespace DefenseClaw
                         "restricted Setup launch was requested from an already non-elevated process");
                 }
                 LaunchTokenKind launchTokenKind;
-                launchToken = OpenStandardUserPrimaryToken(sourceToken, out launchTokenKind);
+                launchToken = OpenStandardUserPrimaryToken(
+                    sourceToken,
+                    allowRestrictedLuaFallback,
+                    out launchTokenKind);
 
                 environment = BuildEnvironment(environmentEntries);
                 STARTUPINFO startupInfo = new STARTUPINFO();

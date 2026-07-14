@@ -230,10 +230,9 @@ function Start-SetupWizardProcess([string]$Application, [string]$WorkingDirector
 
     # GitHub-hosted Windows runners execute this job with an elevated token,
     # while user-scope Setup deliberately refuses elevation. Launch the exact
-    # Setup image on the interactive desktop with a verified restricted LUA
-    # token, matching the lifecycle acceptance boundary. Environment entries
-    # are copied verbatim so Known Folder, diagnostics, and runner contracts
-    # still describe the same user rather than an over-the-shoulder account.
+    # Setup image on the interactive desktop with the UAC-linked limited token.
+    # Certification never accepts the weaker restricted-LUA compatibility
+    # fallback; hosted UAC-disabled runners use a real disposable user instead.
     $environment = @(
         [Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
             ForEach-Object { '{0}={1}' -f [string]$_.Key, [string]$_.Value }
@@ -242,7 +241,8 @@ function Start-SetupWizardProcess([string]$Application, [string]$WorkingDirector
         $Application,
         [string[]]@(),
         $WorkingDirectory,
-        [string[]]$environment
+        [string[]]$environment,
+        $false
     )
 }
 
