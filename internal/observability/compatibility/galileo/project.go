@@ -77,8 +77,13 @@ func Project(input redaction.Projection, configured Limits) Result {
 	if len(missing) > 0 {
 		return rejected(ReasonSchemaMissingRequired, missing...)
 	}
+	correlationKeys, valid := mergeCanonicalCorrelationAttributes(projectedAttributes, envelope.Correlation)
+	if !valid {
+		return rejected(ReasonInvalidProjection)
+	}
+	required := append(requiredAttributeKeys(contract), correlationKeys...)
 	projectedAttributes = trimAttributes(
-		projectedAttributes, requiredAttributeKeys(contract), limits.MaxAttributesPerSpan,
+		projectedAttributes, required, limits.MaxAttributesPerSpan,
 	)
 	body, ok := projectBody(envelope.Body, projectedAttributes, contract, limits)
 	if !ok {
@@ -102,6 +107,39 @@ func Project(input redaction.Projection, configured Limits) Result {
 		return rejected(ReasonProjectionTooLarge)
 	}
 	return accepted(contract.shape, projected)
+}
+
+var canonicalCorrelationAttributeBindings = [...]struct {
+	wire      string
+	attribute string
+}{
+	{"semantic_event_id", "defenseclaw.semantic_event.id"},
+	{"logical_event_id", "defenseclaw.logical_event.id"},
+	{"connector_instance_id", "defenseclaw.connector.instance.id"},
+}
+
+func mergeCanonicalCorrelationAttributes(attributes, correlation map[string]any) ([]string, bool) {
+	keys := make([]string, 0, len(canonicalCorrelationAttributeBindings))
+	for _, binding := range canonicalCorrelationAttributeBindings {
+		raw, present := correlation[binding.wire]
+		if !present {
+			continue
+		}
+		value, valid := raw.(string)
+		if !valid || value == "" || !utf8.ValidString(value) || len(value) > observability.MaxCorrelationIDBytes {
+			return nil, false
+		}
+		if current, exists := attributes[binding.attribute]; exists {
+			currentValue, same := current.(string)
+			if !same || currentValue != value {
+				return nil, false
+			}
+		} else {
+			attributes[binding.attribute] = strings.Clone(value)
+		}
+		keys = append(keys, binding.attribute)
+	}
+	return keys, true
 }
 
 func validEnvelope(envelope projectedEnvelope) bool {

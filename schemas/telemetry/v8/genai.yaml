@@ -211,6 +211,48 @@ attributes:
     id: identifier-v1
     notes: nonempty bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.semantic_event.id
+  type: string
+  brief: Immutable identity for one accepted upstream telemetry occurrence; every canonical signal derived from that occurrence shares this value.
+  examples:
+  - 019f6a2c-1111-7abc-8def-0123456789ab
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: DefenseClaw-minted UUIDv7 unless an authenticated canonical sender reports the exact semantic occurrence identity
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.logical_event.id
+  type: string
+  brief: Durable identity grouping exact hook, proxy, and native-telemetry observations of the same logical event.
+  examples:
+  - 019f6a2c-2222-7abc-8def-0123456789ab
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: DefenseClaw-minted UUIDv7; late graph merges use relationships and never rewrite an already exported identifier
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.connector.instance.id
+  type: string
+  brief: Stable DefenseClaw identity for one authenticated connector installation instance.
+  examples:
+  - 019f6a2c-3333-7abc-8def-0123456789ab
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: DefenseClaw-minted UUIDv7 persisted across sidecar restarts; payload claims cannot override authenticated connector identity
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.operation.id
   type: string
   brief: Bounded operation identity
@@ -1099,6 +1141,20 @@ attributes:
   normalization:
     id: identifier-v1
     notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.invocation.id
+  type: string
+  brief: Canonical identity for one exact tool invocation, distinct from transport, turn, message, and model-operation identities.
+  examples:
+  - tool-call-01J
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: Source-reported native tool-call identity when exact, otherwise DefenseClaw-minted at a real tool invocation boundary
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.model.attempt
   type: int64
@@ -2017,12 +2073,27 @@ groups:
     requirement_level: optional
     conditional: telemetry-canary-enabled-v1
   body_fields: []
-- id: correlation.request
+- id: correlation.occurrence
   type: attribute_group
-  brief: Request and turn correlation.
+  brief: DefenseClaw occurrence, logical grouping, and authenticated connector-instance identity shared by canonical logs and traces.
   stability: stable
   introduced_in: telemetry-registry-v1
   extends: []
+  attributes:
+  - ref: defenseclaw.semantic_event.id
+    requirement_level: recommended
+  - ref: defenseclaw.logical_event.id
+    requirement_level: recommended
+  - ref: defenseclaw.connector.instance.id
+    requirement_level: recommended
+  body_fields: []
+- id: correlation.request
+  type: attribute_group
+  brief: Transport request and prompt-response turn correlation; the two meanings are never interchangeable.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.occurrence
   attributes:
   - ref: defenseclaw.request.id
     requirement_level: recommended
@@ -2099,6 +2170,8 @@ groups:
   - ref: gen_ai.tool.type
     requirement_level: recommended
   - ref: gen_ai.tool.call.id
+    requirement_level: recommended
+  - ref: defenseclaw.tool.invocation.id
     requirement_level: recommended
   - ref: defenseclaw.tool.provider
     requirement_level: recommended

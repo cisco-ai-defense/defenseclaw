@@ -77,6 +77,15 @@ func TestCanonicalTraceProjectionPreservesDirectOTLPContract(t *testing.T) {
 		t.Fatalf("nested trace contract mismatch: event=%+v link=%+v", span.Events[0], span.Links[0])
 	}
 	attributes := keyValuesByName(span.Attributes)
+	for key, want := range map[string]string{
+		"defenseclaw.semantic_event.id":     "semantic-event-1",
+		"defenseclaw.logical_event.id":      "logical-event-1",
+		"defenseclaw.connector.instance.id": "connector-instance-1",
+	} {
+		if got := attributes[key].GetStringValue(); got != want {
+			t.Fatalf("correlation attribute %s=%q, want %q", key, got, want)
+		}
+	}
 	assertAnyValueArm(t, attributes["defenseclaw.model.retry_count"], "int", int64(0))
 	assertAnyValueArm(t, attributes["gen_ai.request.temperature"], "double", float64(0))
 	assertAnyValueArm(t, attributes["defenseclaw.model.streaming"], "bool", true)
@@ -364,7 +373,12 @@ func canonicalProjectionModelRecordForPlan(t *testing.T, digest string, generati
 		Envelope: observability.FamilyEnvelopeInput{
 			Source: observability.SourceGateway,
 			Correlation: observability.Correlation{
-				TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
+				SemanticEventID: "semantic-event-1", LogicalEventID: "logical-event-1",
+				ConnectorInstanceID: "connector-instance-1", RunID: "run-1",
+				RequestID: "transport-request-1", TurnID: "turn-1",
+				ModelRequestID: "model-request-1", ModelResponseID: "model-response-1",
+				ToolInvocationID: "tool-invocation-1",
+				TraceID:          "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
 			},
 			Provenance: observability.FamilyProvenanceInput{
 				Producer: "gateway.test", BinaryVersion: "8.0.0", ConfigGeneration: generation,

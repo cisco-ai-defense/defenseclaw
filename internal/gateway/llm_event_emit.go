@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -31,20 +32,24 @@ const (
 )
 
 type llmEventMeta struct {
-	Source        string
-	Provider      string
-	Model         string
-	SessionID     string
-	RequestID     string
-	RunID         string
-	TurnID        string
-	PromptID      string
-	ResponseID    string
-	AgentID       string
-	AgentName     string
-	AgentType     string
-	RootAgentID   string
-	ParentAgentID string
+	Source             string
+	Provider           string
+	Model              string
+	SessionID          string
+	RequestID          string
+	RunID              string
+	TurnID             string
+	MessageID          string
+	SourceEventID      string
+	SourceSequence     string
+	PromptID           string
+	ResponseID         string
+	ResponseIDReported bool
+	AgentID            string
+	AgentName          string
+	AgentType          string
+	RootAgentID        string
+	ParentAgentID      string
 	// ParentAgentReported distinguishes an upstream-native parent identity from
 	// the deterministic placeholder synthesized for parent-session-only hooks.
 	ParentAgentReported bool
@@ -80,12 +85,27 @@ type llmEventMeta struct {
 	DestinationApp    string
 	ToolName          string
 	ToolID            string
+	ToolIDReported    bool
 	FinishReasons     []string
 	// TraceEventID scopes the short OTel anchor used for one hook delivery.
 	// Session and agent identifiers remain stable across deliveries, but a
 	// backend must not be asked to append children to a trace it has already
 	// indexed and finalized.
 	TraceEventID string
+}
+
+func (m llmEventMeta) reportedResponseID() string {
+	if m.ResponseIDReported {
+		return m.ResponseID
+	}
+	return ""
+}
+
+func (m llmEventMeta) reportedToolID() string {
+	if m.ToolIDReported {
+		return m.ToolID
+	}
+	return ""
 }
 
 func agentPhaseCodePointer(meta llmEventMeta) *int {
@@ -130,8 +150,19 @@ func emitLLMPromptEventV8WithEmitter(
 	prompt string,
 	rawRequestBody []byte,
 ) string {
+	promptID, _, _ := emitLLMPromptEventV8WithEmitterStatus(ctx, emitter, meta, prompt, rawRequestBody)
+	return promptID
+}
+
+func emitLLMPromptEventV8WithEmitterStatus(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	meta llmEventMeta,
+	prompt string,
+	rawRequestBody []byte,
+) (string, bool, error) {
 	if strings.TrimSpace(prompt) == "" && len(rawRequestBody) == 0 {
-		return ""
+		return "", false, nil
 	}
 	if meta.PromptID == "" {
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID)
@@ -140,8 +171,8 @@ func emitLLMPromptEventV8WithEmitter(
 	if strings.TrimSpace(content) == "" {
 		content = string(rawRequestBody)
 	}
-	emitHookModelRequestLogV8WithEmitter(ctx, emitter, meta, content)
-	return meta.PromptID
+	persisted, err := emitHookModelRequestLogV8WithEmitter(ctx, emitter, meta, content)
+	return meta.PromptID, persisted, err
 }
 
 func (a *APIServer) emitLLMResponseEventV8(
@@ -165,8 +196,21 @@ func emitLLMResponseEventV8WithEmitter(
 	response, rawResponseBody string,
 	finishReasons []string,
 ) string {
+	responseID, _, _ := emitLLMResponseEventV8WithEmitterStatus(
+		ctx, emitter, meta, response, rawResponseBody, finishReasons,
+	)
+	return responseID
+}
+
+func emitLLMResponseEventV8WithEmitterStatus(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	meta llmEventMeta,
+	response, rawResponseBody string,
+	finishReasons []string,
+) (string, bool, error) {
 	if strings.TrimSpace(response) == "" && rawResponseBody == "" && len(finishReasons) == 0 {
-		return ""
+		return "", false, nil
 	}
 	if meta.ResponseID == "" {
 		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
@@ -175,8 +219,8 @@ func emitLLMResponseEventV8WithEmitter(
 	if strings.TrimSpace(content) == "" {
 		content = rawResponseBody
 	}
-	emitHookModelResponseLogV8WithEmitter(ctx, emitter, meta, content, finishReasons)
-	return meta.ResponseID
+	persisted, err := emitHookModelResponseLogV8WithEmitter(ctx, emitter, meta, content, finishReasons)
+	return meta.ResponseID, persisted, err
 }
 
 func (p *GuardrailProxy) emitLLMPromptEventV8(
@@ -186,6 +230,32 @@ func (p *GuardrailProxy) emitLLMPromptEventV8(
 	rawRequestBody []byte,
 ) string {
 	emitter, _ := p.observabilityV8TraceRuntime().(sidecarRuntimeEmitter)
+	if meta.PromptID == "" {
+		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID)
+	}
+	if spec, ok := p.proxyCorrelationSpecV8(); ok && p.store != nil && emitter != nil {
+		correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+			store: p.store, emitter: emitter, spec: spec,
+			rail: audit.CorrelationRailProxy, surface: connector.CorrelationSurfaceProxy,
+			lifecycle: connector.CorrelationLifecycleModelStart, meta: meta, rawPayload: llmRailRawPayload(rawRequestBody, prompt),
+		})
+		if err != nil {
+			readLoopLogf("[correlation] proxy model-start persistence failed; telemetry emission skipped")
+			return meta.PromptID
+		}
+		if correlated.suppressEmission {
+			return correlated.meta.PromptID
+		}
+		promptID, persisted, emitErr := emitLLMPromptEventV8WithEmitterStatus(
+			correlated.ctx, emitter, correlated.meta, prompt, rawRequestBody,
+		)
+		if err := finalizeLLMRailCanonicalEmission(
+			correlated.ctx, p.store, correlated.receipt, persisted, emitErr,
+		); err != nil {
+			readLoopLogf("[correlation] proxy model-start canonical persistence incomplete")
+		}
+		return promptID
+	}
 	return emitLLMPromptEventV8WithEmitter(ctx, emitter, meta, prompt, rawRequestBody)
 }
 
@@ -196,6 +266,33 @@ func (p *GuardrailProxy) emitLLMResponseEventV8(
 	finishReasons []string,
 ) string {
 	emitter, _ := p.observabilityV8TraceRuntime().(sidecarRuntimeEmitter)
+	if meta.ResponseID == "" {
+		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
+	}
+	if spec, ok := p.proxyCorrelationSpecV8(); ok && p.store != nil && emitter != nil {
+		correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+			store: p.store, emitter: emitter, spec: spec,
+			rail: audit.CorrelationRailProxy, surface: connector.CorrelationSurfaceProxy,
+			lifecycle: connector.CorrelationLifecycleModelEnd, meta: meta,
+			rawPayload: []byte(firstNonEmpty(rawResponseBody, response)),
+		})
+		if err != nil {
+			readLoopLogf("[correlation] proxy model-end persistence failed; telemetry emission skipped")
+			return meta.ResponseID
+		}
+		if correlated.suppressEmission {
+			return correlated.meta.ResponseID
+		}
+		responseID, persisted, emitErr := emitLLMResponseEventV8WithEmitterStatus(
+			correlated.ctx, emitter, correlated.meta, response, rawResponseBody, finishReasons,
+		)
+		if err := finalizeLLMRailCanonicalEmission(
+			correlated.ctx, p.store, correlated.receipt, persisted, emitErr,
+		); err != nil {
+			readLoopLogf("[correlation] proxy model-end canonical persistence incomplete")
+		}
+		return responseID
+	}
 	return emitLLMResponseEventV8WithEmitter(ctx, emitter, meta, response, rawResponseBody, finishReasons)
 }
 
@@ -205,7 +302,39 @@ func (r *EventRouter) emitLLMPromptEventV8(
 	prompt string,
 	rawRequestBody []byte,
 ) string {
-	return emitLLMPromptEventV8WithEmitter(ctx, r.observabilityV8RuntimeEmitter(), meta, prompt, rawRequestBody)
+	emitter := r.observabilityV8RuntimeEmitter()
+	if meta.PromptID == "" {
+		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID)
+	}
+	if r.store != nil && emitter != nil {
+		spec, ok := r.streamCorrelationSpecV8()
+		if !ok {
+			readLoopLogf("[correlation] stream model-start profile unavailable; telemetry emission skipped")
+			return meta.PromptID
+		}
+		correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+			store: r.store, emitter: emitter, spec: spec,
+			rail: audit.CorrelationRailStream, surface: connector.CorrelationSurfaceStream,
+			lifecycle: connector.CorrelationLifecycleModelStart, meta: meta, rawPayload: llmRailRawPayload(rawRequestBody, prompt),
+		})
+		if err != nil {
+			readLoopLogf("[correlation] stream model-start persistence failed; telemetry emission skipped")
+			return meta.PromptID
+		}
+		if correlated.suppressEmission {
+			return correlated.meta.PromptID
+		}
+		promptID, persisted, emitErr := emitLLMPromptEventV8WithEmitterStatus(
+			correlated.ctx, emitter, correlated.meta, prompt, rawRequestBody,
+		)
+		if err := finalizeLLMRailCanonicalEmission(
+			correlated.ctx, r.store, correlated.receipt, persisted, emitErr,
+		); err != nil {
+			readLoopLogf("[correlation] stream model-start canonical persistence incomplete")
+		}
+		return promptID
+	}
+	return emitLLMPromptEventV8WithEmitter(ctx, emitter, meta, prompt, rawRequestBody)
 }
 
 func (r *EventRouter) emitLLMResponseEventV8(
@@ -214,9 +343,88 @@ func (r *EventRouter) emitLLMResponseEventV8(
 	response, rawResponseBody string,
 	finishReasons []string,
 ) string {
-	return emitLLMResponseEventV8WithEmitter(
-		ctx, r.observabilityV8RuntimeEmitter(), meta, response, rawResponseBody, finishReasons,
-	)
+	responseID, _, _, _ := r.emitLLMResponseEventV8Correlated(ctx, meta, response, rawResponseBody, finishReasons)
+	return responseID
+}
+
+func (r *EventRouter) emitLLMResponseEventV8Correlated(
+	ctx context.Context,
+	meta llmEventMeta,
+	response, rawResponseBody string,
+	finishReasons []string,
+) (string, context.Context, llmEventMeta, bool) {
+	emitter := r.observabilityV8RuntimeEmitter()
+	if meta.ResponseID == "" {
+		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
+	}
+	if r.store != nil && emitter != nil {
+		spec, ok := r.streamCorrelationSpecV8()
+		if !ok {
+			readLoopLogf("[correlation] stream model-end profile unavailable; telemetry emission skipped")
+			return meta.ResponseID, ctx, meta, false
+		}
+		correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+			store: r.store, emitter: emitter, spec: spec,
+			rail: audit.CorrelationRailStream, surface: connector.CorrelationSurfaceStream,
+			lifecycle: connector.CorrelationLifecycleModelEnd, meta: meta,
+			rawPayload: []byte(firstNonEmpty(rawResponseBody, response)),
+		})
+		if err != nil {
+			readLoopLogf("[correlation] stream model-end persistence failed; telemetry emission skipped")
+			return meta.ResponseID, ctx, meta, false
+		}
+		if correlated.suppressEmission {
+			return correlated.meta.ResponseID, correlated.ctx, correlated.meta, false
+		}
+		responseID, persisted, emitErr := emitLLMResponseEventV8WithEmitterStatus(
+			correlated.ctx, emitter, correlated.meta, response, rawResponseBody, finishReasons,
+		)
+		if err := finalizeLLMRailCanonicalEmission(
+			correlated.ctx, r.store, correlated.receipt, persisted, emitErr,
+		); err != nil {
+			readLoopLogf("[correlation] stream model-end canonical persistence incomplete")
+		}
+		return responseID, correlated.ctx, correlated.meta, true
+	}
+	return emitLLMResponseEventV8WithEmitter(ctx, emitter, meta, response, rawResponseBody, finishReasons), ctx, meta, true
+}
+
+func (p *GuardrailProxy) proxyCorrelationSpecV8() (connector.CorrelationSpec, bool) {
+	if p == nil || p.connector == nil {
+		return connector.CorrelationSpec{}, false
+	}
+	var spec connector.CorrelationSpec
+	if provider, ok := p.connector.(connector.CorrelationSpecProvider); ok {
+		spec = provider.CorrelationSpec(p.setupOpts)
+	} else {
+		var found bool
+		spec, found = connector.CorrelationSpecForConnector(p.connectorName(), "")
+		if !found {
+			return connector.CorrelationSpec{}, false
+		}
+	}
+	if err := spec.Validate(); err != nil || !correlationSpecDeclaresSurface(spec, connector.CorrelationSurfaceProxy) {
+		return connector.CorrelationSpec{}, false
+	}
+	return spec, true
+}
+
+func (r *EventRouter) streamCorrelationSpecV8() (connector.CorrelationSpec, bool) {
+	if r == nil {
+		return connector.CorrelationSpec{}, false
+	}
+	spec, ok := connector.CorrelationSpecForConnector("openclaw", "")
+	if !ok || spec.Validate() != nil || !correlationSpecDeclaresSurface(spec, connector.CorrelationSurfaceStream) {
+		return connector.CorrelationSpec{}, false
+	}
+	return spec, true
+}
+
+func llmRailRawPayload(raw []byte, content string) []byte {
+	if len(raw) != 0 {
+		return raw
+	}
+	return []byte(content)
 }
 
 func (a *APIServer) emitToolInvocationEventV8(
@@ -288,7 +496,7 @@ func (p *GuardrailProxy) emitOpenAIToolCallEvents(ctx context.Context, meta llmE
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
 		fallback := meta
 		fallback.ToolID = stableLLMEventID("tool", meta.Source, meta.SessionID, meta.RequestID, meta.Model, "unparsed")
-		emitHookToolLogV8WithEmitter(ctx, emitter, fallback, "call", "unknown", string(toolCallsJSON), "", nil)
+		p.emitProxyToolStartV8(ctx, emitter, fallback, "unknown", string(toolCallsJSON))
 		return
 	}
 	for i, tc := range toolCalls {
@@ -296,7 +504,57 @@ func (p *GuardrailProxy) emitOpenAIToolCallEvents(ctx context.Context, meta llmE
 		callMeta := meta
 		callMeta.ToolName = toolName
 		callMeta.ToolID = firstNonEmpty(tc.ID, stableLLMEventID("tool", meta.Source, meta.SessionID, meta.RequestID, meta.Model, intString(i)))
-		emitHookToolLogV8WithEmitter(ctx, emitter, callMeta, "call", toolName, tc.Function.Arguments, "", nil)
+		callMeta.ToolIDReported = strings.TrimSpace(tc.ID) != ""
+		p.emitProxyToolStartV8(ctx, emitter, callMeta, toolName, tc.Function.Arguments)
+	}
+}
+
+func (p *GuardrailProxy) emitProxyToolStartV8(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	meta llmEventMeta,
+	toolName string,
+	arguments string,
+) {
+	if p == nil {
+		return
+	}
+	// A missing store is a supported reduced/test configuration. Production
+	// has a store and a validated proxy profile; once both are available the
+	// occurrence must commit before any log is exported.
+	if p.store == nil || emitter == nil {
+		emitHookToolLogV8WithEmitter(ctx, emitter, meta, "call", toolName, arguments, "", nil)
+		return
+	}
+	spec, ok := p.proxyCorrelationSpecV8()
+	if !ok {
+		// Connectors without a proxy correlation surface retain their previous
+		// telemetry behavior. A connector declaring proxy correlation is
+		// validated by proxyCorrelationSpecV8 and takes the fail-closed path
+		// below on any persistence failure.
+		emitHookToolLogV8WithEmitter(ctx, emitter, meta, "call", toolName, arguments, "", nil)
+		return
+	}
+	correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+		store: p.store, emitter: emitter, spec: spec,
+		rail: audit.CorrelationRailProxy, surface: connector.CorrelationSurfaceProxy,
+		lifecycle: connector.CorrelationLifecycleToolStart, meta: meta,
+		rawPayload: []byte(arguments),
+	})
+	if err != nil {
+		readLoopLogf("[correlation] proxy tool-start persistence failed; telemetry emission skipped")
+		return
+	}
+	if correlated.suppressEmission {
+		return
+	}
+	persisted, emitErr := emitHookToolLogV8WithEmitter(
+		correlated.ctx, emitter, correlated.meta, "call", toolName, arguments, "", nil,
+	)
+	if err := finalizeLLMRailCanonicalEmission(
+		correlated.ctx, p.store, correlated.receipt, persisted, emitErr,
+	); err != nil {
+		readLoopLogf("[correlation] proxy tool-start canonical persistence incomplete")
 	}
 }
 
@@ -1808,11 +2066,6 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		a.hookToolInvocations = make(map[string][]hookToolInvocation)
 	}
 	boundedArguments := boundedHookLLMSpanContent(arguments)
-	if strings.TrimSpace(meta.ToolID) != "" {
-		if _, completed := a.hookLLMSpanCompleted[stableLLMEventID("hook-tool-span", key)]; completed {
-			return
-		}
-	}
 	if queue := a.hookToolInvocations[key]; strings.TrimSpace(meta.ToolID) != "" && len(queue) > 0 {
 		pending := queue[0]
 		pending.meta = meta
@@ -1856,29 +2109,6 @@ func (a *APIServer) takeHookToolInvocation(
 	var snapshot hookToolInvocation
 	if len(queue) > 0 {
 		snapshot = queue[0]
-	}
-	nativeToolID := strings.TrimSpace(meta.ToolID) != ""
-	baseCompletionKey := stableLLMEventID("hook-tool-span", key, result)
-	if nativeToolID {
-		baseCompletionKey = stableLLMEventID("hook-tool-span", key)
-	}
-	completionKey := baseCompletionKey
-	if snapshot.id != "" && !nativeToolID {
-		completionKey = stableLLMEventID("hook-tool-span", baseCompletionKey, snapshot.id)
-	}
-	if a.hookLLMSpanCompleted == nil {
-		a.hookLLMSpanCompleted = make(map[string]struct{})
-	}
-	if _, duplicate := a.hookLLMSpanCompleted[completionKey]; duplicate {
-		return hookToolInvocation{}, false
-	}
-	putBoundedHookLLMSpanCompletion(
-		a.hookLLMSpanCompleted, &a.hookLLMSpanCompletedOrder, completionKey,
-	)
-	if completionKey != baseCompletionKey {
-		putBoundedHookLLMSpanCompletion(
-			a.hookLLMSpanCompleted, &a.hookLLMSpanCompletedOrder, baseCompletionKey,
-		)
 	}
 	if len(queue) > 0 {
 		if len(queue) == 1 {
@@ -2168,26 +2398,14 @@ func (a *APIServer) rememberHookLLMSpanPrompt(meta llmEventMeta, prompt string) 
 	}
 }
 
-// takeHookLLMSpanPrompt atomically deduplicates completed hook turns and takes
-// the best prompt snapshot: exact source/session/turn first, then the latest
-// source/session prompt. A duplicate Stop event therefore cannot create a
-// second Galileo trace.
+// takeHookLLMSpanPrompt atomically takes the best prompt snapshot: exact
+// source/session/turn first, then the latest source/session prompt. It does not
+// suppress repeated completions. Only the durable correlation receipt layer
+// may suppress an exact delivery replay; without an exact, profile-declared
+// receipt key, identical responses are independent observations.
 func (a *APIServer) takeHookLLMSpanPrompt(meta llmEventMeta, response string) (hookLLMSpanPrompt, bool) {
-	completionKey := stableLLMEventID(
-		"hook-span", meta.Source, meta.SessionID, meta.AgentID, meta.ExecutionID,
-		meta.TurnID, meta.PromptID, response,
-	)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
-	if a.hookLLMSpanCompleted == nil {
-		a.hookLLMSpanCompleted = make(map[string]struct{})
-	}
-	if _, duplicate := a.hookLLMSpanCompleted[completionKey]; duplicate {
-		return hookLLMSpanPrompt{}, false
-	}
-	putBoundedHookLLMSpanCompletion(
-		a.hookLLMSpanCompleted, &a.hookLLMSpanCompletedOrder, completionKey,
-	)
 
 	var snapshot hookLLMSpanPrompt
 	for _, key := range hookLLMSpanPromptKeys(meta) {

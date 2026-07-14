@@ -39,6 +39,9 @@ func validRecordInput() RecordInput {
 		Phase:     "completed",
 		Outcome:   OutcomeCompleted,
 		Correlation: Correlation{
+			SemanticEventID:     "semantic-event-1",
+			LogicalEventID:      "logical-event-1",
+			ConnectorInstanceID: "connector-instance-1",
 			RunID:               "run-1",
 			RequestID:           "request-1",
 			SessionID:           "session-1",
@@ -164,11 +167,94 @@ func TestRecordEnvelopeAndDeterministicJSON(t *testing.T) {
 		t.Fatalf("log contains metric payload arm: %#v", wire)
 	}
 	correlation := wire["correlation"].(map[string]any)
-	if len(correlation) != 20 {
-		t.Fatalf("correlation fields = %d, want 20: %#v", len(correlation), correlation)
+	if len(correlation) != 23 {
+		t.Fatalf("correlation fields = %d, want 23: %#v", len(correlation), correlation)
 	}
 	if !strings.Contains(string(first), `"field_classes":{"/count":"metadata","/message":"content"}`) {
 		t.Fatalf("field classes not deterministic: %s", first)
+	}
+}
+
+func TestRecordWithCorrelationDefaultsFillsOnlyMissingFields(t *testing.T) {
+	input := validRecordInput()
+	input.Correlation.SemanticEventID = ""
+	input.Correlation.LogicalEventID = ""
+	input.Correlation.ConnectorInstanceID = ""
+	record, err := NewRecord(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := Correlation{
+		SemanticEventID:     "semantic-default",
+		LogicalEventID:      "logical-default",
+		ConnectorInstanceID: "connector-instance-default",
+		RequestID:           input.Correlation.RequestID,
+	}
+	merged, err := record.WithCorrelationDefaults(defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := merged.Correlation()
+	if got.SemanticEventID != defaults.SemanticEventID ||
+		got.LogicalEventID != defaults.LogicalEventID ||
+		got.ConnectorInstanceID != defaults.ConnectorInstanceID ||
+		got.RequestID != input.Correlation.RequestID {
+		t.Fatalf("merged correlation = %#v", got)
+	}
+	original := record.Correlation()
+	if original.SemanticEventID != "" || original.LogicalEventID != "" || original.ConnectorInstanceID != "" {
+		t.Fatalf("WithCorrelationDefaults mutated receiver: %#v", original)
+	}
+	defaults.SemanticEventID = "mutated-after-call"
+	if merged.Correlation().SemanticEventID != "semantic-default" {
+		t.Fatal("merged record retained caller-owned default storage")
+	}
+}
+
+func TestRecordWithCorrelationDefaultsKeepsRecordOwnedBusinessIdentity(t *testing.T) {
+	record, err := NewRecord(validRecordInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := record.WithCorrelationDefaults(Correlation{
+		TurnID:           "different-secret-turn",
+		ToolInvocationID: "different-secret-tool",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation := merged.Correlation()
+	if correlation.TurnID != "turn-1" || correlation.ToolInvocationID != "tool-1" {
+		t.Fatalf("record-owned business identity was replaced: %#v", correlation)
+	}
+}
+
+func TestRecordWithCorrelationDefaultsRejectsOccurrenceConflictWithoutLeakingValues(t *testing.T) {
+	record, err := NewRecord(validRecordInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = record.WithCorrelationDefaults(Correlation{SemanticEventID: "different-secret-event"})
+	if err == nil {
+		t.Fatal("expected occurrence identity conflict")
+	}
+	if strings.Contains(err.Error(), "different-secret-event") || strings.Contains(err.Error(), "semantic-event-1") {
+		t.Fatalf("conflict error leaked correlation values: %v", err)
+	}
+	if !strings.Contains(err.Error(), "semantic_event_id") {
+		t.Fatalf("conflict error did not identify the field: %v", err)
+	}
+}
+
+func TestRecordWithCorrelationDefaultsRejectsInvalidDefault(t *testing.T) {
+	record, err := NewRecord(validRecordInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = record.WithCorrelationDefaults(Correlation{SemanticEventID: strings.Repeat("x", MaxCorrelationIDBytes+1)})
+	if err == nil || !strings.Contains(err.Error(), "invalid correlation defaults") {
+		t.Fatalf("invalid default error = %v", err)
 	}
 }
 

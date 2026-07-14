@@ -94,9 +94,12 @@ or execution filters.
 The Agent360 lifecycle DAG is also interactive. Clicking a node or edge exposes
 its total count, grouping key, available lineage, session, lifecycle/execution,
 sequence, operation/call, outcome, connector, and trace fields plus
-time-range-preserving drill-down links. Session and spawn anchors may use the
-prior 24 hours to keep selected-range boundary edges renderable; a recovered spawn
-appears only when that child has graph-eligible activity in the selected range.
+time-range-preserving drill-down links. Session and durable lineage anchors may
+use the prior 24 hours to keep selected-range boundary edges renderable; a
+recovered lineage edge appears only when that child has graph-eligible activity
+in the selected range. Agent parentage comes only from active typed `parent_of`
+or inverse `delegated_by` relationship records, never a raw parent field or trace
+parentage.
 Repeated model calls are summarized per
 owning agent, provider, and model. Tool calls are summarized per owning agent as
 Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, or Task control;

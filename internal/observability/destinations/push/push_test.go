@@ -197,6 +197,18 @@ func TestAdaptersRejectInvalidUTF8Projection(t *testing.T) {
 	}
 }
 
+func TestProjectedAliasesPreserveCanonicalOccurrenceCorrelation(t *testing.T) {
+	projected := []byte(`{"record_id":"r1","correlation":{"semantic_event_id":"semantic-1","logical_event_id":"logical-1","connector_instance_id":"connector-instance-1"},"body":{"message":"safe"}}`)
+	alias, _, ok := projectedAliases(projected)
+	if !ok {
+		t.Fatal("canonical projection was rejected")
+	}
+	if alias.SemanticEventID != "semantic-1" || alias.LogicalEventID != "logical-1" ||
+		alias.ConnectorInstanceID != "connector-instance-1" {
+		t.Fatalf("correlation aliases = %#v", alias)
+	}
+}
+
 func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 	capture := &requestCapture{status: http.StatusOK, body: `{"text":"Success","code":0,"ackId":7}`}
 	server := httptest.NewServer(capture)
@@ -210,7 +222,7 @@ func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projected := `{"record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","correlation":{"run_id":"run-1"},"body":{"message":"safe","verbatim":"<>&","removed":false}}`
+	projected := `{"record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","correlation":{"semantic_event_id":"semantic-1","logical_event_id":"logical-1","connector_instance_id":"connector-instance-1","run_id":"run-1"},"body":{"message":"safe","verbatim":"<>&","removed":false}}`
 	counters := deliverBatch(t, "splunk", adapter, projected)
 	if counters.Delivered != 1 || counters.Rejected != 0 {
 		t.Fatalf("counters=%+v", counters)
@@ -224,7 +236,7 @@ func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 		request.header.Get("Content-Type") != "application/json" {
 		t.Fatalf("unexpected request metadata")
 	}
-	want := `{"index":"main","source":"defenseclaw","sourcetype":"defenseclaw:config","event":{"record":` + projected + `,"id":"r1","record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","run_id":"run-1","details":"safe"}}` + "\n"
+	want := `{"index":"main","source":"defenseclaw","sourcetype":"defenseclaw:config","event":{"record":` + projected + `,"id":"r1","record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","semantic_event_id":"semantic-1","logical_event_id":"logical-1","connector_instance_id":"connector-instance-1","run_id":"run-1","details":"safe"}}` + "\n"
 	if got := string(request.payload); got != want {
 		t.Fatalf("wire mismatch\n got: %s\nwant: %s", got, want)
 	}

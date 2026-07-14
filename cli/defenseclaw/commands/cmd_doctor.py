@@ -2516,6 +2516,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     """Inspect v8 status and exercise each enabled Galileo runtime route."""
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.custody_status import inspect_connector_custody
     from defenseclaw.observability.v8_config import V8ConfigError
     from defenseclaw.observability.v8_status import inspect_v8_operator_status
 
@@ -2526,12 +2527,152 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return
     _check_observability_v8_status(status, r, live_health=live_health)
+    _check_connector_export_custody(
+        inspect_connector_custody(
+            status.local_path
+            or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
+            cfg.data_dir,
+        ),
+        r,
+    )
     _check_galileo_trace_canaries(
         status,
         r,
         config_path=str(config_path),
         data_dir=cfg.data_dir,
     )
+
+
+def _check_connector_export_custody(report, r: _DoctorResult) -> None:
+    """Render per-instance custody and bounded native-ingest evidence.
+
+    This is intentionally diagnostic only. In particular, doctor never edits
+    a connector exporter, and an ``external`` row is the expected result for
+    a migrated connector until the operator runs explicit managed setup.
+    """
+
+    if report.state != "available":
+        _emit(
+            "skip",
+            "Connector export custody",
+            f"unavailable ({report.reason}); correlation remains active for received telemetry",
+            r=r,
+        )
+        return
+    if not report.instances:
+        _emit(
+            "skip",
+            "Connector export custody",
+            "no connector instance has emitted correlation evidence yet",
+            r=r,
+        )
+    for item in report.instances:
+        suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
+        label = f"Connector OTLP: {item.connector}{suffix}"
+        if item.custody == "external":
+            tag = "warn"
+            conditions = [
+                "native exporter bypasses DefenseClaw",
+                "migration left its endpoint and credentials untouched",
+                "run explicit managed connector setup to opt in",
+            ]
+            if item.credential_state == "invalid":
+                tag = "fail"
+                conditions.append(
+                    f"invalid credentials observed ({item.authentication_failures} recent failures)"
+                )
+            elif item.credential_state == "recovered":
+                conditions.append(
+                    f"credentials recovered after {item.authentication_failures} recent failures"
+                )
+            if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
+                tag = "fail"
+                conditions.append(
+                    f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
+                )
+            elif item.drop_only_batches:
+                conditions.append(
+                    f"partial drop-only evidence ({item.drop_only_batches}/{item.normalized_batches} batches)"
+                )
+            _emit(
+                tag,
+                label,
+                "custody=external; " + "; ".join(conditions),
+                r=r,
+            )
+            continue
+        if item.custody == "hook_only":
+            _emit(
+                "pass",
+                label,
+                "custody=hook_only; no native exporter is expected; correlation remains active on hook telemetry",
+                r=r,
+            )
+            continue
+
+        tag = "pass"
+        conditions: list[str] = []
+        if item.managed_config_state == "drifted":
+            tag = "fail"
+            conditions.append("managed-exporter drift detected")
+        elif item.managed_config_state == "unverifiable":
+            tag = "warn"
+            conditions.append("managed-exporter state is unverifiable")
+        elif item.managed_config_state == "verified":
+            conditions.append(f"managed-exporter verified ({item.managed_config_files} files)")
+        else:
+            conditions.append(f"managed-exporter={item.managed_config_state}")
+
+        if item.credential_state == "invalid":
+            tag = "fail"
+            conditions.append(
+                f"invalid credentials observed ({item.authentication_failures} recent failures)"
+            )
+        elif item.credential_state == "recovered":
+            if tag == "pass":
+                tag = "warn"
+            conditions.append(
+                f"credentials recovered after {item.authentication_failures} recent failures"
+            )
+        else:
+            conditions.append("credentials=no recent failure")
+
+        if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
+            tag = "fail"
+            conditions.append(
+                f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
+            )
+        elif item.drop_only_batches:
+            if tag == "pass":
+                tag = "warn"
+            conditions.append(
+                f"partial drop-only evidence ({item.drop_only_batches}/{item.normalized_batches} batches)"
+            )
+        else:
+            conditions.append(f"normalized_batches={item.normalized_batches}")
+        _emit(
+            tag,
+            label,
+            f"custody=defenseclaw; profile={item.profile_version}; " + "; ".join(conditions),
+            r=r,
+        )
+
+    if report.unattributed_authentication_failures:
+        _emit(
+            "warn",
+            "Native OTLP credentials",
+            f"invalid credential attempts could not be attributed to a trusted connector; "
+            f"count={report.unattributed_authentication_failures}; "
+            f"last={report.last_unattributed_authentication_failure or 'unknown'}",
+            r=r,
+        )
+    if report.event_rows_truncated:
+        _emit(
+            "warn",
+            "Connector OTLP evidence",
+            "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
+            r=r,
+        )
 
 
 def _check_galileo_trace_canaries(

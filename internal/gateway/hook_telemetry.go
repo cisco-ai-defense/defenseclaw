@@ -92,9 +92,9 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // row's action column instead of the canonical
 // ActionConnectorHook. Sinks that want to keep "1 row per
 // codex.notify in" should filter on action=connector-hook only.
-func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) {
+func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
-		return
+		return fmt.Errorf("gateway: audit logger is unavailable")
 	}
 	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
 	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
@@ -109,7 +109,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
-	_ = a.logger.LogEventCtx(ctx, audit.Event{
+	return a.logger.LogEventCtx(ctx, audit.Event{
 		Action:     auditAction,
 		Target:     env.Event,
 		Actor:      "defenseclaw",

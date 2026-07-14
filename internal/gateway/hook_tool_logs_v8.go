@@ -28,7 +28,9 @@ func (a *APIServer) emitHookToolLogV8(
 	if a == nil {
 		return
 	}
-	emitHookToolLogV8WithEmitter(ctx, a.observabilityV8RuntimeEmitter(), meta, phase, tool, input, output, exitCode)
+	_, _ = emitHookToolLogV8WithEmitter(
+		ctx, a.observabilityV8RuntimeEmitter(), meta, phase, tool, input, output, exitCode,
+	)
 }
 
 func emitHookToolLogV8WithEmitter(
@@ -37,10 +39,10 @@ func emitHookToolLogV8WithEmitter(
 	meta llmEventMeta,
 	phase, tool, input, output string,
 	exitCode *int,
-) {
+) (bool, error) {
 	tool = strings.TrimSpace(tool)
 	if ctx == nil || !hookModelV8Identifier(tool) {
-		return
+		return false, nil
 	}
 	if meta.ToolID == "" {
 		meta.ToolID = stableLLMEventID("tool", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, tool, phase)
@@ -60,7 +62,7 @@ func emitHookToolLogV8WithEmitter(
 	}
 	connector := hookModelV8StableToken(meta.Source)
 	if connector == "" || emitter == nil {
-		return
+		return false, nil
 	}
 	rawSeverity := "INFO"
 	if outcome != observability.OutcomeAttempted && outcome != observability.OutcomeCompleted {
@@ -77,9 +79,9 @@ func emitHookToolLogV8WithEmitter(
 		observability.ProducerKey(gatewaylog.EventToolInvocation),
 	)
 	if err != nil {
-		return
+		return false, err
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(
+	emission, err := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -108,6 +110,10 @@ func emitHookToolLogV8WithEmitter(
 		}
 		return builder.BuildLogToolInvocationCompleted(completed)
 	})
+	if err != nil {
+		return false, err
+	}
+	return emission.LocalPersisted(), nil
 }
 
 func hookToolLogEnvelope(

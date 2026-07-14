@@ -9,13 +9,18 @@ keywords:
   - DefenseClaw rollback
 ---
 
-From a coherent installed `0.8.4` bridge, use the built-in controller. It
-authenticates and privately acquires its exact published `0.8.4` rollback
-artifacts before backup, service stop, or target mutation:
+From a coherent installed `0.8.4` bridge, use the current release-owned POSIX
+resolver. It automatically authenticates an ephemeral Cosign verifier when the
+host does not already have one, then privately acquires the exact published
+`0.8.4` rollback artifacts before backup, service stop, or target mutation:
 
 ```bash
-defenseclaw upgrade --yes
+bash defenseclaw-upgrade.sh --yes
 ```
+
+The frozen `0.8.4` built-in `defenseclaw upgrade --yes` remains valid when
+Cosign is already on `PATH`; that published controller cannot gain the new
+automatic bootstrap retroactively.
 
 For `0.8.3` or older, follow the complete Sigstore and SHA-256 bootstrap in the
 linked CLI reference below, then run the authenticated target-release resolver
@@ -25,12 +30,14 @@ asset in latest mode:
 bash defenseclaw-upgrade.sh --yes
 ```
 
-On Windows, run `& .\defenseclaw-upgrade.ps1 -Yes`. Do not pass `--version` or
-`-Version` to either resolver.
+This hard-cut release remains POSIX-only because `0.8.4` published no Windows
+gateway, rollback, or SBOM binaries. The signed PowerShell resolver may be
+present as a refusal surface, but it must not claim or attempt a Windows bridge
+path. Do not copy POSIX artifacts onto Windows.
 
 Do not use the built-in form to cross a manifest-required bridge. A
-`0.8.3`-or-older host must use the authenticated current release-owned shell or
-PowerShell resolver in latest mode, as shown below. Its immutable built-in
+`0.8.3`-or-older POSIX host must use the authenticated current release-owned
+shell resolver in latest mode, as shown below. Its immutable built-in
 command and an explicit hard-cut target both refuse before stopping services or
 changing installed state. Some frozen controllers then print an obsolete raw
 network-to-shell hint; do not execute it. Use the authenticated bootstrap from
@@ -59,12 +66,12 @@ services or installed files change. A coherent installed `0.8.4` bridge may use
 its built-in controller, which acquires authenticated rollback custody itself.
 
 Installed users must download and authenticate the release-owned resolver
-asset before running it. Use the complete POSIX or PowerShell `cosign` and
-SHA-256 bootstrap in the
+asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap in the
 [repository CLI reference](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade);
 it does not require a source checkout. From a checkout of the current release,
-the equivalent local commands are `./scripts/upgrade.sh --yes` on macOS/Linux
-and `.\scripts\upgrade.ps1 -Yes` on Windows.
+the equivalent local command is `./scripts/upgrade.sh --yes` on macOS/Linux.
+The signed PowerShell resolver is refusal-only because no Windows bridge
+binary was published.
 
 When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
 health-checks the bridge for a pre-bridge source, then hands control to its
@@ -102,9 +109,12 @@ resolver invocation, recovery waits for that child, reinstalls the retained
 authenticated `0.8.4` wheel without importing a possibly partial target wheel,
 restores exact bridge state, and then retries only after bridge health passes.
 
-Release `0.8.4` and later require local `cosign` verification against the exact
-protected release workflow identity. `--allow-unverified` cannot weaken that
-boundary.
+Release `0.8.4` and later require Cosign verification against the exact
+protected release workflow identity. The current POSIX resolver and fresh
+installer prefer an existing `cosign`; when it is absent, they download pinned
+Cosign `2.6.3` into an owner-only temporary directory, authenticate it against a
+hard-coded platform SHA-256, use it once, and retire it. They never install it
+system-wide or modify `PATH`. `--allow-unverified` cannot weaken this boundary.
 
 <Callout title="Release order is part of the safety contract">
 Release engineering must publish and soak immutable `0.8.4`, with the complete
@@ -112,27 +122,30 @@ historical baseline matrix green, before cutting `0.8.5`. The hard cut must
 consume the published `0.8.4` bridge—not an unpublished branch artifact.
 </Callout>
 
-`0.8.4+` releases require `cosign` to verify the exact GitHub release-workflow
-identity. If it is missing, the resolver exits before service stop or installed
-mutation; SHA-256 coverage alone is not treated as authenticated provenance.
+`0.8.4+` releases require Cosign to verify the exact GitHub release-workflow
+identity. A missing system Cosign triggers the authenticated temporary POSIX
+bootstrap; a download, platform, digest, or signature failure exits before
+service stop or installed mutation. SHA-256 coverage of DefenseClaw artifacts
+alone is not treated as authenticated provenance.
 
 <Callout title="Prefer upgrade over re-running the installer">
 Install scripts are for a fresh host. `defenseclaw upgrade` adds artifact
 verification, exact state backups, required migrations, atomic activation,
 service restart, local-bundle refresh, and post-upgrade health checks.
-The shell and PowerShell installers refuse an existing installation before
-dependency installation or artifact replacement.
+The POSIX installer refuses an existing installation before dependency
+installation or artifact replacement. The PowerShell surface has no installable
+Windows runtime for this cut.
 </Callout>
 
 ## Supported installation paths at the hard cut
 
 | Path | Existing installation behavior |
 | --- | --- |
-| Built-in `defenseclaw upgrade` | A coherent installed `0.8.4` controller supports `0.8.4 → 0.8.5` by first acquiring authenticated bridge rollback custody. Frozen older controllers refuse a direct hard cut before mutation. |
-| Release-owned shell/PowerShell resolver | Tested old sources auto-hop through `0.8.4` from one command; unsupported sources fail closed with the exact bridge-first path. |
-| Fresh-install shell/PowerShell script | Refuses to overwrite an existing installation and points to the resolver. |
+| Built-in `defenseclaw upgrade` | A coherent installed `0.8.4` controller supports `0.8.4 → 0.8.5` when Cosign is already on `PATH`; the immutable controller predates automatic verifier bootstrap. From `0.8.5` onward, the POSIX built-in command can authenticate a temporary pinned verifier. Frozen older controllers refuse a direct hard cut before mutation. |
+| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. The signed PowerShell resolver is refusal-only because Windows publication remains disabled. |
+| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. No Windows fresh-install binary is published for this cut. |
 | Package manager | No in-place package-manager hard-cut path is supported unless that package invokes the same resolver; direct replacement must be disabled. |
-| Manual wheel/gateway artifacts | Direct copying is not a supported upgrade. Use the POSIX resolver's `--plan` or the PowerShell resolver's verified confirmation, then let that resolver perform the transaction. |
+| Manual wheel/gateway artifacts | Direct copying is not a supported upgrade. Use the POSIX resolver's `--plan`, then let that resolver perform the transaction. |
 
 ## What the upgrade does
 

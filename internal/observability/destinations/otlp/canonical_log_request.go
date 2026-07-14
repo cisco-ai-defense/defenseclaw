@@ -121,7 +121,9 @@ func (builder *CanonicalLogRequestBuilder) Build(batch delivery.Batch) (*collect
 				stringAttribute("defenseclaw.event.name", identity.EventName),
 			},
 		}
-		projectCanonicalLogFields(record, projected)
+		if !projectCanonicalLogFields(record, projected) {
+			return nil, false
+		}
 		records = append(records, record)
 	}
 	resource, ok := proto.Clone(builder.resource).(*resourcepb.Resource)

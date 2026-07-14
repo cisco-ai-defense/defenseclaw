@@ -104,7 +104,9 @@ func eventRouterModelMeta(
 	model string,
 ) llmEventMeta {
 	meta := streamLLMEventMeta(r, sessionID, runID, provider, model, "")
-	meta.TurnID = firstNonEmpty(messageID, intString(sequence))
+	meta.MessageID = proxyV8StableID(messageID)
+	meta.SourceEventID = meta.MessageID
+	meta.SourceSequence = intString(sequence)
 	meta.ResponseID = stableLLMEventID(
 		"response", eventRouterToolConnector, sessionID, messageID, intString(sequence),
 	)
@@ -115,7 +117,6 @@ func eventRouterModelMeta(
 	meta.PolicyID = proxyV8StableID(meta.PolicyID)
 	meta.SessionID = proxyV8StableID(meta.SessionID)
 	meta.RunID = proxyV8StableID(meta.RunID)
-	meta.TurnID = proxyV8StableID(meta.TurnID)
 	meta.ResponseID = proxyV8StableID(meta.ResponseID)
 	return meta
 }

@@ -537,6 +537,94 @@ func TestEventHistoryWriterPersistsExactCanonicalProjectionAndLegacyView(t *test
 	}
 }
 
+func TestEventHistoryWriterCommitsCorrelationObservationAtomically(t *testing.T) {
+	store := newV8HistoryStore(t)
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
+	event, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{eventName: "diagnostic.message"})
+	buildRecord := func(recordID string, semantic SemanticEventID, traceID, spanID string) observability.Record {
+		record, err := observability.NewRecord(observability.RecordInput{
+			Timestamp: time.Now().UTC(), RecordID: recordID,
+			Identity: observability.EventIdentity{Bucket: observability.BucketDiagnostic,
+				Signal: observability.SignalLogs, Name: "diagnostic.message"},
+			Source: observability.SourceGateway, Connector: "codex", Action: "diagnostic.emit",
+			Outcome: observability.OutcomeCompleted,
+			Correlation: observability.Correlation{
+				SemanticEventID: string(semantic), LogicalEventID: string(event.LogicalEventID),
+				ConnectorInstanceID: string(instance.ConnectorInstanceID), SessionID: "session",
+				TurnID: "turn", TraceID: traceID,
+				SpanID: spanID, AgentID: "agent",
+			},
+			Provenance: observability.Provenance{Producer: "gateway.audit", BinaryVersion: "v8-test",
+				RegistrySchemaVersion: 1, ConfigGeneration: 1,
+				ConfigDigest: stringsOf("a", 64)},
+			Body:         map[string]any{"message": "correlated"},
+			FieldClasses: map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := buildRecord("atomic-correlation-log", event.SemanticEventID,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)
+	if err := writer.Append(record, projection); err != nil {
+		t.Fatal(err)
+	}
+	var auditRows, observationRows int
+	var projectionHash string
+	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(projection_hash) FROM audit_events WHERE id=?`, record.RecordID()).Scan(&auditRows, &projectionHash); err != nil {
+		t.Fatal(err)
+	}
+	var observedHash string
+	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(projection_hash) FROM correlation_observations WHERE record_id=?`, record.RecordID()).Scan(&observationRows, &observedHash); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 1 || observationRows != 1 || observedHash != projectionHash {
+		t.Fatalf("audit=%d observation=%d hashes=%q/%q", auditRows, observationRows, projectionHash, observedHash)
+	}
+
+	legacy := buildRecord("atomic-correlation-legacy-trace", event.SemanticEventID, "trace-123", "span-123")
+	legacyProjection := projectV8HistoryRecord(t, legacy, observabilityredaction.ProfileNone)
+	if err := writer.Append(legacy, legacyProjection); err != nil {
+		t.Fatalf("legacy opaque trace correlation prevented audit persistence: %v", err)
+	}
+	var legacyAuditTrace sql.NullString
+	if err := store.db.QueryRow(`SELECT trace_id FROM audit_events WHERE id=?`, legacy.RecordID()).Scan(&legacyAuditTrace); err != nil {
+		t.Fatal(err)
+	}
+	var observationTrace, observationSpan sql.NullString
+	if err := store.db.QueryRow(`SELECT trace_id, span_id FROM correlation_observations WHERE record_id=?`, legacy.RecordID()).Scan(&observationTrace, &observationSpan); err != nil {
+		t.Fatal(err)
+	}
+	if !legacyAuditTrace.Valid || legacyAuditTrace.String != "trace-123" || observationTrace.Valid || observationSpan.Valid {
+		t.Fatalf("legacy/exact topology split = audit:%#v observation:%#v/%#v",
+			legacyAuditTrace, observationTrace, observationSpan)
+	}
+
+	missing, _ := NewSemanticEventID()
+	failed := buildRecord("atomic-correlation-missing", missing,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	failedProjection := projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)
+	if err := writer.Append(failed, failedProjection); err == nil {
+		t.Fatal("event-history append succeeded without an accepted correlation event")
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id=?`, failed.RecordID()).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 0 {
+		t.Fatal("failed correlation observation left a partially committed audit row")
+	}
+}
+
 func TestLegacyAlertQueryCannotTreatV8HistoryAsMutableQueue(t *testing.T) {
 	store := newV8HistoryStore(t)
 	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})

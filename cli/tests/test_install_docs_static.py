@@ -47,13 +47,7 @@ DOC_INSTALL_COMMANDS = {
         'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector none',
         'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --no-openclaw',
     ),
-    "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
-    + (
-        f'$Version = "{CURRENT_RELEASE}"',
-        '$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"',
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version",
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version -Connector codex -Quickstart -Yes",
-    ),
+    "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES,
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"VERSION={CURRENT_RELEASE}",
         'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
@@ -1803,10 +1797,8 @@ def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops(
     assert "0.7.0" in install
     assert "0.2.x" in install
     assert "0.3.x" in install
-    assert "native Windows matrix currently covers only" in install
-    assert "Windows source older than `0.8.0`" in install
-    assert "Windows older than `0.8.0`" in cli
-    assert "`0.8.0`–`0.8.4` only" in cli
+    assert "no supported Windows source version" in install
+    assert "no Windows hard-cut path is published" in cli
     assert "Explicitly upgrade to `0.8.4`" not in cli
     assert "reach tested baseline `0.4.0`" not in cli
     assert "Upgrading from 0.2.0 to an artifact-backed release" not in install
@@ -1822,7 +1814,7 @@ def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback()
     assert "Re-run that same resolver in latest mode, without a version override" in section
     assert "do not manually copy a backup over live state" in section
     assert "./scripts/upgrade.sh --yes" in section
-    assert ".\\scripts\\upgrade.ps1 -Yes" in section
+    assert "PowerShell resolver remains a preflight refusal surface only" in section
     assert "upgrade.sh --version" not in section
     assert "VERSION=0.3.0" not in section
     assert "curl -sSfL" not in section
@@ -1835,25 +1827,15 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
     quickstart = (ROOT / "docs/GUARDRAIL_QUICKSTART.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
 
-    for asset in ("defenseclaw-upgrade.sh", "defenseclaw-upgrade.ps1"):
-        assert asset in cli
-    assert "cosign verify-blob" in cli
-    assert "-UseBasicParsing" in cli
+    assert "defenseclaw-upgrade.sh" in cli
+    assert "verify-blob" in cli
     latest_assets = "releases/latest/download/"
-    assert cli.count(latest_assets) == 2
+    assert cli.count(latest_assets) == 1
     assert re.search(r"releases/download/\d+\.\d+\.\d+/", cli) is None
     assert f"releases/download/v{CURRENT_RELEASE}/" not in cli
     assert "That URL is only a locator" in " ".join(cli.split())
-    documented_windows = cli.split(
-        "```powershell\n# PowerShell: download the current resolver, then run latest mode\n",
-        1,
-    )[1].split("\n```", 1)[0]
-    generated_windows = (
-        authenticated_resolver_instructions(CURRENT_RELEASE)
-        .replace(f"releases/download/{CURRENT_RELEASE}/", latest_assets)
-        .split("Windows PowerShell:\n", 1)[1]
-    )
-    assert documented_windows.strip() == generated_windows.strip()
+    generated = authenticated_resolver_instructions(CURRENT_RELEASE)
+    assert "Preflight refusal only" in generated
     assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
     expected_reference = "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade"
@@ -1887,17 +1869,17 @@ def test_hard_cut_docs_reject_frozen_raw_hint_and_allow_coherent_bridge_controll
     guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
     rendered = "\n".join((cli, install, site, guardrail))
 
-    assert "Run `defenseclaw upgrade --yes`" in cli
+    assert "release-owned POSIX shell resolver performs the supported one-command path" in cli
     assert "installed, coherent `0.8.4` bridge controller" in install
     assert "supports `0.8.4 → 0.8.5`" in site
-    assert "authenticated bridge rollback custody" in site
+    assert "acquires authenticated rollback custody itself" in site
     assert "bash defenseclaw-upgrade.sh --yes" in install
     assert "bash defenseclaw-upgrade.sh --yes" in site
-    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in install
-    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in site
+    assert "PowerShell resolver" in install and "refusal" in install
+    assert "PowerShell resolver" in site and "refusal" in site
     assert "without `--version`" in cli
-    assert "Do not add `--version` or `-Version`" in install
-    assert "Do not pass `--version` or" in site
+    assert "Do not add `--version` to the resolver command" in install
+    assert "without a target version" in site
     assert "0.8.3` or older" in install
     assert "`0.8.3` or older" in site
     assert rendered.count("obsolete raw") >= 3

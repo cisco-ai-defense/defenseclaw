@@ -19,6 +19,7 @@ const hookToolV8Producer = "gateway.hook.tool"
 
 type generatedToolV8Observation struct {
 	meta                   llmEventMeta
+	correlationCtx         context.Context
 	producer               string
 	tool                   string
 	arguments              string

@@ -40,7 +40,7 @@ func (a *APIServer) importOTLPTraceTargetV8(
 	) (observability.Record, error) {
 		result.collected = true
 		input, unknownDropped, err := a.mapInboundTraceV8(
-			leaf, match, target, wire, authenticatedSource, receipt, snapshot,
+			ctx, leaf, match, target, wire, authenticatedSource, receipt, snapshot,
 		)
 		if err != nil {
 			mapFailed = true
@@ -83,6 +83,7 @@ func (a *APIServer) importOTLPTraceTargetV8(
 }
 
 func (a *APIServer) mapInboundTraceV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	target observability.InboundTarget,
@@ -99,7 +100,7 @@ func (a *APIServer) mapInboundTraceV8(
 	if err != nil {
 		return observability.InboundImportedTraceInput{}, 0, err
 	}
-	correlation, err := inboundCorrelationWithSnapshotV8(leaf, match, authenticatedSource, snapshot)
+	correlation, err := inboundCorrelationWithSnapshotV8(ctx, leaf, match, authenticatedSource, snapshot)
 	if err != nil {
 		return observability.InboundImportedTraceInput{}, 0, err
 	}
@@ -148,7 +149,7 @@ func (a *APIServer) mapInboundTraceV8(
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, match, target, authenticatedSource, &correlation, fields, selected,
+		leaf, target, authenticatedSource, &correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedTraceInput{}, 0, err

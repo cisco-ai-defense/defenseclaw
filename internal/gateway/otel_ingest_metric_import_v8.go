@@ -38,7 +38,7 @@ func (a *APIServer) importOTLPMetricTargetV8(
 	) (observability.Record, error) {
 		result.collected = true
 		input, unknownDropped, err := mapInboundNativeMetricV8(
-			leaf, match, target, wire, authenticatedSource, receipt, snapshot,
+			ctx, leaf, match, target, wire, authenticatedSource, receipt, snapshot,
 		)
 		if err != nil {
 			mapFailed = true
@@ -78,6 +78,7 @@ func (a *APIServer) importOTLPMetricTargetV8(
 }
 
 func mapInboundNativeMetricV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	target observability.InboundTarget,
@@ -119,7 +120,7 @@ func mapInboundNativeMetricV8(
 	if err != nil {
 		return observability.InboundImportedMetricInput{}, 0, err
 	}
-	correlation, err := inboundCorrelationWithSnapshotV8(leaf, match, authenticatedSource, snapshot)
+	correlation, err := inboundCorrelationWithSnapshotV8(ctx, leaf, match, authenticatedSource, snapshot)
 	if err != nil {
 		return observability.InboundImportedMetricInput{}, 0, err
 	}
@@ -200,7 +201,7 @@ func (a *APIServer) deriveOTLPMetricObservationV8(
 			return observability.Record{}, errOTLPInboundMappingV8
 		}
 		input, unknownDropped, absent, duplicate, err := a.mapInboundDerivedMetricV8(
-			leaf, match, target, wire, authenticatedSource, receipt, snapshot, variant,
+			ctx, leaf, match, target, wire, authenticatedSource, receipt, snapshot, variant,
 		)
 		result.unknownDropped = unknownDropped
 		if absent || duplicate {
@@ -253,6 +254,7 @@ func (a *APIServer) deriveOTLPMetricObservationV8(
 }
 
 func (a *APIServer) mapInboundDerivedMetricV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	target observability.InboundTarget,
@@ -273,7 +275,7 @@ func (a *APIServer) mapInboundDerivedMetricV8(
 	if err != nil || absent || duplicate {
 		return observability.InboundImportedMetricInput{}, unknown, absent, duplicate, err
 	}
-	correlation, err := inboundCorrelationWithSnapshotV8(leaf, match, authenticatedSource, snapshot)
+	correlation, err := inboundCorrelationWithSnapshotV8(ctx, leaf, match, authenticatedSource, snapshot)
 	if err != nil {
 		return observability.InboundImportedMetricInput{}, unknown, false, false, err
 	}
@@ -566,7 +568,7 @@ func (a *APIServer) inboundDerivedMetricFieldsV8(
 			return nil, false, err
 		}
 		return a.enrichInboundWithHookLifecycleV8(
-			leaf, match, target, authenticatedSource, correlation, fields, selected,
+			leaf, target, authenticatedSource, correlation, fields, selected,
 		)
 	}
 	fields := inboundTargetFieldsByName(target)
@@ -640,7 +642,7 @@ func (a *APIServer) inboundDerivedMetricFieldsV8(
 		}
 	}
 	result, hookFound, err := a.enrichInboundWithHookLifecycleV8(
-		leaf, match, target, authenticatedSource, correlation, result, selected,
+		leaf, target, authenticatedSource, correlation, result, selected,
 	)
 	return result, hookFound, err
 }

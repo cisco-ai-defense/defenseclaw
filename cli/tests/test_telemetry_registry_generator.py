@@ -460,6 +460,9 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
         "defenseclaw.config.generation",
         "defenseclaw.run.id",
         "defenseclaw.operation.id",
+        "defenseclaw.semantic_event.id",
+        "defenseclaw.logical_event.id",
+        "defenseclaw.connector.instance.id",
         "defenseclaw.agent.phase",
         "defenseclaw.agent.phase.previous",
         "defenseclaw.agent.phase.from",
@@ -691,10 +694,17 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
 
     alias_specs = (
         ("conversation-id-v1", "gen_ai.conversation.id", ["conversation.id"]),
+        ("codex-conversation-id-v1", "gen_ai.conversation.id", ["conversation.id"]),
         ("request-id-v1", "defenseclaw.request.id", ["request.id"]),
         ("turn-id-v1", "defenseclaw.turn.id", ["turn.id"]),
+        ("codex-turn-id-v1", "defenseclaw.turn.id", ["turn.id"]),
+        ("claudecode-turn-id-v1", "defenseclaw.turn.id", ["prompt.id"]),
         ("provider-v1", "gen_ai.provider.name", ["provider"]),
         ("request-model-v1", "gen_ai.request.model", ["model"]),
+        ("codex-tool-name-v1", "gen_ai.tool.name", ["tool_name"]),
+        ("codex-tool-call-id-v1", "gen_ai.tool.call.id", ["call_id"]),
+        ("codex-tool-arguments-v1", "gen_ai.tool.call.arguments", ["arguments"]),
+        ("codex-tool-result-v1", "gen_ai.tool.call.result", ["output"]),
         ("input-content-v1", "gen_ai.input.messages", ["prompt"]),
         ("output-content-v1", "gen_ai.output.messages", ["response"]),
         ("input-tokens-v1", "gen_ai.usage.input_tokens", ["input_tokens"]),
@@ -706,8 +716,18 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
         {
             "id": alias_id,
             "target": target,
-            "value_type": "double" if alias_id == "log-duration-seconds-v1" else "string",
-            "normalization": "bounded-v1",
+            "value_type": (
+                "double"
+                if alias_id == "log-duration-seconds-v1"
+                else "structured"
+                if alias_id in {"codex-tool-arguments-v1", "codex-tool-result-v1"}
+                else "string"
+            ),
+            "normalization": (
+                "structured-genai-v1"
+                if alias_id in {"codex-tool-arguments-v1", "codex-tool-result-v1"}
+                else "bounded-v1"
+            ),
             "sources": sources,
         }
         for alias_id, target, sources in alias_specs
@@ -835,6 +855,27 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
             {"kind": "singleton", "primary_family": "diagnostic.message"},
             [predicate("leaf_attribute", "event.name", "equals", values=["codex.user_prompt"])],
             aliases=["conversation-id-v1", "input-content-v1"],
+        ),
+        binding(
+            "otlp.codex.tool_result.v1",
+            "logs",
+            ["codex"],
+            "import",
+            {"kind": "singleton", "primary_family": "fixture.log.2"},
+            [
+                predicate("leaf_attribute", "event.name", "equals", values=["codex.tool_result"]),
+                predicate("leaf_attribute", "call_id", "present"),
+                predicate("leaf_attribute", "tool_name", "present"),
+            ],
+            aliases=[
+                "codex-conversation-id-v1",
+                "request-id-v1",
+                "codex-turn-id-v1",
+                "codex-tool-name-v1",
+                "codex-tool-call-id-v1",
+                "codex-tool-arguments-v1",
+                "codex-tool-result-v1",
+            ],
         ),
         binding(
             "otlp.claudecode.user_prompt.v1",
@@ -983,6 +1024,7 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
         "otlp.genai.span.operation.v1",
         "otlp.codex.turn_span.v1",
         "otlp.codex.user_prompt.v1",
+        "otlp.codex.tool_result.v1",
         "otlp.claudecode.user_prompt.v1",
         "otlp.codex.response_completed.v1",
         "otlp.claudecode.token_usage.v1",
@@ -5084,9 +5126,11 @@ def test_family_schema_version_above_uint32_is_rejected_before_rendering(tmp_pat
             "canonical structural names must be snake_case",
         ),
         (
-            lambda registry: registry["structural_contract"]["correlation"]["fields"][4]["otlp"].__setitem__(
-                "target", "wrongTraceId"
-            ),
+            lambda registry: next(
+                field
+                for field in registry["structural_contract"]["correlation"]["fields"]
+                if field["name"] == "trace_id"
+            )["otlp"].__setitem__("target", "wrongTraceId"),
             "typed OTLP mapping mismatch",
         ),
     ],

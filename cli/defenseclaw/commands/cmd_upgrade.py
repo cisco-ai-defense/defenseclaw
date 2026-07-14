@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import click
 import requests
@@ -104,6 +104,21 @@ _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
 _STRICT_SIGSTORE_RELEASE_VERSION = "0.8.4"
 _RELEASE_WORKFLOW_IDENTITY = f"https://github.com/{GITHUB_REPO}/.github/workflows/release.yaml@refs/heads/main"
+_COSIGN_BOOTSTRAP_VERSION = "2.6.3"
+_COSIGN_BOOTSTRAP_MAX_BYTES = 200 * 1024 * 1024
+_COSIGN_BOOTSTRAP_ALLOWED_HOSTS = frozenset(
+    {
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
+_COSIGN_BOOTSTRAP_SHA256 = {
+    ("darwin", "amd64"): "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
+    ("darwin", "arm64"): "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
+    ("linux", "amd64"): "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4",
+    ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
+}
 _TARGET_CONFIG_VERSION = 8
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
@@ -1811,6 +1826,180 @@ def _fail_unsigned_checksums(
     raise SystemExit(1)
 
 
+def _validate_cosign_bootstrap_url(url: str) -> None:
+    """Constrain the pinned verifier download to Sigstore's GitHub assets."""
+
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("Cosign bootstrap URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _COSIGN_BOOTSTRAP_ALLOWED_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        raise OSError("Cosign bootstrap redirect left the pinned HTTPS host set")
+
+
+def _download_bootstrap_cosign(destination_dir: str) -> str:
+    """Download and authenticate the pinned POSIX Cosign verifier.
+
+    This deliberately does not install anything system-wide. The verifier is
+    staged in a private temporary directory, authenticated against a digest
+    compiled into this controller, used once, and retired with the staging
+    directory. The hard-coded digest is the trust anchor; release metadata is
+    never allowed to choose either the verifier version or its checksum.
+    """
+
+    os_name, arch = _detect_platform()
+    expected = _COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
+    if expected is None or os.name != "posix":
+        raise OSError(
+            f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}"
+        )
+
+    root_info = os.lstat(destination_dir)
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise OSError("Cosign bootstrap directory is not private and caller-owned")
+
+    filename = f"cosign-{os_name}-{arch}"
+    url = (
+        "https://github.com/sigstore/cosign/releases/download/"
+        f"v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
+    )
+    response = None
+    for _redirect in range(6):
+        _validate_cosign_bootstrap_url(url)
+        for attempt in range(1, 4):
+            try:
+                response = requests.get(
+                    url,
+                    stream=True,
+                    timeout=(15, 120),
+                    allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                if attempt < 3:
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise OSError(f"pinned Cosign verifier download failed: {exc}") from exc
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < 3:
+                response.close()
+                response = None
+                time.sleep(2 ** (attempt - 1))
+                continue
+            break
+        if response is None:
+            raise OSError("pinned Cosign verifier download returned no response")
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("location", "")
+            response.close()
+            response = None
+            if not location:
+                raise OSError("pinned Cosign verifier redirect had no location")
+            url = urljoin(url, location)
+            continue
+        break
+    else:
+        raise OSError("pinned Cosign verifier exceeded the redirect limit")
+
+    if response is None or response.status_code != 200:
+        status = "unavailable" if response is None else str(response.status_code)
+        if response is not None:
+            response.close()
+        raise OSError(f"pinned Cosign verifier download failed (HTTP {status})")
+
+    content_length = response.headers.get("content-length", "")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            response.close()
+            raise OSError("pinned Cosign verifier has an invalid content length") from exc
+        if not 0 < declared_size <= _COSIGN_BOOTSTRAP_MAX_BYTES:
+            response.close()
+            raise OSError("pinned Cosign verifier exceeds the download limit")
+
+    destination = os.path.join(destination_dir, filename)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            for chunk in response.iter_content(chunk_size=128 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > _COSIGN_BOOTSTRAP_MAX_BYTES:
+                    raise OSError("pinned Cosign verifier exceeds the download limit")
+                stream.write(chunk)
+                digest.update(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        response.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    if size == 0 or digest.hexdigest() != expected:
+        raise OSError("pinned Cosign verifier SHA-256 authentication failed")
+    # The file was created above with O_EXCL|O_NOFOLLOW inside a private
+    # temporary directory, so it cannot be a pre-existing symlink.  Linux
+    # does not implement chmod(..., follow_symlinks=False); using the normal
+    # chmod here keeps the verified bootstrap portable while retaining the
+    # same custody guarantees.
+    os.chmod(destination, 0o700)
+    info = os.lstat(destination)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or info.st_nlink != 1
+        or info.st_size != size
+    ):
+        raise OSError("authenticated Cosign verifier lost private file custody")
+    if _sha256_file(destination) != expected:
+        raise OSError("authenticated Cosign verifier changed before execution")
+    return destination
+
+
+@contextmanager
+def _cosign_verifier(*, strict: bool):
+    """Yield an existing Cosign or an authenticated ephemeral verifier."""
+
+    existing = shutil.which("cosign")
+    if existing:
+        yield existing
+        return
+    if not strict:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-cosign-") as directory:
+        if os.name == "posix":
+            os.chmod(directory, 0o700)
+        click.echo(
+            f"  {ux.dim('→')} Cosign was not found; authenticating temporary "
+            f"Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
+        )
+        verifier = _download_bootstrap_cosign(directory)
+        ux.ok("Temporary Cosign verifier authenticated")
+        yield verifier
+
+
 def _verify_checksums_sigstore(
     version: str,
     staging_dir: str,
@@ -1826,8 +2015,8 @@ def _verify_checksums_sigstore(
       one of them) is untrusted — a checksum match against an unsigned
       manifest proves nothing about provenance.
     * Bad Sigstore signatures or identities are untrusted.
-    * Missing local ``cosign`` is fatal for 0.8.4+, while older releases keep
-      their compatibility warning.
+    * Missing local ``cosign`` is bootstrapped from a pinned, hard-coded digest
+      for 0.8.4+, while older releases keep their compatibility warning.
     """
     strict_provenance = _version_key(version) >= _version_key(_STRICT_SIGSTORE_RELEASE_VERSION)
     legacy_allow_unverified = allow_unverified and not strict_provenance
@@ -1852,54 +2041,43 @@ def _verify_checksums_sigstore(
         )
         return
 
-    cosign = shutil.which("cosign")
-    if not cosign:
-        if strict_provenance:
-            ux.err(
-                f"DefenseClaw {version} requires cosign to authenticate release provenance.",
-                indent="  ",
-            )
-            ux.subhead(
-                "Install cosign and retry; no release artifacts were accepted.",
-                indent="    ",
-            )
-            raise SystemExit(1)
-        ux.warn(
-            "checksums.txt Sigstore signature is present, but cosign was "
-            "not found on PATH; continuing with checksum verification only. "
-            "Install cosign to verify release provenance.",
-            indent="  ",
-        )
-        return
-
-    identity_args = (
-        ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
-        if strict_provenance
-        else [
-            "--certificate-identity-regexp",
-            f"^https://github.com/{GITHUB_REPO}/.+",
-        ]
-    )
-    cmd = [
-        cosign,
-        "verify-blob",
-        "--certificate",
-        cert_path,
-        "--signature",
-        sig_path,
-        *identity_args,
-        "--certificate-oidc-issuer",
-        "https://token.actions.githubusercontent.com",
-        checksums_path,
-    ]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        with _cosign_verifier(strict=strict_provenance) as cosign:
+            if not cosign:
+                ux.warn(
+                    "checksums.txt Sigstore signature is present, but cosign was "
+                    "not found on PATH; continuing with checksum verification only. "
+                    "Install cosign to verify release provenance.",
+                    indent="  ",
+                )
+                return
+            identity_args = (
+                ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
+                if strict_provenance
+                else [
+                    "--certificate-identity-regexp",
+                    f"^https://github.com/{GITHUB_REPO}/.+",
+                ]
+            )
+            cmd = [
+                cosign,
+                "verify-blob",
+                "--certificate",
+                cert_path,
+                "--signature",
+                sig_path,
+                *identity_args,
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                checksums_path,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         ux.err(f"Could not verify checksums.txt Sigstore signature: {exc}", indent="  ")
         raise SystemExit(1) from exc
@@ -6438,43 +6616,41 @@ def _verify_staged_checksums_signature(
     certificate_path: str,
 ) -> None:
     strict_provenance = _version_key(version) >= _version_key(_STRICT_SIGSTORE_RELEASE_VERSION)
-    cosign = shutil.which("cosign")
-    if not cosign:
-        if strict_provenance:
-            raise OSError(f"staged bridge {version} requires cosign provenance verification")
-        ux.warn(
-            "Staged bridge signature assets are present, but cosign is unavailable; "
-            "continuing with the resolver-verified private handoff and local SHA-256 checks.",
-            indent="  ",
-        )
-        return
-    identity_args = (
-        ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
-        if strict_provenance
-        else [
-            "--certificate-identity-regexp",
-            f"^https://github.com/{GITHUB_REPO}/.+",
-        ]
-    )
     try:
-        completed = subprocess.run(
-            [
-                cosign,
-                "verify-blob",
-                "--certificate",
-                certificate_path,
-                "--signature",
-                signature_path,
-                *identity_args,
-                "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                checksums_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        with _cosign_verifier(strict=strict_provenance) as cosign:
+            if not cosign:
+                ux.warn(
+                    "Staged bridge signature assets are present, but cosign is unavailable; "
+                    "continuing with the resolver-verified private handoff and local SHA-256 checks.",
+                    indent="  ",
+                )
+                return
+            identity_args = (
+                ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
+                if strict_provenance
+                else [
+                    "--certificate-identity-regexp",
+                    f"^https://github.com/{GITHUB_REPO}/.+",
+                ]
+            )
+            completed = subprocess.run(
+                [
+                    cosign,
+                    "verify-blob",
+                    "--certificate",
+                    certificate_path,
+                    "--signature",
+                    signature_path,
+                    *identity_args,
+                    "--certificate-oidc-issuer",
+                    "https://token.actions.githubusercontent.com",
+                    checksums_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise OSError("staged bridge checksum signature verification failed") from exc
     if completed.returncode != 0:

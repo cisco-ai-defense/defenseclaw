@@ -436,8 +436,10 @@ def payload_asset_names(
 def published_asset_names(
     version: str,
     macos_verification_status: str,
+    *,
+    omit_windows_binaries: bool = False,
 ) -> tuple[str, ...]:
-    return tuple(
+    names = tuple(
         sorted(
             (
                 *payload_asset_names(version, macos_verification_status),
@@ -447,6 +449,10 @@ def published_asset_names(
             )
         )
     )
+    if omit_windows_binaries:
+        omitted = set(windows_release_binary_names(version))
+        names = tuple(name for name in names if name not in omitted)
+    return names
 
 
 def windows_release_binary_names(version: str) -> tuple[str, ...]:

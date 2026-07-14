@@ -15,12 +15,13 @@ import (
 const rawTelemetryDedupeTTL = 2 * time.Minute
 
 type rawTelemetryFingerprint struct {
-	connector string
-	kind      string
-	sessionID string
-	turnID    string
-	toolID    string
-	hash      string
+	connector    string
+	kind         string
+	occurrenceID string
+	sessionID    string
+	turnID       string
+	toolID       string
+	hash         string
 }
 
 type rawTelemetryDedupeEntry struct {
@@ -73,21 +74,6 @@ func (d *rawTelemetryDeduper) remember(fp rawTelemetryFingerprint) string {
 	return eventID
 }
 
-func (d *rawTelemetryDeduper) duplicateOf(fp rawTelemetryFingerprint) (string, bool) {
-	if !fp.valid() {
-		return "", false
-	}
-	now := time.Now()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.pruneLocked(now)
-	entry, ok := d.entries[fp.key()]
-	if !ok || !entry.expiresAt.After(now) {
-		return "", false
-	}
-	return entry.eventID, true
-}
-
 func (d *rawTelemetryDeduper) pruneLocked(now time.Time) {
 	for key, entry := range d.entries {
 		if !entry.expiresAt.After(now) {
@@ -99,6 +85,7 @@ func (d *rawTelemetryDeduper) pruneLocked(now time.Time) {
 func (fp rawTelemetryFingerprint) valid() bool {
 	return fp.connector != "" &&
 		fp.kind != "" &&
+		fp.occurrenceID != "" &&
 		fp.hash != "" &&
 		(fp.sessionID != "" || fp.turnID != "" || fp.toolID != "")
 }
@@ -107,6 +94,7 @@ func (fp rawTelemetryFingerprint) key() string {
 	return strings.Join([]string{
 		normalizeRawTelemetryToken(fp.connector),
 		normalizeRawTelemetryToken(fp.kind),
+		fp.occurrenceID,
 		normalizeRawTelemetryToken(fp.sessionID),
 		normalizeRawTelemetryToken(fp.turnID),
 		normalizeRawTelemetryToken(fp.toolID),
@@ -128,57 +116,57 @@ func rawTelemetryEventID(key string) string {
 	return "raw-" + hex.EncodeToString(sum[:8])
 }
 
-func newRawTelemetryFingerprint(connector, kind, sessionID, turnID, toolID string, raw []byte) rawTelemetryFingerprint {
+func newRawTelemetryFingerprint(connector, kind, occurrenceID, sessionID, turnID, toolID string, raw []byte) rawTelemetryFingerprint {
 	raw = []byte(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 {
 		return rawTelemetryFingerprint{}
 	}
 	return rawTelemetryFingerprint{
-		connector: connector,
-		kind:      kind,
-		sessionID: sessionID,
-		turnID:    turnID,
-		toolID:    toolID,
-		hash:      rawTelemetryHash(raw),
+		connector: connector, kind: kind, occurrenceID: occurrenceID,
+		sessionID: sessionID, turnID: turnID, toolID: toolID,
+		hash: rawTelemetryHash(raw),
 	}
 }
 
-func (a *APIServer) rememberRawHookEvent(connector, kind, sessionID, turnID, toolID string, raw []byte) string {
-	return a.rawDeduper().remember(newRawTelemetryFingerprint(connector, kind, sessionID, turnID, toolID, raw))
+func (a *APIServer) rememberRawHookEvent(connector, kind, occurrenceID, sessionID, turnID, toolID string, raw []byte) string {
+	return a.rawDeduper().remember(newRawTelemetryFingerprint(connector, kind, occurrenceID, sessionID, turnID, toolID, raw))
 }
 
-func (a *APIServer) rememberCodexRawHookEvents(req codexHookRequest) []string {
+func (a *APIServer) rememberCodexRawHookEvents(req codexHookRequest, occurrenceID string) []string {
 	var ids []string
 	switch req.HookEventName {
 	case "UserPromptSubmit":
-		ids = append(ids, a.rememberRawHookEvent("codex", "prompt", req.SessionID, req.TurnID, "", []byte(req.Prompt)))
+		ids = append(ids, a.rememberRawHookEvent("codex", "prompt", occurrenceID, req.SessionID, req.TurnID, "", []byte(req.Prompt)))
 	case "PreToolUse", "PermissionRequest":
-		ids = append(ids, a.rememberRawHookEvent("codex", "tool_call", req.SessionID, req.TurnID, req.ToolUseID, codexToolArgs(req)))
+		ids = append(ids, a.rememberRawHookEvent("codex", "tool_call", occurrenceID, req.SessionID, req.TurnID, req.ToolUseID, codexToolArgs(req)))
 	case "PostToolUse":
-		ids = append(ids, a.rememberRawHookEvent("codex", "tool_result", req.SessionID, req.TurnID, req.ToolUseID, []byte(codexToolResponseString(req.ToolResponse))))
+		ids = append(ids, a.rememberRawHookEvent("codex", "tool_result", occurrenceID, req.SessionID, req.TurnID, req.ToolUseID, []byte(codexToolResponseString(req.ToolResponse))))
 	}
 	return uniqueNonEmpty(ids)
 }
 
-func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest) []string {
+func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest, occurrenceID string) []string {
 	var ids []string
 	switch req.HookEventName {
 	case "UserPromptSubmit", "UserPromptExpansion":
-		ids = append(ids, a.rememberRawHookEvent("claudecode", "prompt", req.SessionID, "", "", []byte(claudeCodePromptContent(req))))
+		ids = append(ids, a.rememberRawHookEvent("claudecode", "prompt", occurrenceID, req.SessionID, "", "", []byte(claudeCodePromptContent(req))))
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		ids = append(ids, a.rememberRawHookEvent("claudecode", "tool_call", req.SessionID, "", req.ToolUseID, claudeCodeToolArgs(req)))
+		ids = append(ids, a.rememberRawHookEvent("claudecode", "tool_call", occurrenceID, req.SessionID, "", req.ToolUseID, claudeCodeToolArgs(req)))
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
-		ids = append(ids, a.rememberRawHookEvent("claudecode", "tool_result", req.SessionID, "", req.ToolUseID, []byte(claudeCodeToolOutput(req))))
+		ids = append(ids, a.rememberRawHookEvent("claudecode", "tool_result", occurrenceID, req.SessionID, "", req.ToolUseID, []byte(claudeCodeToolOutput(req))))
 	}
 	return uniqueNonEmpty(ids)
 }
 
-// rememberHookRawEvents is the profile-driven raw event deduper.
+// rememberHookRawEvents assigns compatibility raw-event IDs inside one
+// already accepted semantic occurrence. The payload hash remains part of the
+// projection key, but the durable semantic event ID is mandatory: identical
+// content in two parallel occurrences must never produce the same identity.
 // It folds rememberCodexRawHookEvents and
 // rememberClaudeCodeRawHookEvents into a single helper keyed on the
 // generic agentHookRequest, so any connector — codex, claudecode, and
 // every future generic connector with a non-nil NativeOTLPSpec — gets
-// automatic dedup coverage without bespoke code paths.
+// automatic raw-event join coverage without bespoke code paths.
 //
 // The kind classification (prompt / tool_call / tool_result) matches
 // the bespoke helpers byte-for-byte by canonicalizing the event name
@@ -209,15 +197,15 @@ func (a *APIServer) rememberHookRawEvents(req agentHookRequest) []string {
 	var ids []string
 	switch {
 	case isPromptLikeEvent(canon) || canon == "userpromptexpansion":
-		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "prompt", req.SessionID, req.TurnID, toolID, []byte(req.Content)))
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "prompt", req.SemanticEventID, req.SessionID, req.TurnID, toolID, []byte(req.Content)))
 	case isGenericToolInspectionEvent(canon) || canon == "permissiondenied":
 		args := []byte(req.ToolArgs)
 		if len(args) == 0 {
 			args = []byte("{}")
 		}
-		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_call", req.SessionID, req.TurnID, toolID, args))
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_call", req.SemanticEventID, req.SessionID, req.TurnID, toolID, args))
 	case isResultLikeEvent(canon) || canon == "posttoolbatch":
-		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_result", req.SessionID, req.TurnID, toolID, []byte(req.Content)))
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_result", req.SemanticEventID, req.SessionID, req.TurnID, toolID, []byte(req.Content)))
 	}
 	return uniqueNonEmpty(ids)
 }

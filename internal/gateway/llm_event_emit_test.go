@@ -68,6 +68,25 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	}
 }
 
+func TestCorrelatedCanonicalLogHelpersReportEmitterFailure(t *testing.T) {
+	emitter := &failingHookLifecycleEmitter{}
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "session-emitter-failure",
+		TurnID: "turn-emitter-failure", PromptID: "prompt-emitter-failure",
+		ToolID: "tool-emitter-failure", ToolIDReported: true,
+	}
+	if promptID, persisted, err := emitLLMPromptEventV8WithEmitterStatus(
+		t.Context(), emitter, meta, "prompt", nil,
+	); promptID != meta.PromptID || persisted || err == nil {
+		t.Fatalf("prompt emission id=%q persisted=%t err=%v", promptID, persisted, err)
+	}
+	if persisted, err := emitHookToolLogV8WithEmitter(
+		t.Context(), emitter, meta, "call", "shell", `{}`, "", nil,
+	); persisted || err == nil {
+		t.Fatalf("tool emission persisted=%t err=%v", persisted, err)
+	}
+}
+
 func TestHookSessionStateSnapshotExplicitAgentMissDoesNotSelectSibling(t *testing.T) {
 	t.Parallel()
 	root := llmEventMeta{
@@ -834,7 +853,7 @@ func TestHookLLMSpanUsageCacheIsExecutionScoped(t *testing.T) {
 	}
 }
 
-func TestHookLLMSpanCompletionDedupeIsExecutionAndAgentScoped(t *testing.T) {
+func TestHookLLMSpanCompletionDoesNotSuppressWithoutExactReceipt(t *testing.T) {
 	t.Run("execution", func(t *testing.T) {
 		api := &APIServer{}
 		executionA := llmEventMeta{
@@ -847,8 +866,8 @@ func TestHookLLMSpanCompletionDedupeIsExecutionAndAgentScoped(t *testing.T) {
 		if _, ok := api.takeHookLLMSpanPrompt(executionA, "same response"); !ok {
 			t.Fatal("first execution completion was suppressed")
 		}
-		if _, ok := api.takeHookLLMSpanPrompt(executionA, "same response"); ok {
-			t.Fatal("exact replay inside one execution was not deduped")
+		if _, ok := api.takeHookLLMSpanPrompt(executionA, "same response"); !ok {
+			t.Fatal("same-content completion without an exact receipt was suppressed")
 		}
 		if _, ok := api.takeHookLLMSpanPrompt(executionB, "same response"); !ok {
 			t.Fatal("second execution completion was suppressed by the first")
@@ -901,7 +920,7 @@ func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 	}
 }
 
-func TestHookToolInvocationCacheAndCompletionDedupeAreExecutionScoped(t *testing.T) {
+func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDeduped(t *testing.T) {
 	executionA := llmEventMeta{
 		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution-a",
@@ -924,13 +943,13 @@ func TestHookToolInvocationCacheAndCompletionDedupeAreExecutionScoped(t *testing
 		}
 	})
 
-	t.Run("completion dedupe", func(t *testing.T) {
+	t.Run("completion observations", func(t *testing.T) {
 		api := &APIServer{}
 		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
 			t.Fatal("first execution completion was suppressed")
 		}
-		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); ok {
-			t.Fatal("exact replay inside one execution was not deduped")
+		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
+			t.Fatal("same-content completion without an exact receipt was suppressed")
 		}
 		if _, ok := api.takeHookToolInvocation(executionB, "Bash", "same result"); !ok {
 			t.Fatal("second execution completion was suppressed by the first")
@@ -938,7 +957,7 @@ func TestHookToolInvocationCacheAndCompletionDedupeAreExecutionScoped(t *testing
 	})
 }
 
-func TestHookToolInvocationExactDeliveryDoesNotQueueTwice(t *testing.T) {
+func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
 		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
@@ -951,8 +970,8 @@ func TestHookToolInvocationExactDeliveryDoesNotQueueTwice(t *testing.T) {
 	if _, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok {
 		t.Fatal("first completion was suppressed")
 	}
-	if _, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); ok {
-		t.Fatal("exact completion replay consumed a duplicate queued delivery")
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+		t.Fatalf("second completion should remain an independent observation without queued state: %+v ok=%v", snapshot, ok)
 	}
 	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
 		t.Fatalf("duplicate delivery left queued state: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
@@ -978,8 +997,8 @@ func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	if !ok || snapshot.arguments != `{"command": "printf new"}` {
 		t.Fatalf("native tool ID completion snapshot=%+v emit=%v", snapshot, ok)
 	}
-	if _, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); ok {
-		t.Fatal("native tool ID completion replay was not deduped")
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+		t.Fatalf("native tool completion without an exact receipt was suppressed: %+v ok=%v", snapshot, ok)
 	}
 }
 
@@ -993,12 +1012,12 @@ func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T)
 		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output":"first"}`); !ok {
 			t.Fatal("first native tool completion was suppressed")
 		}
-		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output": "second"}`); ok {
-			t.Fatal("native tool ID emitted a second completion after result serialization changed")
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output": "second"}`); !ok {
+			t.Fatal("native tool completion without an exact receipt was suppressed")
 		}
 		api.rememberHookToolInvocation(meta, "Bash", `{"command":"late replay"}`)
-		if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 0 {
-			t.Fatalf("completed native tool ID requeued %d pending invocations", got)
+		if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 1 {
+			t.Fatalf("new native tool start after completion queued %d pending invocations want=1", got)
 		}
 	})
 

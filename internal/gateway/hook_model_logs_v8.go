@@ -27,7 +27,7 @@ func (a *APIServer) emitHookModelRequestLogV8(ctx context.Context, meta llmEvent
 	if a == nil {
 		return
 	}
-	emitHookModelRequestLogV8WithEmitter(ctx, a.observabilityV8RuntimeEmitter(), meta, content)
+	_, _ = emitHookModelRequestLogV8WithEmitter(ctx, a.observabilityV8RuntimeEmitter(), meta, content)
 }
 
 func emitHookModelRequestLogV8WithEmitter(
@@ -35,8 +35,8 @@ func emitHookModelRequestLogV8WithEmitter(
 	emitter sidecarRuntimeEmitter,
 	meta llmEventMeta,
 	content string,
-) {
-	emitHookModelLogV8WithEmitter(ctx, emitter, meta, observability.TelemetryEventModelRequest, func(
+) (bool, error) {
+	return emitHookModelLogV8WithEmitter(ctx, emitter, meta, observability.TelemetryEventModelRequest, func(
 		builder *observability.FamilyBuilder,
 		envelope observability.FamilyEnvelopeInput,
 	) (observability.Record, error) {
@@ -53,7 +53,9 @@ func (a *APIServer) emitHookModelResponseLogV8(
 	if a == nil {
 		return
 	}
-	emitHookModelResponseLogV8WithEmitter(ctx, a.observabilityV8RuntimeEmitter(), meta, content, finishReasons)
+	_, _ = emitHookModelResponseLogV8WithEmitter(
+		ctx, a.observabilityV8RuntimeEmitter(), meta, content, finishReasons,
+	)
 }
 
 func emitHookModelResponseLogV8WithEmitter(
@@ -62,12 +64,12 @@ func emitHookModelResponseLogV8WithEmitter(
 	meta llmEventMeta,
 	content string,
 	finishReasons []string,
-) {
+) (bool, error) {
 	eventName := observability.TelemetryEventModelResponse
 	if outcome, _, _ := hookModelV8TerminalResult(meta); outcome != observability.OutcomeCompleted {
 		eventName = observability.TelemetryEventModelCallFailed
 	}
-	emitHookModelLogV8WithEmitter(ctx, emitter, meta, eventName, func(
+	return emitHookModelLogV8WithEmitter(ctx, emitter, meta, eventName, func(
 		builder *observability.FamilyBuilder,
 		envelope observability.FamilyEnvelopeInput,
 	) (observability.Record, error) {
@@ -151,10 +153,10 @@ func emitHookModelLogV8WithEmitter(
 	meta llmEventMeta,
 	eventName string,
 	build hookModelLogBuilder,
-) {
+) (bool, error) {
 	connector := hookModelV8StableToken(meta.Source)
 	if emitter == nil || ctx == nil || connector == "" || build == nil {
-		return
+		return false, nil
 	}
 	producerKey := observability.ProducerKey(gatewaylog.EventLLMPrompt)
 	if eventName != observability.TelemetryEventModelRequest {
@@ -175,9 +177,9 @@ func emitHookModelLogV8WithEmitter(
 		producerKey,
 	)
 	if err != nil {
-		return
+		return false, err
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(
+	outcome, err := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -193,6 +195,10 @@ func emitHookModelLogV8WithEmitter(
 		}
 		return build(builder, hookModelLogEnvelope(ctx, snapshot, meta, connector, eventName))
 	})
+	if err != nil {
+		return false, err
+	}
+	return outcome.LocalPersisted(), nil
 }
 
 func hookModelLogEnvelope(

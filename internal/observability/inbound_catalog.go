@@ -132,6 +132,7 @@ type InboundMappingStrategy string
 const (
 	InboundMappingClaudeTokenUsage  InboundMappingStrategy = "claude-token-usage-v1"
 	InboundMappingConnectorModelLog InboundMappingStrategy = "connector-model-log-v1"
+	InboundMappingConnectorToolLog  InboundMappingStrategy = "connector-tool-log-v1"
 	InboundMappingDurationMetric    InboundMappingStrategy = "duration-metric-v1"
 	InboundMappingReverseMetric     InboundMappingStrategy = "generated-reverse-metric-v1"
 	InboundMappingReverseSpan       InboundMappingStrategy = "generated-reverse-span-v1"

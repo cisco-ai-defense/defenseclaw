@@ -66,15 +66,17 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 | **Proxy & LLM Guard** | proxy operators | HTTP/tool/admission/LLM telemetry when proxy/router mode is active |
 | **Runtime & Reliability** | SRE | process, SQLite, hook SLOs, exporter health, audit delivery, schema violations, and panics |
 
-Agent360's DAG is built from canonical Loki events: session creation is a separate
+Agent360's DAG is built from canonical Loki events and durable relationship
+evidence: session creation is a separate
 anchor; one per-root **Prompt inputs** node counts distinct depth-zero
 `model.request` facts while the ordered/raw views retain the individual initial and
 follow-up records; replayed observations deduplicate by turn, model-request,
 request, operation, then occurrence ID;
-root depth 0 connects to recursively reported or explicitly identified child
-lineage through depth 64; and work is grouped by its owning agent. Session and
-spawn anchors may be recovered from the prior 24 hours, with recovered spawn edges
-kept only for children active in the selected range. Repeated model
+root depth 0 connects through active typed `parent_of` relationships and inverse
+`delegated_by` relationships; raw parent fields and trace parentage never create
+lineage. Work is grouped by its owning agent. Session and durable lineage anchors
+may be recovered from the prior 24 hours, with recovered edges kept only for
+children active in the selected range. Repeated model
 calls share one summary per owning agent, provider, and model. Repeated tool calls
 share one per-agent family node: Bash, MCP, Skills, Collaboration, File edits,
 Web/browser, Visual, or Task control; an unrecognized tool keeps its reported
@@ -87,6 +89,16 @@ counts, lineage provenance, and stable agent/root/parent detail, with filtered
 links to the raw OTEL events behind each group. Optional session fields remain on
 lifecycle, session, ordered, and raw surfaces rather than splitting stable agent
 nodes.
+
+The correlation row distinguishes durable logical events from immutable raw Loki
+observations. Exact hook/proxy/native mirrors can share one logical event without
+removing any source record. Relationship-change chronology shows the edge type,
+typed source and target node kinds, reported/trace-exact/derived/inferred method,
+active or conflict status, stable rule ID and version, confidence, and cumulative
+durable evidence count. Lineage never comes from a shared trace or
+span parent. Tempo remains the exact synchronous-trace drill-down, while
+Prometheus retains only bounded aggregate labels and never semantic, logical,
+request, turn, tool, or relationship IDs.
 
 Update nodes are sourced only from actual `collaboration.send_message` tool
 records. For each sender, `/root` and `/root/*` collapse into one

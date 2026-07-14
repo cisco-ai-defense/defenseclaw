@@ -142,9 +142,9 @@ func (adapter *LogAdapter) Deliver(ctx context.Context, batch delivery.Batch) de
 // standard OTLP LogRecord fields used by backends for log-to-trace joins,
 // timestamp ordering, and severity filtering. The complete destination-
 // projected canonical JSON remains the body and is still authoritative.
-func projectCanonicalLogFields(record *logspb.LogRecord, projected []byte) {
+func projectCanonicalLogFields(record *logspb.LogRecord, projected []byte) bool {
 	if record == nil {
-		return
+		return false
 	}
 	var wire struct {
 		Timestamp   string         `json:"timestamp"`
@@ -153,7 +153,7 @@ func projectCanonicalLogFields(record *logspb.LogRecord, projected []byte) {
 		Correlation map[string]any `json:"correlation"`
 	}
 	if err := json.Unmarshal(projected, &wire); err != nil {
-		return
+		return false
 	}
 	if timestamp, err := time.Parse(time.RFC3339Nano, wire.Timestamp); err == nil {
 		record.TimeUnixNano = uint64(timestamp.UnixNano())
@@ -166,7 +166,7 @@ func projectCanonicalLogFields(record *logspb.LogRecord, projected []byte) {
 	record.SeverityText = level
 	record.SeverityNumber = canonicalLogSeverityNumber(level)
 	if wire.Correlation == nil {
-		return
+		return true
 	}
 	if value, _ := wire.Correlation["trace_id"].(string); value != "" {
 		if decoded, ok := exactHex(value, 16); ok {
@@ -178,6 +178,12 @@ func projectCanonicalLogFields(record *logspb.LogRecord, projected []byte) {
 			record.SpanId = decoded
 		}
 	}
+	correlationAttributes, ok := canonicalCorrelationKeyValues(wire.Correlation)
+	if !ok {
+		return false
+	}
+	record.Attributes = append(record.Attributes, correlationAttributes...)
+	return true
 }
 
 func canonicalLogSeverityNumber(level string) logspb.SeverityNumber {

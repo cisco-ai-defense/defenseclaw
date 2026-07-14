@@ -1319,7 +1319,7 @@ func validInboundDiscriminator(value InboundDiscriminatorKind) bool {
 func validInboundMappingStrategy(value InboundMappingStrategy) bool {
 	return containsInboundString([]string{
 		string(InboundMappingClaudeTokenUsage), string(InboundMappingConnectorModelLog),
-		string(InboundMappingDurationMetric), string(InboundMappingReverseMetric),
+		string(InboundMappingConnectorToolLog), string(InboundMappingDurationMetric), string(InboundMappingReverseMetric),
 		string(InboundMappingReverseSpan), string(InboundMappingNativeLog),
 		string(InboundMappingStandardGenAISpan),
 	}, string(value))

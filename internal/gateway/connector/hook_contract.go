@@ -727,6 +727,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.CompatibilityStatus = resolution.Status
 	profile.CompatibilityReason = resolution.Reason
 	if resolution.Contract.ContractID == "" {
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
 		return profile
 	}
 	contract := resolution.Contract
@@ -738,6 +739,13 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
+		profile.Correlation = spec
+	} else {
+		// Unknown/mismatched contracts fail closed for identity mapping. The
+		// hook can still be inspected, but only exact canonical IDs are read.
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
+	}
 
 	contractCaps := contract.Capabilities
 	if profile.Capabilities.ConfigPath != "" && contractCaps.ConfigPath == "" {

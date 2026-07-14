@@ -57,11 +57,16 @@ func (pipelines *codexNativeOTLPPipelines) build(
 
 type codexNativeOTLPFixture struct {
 	runtime   *observabilityruntime.Runtime
+	store     *audit.Store
 	path      string
 	pipelines *codexNativeOTLPPipelines
 }
 
 func newCodexNativeOTLPFixture(t *testing.T) codexNativeOTLPFixture {
+	return newCodexNativeOTLPFixtureWithCollection(t, true)
+}
+
+func newCodexNativeOTLPFixtureWithCollection(t *testing.T, collect bool) codexNativeOTLPFixture {
 	t.Helper()
 	previousInstanceID := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("codex-native-otlp-test")
@@ -102,7 +107,6 @@ func newCodexNativeOTLPFixture(t *testing.T) codexNativeOTLPFixture {
 		t.Fatal(err)
 	}
 
-	collect := true
 	retentionDays := 0
 	source := &config.ObservabilityV8Source{
 		Local: config.ObservabilityV8LocalSource{
@@ -150,7 +154,7 @@ func newCodexNativeOTLPFixture(t *testing.T) codexNativeOTLPFixture {
 			t.Errorf("close native Codex OTLP runtime: %v", err)
 		}
 	})
-	return codexNativeOTLPFixture{runtime: runtime, path: path, pipelines: pipelines}
+	return codexNativeOTLPFixture{runtime: runtime, store: store, path: path, pipelines: pipelines}
 }
 
 func TestOTLPInboundRealCodexTurnProjectsOnceAndJoinsHookRoot(t *testing.T) {
@@ -294,7 +298,11 @@ func TestOTLPInboundRealCodexTurnProjectsOnceAndJoinsHookRoot(t *testing.T) {
 		StartTimeUnixNano: uint64(now.Add(-1500 * time.Millisecond).UnixNano()),
 		EndTimeUnixNano:   uint64(now.UnixNano()),
 		Attributes: []*commonpb.KeyValue{
-			otlpClassifierStringAttribute("thread.id", conversationID),
+			// Codex thread identity is a separately typed native alias. Only the
+			// documented conversation identity may join hook session/lifecycle
+			// state; thread.id alone must never be promoted to a session.
+			otlpClassifierStringAttribute("thread.id", "thread-real-codex"),
+			otlpClassifierStringAttribute("conversation.id", conversationID),
 			otlpClassifierStringAttribute("turn.id", turnID),
 			otlpClassifierStringAttribute("model", "gpt-5.4"),
 			otlpClassifierIntAttribute("input_token_count", 12770),

@@ -37,6 +37,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _crash_bundle_rollback_result,
     _create_backup,
     _detect_platform,
+    _download_bootstrap_cosign,
     _download_checksums,
     _download_file,
     _download_gateway,
@@ -1137,15 +1138,41 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             ):
                 _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
 
-    def test_staged_modern_bridge_requires_cosign_and_exact_workflow_identity(self):
+    def test_staged_modern_bridge_bootstraps_cosign_and_uses_exact_workflow_identity(self):
         with TemporaryDirectory() as root:
             self._prepare_plan(root)
             staged = os.path.join(root, "staged-handoff")
             with (
                 patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
-                self.assertRaisesRegex(OSError, "requires cosign"),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    return_value="/tmp/authenticated-cosign",
+                ) as bootstrap,
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                    return_value=Mock(returncode=0),
+                ) as bootstrap_run,
             ):
-                _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
+                _validate_staged_bridge_artifact_set(
+                    staged, "0.8.4", "linux", "amd64"
+                )
+
+            bootstrap.assert_called_once()
+            self.assertEqual(
+                bootstrap_run.call_args.args[0][0], "/tmp/authenticated-cosign"
+            )
+
+            with (
+                patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    side_effect=OSError("digest mismatch"),
+                ),
+                self.assertRaisesRegex(OSError, "signature verification failed"),
+            ):
+                _validate_staged_bridge_artifact_set(
+                    staged, "0.8.4", "linux", "amd64"
+                )
 
             with (
                 patch(
@@ -4149,6 +4176,78 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
         self.assertIn("Run manually: openclaw gateway restart", result.output)
 
 
+class TestCosignBootstrap(unittest.TestCase):
+    def test_downloads_pinned_verifier_into_private_temporary_custody(self):
+        payload = b"authenticated temporary cosign"
+        response = Mock(
+            status_code=200,
+            headers={"content-length": str(len(payload))},
+        )
+        response.iter_content.return_value = [payload]
+        expected = hashlib.sha256(payload).hexdigest()
+
+        with (
+            TemporaryDirectory() as root,
+            patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("linux", "amd64"),
+            ),
+            patch.dict(
+                cmd_upgrade_module._COSIGN_BOOTSTRAP_SHA256,
+                {("linux", "amd64"): expected},
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.requests.get",
+                return_value=response,
+            ) as get_mock,
+        ):
+            os.chmod(root, 0o700)
+            real_chmod = os.chmod
+
+            def linux_compatible_chmod(path, mode):
+                # Linux rejects chmod(..., follow_symlinks=False).  Keep the
+                # bootstrap test portable even when it runs on Darwin.
+                return real_chmod(path, mode)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.chmod",
+                side_effect=linux_compatible_chmod,
+            ) as chmod_mock:
+                verifier = _download_bootstrap_cosign(root)
+            info = os.lstat(verifier)
+            self.assertEqual(Path(verifier).read_bytes(), payload)
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+            self.assertEqual(info.st_uid, os.getuid())
+            self.assertEqual(info.st_nlink, 1)
+            self.assertEqual(chmod_mock.call_args.kwargs, {})
+
+        get_mock.assert_called_once()
+        self.assertFalse(get_mock.call_args.kwargs["allow_redirects"])
+
+    def test_rejects_redirect_outside_pinned_github_host_set_before_following(self):
+        response = Mock(
+            status_code=302,
+            headers={"location": "https://attacker.invalid/cosign"},
+        )
+        with (
+            TemporaryDirectory() as root,
+            patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("linux", "amd64"),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.requests.get",
+                return_value=response,
+            ) as get_mock,
+            self.assertRaisesRegex(OSError, "pinned HTTPS host set"),
+        ):
+            os.chmod(root, 0o700)
+            _download_bootstrap_cosign(root)
+
+        get_mock.assert_called_once()
+
+
 class TestChecksumVerification(unittest.TestCase):
     """Supply-chain: every artifact must match a published checksum or be
     refused. A successful checksum is silent; a mismatch aborts; an
@@ -4411,7 +4510,7 @@ class TestChecksumVerification(unittest.TestCase):
 
         run_mock.assert_not_called()
 
-    def test_modern_checksums_require_cosign_even_with_unsafe_override(self):
+    def test_modern_checksums_bootstrap_failure_is_fatal_even_with_unsafe_override(self):
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -4426,6 +4525,10 @@ class TestChecksumVerification(unittest.TestCase):
                     side_effect=[sig, cert],
                 ),
                 patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    side_effect=OSError("digest mismatch"),
+                ),
                 patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run_mock,
                 self.assertRaises(SystemExit) as raised,
             ):

@@ -24,17 +24,32 @@ inbound_bindings:
       target: gen_ai.conversation.id
       value_type: string
       normalization: identifier-v1
-      sources: [gen_ai.conversation.id, conversation.id, session.id, session_id, thread.id]
+      sources: [gen_ai.conversation.id]
+    - id: codex-conversation-id-v1
+      target: gen_ai.conversation.id
+      value_type: string
+      normalization: identifier-v1
+      sources: [gen_ai.conversation.id, conversation.id]
     - id: request-id-v1
       target: defenseclaw.request.id
       value_type: string
       normalization: identifier-v1
-      sources: [defenseclaw.request.id, request.id]
+      sources: [defenseclaw.request.id]
     - id: turn-id-v1
       target: defenseclaw.turn.id
       value_type: string
       normalization: identifier-v1
-      sources: [defenseclaw.turn.id, codex.turn.id, turn.id, turn_id]
+      sources: [defenseclaw.turn.id]
+    - id: codex-turn-id-v1
+      target: defenseclaw.turn.id
+      value_type: string
+      normalization: identifier-v1
+      sources: [defenseclaw.turn.id, codex.turn.id, turn.id]
+    - id: claudecode-turn-id-v1
+      target: defenseclaw.turn.id
+      value_type: string
+      normalization: identifier-v1
+      sources: [defenseclaw.turn.id, prompt.id]
     - id: provider-v1
       target: gen_ai.provider.name
       value_type: string
@@ -45,6 +60,26 @@ inbound_bindings:
       value_type: string
       normalization: identifier-v1
       sources: [gen_ai.request.model, gen_ai.response.model, model]
+    - id: codex-tool-name-v1
+      target: gen_ai.tool.name
+      value_type: string
+      normalization: identifier-v1
+      sources: [gen_ai.tool.name, tool_name]
+    - id: codex-tool-call-id-v1
+      target: gen_ai.tool.call.id
+      value_type: string
+      normalization: identifier-v1
+      sources: [gen_ai.tool.call.id, call_id]
+    - id: codex-tool-arguments-v1
+      target: gen_ai.tool.call.arguments
+      value_type: structured
+      normalization: structured-genai-v1
+      sources: [gen_ai.tool.call.arguments, arguments]
+    - id: codex-tool-result-v1
+      target: gen_ai.tool.call.result
+      value_type: structured
+      normalization: structured-genai-v1
+      sources: [gen_ai.tool.call.result, output]
     - id: input-content-v1
       target: gen_ai.input.messages
       value_type: structured
@@ -170,8 +205,8 @@ inbound_bindings:
           requirement: optional
           normalization: identifier-label-v1
           source_groups:
-            - {placement: metric_point_attribute, keys: [gen_ai.conversation.id, conversation.id, session.id, session_id]}
-            - {placement: resource_attribute, keys: [gen_ai.conversation.id, conversation.id, session.id, session_id]}
+            - {placement: metric_point_attribute, keys: [gen_ai.conversation.id]}
+            - {placement: resource_attribute, keys: [gen_ai.conversation.id]}
         - target: gen_ai.operation.name
           disposition: project
           requirement: required
@@ -243,8 +278,8 @@ inbound_bindings:
             requirement: optional
             normalization: identifier-label-v1
             source_groups:
-              - {placement: metric_point_attribute, keys: [gen_ai.conversation.id, conversation.id, session.id, session_id]}
-              - {placement: resource_attribute, keys: [gen_ai.conversation.id, conversation.id, session.id, session_id]}
+              - {placement: metric_point_attribute, keys: [gen_ai.conversation.id]}
+              - {placement: resource_attribute, keys: [gen_ai.conversation.id]}
         reset_epoch:
           role: reset_only
           identity: false
@@ -396,7 +431,7 @@ inbound_bindings:
           - {location: leaf_attribute, key: model, operator: present, value_type: string}
           - {location: span, key: $span_name, operator: equals, values: [session_task.turn], value_type: string}
           - {location: span, key: $ended, operator: valid_ended_span, value_type: structural}
-      mapping: {strategy: standard-genai-span-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
+      mapping: {strategy: standard-genai-span-v1, alias_sets: [codex-conversation-id-v1, request-id-v1, codex-turn-id-v1, provider-v1, request-model-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
       derived_targets:
         - {family: metric.gen_ai.client.operation.duration, strategy: elapsed-time-v1}
       time_rule: span-end-v1
@@ -412,10 +447,27 @@ inbound_bindings:
         predicates:
           - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
           - {location: leaf_attribute, key: event.name, operator: equals, values: [codex.user_prompt], value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [codex-conversation-id-v1, request-id-v1, codex-turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
       derived_targets: []
       time_rule: log-time-observed-receipt-v1
       outcome_rule: {fixed: attempted}
+      native_round_trip: false
+    - id: otlp.codex.tool_result.v1
+      signal: logs
+      sources: [codex]
+      mode: import
+      expansion: {kind: singleton, primary_family: log.tool.invocation.completed}
+      discriminator:
+        kind: connector-log-v1
+        predicates:
+          - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
+          - {location: leaf_attribute, key: event.name, operator: equals, values: [codex.tool_result], value_type: string}
+          - {location: leaf_attribute, key: call_id, operator: present, value_type: string}
+          - {location: leaf_attribute, key: tool_name, operator: present, value_type: string}
+      mapping: {strategy: connector-tool-log-v1, alias_sets: [codex-conversation-id-v1, request-id-v1, codex-turn-id-v1, codex-tool-name-v1, codex-tool-call-id-v1, codex-tool-arguments-v1, codex-tool-result-v1]}
+      derived_targets: []
+      time_rule: log-time-observed-receipt-v1
+      outcome_rule: {fixed: completed}
       native_round_trip: false
     - id: otlp.claudecode.user_prompt.v1
       signal: logs
@@ -427,7 +479,7 @@ inbound_bindings:
         predicates:
           - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
           - {location: leaf_attribute, key: event.name, operator: equals, values: [claude_code.user_prompt], value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, claudecode-turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
       derived_targets: []
       time_rule: log-time-observed-receipt-v1
       outcome_rule: {fixed: attempted}
@@ -445,7 +497,7 @@ inbound_bindings:
           - {location: leaf_attribute, key: event.kind, operator: equals, values: [response.completed], value_type: string}
           - {location: leaf_attribute, key: input_token_count, operator: present, value_type: string}
           - {location: leaf_attribute, key: output_token_count, operator: present, value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, output-content-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [codex-conversation-id-v1, request-id-v1, codex-turn-id-v1, provider-v1, request-model-v1, output-content-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
       derived_targets:
         - {family: metric.defenseclaw.agent.token.usage, strategy: codex-token-fields-v1}
       time_rule: log-time-observed-receipt-v1
@@ -1052,7 +1104,7 @@ structural_contract:
       - {name: phase, type: string, required: false, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 128, pattern: '^[a-z0-9][a-z0-9_.-]{0,127}$'}}}
       - {name: outcome, type: string, required: false, semantic_ref: defenseclaw.outcome, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [allowed, applied, approved, attempted, blocked, cancelled, completed, denied, failed, no_change, partial, quarantined, redacted, rejected, released, revoked, skipped, terminated, timed_out, validated]}}}
       - {name: mandatory, type: boolean, required: false, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
-      - {name: correlation, type: object, required: true, object_ref: correlation, field_class: metadata, sensitivity: internal, normalization: {id: structured-content-v1, overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 512, max_items: 20, max_depth: 1, max_properties: 20}}}
+      - {name: correlation, type: object, required: true, object_ref: correlation, field_class: metadata, sensitivity: internal, normalization: {id: structured-content-v1, overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 512, max_items: 24, max_depth: 1, max_properties: 24}}}
       - {name: provenance, type: object, required: true, object_ref: provenance, field_class: metadata, sensitivity: internal, normalization: {id: structured-content-v1, overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 512, max_items: 20, max_depth: 2, max_properties: 20}}}
       - {name: body, type: canonical_json, required: false, semantic_ref: registry.family_payload, field_class: metadata, sensitivity: critical, normalization: {id: structured-content-v1, overrides: {max_utf8_bytes: 1048576, max_item_utf8_bytes: 65536, max_items: 8192, max_depth: 32, max_properties: 8192}}}
       - {name: instrument_data, type: object, required: false, object_ref: metric_instrument_data, field_class: metadata, sensitivity: internal, normalization: {id: structured-content-v1, overrides: {max_utf8_bytes: 1048576, max_item_utf8_bytes: 65536, max_items: 8192, max_depth: 32, max_properties: 8192}}}
@@ -1064,6 +1116,9 @@ structural_contract:
   correlation:
     additional_properties: false
     fields:
+      - {name: semantic_event_id, type: string, required: false, semantic_ref: defenseclaw.semantic_event.id, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1}}
+      - {name: logical_event_id, type: string, required: false, semantic_ref: defenseclaw.logical_event.id, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1}}
+      - {name: connector_instance_id, type: string, required: false, semantic_ref: defenseclaw.connector.instance.id, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1}}
       - {name: run_id, type: string, required: false, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1, overrides: {max_utf8_bytes: 512}}}
       - {name: request_id, type: string, required: false, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1, overrides: {max_utf8_bytes: 512}}}
       - {name: session_id, type: string, required: false, field_class: identifier, sensitivity: sensitive, normalization: {id: identifier-v1, overrides: {max_utf8_bytes: 512}}}

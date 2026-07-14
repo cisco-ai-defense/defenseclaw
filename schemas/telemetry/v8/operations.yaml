@@ -1433,6 +1433,176 @@ attributes:
     overrides: {max_utf8_bytes: 128}
     notes: Registered class only; never decoder text, payload fragments, endpoints, or credentials
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.id
+  type: string
+  brief: Stable identity for one durable correlation-graph edge.
+  examples: [rel-019f6a2c]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization: {id: identifier-v1, notes: DefenseClaw-minted bounded relationship identifier}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.type
+  type: string
+  brief: Typed correlation-graph edge.
+  examples: [same_as]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [same_as, duplicate_of, belongs_to, parent_of, delegated_by, caused_by, invokes, responds_to, resumes, correlates_with]
+    notes: Closed relationship vocabulary; trace topology establishes causality and never implies identity
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.source_kind
+  type: string
+  brief: Typed graph-node kind at the source of a correlation relationship.
+  examples: [semantic_event]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [semantic_event, logical_event, record, session, turn, agent, lifecycle, execution, model_request, model_response, tool_invocation, trace, span]
+    notes: Closed node-kind vocabulary required to reconstruct typed relationship edges
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.source_id
+  type: string
+  brief: Stable graph-node identity at the source of a correlation relationship.
+  examples: [event-019f6a2c]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization: {id: identifier-v1, notes: Bounded node identity; never content-derived}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.target_kind
+  type: string
+  brief: Typed graph-node kind at the target of a correlation relationship.
+  examples: [logical_event]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [semantic_event, logical_event, record, session, turn, agent, lifecycle, execution, model_request, model_response, tool_invocation, trace, span]
+    notes: Closed node-kind vocabulary required to reconstruct typed relationship edges
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.target_id
+  type: string
+  brief: Stable graph-node identity at the target of a correlation relationship.
+  examples: [turn-native-123]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization: {id: identifier-v1, notes: Bounded node identity; never content-derived}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.method
+  type: string
+  brief: Evidence class by which a correlation relationship was established.
+  examples: [trace_exact]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [reported, trace_exact, derived, inferred]}
+    notes: Inferred edges remain candidates and cannot destructively deduplicate observations
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.status
+  type: string
+  brief: Durable lifecycle state of a correlation relationship.
+  examples: [active]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [active, unresolved, conflicted, superseded, rejected]}
+    notes: Closed relationship lifecycle vocabulary
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.rule_id
+  type: string
+  brief: Stable connector-profile rule that produced the relationship.
+  examples: [reported-agent-lineage]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Registered correlation-profile rule identity only
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.rule_version
+  type: string
+  brief: Versioned connector-profile rule that produced the relationship.
+  examples: [codex-hooks-v1]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization: {id: identifier-v1, notes: Registered correlation-profile/rule version only}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.confidence
+  type: double
+  brief: Fixed confidence assigned by the registered correlation rule, never caller supplied.
+  examples: [1.0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1}
+    notes: Inclusive zero-to-one value fixed by the registered rule
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.evidence_count
+  type: int64
+  brief: Number of durable observations supporting the relationship.
+  examples: [2]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Nonnegative evidence count; evidence payload is never embedded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.correlation.relationship.evidence_record_id
+  type: string
+  brief: Optional canonical record identity for one exact supporting observation.
+  examples: [019f6a2c-4444-7abc-8def-0123456789ab]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization: {id: identifier-v1, notes: Bounded canonical record identity; no payload content}
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.destination.id
   type: string
   brief: Destination identity
@@ -3638,6 +3808,41 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.telemetry.rejection_reason_class
     requirement_level: recommended
+- id: body.correlation.relationship.changed
+  type: body_group
+  brief: Content-free, explainable correlation-graph relationship change.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.occurrence
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.correlation.relationship.id
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.type
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.source_kind
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.source_id
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.target_kind
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.target_id
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.method
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.status
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.rule_id
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.rule_version
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.confidence
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.evidence_count
+    requirement_level: required
+  - ref: defenseclaw.correlation.relationship.evidence_record_id
+    requirement_level: recommended
 - id: body.platform.health
   type: body_group
   brief: Bounded platform health transition/failure body.
@@ -5644,6 +5849,28 @@ groups:
     legacy_bindings:
     - source: internal/observability/event_registry.go
       disposition: preserved
+- id: log.correlation.relationship.changed
+  type: log
+  brief: Durable, content-free change to an explainable correlation-graph relationship.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.correlation.relationship.changed
+  attributes: []
+  body_fields: []
+  log:
+    event_name: correlation.relationship.changed
+  x-defenseclaw:
+    bucket: telemetry.ingest
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
 - id: log.telemetry.authentication.failed
   type: log
   brief: Canonical telemetry.authentication.failed log identity.
@@ -10092,6 +10319,9 @@ producer_identity_sets:
     family: log.subsystem.restored
 - id: identity_set.telemetry_ingest
   identities:
+  - event_name: correlation.relationship.changed
+    bucket: telemetry.ingest
+    family: log.correlation.relationship.changed
   - event_name: legacy.audit.codex.notify
     bucket: telemetry.ingest
     compatibility_only: true

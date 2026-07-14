@@ -241,36 +241,39 @@ func encodeHECEnvelope(envelope hecEnvelope) ([]byte, error) {
 }
 
 type compatibilityAlias struct {
-	ID                string `json:"id,omitempty"`
-	RecordID          string `json:"record_id,omitempty"`
-	Timestamp         string `json:"timestamp,omitempty"`
-	Bucket            string `json:"bucket,omitempty"`
-	EventName         string `json:"event_name,omitempty"`
-	Severity          string `json:"severity,omitempty"`
-	Source            string `json:"source,omitempty"`
-	Connector         string `json:"connector,omitempty"`
-	Action            string `json:"action,omitempty"`
-	Outcome           string `json:"outcome,omitempty"`
-	RunID             string `json:"run_id,omitempty"`
-	RequestID         string `json:"request_id,omitempty"`
-	SessionID         string `json:"session_id,omitempty"`
-	TurnID            string `json:"turn_id,omitempty"`
-	TraceID           string `json:"trace_id,omitempty"`
-	AgentID           string `json:"agent_id,omitempty"`
-	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
-	PolicyID          string `json:"policy_id,omitempty"`
-	ModelRequestID    string `json:"model_request_id,omitempty"`
-	ModelResponseID   string `json:"model_response_id,omitempty"`
-	ToolInvocationID  string `json:"tool_invocation_id,omitempty"`
-	ConnectorID       string `json:"connector_id,omitempty"`
-	Actor             string `json:"actor,omitempty"`
-	Target            string `json:"target,omitempty"`
-	Details           string `json:"details,omitempty"`
-	ToolName          string `json:"tool_name,omitempty"`
-	ToolID            string `json:"tool_id,omitempty"`
-	DestinationApp    string `json:"destination_app,omitempty"`
-	AgentName         string `json:"agent_name,omitempty"`
+	ID                  string `json:"id,omitempty"`
+	RecordID            string `json:"record_id,omitempty"`
+	Timestamp           string `json:"timestamp,omitempty"`
+	Bucket              string `json:"bucket,omitempty"`
+	EventName           string `json:"event_name,omitempty"`
+	Severity            string `json:"severity,omitempty"`
+	Source              string `json:"source,omitempty"`
+	Connector           string `json:"connector,omitempty"`
+	Action              string `json:"action,omitempty"`
+	Outcome             string `json:"outcome,omitempty"`
+	SemanticEventID     string `json:"semantic_event_id,omitempty"`
+	LogicalEventID      string `json:"logical_event_id,omitempty"`
+	ConnectorInstanceID string `json:"connector_instance_id,omitempty"`
+	RunID               string `json:"run_id,omitempty"`
+	RequestID           string `json:"request_id,omitempty"`
+	SessionID           string `json:"session_id,omitempty"`
+	TurnID              string `json:"turn_id,omitempty"`
+	TraceID             string `json:"trace_id,omitempty"`
+	AgentID             string `json:"agent_id,omitempty"`
+	AgentInstanceID     string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID   string `json:"sidecar_instance_id,omitempty"`
+	PolicyID            string `json:"policy_id,omitempty"`
+	ModelRequestID      string `json:"model_request_id,omitempty"`
+	ModelResponseID     string `json:"model_response_id,omitempty"`
+	ToolInvocationID    string `json:"tool_invocation_id,omitempty"`
+	ConnectorID         string `json:"connector_id,omitempty"`
+	Actor               string `json:"actor,omitempty"`
+	Target              string `json:"target,omitempty"`
+	Details             string `json:"details,omitempty"`
+	ToolName            string `json:"tool_name,omitempty"`
+	ToolID              string `json:"tool_id,omitempty"`
+	DestinationApp      string `json:"destination_app,omitempty"`
+	AgentName           string `json:"agent_name,omitempty"`
 }
 
 func projectedAliases(projected []byte) (compatibilityAlias, string, bool) {
@@ -295,6 +298,9 @@ func projectedAliases(projected []byte) (compatibilityAlias, string, bool) {
 	}
 	alias.ID = alias.RecordID
 	if correlation, ok := wire["correlation"].(map[string]any); ok {
+		alias.SemanticEventID = stringAt(correlation, "semantic_event_id")
+		alias.LogicalEventID = stringAt(correlation, "logical_event_id")
+		alias.ConnectorInstanceID = stringAt(correlation, "connector_instance_id")
 		alias.RunID = stringAt(correlation, "run_id")
 		alias.RequestID = stringAt(correlation, "request_id")
 		alias.SessionID = stringAt(correlation, "session_id")

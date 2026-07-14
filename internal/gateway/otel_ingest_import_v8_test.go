@@ -72,6 +72,61 @@ func TestPrimaryDispositionPreservesConstructedDerivativeOnDeliveryDegradation(t
 	}
 }
 
+func TestInboundCorrelationUsesCodexExactNativeKinds(t *testing.T) {
+	t.Parallel()
+
+	leaf := otlpDecodedLeaf{signal: otelSignalTraces, span: &tracepb.Span{}}
+	leaf.leafAttributes = newOTLPTypedAttributeIndex([]*commonpb.KeyValue{
+		otlpClassifierStringAttribute("thread.id", "thread-1"),
+		otlpClassifierStringAttribute("turn.id", "turn-1"),
+	})
+	correlation := observability.Correlation{}
+	if err := applyConnectorNativeCorrelationV8(&correlation, leaf, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if correlation.SessionID != "" || correlation.TurnID != "turn-1" {
+		t.Fatalf("thread was promoted to session: %+v", correlation)
+	}
+
+	leaf.leafAttributes = newOTLPTypedAttributeIndex([]*commonpb.KeyValue{
+		otlpClassifierStringAttribute("conversation.id", "session-1"),
+		otlpClassifierStringAttribute("thread.id", "thread-1"),
+		otlpClassifierStringAttribute("turn.id", "turn-1"),
+	})
+	correlation = observability.Correlation{}
+	if err := applyConnectorNativeCorrelationV8(&correlation, leaf, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if correlation.SessionID != "session-1" || correlation.TurnID != "turn-1" {
+		t.Fatalf("exact Codex identities not mapped: %+v", correlation)
+	}
+
+	leaf.leafAttributes = newOTLPTypedAttributeIndex([]*commonpb.KeyValue{
+		otlpClassifierStringAttribute("conversation.id", "session-a"),
+		otlpClassifierStringAttribute("gen_ai.conversation.id", "session-b"),
+	})
+	if err := applyConnectorNativeCorrelationV8(&observability.Correlation{}, leaf, "codex"); err == nil {
+		t.Fatal("conflicting exact Codex session aliases were accepted")
+	}
+}
+
+func TestInboundCorrelationPreservesDistinctTypedIDsAndUsesProviderPreference(t *testing.T) {
+	t.Parallel()
+
+	leaf := otlpDecodedLeaf{signal: otelSignalTraces, span: &tracepb.Span{}}
+	leaf.leafAttributes = newOTLPTypedAttributeIndex([]*commonpb.KeyValue{
+		otlpClassifierStringAttribute("defenseclaw.turn.id", "defenseclaw-turn"),
+		otlpClassifierStringAttribute("prompt.id", "claude-prompt"),
+	})
+	correlation := observability.Correlation{}
+	if err := applyConnectorNativeCorrelationV8(&correlation, leaf, "claudecode"); err != nil {
+		t.Fatalf("distinct typed turn/prompt identities were rejected: %v", err)
+	}
+	if correlation.TurnID != "claude-prompt" {
+		t.Fatalf("turn=%q want provider-native prompt ID", correlation.TurnID)
+	}
+}
+
 func TestOTLPInboundUnsupportedLeafCompletesPrimaryAccounting(t *testing.T) {
 	previousInstance := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("otlp-inbound-accounting-test")
@@ -212,10 +267,12 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 		stateKey      string
 		oppositeKey   string
 		oppositeState string
+		sessionKey    string
+		turnKey       string
 	}{
-		{"otlp.codex.user_prompt.v1.log.model.request", "codex prompt", "model.request", "attempted", "request-1", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
-		{"otlp.claudecode.user_prompt.v1.log.model.request", "claude prompt", "model.request", "attempted", "", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
-		{"otlp.codex.response_completed.v1.log.model.response", "codex response", "model.response", "completed", "", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state"},
+		{"otlp.codex.user_prompt.v1.log.model.request", "codex prompt", "model.request", "attempted", "request-1", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "conversation.id", "turn.id"},
+		{"otlp.claudecode.user_prompt.v1.log.model.request", "claude prompt", "model.request", "attempted", "", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "gen_ai.conversation.id", "prompt.id"},
+		{"otlp.codex.response_completed.v1.log.model.response", "codex response", "model.response", "completed", "", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "conversation.id", "turn.id"},
 	}
 	now := time.Now().UTC()
 	for index, test := range tests {
@@ -234,12 +291,12 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 		leaf.logRecord.TimeUnixNano = uint64(now.Add(time.Duration(index) * time.Nanosecond).UnixNano())
 		leaf.logRecord.Body = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: test.content}}
 		leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
-			otlpClassifierStringAttribute("session_id", "session-1"),
-			otlpClassifierStringAttribute("turn_id", "turn-1"),
+			otlpClassifierStringAttribute(test.sessionKey, "session-1"),
+			otlpClassifierStringAttribute(test.turnKey, "turn-1"),
 		)
 		if test.requestID != "" {
 			leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
-				otlpClassifierStringAttribute("request.id", test.requestID),
+				otlpClassifierStringAttribute("defenseclaw.request.id", test.requestID),
 			)
 		}
 		message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
@@ -301,7 +358,7 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 	conflict, source := inboundFixtureLeafForMatch(t, codexPrompt)
 	conflict.logRecord.Body = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "prompt"}}
 	conflict.logRecord.Attributes = append(conflict.logRecord.Attributes,
-		otlpClassifierStringAttribute("session_id", "session-a"),
+		otlpClassifierStringAttribute("conversation.id", "session-a"),
 		otlpClassifierStringAttribute("gen_ai.conversation.id", "session-b"),
 	)
 	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
@@ -604,7 +661,7 @@ func TestOTLPInboundTraceMappingRejectsMissingPinnedPrivateFactsBeforeConstructi
 	}
 	var occurrenceIDs int
 	if _, _, err := api.mapInboundTraceV8(
-		leaf, match, targets[0], classifier.catalog.WireContract(), source, now,
+		t.Context(), leaf, match, targets[0], classifier.catalog.WireContract(), source, now,
 		observabilityruntime.EmitContext{},
 	); err == nil {
 		occurrenceIDs++
@@ -1092,9 +1149,11 @@ func TestOTLPInboundDuplicateAndCumulativeSemantics(t *testing.T) {
 		}
 		values = append(values, value)
 		attributes := metric.Attributes()
-		if attributes["gen_ai.request.model"] != "claude-4" || attributes["gen_ai.token.type"] != "input" ||
-			attributes["gen_ai.conversation.id"] != "conversation-a" {
+		if attributes["gen_ai.request.model"] != "claude-4" || attributes["gen_ai.token.type"] != "input" {
 			t.Fatalf("generated cumulative labels=%#v", attributes)
+		}
+		if _, exists := attributes["gen_ai.conversation.id"]; exists {
+			t.Fatalf("high-cardinality conversation ID leaked into metric labels=%#v", attributes)
 		}
 	}
 	if want := []int64{10, 5, 20, 7}; !reflect.DeepEqual(values, want) {

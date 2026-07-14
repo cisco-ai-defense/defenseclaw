@@ -95,14 +95,15 @@ func newCanonicalTracePayload(
 }
 
 type canonicalTraceWire struct {
-	recordID   string
-	bucket     string
-	family     observability.EventName
-	spanName   string
-	traceID    []byte
-	spanID     []byte
-	body       map[string]any
-	projection map[string]any
+	recordID    string
+	bucket      string
+	family      observability.EventName
+	spanName    string
+	traceID     []byte
+	spanID      []byte
+	correlation map[string]any
+	body        map[string]any
+	projection  map[string]any
 }
 
 func decodeCanonicalTraceProjection(encoded []byte) (canonicalTraceWire, bool) {
@@ -136,7 +137,7 @@ func decodeCanonicalTraceProjection(encoded []byte) (canonicalTraceWire, bool) {
 	}
 	return canonicalTraceWire{
 		recordID: recordID, bucket: bucket, family: family, spanName: spanName,
-		traceID: traceID, spanID: spanID, body: body, projection: projection,
+		traceID: traceID, spanID: spanID, correlation: correlation, body: body, projection: projection,
 	}, true
 }
 
@@ -162,6 +163,10 @@ type canonicalProjectedSpan struct {
 
 func (wire canonicalTraceWire) otlp() (canonicalProjectedSpan, bool) {
 	attributes, ok := object(wire.body, "attributes")
+	if !ok {
+		return canonicalProjectedSpan{}, false
+	}
+	attributes, ok = withCanonicalCorrelationAttributes(attributes, wire.correlation)
 	if !ok {
 		return canonicalProjectedSpan{}, false
 	}
@@ -193,6 +198,9 @@ func (wire canonicalTraceWire) otlp() (canonicalProjectedSpan, bool) {
 		return canonicalProjectedSpan{}, false
 	}
 	spanAttributes, ok := canonicalKeyValues(attributes, func(key string) (observability.OTLPValueKind, bool) {
+		if isCanonicalCorrelationAttribute(key) {
+			return observability.OTLPValueString, true
+		}
 		if openinference.IsProjectionAttribute(key) {
 			return observability.OTLPValueString, true
 		}

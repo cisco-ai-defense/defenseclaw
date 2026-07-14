@@ -96,6 +96,11 @@ func (batch *InboundImportBatch) ImportTraceWithPolicy(
 		inboundInstanceID:    resourceFields.DefenseClawInstanceID,
 	}
 	record, err := builder(snapshot)
+	if err == nil {
+		record, err = stampRuntimeCorrelation(
+			record, correlationDefaultsFromContext(ctx, correlationDefaultsImported),
+		)
+	}
 	if err != nil || !validInboundSignalRecord(
 		record, target, authenticatedSource, digest, generation, observability.ImportModeImport,
 	) {
@@ -107,6 +112,9 @@ func (batch *InboundImportBatch) ImportTraceWithPolicy(
 	// its caller has gone away.
 	if err := ctx.Err(); err != nil {
 		return telemetry.V8ImportedSpanResult{}, err
+	}
+	if err := persistRuntimeCorrelationObservation(ctx, batch.runtime.store, record); err != nil {
+		return telemetry.V8ImportedSpanResult{}, &InboundImportError{code: InboundImportDeliveryFailed}
 	}
 	exportPolicy := telemetry.SuppressAllV8ImportedExport()
 	var policyErr error
@@ -184,6 +192,11 @@ func (batch *InboundImportBatch) RecordMetricWithPolicy(
 		inboundInstanceID:    resourceContext.TraceResourceFields().DefenseClawInstanceID,
 	}
 	record, err := builder(snapshot)
+	if err == nil {
+		record, err = stampRuntimeCorrelation(
+			record, correlationDefaultsFromContext(ctx, correlationDefaultsImported),
+		)
+	}
 	wantMode := observability.ImportModeImport
 	if target.Role() == observability.InboundTargetDerive {
 		wantMode = observability.ImportModeDerive
@@ -192,6 +205,9 @@ func (batch *InboundImportBatch) RecordMetricWithPolicy(
 		record, target, authenticatedSource, digest, generation, wantMode,
 	) {
 		return telemetry.V8MetricRecordResult{}, &InboundImportError{code: InboundImportBuildRejected}
+	}
+	if err := persistRuntimeCorrelationObservation(ctx, batch.runtime.store, record); err != nil {
+		return telemetry.V8MetricRecordResult{}, &InboundImportError{code: InboundImportDeliveryFailed}
 	}
 	exportPolicy := telemetry.SuppressAllV8ImportedExport()
 	var policyErr error

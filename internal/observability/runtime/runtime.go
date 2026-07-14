@@ -434,6 +434,16 @@ func (runtime *Runtime) emitWithLeaseControls(
 		if err != nil {
 			return observability.Record{}, err
 		}
+		defaultMode := correlationDefaultsGenerated
+		if inbound {
+			defaultMode = correlationDefaultsImported
+		}
+		record, err = stampRuntimeCorrelation(
+			record, correlationDefaultsFromContext(ctx, defaultMode),
+		)
+		if err != nil {
+			return observability.Record{}, &emitBuilderError{}
+		}
 		provenance := record.Provenance()
 		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
 			uint64(provenance.ConfigGeneration) != snapshot.Generation() {

@@ -70,19 +70,48 @@ func getFallbackConnectorRegistry() *connector.Registry {
 }
 
 type agentHookRequest struct {
-	ConnectorName string
-	AgentID       string
-	AgentName     string
-	AgentType     string
-	HookEventName string
-	SessionID     string
-	TurnID        string
-	CWD           string
-	ToolName      string
-	ToolArgs      json.RawMessage
-	Content       string
-	Direction     string
-	Payload       map[string]interface{}
+	ConnectorName             string
+	AgentID                   string
+	AgentName                 string
+	AgentType                 string
+	RootAgentID               string
+	ParentAgentID             string
+	ChildAgentID              string
+	HookEventName             string
+	SemanticEventID           string
+	LogicalEventID            string
+	ConnectorInstanceID       string
+	SessionID                 string
+	ThreadID                  string
+	TurnID                    string
+	MessageID                 string
+	RootSessionID             string
+	ParentSessionID           string
+	ChildSessionID            string
+	ToolInvocationID          string
+	ModelRequestID            string
+	ModelResponseID           string
+	SourceEventID             string
+	SourceSequence            string
+	SourceTimestamp           string
+	SourceNamespace           string
+	SourceIDKind              string
+	ExecutionID               string
+	StepID                    string
+	CorrelationProfileVersion connector.CorrelationProfileVersion
+	CorrelationCompleteness   connector.CorrelationCompleteness
+	CorrelationSurface        connector.CorrelationSurface
+	CorrelationOrigins        map[connector.CorrelationTarget]connector.CorrelationOrigin
+	CorrelationValues         map[connector.CorrelationTarget]connector.CorrelationValue
+	CorrelationIdentifiers    []connector.CorrelationValue
+	SuppressCorrelationEmit   bool
+	CorrelationReceipt        *audit.CorrelationReceiptLocator
+	CWD                       string
+	ToolName                  string
+	ToolArgs                  json.RawMessage
+	Content                   string
+	Direction                 string
+	Payload                   map[string]interface{}
 }
 
 type agentHookResponse struct {
@@ -143,7 +172,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		req.CWD = sanitizeHookCWD(req.CWD)
-		ctx := enrichAgentHookContext(r.Context(), req)
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
+		if correlationErr != nil {
+			// Correlation persistence is fail-closed for export, not for policy
+			// enforcement. The hook must still be evaluated if the local ledger is
+			// temporarily unavailable; runtime export receives no incomplete
+			// occurrence envelope and therefore cannot publish a partial join.
+			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
+				connectorName, req.HookEventName, correlationErr)
+			req.SuppressCorrelationEmit = true
+		} else {
+			req = correlatedReq
+		}
+		ctx = enrichAgentHookContext(ctx, req)
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
 		// AND "writeJSON started writing and panicked partway". Once
@@ -168,7 +209,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
+					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
+					if persisted {
+						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
+								connectorName, req.HookEventName, err)
+						}
+					}
 					finalized = true
 				}
 				if !attemptedWrite {
@@ -202,7 +249,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// correlation IDs (Codex / Claude Code today) through their
 		// registered dedupe callback and every other connector
 		// through the generic profile path.
-		rawEventIDs = runtime.RememberRawEvents(a, req, b, payload)
+		if !req.SuppressCorrelationEmit {
+			rawEventIDs = runtime.RememberRawEvents(a, req, b, payload)
+		}
 
 		// Emit the LLM event (prompt/tool/response) BEFORE the
 		// evaluator runs. Capturing what the agent attempted
@@ -225,7 +274,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// the emit stays BEFORE the evaluator (audit-honest ordering) and
 		// behavior is byte-for-byte unchanged.
 		deferManagedHookEmit := managedEnterpriseActive.Load()
-		if !deferManagedHookEmit {
+		if !deferManagedHookEmit && !req.SuppressCorrelationEmit {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -278,11 +327,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// still precedes the hook_decision event, preserving the OSS event
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
-		if deferManagedHookEmit {
+		if deferManagedHookEmit && !req.SuppressCorrelationEmit {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		if persisted {
+			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
+					connectorName, req.HookEventName, err)
+			}
+		}
 		finalized = true
 
 		// Mark the write attempt BEFORE invoking writeJSON. A panic
@@ -314,7 +369,8 @@ func (a *APIServer) finalizeAgentHook(
 	elapsed time.Duration,
 	panicked bool,
 	extra map[string]string,
-) {
+) bool {
+	auditPersisted := false
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -377,14 +433,16 @@ func (a *APIServer) finalizeAgentHook(
 		}
 	})
 
-	safeSection("observability_v8", func() {
-		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-	})
+	if !req.SuppressCorrelationEmit {
+		safeSection("observability_v8", func() {
+			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+		})
 
-	safeSection("audit", func() {
-		a.logConnectorHookAuditEnvelope(ctx, env)
-	})
-
+		safeSection("audit", func() {
+			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
+		})
+	}
+	return auditPersisted
 }
 
 func (a *APIServer) hookDecisionMeta(
@@ -411,7 +469,7 @@ func (a *APIServer) hookDecisionMeta(
 		req.AgentType,
 		req.Payload,
 	)
-	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+	meta.ToolID = req.ToolInvocationID
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
@@ -596,10 +654,21 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	if strings.TrimSpace(connectorName) != "" {
 		req.ConnectorName = connectorName
 	}
-	ctx = enrichAgentHookContext(ctx, req)
 	profile := a.hookProfileForConnector(connectorName)
-	rawEventIDs := a.rememberHookRawEvents(req)
-	a.emitAgentHookLLMEvent(ctx, req, rawBody)
+	correlatedCtx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, rawBody)
+	if correlationErr != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] synthetic hook correlation unavailable connector=%s event=%s: %v\n",
+			connectorName, req.HookEventName, correlationErr)
+		req.SuppressCorrelationEmit = true
+	} else {
+		ctx, req = correlatedCtx, correlatedReq
+	}
+	ctx = enrichAgentHookContext(ctx, req)
+	var rawEventIDs []string
+	if !req.SuppressCorrelationEmit {
+		rawEventIDs = a.rememberHookRawEvents(req)
+		a.emitAgentHookLLMEvent(ctx, req, rawBody)
+	}
 
 	// Synthetic paths use the generic evaluator (notify carries no
 	// scan/tool context), but they still need panic safety: the
@@ -656,8 +725,18 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 	a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-	a.logConnectorHookAuditEnvelope(ctx, env)
+	if !req.SuppressCorrelationEmit {
+		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
+				connectorName, req.HookEventName, err)
+		} else {
+			if finalizeErr := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); finalizeErr != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] synthetic hook receipt finalization failed connector=%s event=%s: %v\n",
+					connectorName, req.HookEventName, finalizeErr)
+			}
+		}
+	}
 	return resp
 }
 
@@ -1163,6 +1242,19 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 }
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
+	return normalizeAgentHookRequestWithCorrelation(connectorName, payload, connector.DefaultCorrelationSpec(connectorName))
+}
+
+// normalizeAgentHookRequestWithCorrelation decodes content using the shared
+// hook vocabulary but resolves identity exclusively through the connector's
+// reviewed CorrelationSpec. This separation is intentional: prompt/tool
+// content aliases are harmless inspection conveniences, while treating an
+// execution, message, step or task identifier as a turn changes correlation
+// meaning and therefore must be explicitly connector-scoped.
+func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec) agentHookRequest {
+	if spec.Connector == "" || len(spec.HookBindings) == 0 {
+		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
+	}
 	event := firstString(payload,
 		"hook_event_name",
 		"hookEventName",
@@ -1175,48 +1267,89 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	if event == "" {
 		event = inferAgentHookEvent(payload)
 	}
-	agentID, agentName, agentType := extractAgentIdentityFromHookPayload(payload)
-	sessionID := firstString(payload,
-		"session_id", "sessionId", "sessionID",
-		"task_id", "conversation_id", "conversationId", "conversationID",
-		"thread_id", "threadId", "trajectory_id", "trajectoryId",
-	)
+	values := make(map[connector.CorrelationTarget]connector.CorrelationValue)
+	identifiers := spec.HookValues(payload)
+	for _, target := range []connector.CorrelationTarget{
+		connector.CorrelationTargetSemanticEvent,
+		connector.CorrelationTargetSession,
+		connector.CorrelationTargetThread,
+		connector.CorrelationTargetTurn,
+		connector.CorrelationTargetMessage,
+		connector.CorrelationTargetAgent,
+		connector.CorrelationTargetAgentName,
+		connector.CorrelationTargetAgentType,
+		connector.CorrelationTargetRootAgent,
+		connector.CorrelationTargetParentAgent,
+		connector.CorrelationTargetChildAgent,
+		connector.CorrelationTargetRootSession,
+		connector.CorrelationTargetParentSession,
+		connector.CorrelationTargetChildSession,
+		connector.CorrelationTargetTool,
+		connector.CorrelationTargetModelRequest,
+		connector.CorrelationTargetModelResponse,
+		connector.CorrelationTargetSourceEvent,
+		connector.CorrelationTargetSourceSeq,
+		connector.CorrelationTargetSourceTime,
+		connector.CorrelationTargetExecution,
+		connector.CorrelationTargetStep,
+	} {
+		if value, ok := spec.HookValue(payload, target); ok {
+			values[target] = value
+		}
+	}
+	correlationValue := func(target connector.CorrelationTarget) string {
+		return values[target].Value
+	}
+	agentID := correlationValue(connector.CorrelationTargetAgent)
+	agentName := correlationValue(connector.CorrelationTargetAgentName)
+	agentType := correlationValue(connector.CorrelationTargetAgentType)
+	sessionID := correlationValue(connector.CorrelationTargetSession)
+	rootAgentID := correlationValue(connector.CorrelationTargetRootAgent)
+	parentAgentID := correlationValue(connector.CorrelationTargetParentAgent)
+	childAgentID := correlationValue(connector.CorrelationTargetChildAgent)
+	rootSessionID := correlationValue(connector.CorrelationTargetRootSession)
+	parentSessionID := correlationValue(connector.CorrelationTargetParentSession)
+	childSessionID := correlationValue(connector.CorrelationTargetChildSession)
 	if canonicalEvent(event) == "subagentstart" || canonicalEvent(event) == "subagentstop" {
-		extra := objectAt(payload, "extra")
-		parentSessionID := firstNonEmpty(
-			firstString(payload, "parent_session_id", "parentSessionId", "parentSessionID"),
-			firstString(extra, "parent_session_id", "parentSessionId", "parentSessionID"),
-			sessionID,
-		)
-		childSessionID := firstNonEmpty(
-			firstString(payload, "child_session_id", "childSessionId", "childSessionID"),
-			firstString(extra, "child_session_id", "childSessionId", "childSessionID"),
-		)
+		parentSessionID = firstNonEmpty(parentSessionID, sessionID)
 		if childSessionID != "" {
 			payload["parent_session_id"] = parentSessionID
 			sessionID = childSessionID
+			child := values[connector.CorrelationTargetChildSession]
+			child.Target = connector.CorrelationTargetSession
+			values[connector.CorrelationTargetSession] = child
+		}
+		if childAgentID != "" {
+			agentID = childAgentID
+			child := values[connector.CorrelationTargetChildAgent]
+			child.Target = connector.CorrelationTargetAgent
+			values[connector.CorrelationTargetAgent] = child
 		}
 	}
-	if agentID == "" && (canonicalEvent(event) == "subagentstart" || canonicalEvent(event) == "subagentstop") {
+	if agentID == "" && spec.Allows(connector.CorrelationInferenceSubagentIdentity) &&
+		(canonicalEvent(event) == "subagentstart" || canonicalEvent(event) == "subagentstop") {
 		childIdentity := firstNonEmpty(
-			firstString(payload, "subagent_id", "subagentId", "agent_transcript_path", "agentTranscriptPath", "tool_call_id", "toolCallId"),
-			firstString(payload, "child_role", "agent_name", "agentName", "agent_type", "agentType"),
-			firstString(objectAt(payload, "extra"), "child_role", "agent_name", "agent_type"),
+			childAgentID,
+			correlationValue(connector.CorrelationTargetTool),
+			agentName,
+			agentType,
 			"subagent",
 		)
 		agentID = stableLLMEventID("agent", connectorName, sessionID, "subagent", childIdentity)
 		agentName = firstNonEmpty(agentName, childIdentity)
+		values[connector.CorrelationTargetAgent] = connector.CorrelationValue{
+			Target: connector.CorrelationTargetAgent, Value: agentID,
+			Origin: connector.CorrelationOriginDerived, Namespace: connectorName, IDKind: "agent",
+		}
 	}
-	if agentID == "" && canonicalEvent(event) == "teammateidle" {
+	if agentID == "" && spec.Allows(connector.CorrelationInferenceSubagentIdentity) && canonicalEvent(event) == "teammateidle" {
 		teammate := firstNonEmpty(firstString(payload, "teammate_name", "teammateName"), "teammate")
 		agentID = stableLLMEventID("agent", connectorName, sessionID, "teammate", teammate)
 		agentName = firstNonEmpty(agentName, teammate)
 		payload["parent_agent_id"] = stableLLMEventID("agent", connectorName, sessionID, "root")
 		payload["agent_depth"] = 1
 	}
-	turnID := firstString(payload,
-		"turn_id", "turnId", "turnID",
-	)
+	turnID := correlationValue(connector.CorrelationTargetTurn)
 	cwd := firstString(payload, "cwd", "working_dir", "workingDir", "working_directory", "workingDirectory")
 	if cwd == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
@@ -1299,53 +1432,53 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		direction = "tool_result"
 	}
 
+	origins := make(map[connector.CorrelationTarget]connector.CorrelationOrigin, len(values))
+	for target, value := range values {
+		origins[target] = value.Origin
+	}
+	source := values[connector.CorrelationTargetSourceEvent]
 	return agentHookRequest{
 		ConnectorName: connectorName,
-		AgentID:       agentID,
-		AgentName:     agentName,
-		AgentType:     agentType,
-		HookEventName: event,
-		SessionID:     sessionID,
-		TurnID:        turnID,
-		CWD:           cwd,
-		ToolName:      toolName,
-		ToolArgs:      json.RawMessage(argBytes),
-		Content:       content,
-		Direction:     direction,
-		Payload:       payload,
+		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
+		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
+		HookEventName:   event,
+		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
+		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
+		ThreadID:      correlationValue(connector.CorrelationTargetThread),
+		RootSessionID: rootSessionID, ParentSessionID: parentSessionID, ChildSessionID: childSessionID,
+		ToolInvocationID: correlationValue(connector.CorrelationTargetTool),
+		ModelRequestID:   correlationValue(connector.CorrelationTargetModelRequest),
+		ModelResponseID:  correlationValue(connector.CorrelationTargetModelResponse),
+		SourceEventID:    source.Value, SourceSequence: correlationValue(connector.CorrelationTargetSourceSeq),
+		SourceTimestamp: correlationValue(connector.CorrelationTargetSourceTime),
+		SourceNamespace: source.Namespace, SourceIDKind: source.IDKind,
+		ExecutionID: correlationValue(connector.CorrelationTargetExecution), StepID: correlationValue(connector.CorrelationTargetStep),
+		CorrelationProfileVersion: spec.ProfileVersion, CorrelationCompleteness: spec.Completeness,
+		CorrelationSurface: connector.CorrelationSurfaceHook, CorrelationOrigins: origins,
+		CorrelationValues: values, CorrelationIdentifiers: identifiers,
+		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
+		Content: content, Direction: direction, Payload: payload,
 	}
 }
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
-	req := normalizeAgentHookRequest(connectorName, payload)
+	spec := profile.Correlation
+	if spec.Connector == "" || len(spec.HookBindings) == 0 {
+		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
+	}
+	req := normalizeAgentHookRequestWithCorrelation(connectorName, payload, spec)
 	req.Content = applyContentEnvelopeFallback(req.Content, payload, profile.ContentEnvelopeKey)
 	if profile.Decode == nil {
 		return req
 	}
 	decoded := profile.Decode(payload)
-	if decoded.ConnectorName != "" {
-		req.ConnectorName = decoded.ConnectorName
-	}
-	if req.ConnectorName == "" {
-		req.ConnectorName = connectorName
-	}
+	// Decode is allowed to interpret content/wire shape, but identity remains
+	// exclusively owned by the resolved CorrelationSpec above. In particular,
+	// a decoder cannot project execution_id, stepIdx, message_id or any other
+	// convenient vendor value onto TurnID, cannot supply a semantic-event ID,
+	// and cannot override the authenticated connector namespace.
 	if decoded.HookEventName != "" {
 		req.HookEventName = decoded.HookEventName
-	}
-	if decoded.SessionID != "" {
-		req.SessionID = decoded.SessionID
-	}
-	if decoded.TurnID != "" {
-		req.TurnID = decoded.TurnID
-	}
-	if decoded.AgentID != "" {
-		req.AgentID = decoded.AgentID
-	}
-	if decoded.AgentName != "" {
-		req.AgentName = decoded.AgentName
-	}
-	if decoded.AgentType != "" {
-		req.AgentType = decoded.AgentType
 	}
 	if decoded.CWD != "" {
 		req.CWD = decoded.CWD
@@ -1863,18 +1996,25 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 
 func hookProfileRequestFromAgentHook(req agentHookRequest) connector.HookProfileRequest {
 	return connector.HookProfileRequest{
-		ConnectorName: req.ConnectorName,
-		HookEventName: req.HookEventName,
-		SessionID:     req.SessionID,
-		TurnID:        req.TurnID,
-		AgentID:       req.AgentID,
-		AgentName:     req.AgentName,
-		AgentType:     req.AgentType,
-		CWD:           req.CWD,
-		ToolName:      req.ToolName,
-		Content:       req.Content,
-		Direction:     req.Direction,
-		Payload:       req.Payload,
+		ConnectorName: req.ConnectorName, HookEventName: req.HookEventName,
+		SemanticEventID: req.SemanticEventID, LogicalEventID: req.LogicalEventID,
+		ConnectorInstanceID: req.ConnectorInstanceID, SessionID: req.SessionID, ThreadID: req.ThreadID,
+		TurnID: req.TurnID, MessageID: req.MessageID,
+		AgentID: req.AgentID, AgentName: req.AgentName, AgentType: req.AgentType,
+		RootAgentID: req.RootAgentID, ParentAgentID: req.ParentAgentID, ChildAgentID: req.ChildAgentID,
+		RootSessionID: req.RootSessionID, ParentSessionID: req.ParentSessionID, ChildSessionID: req.ChildSessionID,
+		ToolInvocationID: req.ToolInvocationID, ModelRequestID: req.ModelRequestID,
+		ModelResponseID: req.ModelResponseID, SourceEventID: req.SourceEventID,
+		SourceSequence: req.SourceSequence, SourceTimestamp: req.SourceTimestamp,
+		SourceNamespace: req.SourceNamespace, SourceIDKind: req.SourceIDKind,
+		ExecutionID: req.ExecutionID, StepID: req.StepID,
+		CorrelationProfileVersion: req.CorrelationProfileVersion,
+		CorrelationCompleteness:   req.CorrelationCompleteness, CorrelationSurface: req.CorrelationSurface,
+		CorrelationOrigins: req.CorrelationOrigins, CorrelationValues: req.CorrelationValues,
+		CorrelationIdentifiers:  req.CorrelationIdentifiers,
+		SuppressCorrelationEmit: req.SuppressCorrelationEmit,
+		CWD:                     req.CWD, ToolName: req.ToolName, Content: req.Content, Direction: req.Direction,
+		Payload: req.Payload,
 	}
 }
 

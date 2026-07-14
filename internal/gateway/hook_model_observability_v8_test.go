@@ -378,12 +378,14 @@ func TestHookModelV8EmitsGeneratedAgentModelHierarchyAndAllLegacyMetrics(t *test
 		}
 	}
 
-	// Completion retries are deduplicated before any generated signal is built.
+	// Without an exact profile-declared receipt, same-content completions remain
+	// separate raw observations. The durable occurrence coordinator, not this
+	// emitter, owns exact replay suppression.
 	emitRichHookModelV8(t, api)
 	time.Sleep(50 * time.Millisecond)
 	traceRequests, _ := capture.snapshot()
-	if got := len(hookModelV8CapturedSpans(traceRequests)); got != 2 {
-		t.Fatalf("duplicate completion emitted %d spans, want 2", got)
+	if got := len(hookModelV8CapturedSpans(traceRequests)); got != 4 {
+		t.Fatalf("same-content completion emitted %d spans, want two independent agent+model observations", got)
 	}
 }
 

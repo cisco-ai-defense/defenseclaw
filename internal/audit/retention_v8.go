@@ -35,6 +35,11 @@ const (
 	RetentionScanResults              RetentionTableClass = "scan_results"
 	RetentionLegacyJudgeResponses     RetentionTableClass = "legacy_judge_responses"
 	RetentionAuthoritativeJudgeBodies RetentionTableClass = "authoritative_judge_bodies"
+	RetentionCorrelationReceipts      RetentionTableClass = "correlation_receipts"
+	RetentionCorrelationCursors       RetentionTableClass = "correlation_cursors"
+	RetentionCorrelationPending       RetentionTableClass = "correlation_pending_operations"
+	RetentionCorrelationRelationships RetentionTableClass = "correlation_relationships"
+	RetentionCorrelationEvents        RetentionTableClass = "correlation_events"
 )
 
 var retentionTableClasses = [...]RetentionTableClass{
@@ -47,6 +52,11 @@ var retentionTableClasses = [...]RetentionTableClass{
 	RetentionScanResults,
 	RetentionLegacyJudgeResponses,
 	RetentionAuthoritativeJudgeBodies,
+	RetentionCorrelationReceipts,
+	RetentionCorrelationCursors,
+	RetentionCorrelationPending,
+	RetentionCorrelationRelationships,
+	RetentionCorrelationEvents,
 }
 
 // RetentionFailureClass is deliberately bounded and contains no driver error,
@@ -368,7 +378,19 @@ type retentionOwnership string
 const (
 	retentionOwnedHistory   retentionOwnership = "history"
 	retentionOwnedProtected retentionOwnership = "protected"
+	retentionOwnedGraph     retentionOwnership = "graph"
 )
+
+// Correlation state has a fixed graph-aware lifecycle. Direct stages are
+// counted; identifiers, observations, and relationship evidence are removed by
+// declared foreign-key cascades from their owning event/relationship.
+var retentionCorrelationGraphTables = map[string]bool{
+	"correlation_events": true, "correlation_identifiers": true,
+	"correlation_identity_claims": true,
+	"correlation_observations":    true, "correlation_relationships": true,
+	"correlation_relationship_evidence": true, "correlation_cursors": true,
+	"correlation_pending_operations": true, "correlation_receipts": true,
+}
 
 // These catalogs deliberately cover every application table created by the
 // two migration lists. The completeness test compares the live migrated schema
@@ -384,6 +406,20 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"alert_acknowledgement_operations": retentionOwnedProtected,
 	"alert_acknowledgement_baselines":  retentionOwnedProtected,
 	"alert_acknowledgement_health":     retentionOwnedProtected,
+	// Correlation state is graph-owned rather than independent row history.
+	// Its bounded graph reaper is added alongside the ledger so the generic
+	// table reaper can never delete a parent before its cursor, receipt, or
+	// relationship evidence has been resolved.
+	"correlation_connector_instances":   retentionOwnedProtected,
+	"correlation_events":                retentionOwnedGraph,
+	"correlation_identifiers":           retentionOwnedGraph,
+	"correlation_identity_claims":       retentionOwnedGraph,
+	"correlation_observations":          retentionOwnedGraph,
+	"correlation_relationships":         retentionOwnedGraph,
+	"correlation_relationship_evidence": retentionOwnedGraph,
+	"correlation_cursors":               retentionOwnedGraph,
+	"correlation_pending_operations":    retentionOwnedGraph,
+	"correlation_receipts":              retentionOwnedGraph,
 }
 
 var retentionJudgeMigrationCatalog = map[string]retentionOwnership{
@@ -479,6 +515,11 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 	}
 	if runErr == nil && reaper.hooks.afterTimestampRepairs != nil {
 		if err := reaper.hooks.afterTimestampRepairs(); err != nil {
+			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
+		}
+	}
+	if runErr == nil {
+		if err := reaper.drainCorrelationState(ctx, cutoff, started, &result); err != nil {
 			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
 		}
 	}
@@ -649,6 +690,195 @@ func (reaper *RetentionReaper) drainAuditTable(
 		if deleted < RetentionBatchSize {
 			return nil
 		}
+	}
+}
+
+// drainCorrelationState follows dependency order. Receipts and inactive state
+// release event references first; relationships release their evidence; only
+// then may an old, wholly unreferenced event cascade to identifiers and
+// observations. Connector instances and active state are never candidates.
+func (reaper *RetentionReaper) drainCorrelationState(
+	ctx context.Context,
+	cutoff time.Time,
+	now time.Time,
+	result *RetentionRunResult,
+) error {
+	stages := [...]struct {
+		class RetentionTableClass
+		args  []any
+	}{
+		{RetentionCorrelationReceipts, []any{unixNano(now)}},
+		{RetentionCorrelationCursors, []any{unixNano(cutoff)}},
+		{RetentionCorrelationPending, []any{unixNano(cutoff)}},
+		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
+		{RetentionCorrelationEvents, []any{unixNano(cutoff)}},
+	}
+	for _, stage := range stages {
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.args...)
+			if err != nil {
+				return err
+			}
+			if deleted == 0 {
+				break
+			}
+			result.RowsDeleted[stage.class] += deleted
+			result.BatchCount++
+			if err := reaper.hooks.yield(ctx); err != nil {
+				return err
+			}
+			if deleted < RetentionBatchSize {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func (reaper *RetentionReaper) deleteCorrelationBatch(
+	ctx context.Context,
+	class RetentionTableClass,
+	args ...any,
+) (int64, error) {
+	statement, err := correlationRetentionDeleteStatement(class)
+	if err != nil {
+		return 0, err
+	}
+	args = append(args, RetentionBatchSize)
+	release, err := reaper.store.acquireReady()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	var deleted int64
+	err = retryBusy(ctx, "observability_v8_retention_"+string(class), func() error {
+		tx, beginErr := reaper.store.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback() //nolint:errcheck
+		res, execErr := tx.ExecContext(ctx, statement, args...)
+		if execErr != nil {
+			return execErr
+		}
+		rows, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if rows > RetentionBatchSize {
+			return errors.New("correlation retention batch exceeded fixed limit")
+		}
+		if rows > 0 && reaper.hooks.beforeAuditBatchCommit != nil {
+			if hookErr := reaper.hooks.beforeAuditBatchCommit(class); hookErr != nil {
+				return hookErr
+			}
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		deleted = rows
+		return nil
+	})
+	return deleted, err
+}
+
+func correlationRetentionDeleteStatement(class RetentionTableClass) (string, error) {
+	switch class {
+	case RetentionCorrelationReceipts:
+		return `DELETE FROM correlation_receipts WHERE rowid IN (
+			SELECT rowid FROM correlation_receipts
+			WHERE expires_time_unix_nano < ?
+			ORDER BY expires_time_unix_nano, connector_instance_id, source_key_digest,
+				fingerprint_sha256 LIMIT ?
+		)`, nil
+	case RetentionCorrelationCursors:
+		return `DELETE FROM correlation_cursors WHERE rowid IN (
+			SELECT rowid FROM correlation_cursors
+			WHERE active=0 AND updated_time_unix_nano < ?
+			ORDER BY updated_time_unix_nano, connector_instance_id, session_id, agent_id LIMIT ?
+		)`, nil
+	case RetentionCorrelationPending:
+		return `DELETE FROM correlation_pending_operations WHERE rowid IN (
+			SELECT rowid FROM correlation_pending_operations
+			WHERE status<>'active' AND updated_time_unix_nano < ?
+			ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+		)`, nil
+	case RetentionCorrelationRelationships:
+		return `DELETE FROM correlation_relationships WHERE rowid IN (
+			WITH protected_nodes(kind, id) AS (
+				SELECT 'semantic_event', semantic_event_id FROM correlation_receipts
+					WHERE expires_time_unix_nano >= ?
+				UNION SELECT 'semantic_event', conflicts_with_semantic_event_id FROM correlation_receipts
+					WHERE expires_time_unix_nano >= ? AND conflicts_with_semantic_event_id IS NOT NULL
+				UNION SELECT 'semantic_event', last_semantic_event_id FROM correlation_cursors
+					WHERE active=1 AND last_semantic_event_id IS NOT NULL
+				UNION SELECT 'session', session_id FROM correlation_cursors WHERE active=1
+				UNION SELECT 'agent', agent_id FROM correlation_cursors WHERE active=1
+				UNION SELECT 'lifecycle', lifecycle_id FROM correlation_cursors
+					WHERE active=1 AND lifecycle_id IS NOT NULL
+				UNION SELECT 'execution', execution_id FROM correlation_cursors
+					WHERE active=1 AND execution_id IS NOT NULL
+				UNION SELECT 'turn', active_turn_id FROM correlation_cursors
+					WHERE active=1 AND active_turn_id IS NOT NULL
+				UNION SELECT 'semantic_event', start_semantic_event_id FROM correlation_pending_operations
+					WHERE status='active'
+				UNION SELECT 'session', session_id FROM correlation_pending_operations
+					WHERE status='active' AND session_id IS NOT NULL
+				UNION SELECT 'turn', turn_id FROM correlation_pending_operations
+					WHERE status='active' AND turn_id IS NOT NULL
+				UNION SELECT 'agent', agent_id FROM correlation_pending_operations
+					WHERE status='active' AND agent_id IS NOT NULL
+				UNION SELECT 'execution', execution_id FROM correlation_pending_operations
+					WHERE status='active' AND execution_id IS NOT NULL
+				UNION SELECT CASE operation_type WHEN 'model' THEN 'model_request'
+					ELSE 'tool_invocation' END, operation_id FROM correlation_pending_operations
+					WHERE status='active'
+			)
+			SELECT relationship.rowid FROM correlation_relationships AS relationship
+			WHERE relationship.last_seen_time_unix_nano < ?
+			AND NOT EXISTS (SELECT 1 FROM protected_nodes AS node WHERE
+				(node.kind=relationship.from_kind AND node.id=relationship.from_id) OR
+				(node.kind=relationship.to_kind AND node.id=relationship.to_id))
+			AND NOT EXISTS (
+				SELECT 1 FROM correlation_relationship_evidence AS evidence
+				JOIN protected_nodes AS node ON node.kind='semantic_event'
+					AND node.id=evidence.semantic_event_id
+				WHERE evidence.relationship_id=relationship.relationship_id
+			)
+			ORDER BY relationship.last_seen_time_unix_nano, relationship.relationship_id LIMIT ?
+		)`, nil
+	case RetentionCorrelationEvents:
+		return `DELETE FROM correlation_events WHERE rowid IN (
+			SELECT event.rowid FROM correlation_events AS event
+			WHERE event.received_time_unix_nano < ?
+			AND NOT EXISTS (SELECT 1 FROM correlation_receipts AS receipt WHERE
+				receipt.semantic_event_id=event.semantic_event_id OR
+				receipt.conflicts_with_semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_cursors AS cursor
+				WHERE cursor.last_semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
+				operation.start_semantic_event_id=event.semantic_event_id OR
+				operation.terminal_semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationship_evidence AS evidence
+				WHERE evidence.semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (
+				SELECT 1 FROM correlation_relationship_evidence AS evidence
+				JOIN correlation_observations AS observation
+					ON observation.record_id=evidence.evidence_record_id
+				WHERE observation.semantic_event_id=event.semantic_event_id
+			)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				(relationship.from_kind='semantic_event' AND relationship.from_id=event.semantic_event_id) OR
+				(relationship.to_kind='semantic_event' AND relationship.to_id=event.semantic_event_id) OR
+				(relationship.from_kind='logical_event' AND relationship.from_id=event.logical_group_id) OR
+				(relationship.to_kind='logical_event' AND relationship.to_id=event.logical_group_id))
+			ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT ?
+		)`, nil
+	default:
+		return "", errors.New("retention registry contains an unsupported correlation class")
 	}
 }
 

@@ -287,6 +287,30 @@ def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal(
         assert "scripts/release_candidate.py verify" in rendered
 
 
+def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None:
+    text = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
+    installer = POSIX_INSTALLER.read_text(encoding="utf-8")
+
+    # The primary install must not inherit the Cosign installed on the runner.
+    assert 'EXTERNAL_COSIGN="$(command -v cosign)"' in text
+    assert 'readonly BOOTSTRAP_PATH="${BOOTSTRAP_HOME}/.local/bin:${BASE_TOOL_PATH}"' in text
+    assert 'PATH="${BOOTSTRAP_PATH}" command -v cosign' in text
+    assert '$(dirname "$(command -v cosign)")' not in text
+    assert 'Cosign was not found; authenticating temporary Cosign 2.6.3' in text
+    assert 'mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy.XXXXXX"' in installer
+    assert "assert_bootstrap_retired_privately" in text
+    assert 'not retired into bounded custody' in text
+    assert 'BOOTSTRAP_HOME}/.local/bin/cosign' in text
+
+    # A second isolated installation must still exercise an explicit external
+    # verifier and prove the installer did not mutate or replace that binary.
+    assert 'EXTERNAL_TOOL_BIN}/cosign' in text
+    assert 'external Cosign wrapper was not invoked' in text
+    assert 'external-Cosign case unexpectedly used the bootstrap verifier' in text
+    assert '$(sha256_file "${EXTERNAL_COSIGN}")' in text
+    assert 'the ambient Cosign binary changed during fresh-install testing' in text
+
+
 def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
     job = _workflow()["jobs"]["historical-baseline-canary"]
     includes = job["strategy"]["matrix"]["include"]
@@ -398,8 +422,12 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "auto_bridge_from does not match the reviewed pre-bridge matrix" in text
     assert "Resolve immutable published bridge provenance" in text
     assert '"isImmutable": True' in text
-    assert "published_asset_names(expected, status)" in text
+    assert "omit_windows_binaries = expected not in windows_baselines" in text
+    assert "omit_windows_binaries=omit_windows_binaries" in text
     assert "payload_asset_names(expected, status)" in text
+    assert "set(windows_release_binary_names(expected))" in text
+    assert "if name in omitted_windows" in text
+    assert "if name in assets" in text
     assert "cosign verify-blob" in text
     assert '--source-tree "$SOURCE_TREE"' in text
     assert '--bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"' in text
@@ -659,11 +687,12 @@ def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() ->
     assert completed.stdout.strip() == "0.8.3|seed|1"
 
 
-def test_posix_fresh_release_uses_physical_temp_home_and_surfaces_installer_log() -> None:
+def test_posix_fresh_release_uses_physical_temp_homes_and_surfaces_installer_logs() -> None:
     source = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
 
     workdir = source.index('WORKDIR="$(mktemp -d')
     canonical = source.index('WORKDIR="$(cd "${WORKDIR}" && pwd -P)"')
-    home = source.index('export HOME="${WORKDIR}/home"')
+    home = source.index('BOOTSTRAP_HOME="${WORKDIR}/bootstrap/home"')
     assert workdir < canonical < home
-    assert 'cat "${WORKDIR}/install.log" >&2' in source
+    assert 'cat "${WORKDIR}/bootstrap-install.log" >&2' in source
+    assert 'cat "${WORKDIR}/external-install.log" >&2' in source

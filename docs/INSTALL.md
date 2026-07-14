@@ -91,6 +91,11 @@ Scope guardrails for the local Splunk preset:
 For more details on the Free-tier behavior and limits, see
 [About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
+Cosign is not a POSIX release-install prerequisite from `0.8.5` onward. The
+release installer prefers an existing binary and otherwise authenticates a
+pinned, temporary Cosign `2.6.3` against a hard-coded platform SHA-256. The
+temporary verifier is never added to `PATH` or installed system-wide.
+
 ---
 
 ## Building from Source
@@ -354,8 +359,9 @@ binary + CLI wheel + plugin tarball, installs them, and prompts to run
 confirmations. The release installers are fresh-install-only. If the CLI,
 gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
-current release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver
-for an existing pre-bridge host. A `0.8.3`-or-older built-in
+current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
+pre-bridge host. The signed `scripts/upgrade.ps1` surface is refusal-only
+because this cut publishes no Windows runtime. A `0.8.3`-or-older built-in
 `defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
 required two-process bridge handoff retroactively.
 
@@ -706,10 +712,10 @@ path. The resolver fails closed before stopping services and prints the exact
 tested source versions.
 
 Support is platform-specific. POSIX release gates cover the reviewed global
-matrix through `0.4.0`; the native Windows matrix currently covers only
-`0.8.0` through `0.8.4`. A Windows source older than `0.8.0` therefore fails
-closed and prints those exact supported Windows sources—global POSIX coverage
-must not be treated as a Windows upgrade claim.
+matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or
+rollback binary, so this hard cut has no supported Windows source version; the
+PowerShell resolver fails closed before stopping services. Global POSIX
+coverage must not be treated as a Windows upgrade claim.
 
 If the installed version is not in that list, remain on the current version and
 contact support for a source-specific, state-aware recovery plan. Do not infer
@@ -722,14 +728,12 @@ Run the current release-owned resolver in latest mode. Do not add a version
 override when crossing the bridge boundary:
 
 For an installed release without a source checkout, use the authenticated
-POSIX or PowerShell resolver-asset bootstrap in [CLI Reference](CLI.md#upgrade).
+POSIX resolver-asset bootstrap in [CLI Reference](CLI.md#upgrade).
 The local paths below are only the equivalent entry points from a checkout of
 the current release:
 
 ```bash
 ./scripts/upgrade.sh --yes
-# Windows:
-.\scripts\upgrade.ps1 -Yes
 ```
 
 Release `0.8.4` is the config-v7/runtime-v7 protocol bridge for the subsequent
@@ -737,13 +741,19 @@ observability-v8 hard cut. Run the current release-owned updater without
 `--version` when crossing that boundary so its signed manifest can select and
 health-check the bridge before a fresh controller starts the target phase.
 Explicit targets that skip a required bridge fail before installed state is
-changed. Release `0.8.4` and later require `cosign`; `--allow-unverified` cannot
-override their provenance checks.
+changed. Release `0.8.4` and later require Cosign provenance verification;
+`--allow-unverified` cannot override it. The current POSIX resolver prefers an
+existing `cosign`, otherwise it downloads pinned Cosign `2.6.3` into an
+owner-only temporary directory and authenticates its hard-coded platform
+SHA-256 before execution. It does not install Cosign system-wide or modify
+`PATH`. The frozen `0.8.4` built-in controller predates this bootstrap, so a
+no-Cosign `0.8.4` host should use the current release-owned resolver.
 
 The supported staged path is the authenticated current-release
-`defenseclaw-upgrade.sh` or `defenseclaw-upgrade.ps1` asset in latest mode (or
-the equivalent `scripts/upgrade.sh` / `scripts/upgrade.ps1` from a trusted
-current-release checkout). An already-published `0.8.3`-or-older
+`defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
+`scripts/upgrade.sh` from a trusted current-release checkout). The signed
+PowerShell resolver remains a preflight refusal surface only. An
+already-published `0.8.3`-or-older
 `defenseclaw upgrade` command cannot gain the new two-hop orchestration after
 installation, so its signed protocol check deliberately refuses the hard cut
 before stopping services. Some frozen versions then print an obsolete raw
@@ -778,8 +788,8 @@ proves bridge health, and only then retries.
 Once the bridge is installed, its fresh CLI controller performs the target
 phase: preflight artifact verification, config backup,
 stop-install-migrate-restart, rollback on failure, and version-bound health
-polling. The release-owned shell or PowerShell resolver coordinates the
-initial bridge selection. See the [CLI Reference](CLI.md#upgrade) for the
+polling. The release-owned POSIX shell resolver coordinates the initial bridge
+selection. See the [CLI Reference](CLI.md#upgrade) for the
 complete path and flag behavior.
 
 A coherent installed `0.8.4` bridge may start the hard-cut target phase with
@@ -836,12 +846,7 @@ bash defenseclaw-upgrade.sh --yes
 ./scripts/upgrade.sh --yes
 ```
 
-```powershell
-# Run the already-authenticated Windows target-release asset in latest mode
-& .\defenseclaw-upgrade.ps1 -Yes
-```
-
-Do not add `--version` or `-Version` to the resolver commands. The complete
+Do not add `--version` to the resolver command. The complete
 Sigstore and SHA-256 bootstrap is in the [CLI Reference](CLI.md#upgrade). The
 coherent bridge controller performs the same authenticated rollback-artifact
 acquisition, backup, migration, restart, and health checks when invoked through
@@ -873,11 +878,10 @@ target release. Follow the complete Sigstore and SHA-256 bootstrap in the
 authenticated checkout of that release. Do not stream an unauthenticated
 network response into a shell.
 
-On Windows, run the matching signed `scripts/upgrade.ps1` resolver. It detects
-the installed version before stopping anything, verifies and installs `0.8.4`,
-proves fresh `0.8.4` health, then starts the `0.8.5` hard cut under that fresh
-controller. Only versions declared in the published-baseline matrix auto-hop.
-Other sources fail closed and print the exact bridge-first path.
+Windows cannot cross this hard cut because the published `0.8.4` bridge has no
+Windows gateway or rollback binary. The signed `scripts/upgrade.ps1` resolver
+is retained only to refuse before stopping services and explain that no tested
+path exists. Keep the current Windows installation unchanged.
 
 An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
 service stop, or installed-file mutation. Fresh installers also refuse to

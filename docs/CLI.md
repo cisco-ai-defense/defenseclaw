@@ -499,8 +499,8 @@ is required.
 6. Report success only after version-bound health checks pass; otherwise restore and verify the exact source state.
 
 Crossing the observability-v8 hard cut requires the `0.8.4` bridge. The
-release-owned shell and PowerShell resolvers perform the supported one-command
-path when invoked without an explicit target:
+release-owned POSIX shell resolver performs the supported one-command path when
+invoked without an explicit target:
 
 ```text
 reviewed 0.8.3-or-older source
@@ -556,19 +556,24 @@ the v7 file.
 - `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
   signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
-`0.8.4+` upgrades require local `cosign` and the exact release-workflow identity;
-missing provenance verification fails before service stop or installed mutation.
-Install it first (`brew install cosign` on macOS, or the official Sigstore package
-for your platform).
+`0.8.4+` upgrades require Cosign and the exact release-workflow identity. The
+current POSIX resolver and the `0.8.5+` built-in controller prefer an existing
+`cosign`; if it is missing, they download pinned Cosign `2.6.3` into an
+owner-only temporary directory, verify its hard-coded platform SHA-256 before
+execution, use it once, and remove it. They do not install it globally or alter
+`PATH`. Any verifier download, digest, or signature failure occurs before
+service stop or installed mutation. The immutable `0.8.4` built-in controller
+predates this bootstrap, so use the current release-owned resolver on a
+no-Cosign `0.8.4` host.
 
 **Known recovery paths:**
 
 | Installed version | Recommendation |
 | --- | --- |
-| `0.8.4` | Run `defenseclaw upgrade --yes`. A coherent bridge controller authenticates and privately acquires its exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. |
-| A source listed for its platform in `release/upgrade-baselines.json` | Install `cosign`, then run the current release-owned shell or PowerShell resolver without `--version`. It performs `source → 0.8.4 → fresh controller → latest` as one command. |
-| `0.8.0` or `0.8.1` | Install `cosign` before invoking the resolver. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
-| Windows older than `0.8.0` | The native Windows published-baseline matrix currently covers `0.8.0`–`0.8.4` only. The resolver fails closed before stopping services and prints those exact supported Windows sources. |
+| `0.8.4` | Run the current release-owned POSIX resolver without `--version`; it authenticates a temporary pinned Cosign when needed and privately acquires exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. The frozen built-in command remains usable if Cosign is already on `PATH`. |
+| A POSIX source listed for its platform in `release/upgrade-baselines.json` | Run the current release-owned shell resolver without `--version`. It authenticates a temporary verifier if needed and performs `source → 0.8.4 → fresh controller → latest` as one command. |
+| `0.8.0` or `0.8.1` | Use the current release-owned POSIX resolver without `--version`; no system-wide Cosign installation is required. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
+| Any Windows source | The `0.8.4` release contains no Windows gateway/rollback binary, so no Windows hard-cut path is published. The PowerShell resolver fails closed before stopping services. Keep the current installation unchanged. |
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
 | Direct `0.8.3 → 0.8.5` request | Refused before service stop or installed mutation. Remove the explicit target and use the release-owned resolver. |
 
@@ -586,13 +591,34 @@ completeness marker, and syntax check authenticate the bytes before execution.
   umask 077
   d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
   trap 'rm -rf "$d"' EXIT
-  command -v cosign >/dev/null
+  cosign_bin="$(command -v cosign || true)"
+  if [ -z "$cosign_bin" ]; then
+    platform="$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)"
+    case "$platform" in
+      darwin/x86_64) cosign_asset=cosign-darwin-amd64; cosign_sha=5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be ;;
+      darwin/arm64) cosign_asset=cosign-darwin-arm64; cosign_sha=ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e ;;
+      linux/x86_64|linux/amd64) cosign_asset=cosign-linux-amd64; cosign_sha=7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4 ;;
+      linux/aarch64|linux/arm64) cosign_asset=cosign-linux-arm64; cosign_sha=b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917 ;;
+      *) echo "Unsupported platform for automatic Cosign verification" >&2; exit 1 ;;
+    esac
+    cosign_bin="$d/$cosign_asset"
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --max-filesize 209715200 --output "$cosign_bin" \
+      "https://github.com/sigstore/cosign/releases/download/v2.6.3/$cosign_asset"
+    if command -v sha256sum >/dev/null; then
+      cosign_actual="$(sha256sum "$cosign_bin" | awk '{print $1}')"
+    else
+      cosign_actual="$(shasum -a 256 "$cosign_bin" | awk '{print $1}')"
+    fi
+    [ "$cosign_actual" = "$cosign_sha" ]
+    chmod 700 "$cosign_bin"
+  fi
   for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
       --output "$d/$name" \
       "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/$name"
   done
-  cosign verify-blob \
+  "$cosign_bin" verify-blob \
     --certificate "$d/checksums.txt.pem" \
     --signature "$d/checksums.txt.sig" \
     --certificate-identity \
@@ -615,66 +641,11 @@ completeness marker, and syntax check authenticate the bytes before execution.
 )
 ```
 
-```powershell
-# PowerShell: download the current resolver, then run latest mode
-& {
-  $ErrorActionPreference = 'Stop'
-  $d = Join-Path ([IO.Path]::GetTempPath()) ('defenseclaw-upgrade-' + [Guid]::NewGuid().ToString('N'))
-  [void](New-Item -ItemType Directory -Path $d)
-  try {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $directoryAcl = New-Object Security.AccessControl.DirectorySecurity
-    $directoryAcl.SetOwner($current)
-    $directoryAcl.SetAccessRuleProtection($true, $false)
-    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
-      [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    foreach ($sid in @($current, $system)) {
-      $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-        $sid,
-        [Security.AccessControl.FileSystemRights]::FullControl,
-        $inheritance,
-        [Security.AccessControl.PropagationFlags]::None,
-        [Security.AccessControl.AccessControlType]::Allow
-      )
-      [void]$directoryAcl.AddAccessRule($rule)
-    }
-    Set-Acl -LiteralPath $d -AclObject $directoryAcl -ErrorAction Stop
-    $directoryItem = Get-Item -LiteralPath $d -Force -ErrorAction Stop
-    $verifiedAcl = Get-Acl -LiteralPath $d -ErrorAction Stop
-    $accessSection = [Security.AccessControl.AccessControlSections]::Access
-    if (-not $directoryItem.PSIsContainer -or `
-        ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or `
-        -not $verifiedAcl.AreAccessRulesProtected -or `
-        $verifiedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value -or `
-        $verifiedAcl.GetSecurityDescriptorSddlForm($accessSection) -cne `
-          $directoryAcl.GetSecurityDescriptorSddlForm($accessSection)) {
-      throw 'Resolver temporary directory owner/DACL validation failed before download.'
-    }
-    [void](Get-Command cosign -ErrorAction Stop)
-    foreach ($name in @('defenseclaw-upgrade.ps1', 'checksums.txt', 'checksums.txt.sig', 'checksums.txt.pem')) {
-      Invoke-WebRequest -Uri ('https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/' + $name) -OutFile (Join-Path $d $name) -UseBasicParsing -ErrorAction Stop
-    }
-    & cosign verify-blob --certificate (Join-Path $d 'checksums.txt.pem') --signature (Join-Path $d 'checksums.txt.sig') `
-      --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' `
-      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' (Join-Path $d 'checksums.txt')
-    if ($LASTEXITCODE -ne 0) { throw 'Resolver checksum signature is invalid.' }
-    $checksumRows = @(Get-Content -LiteralPath (Join-Path $d 'checksums.txt') | Where-Object { $_ -match '^[0-9a-f]{64}  defenseclaw-upgrade[.]ps1$' })
-    if ($checksumRows.Count -ne 1) { throw 'Resolver checksum entry is missing or duplicated.' }
-    $expected = ($checksumRows[0] -split '\s+', 2)[0]
-    $r = Join-Path $d 'defenseclaw-upgrade.ps1'
-    $actual = (Get-FileHash -LiteralPath $r -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { throw 'Resolver checksum does not match.' }
-    if ((Get-Content -LiteralPath $r -Tail 1) -ne '# DefenseClaw upgrade resolver complete v1') {
-      throw 'Downloaded DefenseClaw resolver is incomplete.'
-    }
-    [void][scriptblock]::Create((Get-Content -LiteralPath $r -Raw))
-    & $r -Yes
-  } finally {
-    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-  }
-}
-```
+> **Windows hard-cut unavailable:** `0.8.4` intentionally published no
+> Windows gateway or rollback binary, so there is no authenticated Windows
+> bridge into `0.8.5`. The signed PowerShell resolver is a fail-closed refusal
+> surface only. Keep the existing Windows installation unchanged until a
+> future release publishes and tests an explicit supported path.
 
 From a checkout of the current release, invoke the resolver in latest mode:
 

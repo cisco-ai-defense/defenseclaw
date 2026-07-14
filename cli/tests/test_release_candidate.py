@@ -808,6 +808,28 @@ def test_hard_cut_provenance_rejects_missing_and_noncanonical_embedded_fields(
         )
 
 
+def test_posix_only_publish_set_omits_only_windows_binaries() -> None:
+    full = set(release_candidate.published_asset_names(VERSION, "unverified"))
+    posix_only = set(
+        release_candidate.published_asset_names(
+            VERSION,
+            "unverified",
+            omit_windows_binaries=True,
+        )
+    )
+    windows_binaries = set(release_candidate.windows_release_binary_names(VERSION))
+
+    assert full - posix_only == windows_binaries
+    assert not posix_only & windows_binaries
+    assert {
+        "checksums.txt",
+        "checksums.txt.pem",
+        "checksums.txt.sig",
+        "defenseclaw-upgrade.ps1",
+        "defenseclaw-upgrade.sh",
+    } <= posix_only
+
+
 def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     root = _sealed_candidate(tmp_path)
 

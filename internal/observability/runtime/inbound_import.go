@@ -183,7 +183,9 @@ func (batch *InboundImportBatch) RecordGeneratedMetric(
 	if batch.closed || batch.runtime == nil || batch.lease == nil {
 		return telemetry.V8MetricRecordResult{}, &InboundImportError{code: InboundImportClosed}
 	}
-	return batch.runtime.recordGeneratedMetricWithLease(ctx, batch.lease, family, builder)
+	return batch.runtime.recordGeneratedMetricWithLease(
+		ctx, batch.lease, family, builder, correlationDefaultsImported,
+	)
 }
 
 // Close releases the request generation exactly once. It is idempotent and may

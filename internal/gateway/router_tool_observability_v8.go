@@ -9,12 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -38,11 +41,19 @@ type eventRouterToolObservationCacheEntry struct {
 
 type eventRouterToolLogKind uint8
 
+type eventRouterCorrelationState uint8
+
 const (
 	eventRouterToolLogRequested eventRouterToolLogKind = iota
 	eventRouterToolLogCompleted
 	eventRouterToolLogFailed
 	eventRouterToolLogBlocked
+)
+
+const (
+	eventRouterCorrelationUnavailable eventRouterCorrelationState = iota
+	eventRouterCorrelationCommitted
+	eventRouterCorrelationFailed
 )
 
 func (r *EventRouter) observeEventRouterToolCallV8(
@@ -55,7 +66,35 @@ func (r *EventRouter) observeEventRouterToolCallV8(
 		string(payload.Args), "", nil, startedAt, startedAt,
 	)
 	observation.dangerous = dangerous
-	_ = r.emitEventRouterToolLogV8(context.Background(), eventRouterToolLogRequested, observation)
+	observation.meta.ToolIDReported = observation.meta.ToolID != ""
+	correlated, correlationState := r.correlateEventRouterToolV8(
+		context.Background(), connector.CorrelationLifecycleToolStart, observation,
+		[]byte(observation.arguments),
+	)
+	switch correlationState {
+	case eventRouterCorrelationCommitted:
+		observation.meta = correlated.meta
+		observation.correlationCtx = correlated.ctx
+		if !correlated.suppressEmission {
+			persisted, emitErr := r.emitEventRouterToolLogV8(
+				correlated.ctx, eventRouterToolLogRequested, observation,
+			)
+			if err := finalizeLLMRailCanonicalEmission(
+				correlated.ctx, r.store, correlated.receipt, persisted, emitErr,
+			); err != nil {
+				readLoopLogf("[correlation] stream tool-start canonical persistence incomplete")
+			}
+		}
+	case eventRouterCorrelationUnavailable:
+		// Reduced test/runtime configurations may intentionally bind v8
+		// emission without an audit store. Preserve the pre-correlation
+		// behavior there; production, which has both, takes the committed
+		// path above.
+		_, _ = r.emitEventRouterToolLogV8(context.Background(), eventRouterToolLogRequested, observation)
+	case eventRouterCorrelationFailed:
+		// A configured coordinator failed before export. The occurrence was
+		// not durably accepted, so fail closed and emit no orphan telemetry.
+	}
 	return observation
 }
 
@@ -137,6 +176,23 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 	if !authoritative {
 		return
 	}
+	observation.meta.ToolIDReported = observation.meta.ToolID != ""
+	correlated, correlationState := r.correlateEventRouterToolV8(
+		context.Background(), connector.CorrelationLifecycleToolEnd, observation,
+		[]byte(observation.result),
+	)
+	if correlationState == eventRouterCorrelationFailed {
+		return
+	}
+	correlationContext := observation.correlationCtx
+	if correlationContext == nil {
+		correlationContext = context.Background()
+	}
+	if correlationState == eventRouterCorrelationCommitted {
+		observation.meta = correlated.meta
+		observation.correlationCtx = correlated.ctx
+		correlationContext = correlated.ctx
+	}
 	outcome, _, _, _ := generatedToolV8Result(observation)
 	logKind := eventRouterToolLogCompleted
 	switch outcome {
@@ -147,12 +203,59 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 	default:
 		logKind = eventRouterToolLogFailed
 	}
-	if emitter != nil {
-		_ = r.emitEventRouterToolLogV8WithEmitter(context.Background(), emitter, logKind, observation)
+	if emitter != nil && (correlationState != eventRouterCorrelationCommitted || !correlated.suppressEmission) {
+		persisted, emitErr := r.emitEventRouterToolLogV8WithEmitter(
+			correlationContext, emitter, logKind, observation,
+		)
+		if correlationState == eventRouterCorrelationCommitted {
+			if err := finalizeLLMRailCanonicalEmission(
+				correlationContext, r.store, correlated.receipt, persisted, emitErr,
+			); err != nil {
+				readLoopLogf("[correlation] stream tool-end canonical persistence incomplete")
+				return
+			}
+		} else if emitErr != nil {
+			return
+		}
+	}
+	if correlationState == eventRouterCorrelationCommitted && correlated.suppressEmission {
+		return
 	}
 	metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
 	parent := r.getToolParentCtx(observation.meta.SessionID, observation.meta.RunID)
+	if parentSpan := trace.SpanContextFromContext(parent); parentSpan.IsValid() {
+		parent = trace.ContextWithSpanContext(correlationContext, parentSpan)
+	} else {
+		parent = correlationContext
+	}
 	emitGeneratedToolSpanV8(parent, lifecycle, metricRuntime, observation)
+}
+
+func (r *EventRouter) correlateEventRouterToolV8(
+	ctx context.Context,
+	lifecycle connector.CorrelationLifecycle,
+	observation generatedToolV8Observation,
+	raw []byte,
+) (llmRailCorrelationResult, eventRouterCorrelationState) {
+	emitter := r.observabilityV8RuntimeEmitter()
+	if r.store == nil || emitter == nil {
+		return llmRailCorrelationResult{}, eventRouterCorrelationUnavailable
+	}
+	spec, ok := r.streamCorrelationSpecV8()
+	if !ok {
+		readLoopLogf("[correlation] stream tool profile unavailable; telemetry emission skipped")
+		return llmRailCorrelationResult{}, eventRouterCorrelationFailed
+	}
+	correlated, err := correlateLLMRailOccurrence(ctx, llmRailCorrelationInput{
+		store: r.store, emitter: emitter, spec: spec,
+		rail: audit.CorrelationRailStream, surface: connector.CorrelationSurfaceStream,
+		lifecycle: lifecycle, meta: observation.meta, rawPayload: raw,
+	})
+	if err != nil {
+		readLoopLogf("[correlation] stream tool persistence failed; telemetry emission skipped")
+		return llmRailCorrelationResult{}, eventRouterCorrelationFailed
+	}
+	return correlated, eventRouterCorrelationCommitted
 }
 
 func (r *EventRouter) newEventRouterToolObservation(
@@ -172,8 +275,10 @@ func (r *EventRouter) newEventRouterToolObservation(
 	meta := llmEventMeta{
 		Source: eventRouterToolConnector, Provider: eventRouterToolProvider,
 		SessionID: sessionID, RunID: runID, AgentName: agentName,
+		AgentID:  SharedAgentRegistry().AgentID(),
 		PolicyID: policyID, DestinationApp: eventRouterToolProvider,
 		ToolName: strings.TrimSpace(tool), ToolID: strings.TrimSpace(id),
+		ToolIDReported: strings.TrimSpace(id) != "",
 	}
 	return generatedToolV8Observation{
 		meta: meta, producer: eventRouterToolV8Producer,
@@ -264,10 +369,10 @@ func (r *EventRouter) emitEventRouterToolLogV8(
 	ctx context.Context,
 	kind eventRouterToolLogKind,
 	observation generatedToolV8Observation,
-) error {
+) (bool, error) {
 	emitter, _, authoritative := r.observabilityV8CapabilitiesSnapshot()
 	if !authoritative || emitter == nil {
-		return nil
+		return false, nil
 	}
 	return r.emitEventRouterToolLogV8WithEmitter(ctx, emitter, kind, observation)
 }
@@ -277,10 +382,10 @@ func (r *EventRouter) emitEventRouterToolLogV8WithEmitter(
 	emitter sidecarRuntimeEmitter,
 	kind eventRouterToolLogKind,
 	observation generatedToolV8Observation,
-) error {
+) (bool, error) {
 	eventName, rawSeverity, ok := eventRouterToolLogIdentity(kind)
 	if r == nil || ctx == nil || emitter == nil || !ok || !hookModelV8Identifier(observation.tool) {
-		return nil
+		return false, nil
 	}
 	producerKey := observability.ProducerKey(gatewaylog.EventToolInvocation)
 	metadata, err := observabilityrouter.NewClassifiedLogMetadata(
@@ -294,9 +399,9 @@ func (r *EventRouter) emitEventRouterToolLogV8WithEmitter(
 		producerKey,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = emitter.Emit(ctx, metadata, func(
+	outcome, err := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission observabilityrouter.Admission,
 	) (observability.Record, error) {
@@ -320,7 +425,10 @@ func (r *EventRouter) emitEventRouterToolLogV8WithEmitter(
 		}
 		return buildEventRouterToolLog(builder, kind, spanInput)
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	return outcome.LocalPersisted(), nil
 }
 
 func eventRouterToolLogIdentity(

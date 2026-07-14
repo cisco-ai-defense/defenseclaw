@@ -592,7 +592,9 @@ func TestProjectPreservesLifecycleCorrelationAndSafeSecurityEvents(t *testing.T)
 	}
 	attributes := resultAttributes(t, result)
 	for key, want := range map[string]any{
-		"defenseclaw.agent.root.id": "root", "defenseclaw.agent.parent.id": "parent",
+		"defenseclaw.semantic_event.id": "semantic-1", "defenseclaw.logical_event.id": "logical-1",
+		"defenseclaw.connector.instance.id": "connector-instance-1",
+		"defenseclaw.agent.root.id":         "root", "defenseclaw.agent.parent.id": "parent",
 		"defenseclaw.agent.lifecycle.id": "life", "defenseclaw.agent.execution.id": "exec",
 		"defenseclaw.agent.lifecycle.event": "subagent_start", "defenseclaw.agent.lifecycle.state": "active",
 		"defenseclaw.session.root.id": "root-session", "defenseclaw.session.parent.id": "parent-session",
@@ -677,6 +679,15 @@ func TestProjectNeverRecoversRawContentAndDestinationProjectionsRemainIndependen
 		t.Fatal("strict route recovered raw content")
 	}
 	strictAttributes := resultAttributes(t, strictResult)
+	for key, want := range map[string]any{
+		"defenseclaw.semantic_event.id":     "semantic-1",
+		"defenseclaw.logical_event.id":      "logical-1",
+		"defenseclaw.connector.instance.id": "connector-instance-1",
+	} {
+		if got := strictAttributes[key]; got != want {
+			t.Fatalf("strict correlation attribute %s=%#v, want %#v", key, got, want)
+		}
+	}
 	if strictAttributes["gen_ai.input.messages"] != "[]" || strictAttributes["defenseclaw.telemetry.input.reported"] != false {
 		t.Fatalf("strict content state = %#v", strictAttributes)
 	}
@@ -1181,7 +1192,9 @@ func newTraceRecord(
 		},
 		SpanName: spanName, Source: observability.SourceGateway,
 		Correlation: observability.Correlation{
-			RunID: "run-1", SessionID: "session-1", TurnID: "turn-1",
+			SemanticEventID: "semantic-1", LogicalEventID: "logical-1",
+			ConnectorInstanceID: "connector-instance-1",
+			RunID:               "run-1", SessionID: "session-1", TurnID: "turn-1",
 			TraceID: strings.Repeat("a", 32), SpanID: strings.Repeat("b", 16),
 			AgentID: "agent-1", AgentInstanceID: "instance-1", ToolInvocationID: "tool-1",
 		},

@@ -187,6 +187,32 @@ func TestStoreInitRejectsMissingProtectedCorrectnessTable(t *testing.T) {
 	}
 }
 
+func TestStoreInitRejectsMissingCorrelationIdentityClaimsTable(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "missing-correlation-claims.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.db.Exec(`CREATE TABLE schema_version (
+		version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for index, migration := range migrations {
+		if err := store.applyMigration(index+1, migration); err != nil {
+			t.Fatalf("migration %d: %v", index+1, err)
+		}
+	}
+	if _, err := store.db.Exec(`DROP TABLE correlation_identity_claims`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err == nil {
+		t.Fatal("store with missing correlation identity claims table reported ready")
+	}
+	if store.Ready() {
+		t.Fatal("failed correlation-table verification published readiness")
+	}
+}
+
 type mutableLocalProfileResolver struct {
 	profiles map[observability.Bucket]observabilityredaction.Profile
 	engine   *observabilityredaction.Engine

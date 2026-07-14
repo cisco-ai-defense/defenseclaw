@@ -539,7 +539,8 @@ jobs:
             --pattern checksums.txt.pem \
             --pattern checksums.txt.sig
 
-          python3 - "$BRIDGE_VERSION" published-bridge.json candidate-input/bridge <<'PY'
+          python3 - "$BRIDGE_VERSION" published-bridge.json candidate-input/bridge \
+            release/upgrade-baselines.json <<'PY'
           import hashlib
           import json
           from pathlib import Path
@@ -551,10 +552,25 @@ jobs:
               _parse_checksums,
               payload_asset_names,
               published_asset_names,
+              windows_release_binary_names,
           )
 
-          expected, release_path, assets_path = sys.argv[1:]
+          expected, release_path, assets_path, baseline_policy_path = sys.argv[1:]
           release = json.loads(Path(release_path).read_text(encoding="utf-8"))
+          baseline_policy = json.loads(
+              Path(baseline_policy_path).read_text(encoding="utf-8")
+          )
+          platform_baselines = baseline_policy.get("platform_published_baselines")
+          if not isinstance(platform_baselines, dict) or set(platform_baselines) != {"windows"}:
+              raise SystemExit("bridge platform baseline policy must contain exactly windows")
+          windows_baselines = platform_baselines["windows"]
+          if (
+              not isinstance(windows_baselines, list)
+              or any(not isinstance(item, str) for item in windows_baselines)
+              or len(windows_baselines) != len(set(windows_baselines))
+          ):
+              raise SystemExit("bridge Windows baseline policy is invalid")
+          omit_windows_binaries = expected not in windows_baselines
           expected_state = {
               "tagName": expected,
               "isDraft": False,
@@ -580,7 +596,13 @@ jobs:
               assets[name] = digest.removeprefix("sha256:")
           names = set(assets)
           variants = {
-              status: set(published_asset_names(expected, status))
+              status: set(
+                  published_asset_names(
+                      expected,
+                      status,
+                      omit_windows_binaries=omit_windows_binaries,
+                  )
+              )
               for status in MACOS_VERIFICATION_STATUSES
           }
           matches = [status for status, required in variants.items() if names == required]
@@ -591,14 +613,24 @@ jobs:
           checksums = _parse_checksums(root / "checksums.txt")
           if tuple(sorted(checksums)) != payload_asset_names(expected, status):
               raise SystemExit("required bridge checksums do not cover the exact payload")
+          omitted_windows = (
+              set(windows_release_binary_names(expected))
+              if omit_windows_binaries
+              else set()
+          )
           for name, digest in checksums.items():
+              if name in omitted_windows:
+                  if name in assets:
+                      raise SystemExit(f"required bridge unexpectedly published {name}")
+                  continue
               if assets.get(name) != digest:
                   raise SystemExit(f"required bridge GitHub digest differs for {name}")
           for name in ("checksums.txt", "checksums.txt.pem", "checksums.txt.sig"):
               actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
               if assets.get(name) != actual:
                   raise SystemExit(f"downloaded required bridge digest differs for {name}")
-          print(f"immutable published bridge verified: {expected} ({status})")
+          publication = "POSIX-only" if omit_windows_binaries else "all-platform"
+          print(f"immutable published bridge verified: {expected} ({status}, {publication})")
           PY
 
           cosign verify-blob \

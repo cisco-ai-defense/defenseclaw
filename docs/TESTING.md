@@ -56,7 +56,7 @@ smoke therefore installs authenticated historical releases in a temporary
 - refuse the schema-2 candidate before service stop, backup, or mutation
 - leave CLI, gateway, config, OpenClaw state, permissions, and PID state unchanged
 - emit the historical controller's expected forward-compatibility failure
-- ship exact reviewed POSIX and PowerShell resolver assets bound by the candidate checksums
+- ship the exact reviewed POSIX resolver and signed PowerShell refusal asset bound by the candidate checksums
 
 The protected release workflow separately signs the sealed candidate and then
 runs the full manifest-derived resolver matrix. That signed gate verifies
@@ -89,9 +89,9 @@ scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:
 ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --from-versions "0.8.4,0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed'
 ```
 
-The default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Its single source is `release/upgrade-baselines.json`; the Make target and smoke-contract tests must match that reviewed data exactly. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so neither is eligible for automatic staging. The `0.8.4` entry deliberately makes the `0.8.5` gate fail until that bridge has actually been published with its complete signed asset set. Targets before `0.8.5` retain schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff for every listed older source, and full v7-to-v8 observability, private-secret, rollback, local-bundle, SQLite, and fresh-process health checks from the bridge.
+The default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Its single source is `release/upgrade-baselines.json`; the Make target and smoke-contract tests must match that reviewed data exactly. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so neither is eligible for automatic staging. The `0.8.4` entry deliberately makes the `0.8.5` gate fail until that bridge has actually been published with its complete signed POSIX asset set. Targets before `0.8.5` retain schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff for every listed older POSIX source, and full v7-to-v8 observability, private-secret, rollback, local-bundle, SQLite, and fresh-process health checks from the bridge.
 
-The release workflow seals one candidate, then runs `scripts/test-upgrade-protocol-release.sh` once per reviewed Linux baseline plus the native macOS, Windows, and live-continuity gates before publishing those exact bytes. A broken refusal, bridge handoff, migration, rollback, health, or history path therefore aborts before any release asset is published.
+The release workflow seals one candidate, then runs `scripts/test-upgrade-protocol-release.sh` once per reviewed Linux baseline plus the native macOS and live-continuity gates before publishing those exact bytes. Windows runtime publication and upgrade jobs remain disabled; release validation instead proves that no Windows gateway, rollback, or SBOM binary is emitted and that the signed PowerShell resolver refuses before mutation. A broken refusal, bridge handoff, migration, rollback, health, or history path therefore aborts before any release asset is published.
 
 ### 0.8.4 bridge rollout order
 

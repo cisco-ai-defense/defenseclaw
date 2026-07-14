@@ -328,7 +328,7 @@ _STRUCTURED_EXPECTED_KNOWN_VALUES: Final = {
 }
 _STRUCTURED_DISPOSITIONS_SHA256: Final = "19aa6a80165bed241ae9e427b9b4f7cea9d0b7001c11e5f6460b84c89bd4c0c3"
 _STRUCTURED_TYPES_SHA256: Final = "f4ca4b3986b0c1b90439f6a127e06f7eb00176ba5b4bcad14a7a1dbe9383cbdb"
-_STRUCTURAL_CONTRACT_SHA256: Final = "63d9df50528f6a8838b25d53761d23697525cc1044f2c992afbec4115950b675"
+_STRUCTURAL_CONTRACT_SHA256: Final = "a5f1dcae714d17b138a130a9a8b99f754165370974dbaef994976d67a8f8abaa"
 _CANONICAL_JSON_LIMITS: Final = {
     "max_depth": 8,
     "max_aggregate_members": 256,
@@ -4746,6 +4746,7 @@ _INBOUND_CLASS_IDS: Final = (
     "otlp.genai.span.operation.v1",
     "otlp.codex.turn_span.v1",
     "otlp.codex.user_prompt.v1",
+    "otlp.codex.tool_result.v1",
     "otlp.claudecode.user_prompt.v1",
     "otlp.codex.response_completed.v1",
     "otlp.claudecode.token_usage.v1",

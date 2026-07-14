@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import click
 
 from defenseclaw import config as config_module
 from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+from defenseclaw.observability.custody_status import (
+    ConnectorCustodyReport,
+    inspect_connector_custody,
+)
 from defenseclaw.observability.destination_test import (
     DestinationTestError,
     canonical_local_compliance_recorder,
@@ -174,6 +179,10 @@ def observability_plan(
         filters=filters,
     )
     delivery = _delivery_settings(effective)
+    custody = inspect_connector_custody(
+        _audit_db_path(effective, inspected.data_dir),
+        inspected.data_dir,
+    )
     if fmt == "json":
         click.echo(
             json.dumps(
@@ -183,6 +192,7 @@ def observability_plan(
                     "plan_digest": inspected.plan_digest,
                     "network_validation": inspected.network_validation,
                     "delivery": delivery,
+                    "connector_export_custody": custody.as_json(),
                     "rows": rows,
                 },
                 indent=2,
@@ -190,7 +200,7 @@ def observability_plan(
             )
         )
     else:
-        _render_plan_table(rows, inspected.plan_digest, delivery)
+        _render_plan_table(rows, inspected.plan_digest, delivery, custody)
     for warning in effective.get("warnings") or []:
         if isinstance(warning, dict):
             code = str(warning.get("code") or "warning")
@@ -435,7 +445,12 @@ def _delivery_settings(effective: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _render_plan_table(rows: list[dict[str, Any]], digest: str, delivery: list[dict[str, Any]]) -> None:
+def _render_plan_table(
+    rows: list[dict[str, Any]],
+    digest: str,
+    delivery: list[dict[str, Any]],
+    custody: ConnectorCustodyReport | None = None,
+) -> None:
     click.echo(f"Compiled Go plan digest: {digest}")
     headings = (
         "BUCKET",
@@ -505,7 +520,47 @@ def _render_plan_table(rows: list[dict[str, Any]], digest: str, delivery: list[d
         click.echo("  ".join(value.ljust(delivery_widths[index]) for index, value in enumerate(delivery_headings)))
         for row in delivery_values:
             click.echo("  ".join(str(value).ljust(delivery_widths[index]) for index, value in enumerate(row)))
+    if custody is not None:
+        _render_custody_table(custody)
     click.echo("Rows render canonical Go-compiled routes; Python does not compile routing policy.")
+
+
+def _audit_db_path(effective: dict[str, Any], data_dir: str) -> str:
+    local = effective.get("local")
+    if isinstance(local, dict):
+        path = local.get("path")
+        if isinstance(path, str) and path.strip():
+            candidate = Path(path).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(data_dir) / candidate
+            return str(candidate)
+    return str(Path(data_dir) / "audit.db")
+
+
+def _render_custody_table(report: ConnectorCustodyReport) -> None:
+    click.echo("Connector export custody (read-only correlation ledger):")
+    if report.state != "available":
+        click.echo(f"  unavailable: {report.reason}")
+        return
+    if not report.instances:
+        click.echo("  no connector instances observed")
+    for item in report.instances:
+        identity = item.connector if item.default else f"{item.connector}/{item.connector_instance_id[:8]}"
+        detail = (
+            f"custody={item.custody}; profile={item.profile_version}; "
+            f"managed_config={item.managed_config_state}; "
+            f"normalized={item.normalized_batches}; drop_only={item.drop_only_batches}; "
+            f"credentials={item.credential_state}"
+        )
+        click.echo(f"  {identity}: {detail}")
+    if report.unattributed_authentication_failures:
+        click.echo(
+            "  unattributed: "
+            f"authentication_failures={report.unattributed_authentication_failures}; "
+            f"last={report.last_unattributed_authentication_failure or 'unknown'}"
+        )
+    if report.event_rows_truncated:
+        click.echo("  warning: recent ingest evidence reached the bounded read limit")
 
 
 def _table_compatibility(row: dict[str, Any]) -> str:

@@ -545,7 +545,48 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 			&eventHistoryWriteError{cause: err},
 		)
 	}
+	if correlation.SemanticEventID != "" {
+		observationTraceID, observationSpanID := exactObservationTopology(correlation.TraceID, correlation.SpanID)
+		if err := putCorrelationObservationTx(ctx, tx, writer.store, CorrelationObservation{
+			RecordID:         record.RecordID(),
+			SemanticEventID:  SemanticEventID(correlation.SemanticEventID),
+			Signal:           CorrelationSignalLogs,
+			Bucket:           string(record.Bucket()),
+			EventName:        string(record.EventName()),
+			ObservedAt:       record.Timestamp(),
+			TraceID:          observationTraceID,
+			SpanID:           observationSpanID,
+			SessionID:        correlation.SessionID,
+			TurnID:           correlation.TurnID,
+			AgentID:          correlation.AgentID,
+			ModelRequestID:   correlation.ModelRequestID,
+			ModelResponseID:  correlation.ModelResponseID,
+			ToolInvocationID: correlation.ToolInvocationID,
+			ProjectionHash:   projectionHash,
+			Status:           CorrelationObservationExportEligible,
+		}); err != nil {
+			return eventHistoryAppendOutcome{}, eventHistoryFailure(
+				EventHistoryHealthWriteFailed,
+				&eventHistoryWriteError{cause: err},
+			)
+		}
+	}
 	return outcome, nil
+}
+
+// exactObservationTopology separates the legacy audit correlation envelope
+// from the correlation ledger's exact OTLP topology. Older callers have always
+// been allowed to use bounded opaque trace/request strings; those values remain
+// in audit_events for compatibility but must not enter exact trace/span joins.
+// A span without a valid trace anchor is also omitted.
+func exactObservationTopology(traceID, spanID string) (string, string) {
+	if validateTraceID(traceID) != nil {
+		return "", ""
+	}
+	if validateSpanID(spanID) != nil {
+		return traceID, ""
+	}
+	return traceID, spanID
 }
 
 func (writer *EventHistoryWriter) reportAppendError(err error) {

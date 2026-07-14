@@ -425,6 +425,9 @@ def loki_inputs() -> set[str]:
         },
     )
     for name in (
+        "semantic_event_id",
+        "logical_event_id",
+        "connector_instance_id",
         "run_id",
         "request_id",
         "session_id",

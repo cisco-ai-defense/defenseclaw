@@ -22,7 +22,7 @@ import (
 )
 
 // TestRememberHookRawEvents_KindClassification asserts the PR 6
-// unified deduper assigns the same (kind, sessionID, turnID, toolID)
+// raw-event projector assigns the same (kind, occurrence, session, turn, tool)
 // fingerprint to a generic agentHookRequest as the bespoke
 // rememberCodexRawHookEvents / rememberClaudeCodeRawHookEvents
 // helpers do for codex / claudecode. Without this test a future
@@ -50,13 +50,14 @@ func TestRememberHookRawEvents_KindClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &APIServer{}
 			req := agentHookRequest{
-				ConnectorName: "codex",
-				HookEventName: tc.event,
-				SessionID:     "sess-1",
-				TurnID:        "turn-1",
-				Content:       "hi",
-				ToolArgs:      json.RawMessage(`{"a":1}`),
-				Payload:       map[string]interface{}{"tool_use_id": "tool-1"},
+				ConnectorName:   "codex",
+				HookEventName:   tc.event,
+				SemanticEventID: "semantic-1",
+				SessionID:       "sess-1",
+				TurnID:          "turn-1",
+				Content:         "hi",
+				ToolArgs:        json.RawMessage(`{"a":1}`),
+				Payload:         map[string]interface{}{"tool_use_id": "tool-1"},
 			}
 			ids := api.rememberHookRawEvents(req)
 			if tc.expectKey == "" {
@@ -68,8 +69,7 @@ func TestRememberHookRawEvents_KindClassification(t *testing.T) {
 			if len(ids) != 1 {
 				t.Fatalf("expected 1 ID for event %s, got %v", tc.event, ids)
 			}
-			// Sanity: replaying the same request returns the same
-			// ID (TTL-windowed dedup).
+			// Re-projecting the same accepted occurrence is idempotent.
 			again := api.rememberHookRawEvents(req)
 			if len(again) != 1 || again[0] != ids[0] {
 				t.Errorf("replay produced different ID: first=%v second=%v", ids, again)
@@ -86,12 +86,13 @@ func TestRememberHookRawEvents_KindClassification(t *testing.T) {
 func TestRememberHookRawEvents_GenericConnector(t *testing.T) {
 	api := &APIServer{}
 	req := agentHookRequest{
-		ConnectorName: "hermes",
-		HookEventName: "PreToolUse",
-		SessionID:     "sess-hermes",
-		TurnID:        "turn-hermes",
-		ToolArgs:      json.RawMessage(`{"path":"/etc/passwd"}`),
-		Payload:       map[string]interface{}{"tool_use_id": "tool-hermes"},
+		ConnectorName:   "hermes",
+		HookEventName:   "PreToolUse",
+		SemanticEventID: "semantic-hermes",
+		SessionID:       "sess-hermes",
+		TurnID:          "turn-hermes",
+		ToolArgs:        json.RawMessage(`{"path":"/etc/passwd"}`),
+		Payload:         map[string]interface{}{"tool_use_id": "tool-hermes"},
 	}
 	ids := api.rememberHookRawEvents(req)
 	if len(ids) != 1 {
@@ -109,12 +110,13 @@ func TestRememberHookRawEvents_BespokeParity(t *testing.T) {
 	t.Run("codex", func(t *testing.T) {
 		api := &APIServer{}
 		generic := agentHookRequest{
-			ConnectorName: "codex",
-			HookEventName: "PreToolUse",
-			SessionID:     "sess-codex",
-			TurnID:        "turn-codex",
-			ToolArgs:      toolArgs,
-			Payload:       map[string]interface{}{"tool_use_id": "tool-codex"},
+			ConnectorName:   "codex",
+			HookEventName:   "PreToolUse",
+			SemanticEventID: "semantic-codex",
+			SessionID:       "sess-codex",
+			TurnID:          "turn-codex",
+			ToolArgs:        toolArgs,
+			Payload:         map[string]interface{}{"tool_use_id": "tool-codex"},
 		}
 		bespoke := codexHookRequest{
 			HookEventName: "PreToolUse",
@@ -124,7 +126,7 @@ func TestRememberHookRawEvents_BespokeParity(t *testing.T) {
 			ToolInput:     toolInput,
 		}
 		genericIDs := api.rememberHookRawEvents(generic)
-		bespokeIDs := api.rememberCodexRawHookEvents(bespoke)
+		bespokeIDs := api.rememberCodexRawHookEvents(bespoke, generic.SemanticEventID)
 		if len(genericIDs) != 1 || len(bespokeIDs) != 1 || genericIDs[0] != bespokeIDs[0] {
 			t.Fatalf("generic/bespoke codex IDs differ: generic=%v bespoke=%v", genericIDs, bespokeIDs)
 		}
@@ -133,11 +135,12 @@ func TestRememberHookRawEvents_BespokeParity(t *testing.T) {
 	t.Run("claudecode", func(t *testing.T) {
 		api := &APIServer{}
 		generic := agentHookRequest{
-			ConnectorName: "claudecode",
-			HookEventName: "PreToolUse",
-			SessionID:     "sess-claude",
-			ToolArgs:      toolArgs,
-			Payload:       map[string]interface{}{"tool_use_id": "tool-claude"},
+			ConnectorName:   "claudecode",
+			HookEventName:   "PreToolUse",
+			SemanticEventID: "semantic-claude",
+			SessionID:       "sess-claude",
+			ToolArgs:        toolArgs,
+			Payload:         map[string]interface{}{"tool_use_id": "tool-claude"},
 		}
 		bespoke := claudeCodeHookRequest{
 			HookEventName: "PreToolUse",
@@ -146,11 +149,30 @@ func TestRememberHookRawEvents_BespokeParity(t *testing.T) {
 			ToolInput:     toolInput,
 		}
 		genericIDs := api.rememberHookRawEvents(generic)
-		bespokeIDs := api.rememberClaudeCodeRawHookEvents(bespoke)
+		bespokeIDs := api.rememberClaudeCodeRawHookEvents(bespoke, generic.SemanticEventID)
 		if len(genericIDs) != 1 || len(bespokeIDs) != 1 || genericIDs[0] != bespokeIDs[0] {
 			t.Fatalf("generic/bespoke claudecode IDs differ: generic=%v bespoke=%v", genericIDs, bespokeIDs)
 		}
 	})
+}
+
+func TestRememberHookRawEventsIdenticalContentAcrossOccurrencesGetsDistinctIDs(t *testing.T) {
+	api := &APIServer{}
+	base := agentHookRequest{
+		ConnectorName: "codex", HookEventName: "PreToolUse",
+		SessionID: "same-session", TurnID: "same-turn",
+		ToolArgs: json.RawMessage(`{"command":"same"}`),
+		Payload:  map[string]interface{}{"tool_use_id": "same-tool"},
+	}
+	first := base
+	first.SemanticEventID = "semantic-first"
+	second := base
+	second.SemanticEventID = "semantic-second"
+	firstIDs := api.rememberHookRawEvents(first)
+	secondIDs := api.rememberHookRawEvents(second)
+	if len(firstIDs) != 1 || len(secondIDs) != 1 || firstIDs[0] == secondIDs[0] {
+		t.Fatalf("parallel identical occurrences collapsed: first=%v second=%v", firstIDs, secondIDs)
+	}
 }
 
 // TestRawOriginIfHook validates the small "set raw_origin only when

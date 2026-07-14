@@ -806,6 +806,14 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Correlation graph endpoints expose the durable, evidence-backed identity
+	// ledger. They remain behind the same bearer-token and CSRF middleware as
+	// every other API route; handlers are read-only and accept exactly one
+	// canonical anchor per request.
+	mux.HandleFunc("/api/v1/correlation/graph", a.handleCorrelationGraphV8)
+	mux.HandleFunc("/api/v1/correlation/explain", a.handleCorrelationExplainV8)
+	mux.HandleFunc("/api/v1/correlation/timeline", a.handleCorrelationTimelineV8)
+	mux.HandleFunc("/api/v1/correlation/conflicts", a.handleCorrelationConflictsV8)
 	// Locations + history endpoints share the /api/v1/ai-usage/components/
 	// prefix; the handlers parse {ecosystem}/{name}/{leaf} themselves.
 	// Net/http's mux uses longest-prefix routing, so registering

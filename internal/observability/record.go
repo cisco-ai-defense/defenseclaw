@@ -34,10 +34,16 @@ const (
 var lowerHexPattern = regexp.MustCompile(`^[0-9a-f]+$`)
 var provenanceProducerPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
 var canonicalUUIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+var canonicalCorrelationAttributePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+
+const maxCanonicalCorrelationAttributeIDBytes = 256
 
 // Correlation is the closed v8 set of optional join keys. An empty value means
 // unknown; builders never invent a correlation identifier.
 type Correlation struct {
+	SemanticEventID     string `json:"semantic_event_id,omitempty"`
+	LogicalEventID      string `json:"logical_event_id,omitempty"`
+	ConnectorInstanceID string `json:"connector_instance_id,omitempty"`
 	RunID               string `json:"run_id,omitempty"`
 	RequestID           string `json:"request_id,omitempty"`
 	SessionID           string `json:"session_id,omitempty"`
@@ -61,7 +67,24 @@ type Correlation struct {
 }
 
 func (correlation Correlation) validate() error {
+	canonical := [...]struct{ field, value string }{
+		{"semantic event ID", correlation.SemanticEventID},
+		{"logical event ID", correlation.LogicalEventID},
+		{"connector instance ID", correlation.ConnectorInstanceID},
+	}
+	for _, identifier := range canonical {
+		if identifier.value == "" {
+			continue
+		}
+		if len(identifier.value) > maxCanonicalCorrelationAttributeIDBytes ||
+			!canonicalCorrelationAttributePattern.MatchString(identifier.value) {
+			return fmt.Errorf("correlation %s is not a canonical identifier", identifier.field)
+		}
+	}
 	values := [...]string{
+		correlation.SemanticEventID,
+		correlation.LogicalEventID,
+		correlation.ConnectorInstanceID,
 		correlation.RunID,
 		correlation.RequestID,
 		correlation.SessionID,
@@ -750,6 +773,9 @@ func cloneEventIdentity(input EventIdentity) EventIdentity {
 
 func cloneCorrelation(input Correlation) Correlation {
 	return Correlation{
+		SemanticEventID:     strings.Clone(input.SemanticEventID),
+		LogicalEventID:      strings.Clone(input.LogicalEventID),
+		ConnectorInstanceID: strings.Clone(input.ConnectorInstanceID),
 		RunID:               strings.Clone(input.RunID),
 		RequestID:           strings.Clone(input.RequestID),
 		SessionID:           strings.Clone(input.SessionID),
@@ -824,6 +850,74 @@ func (record Record) Outcome() Outcome          { return record.data.outcome }
 func (record Record) Mandatory() bool           { return record.data.mandatory }
 func (record Record) Correlation() Correlation  { return cloneCorrelation(record.data.correlation) }
 func (record Record) Provenance() Provenance    { return cloneProvenance(record.data.provenance) }
+
+// WithCorrelationDefaults returns an immutable copy whose missing correlation
+// fields are filled from defaults. The occurrence identity triplet must agree
+// when both the record and defaults provide it; a mismatch fails closed. Every
+// other non-empty record field remains authoritative because a generated record
+// can legitimately carry a more specific business identifier than its enclosing
+// runtime context. The receiver is never mutated.
+func (record Record) WithCorrelationDefaults(defaults Correlation) (Record, error) {
+	if record.data.timestamp.IsZero() || record.data.recordID == "" {
+		return Record{}, fmt.Errorf("cannot add correlation defaults to a zero or invalid canonical record")
+	}
+	if err := defaults.validate(); err != nil {
+		return Record{}, fmt.Errorf("invalid correlation defaults: %w", err)
+	}
+	merged, err := mergeCorrelationDefaults(record.data.correlation, defaults)
+	if err != nil {
+		return Record{}, err
+	}
+	result := record.Clone()
+	result.data.correlation = merged
+	return result, nil
+}
+
+func mergeCorrelationDefaults(existing, defaults Correlation) (Correlation, error) {
+	result := cloneCorrelation(existing)
+	fields := []struct {
+		name       string
+		existing   *string
+		defaultVal string
+		strict     bool
+	}{
+		{"semantic_event_id", &result.SemanticEventID, defaults.SemanticEventID, true},
+		{"logical_event_id", &result.LogicalEventID, defaults.LogicalEventID, true},
+		{"connector_instance_id", &result.ConnectorInstanceID, defaults.ConnectorInstanceID, true},
+		{"run_id", &result.RunID, defaults.RunID, false},
+		{"request_id", &result.RequestID, defaults.RequestID, false},
+		{"session_id", &result.SessionID, defaults.SessionID, false},
+		{"turn_id", &result.TurnID, defaults.TurnID, false},
+		{"trace_id", &result.TraceID, defaults.TraceID, false},
+		{"span_id", &result.SpanID, defaults.SpanID, false},
+		{"agent_id", &result.AgentID, defaults.AgentID, false},
+		{"agent_instance_id", &result.AgentInstanceID, defaults.AgentInstanceID, false},
+		{"policy_id", &result.PolicyID, defaults.PolicyID, false},
+		{"policy_version", &result.PolicyVersion, defaults.PolicyVersion, false},
+		{"evaluation_id", &result.EvaluationID, defaults.EvaluationID, false},
+		{"scan_id", &result.ScanID, defaults.ScanID, false},
+		{"finding_occurrence_id", &result.FindingOccurrenceID, defaults.FindingOccurrenceID, false},
+		{"enforcement_action_id", &result.EnforcementActionID, defaults.EnforcementActionID, false},
+		{"model_request_id", &result.ModelRequestID, defaults.ModelRequestID, false},
+		{"model_response_id", &result.ModelResponseID, defaults.ModelResponseID, false},
+		{"tool_invocation_id", &result.ToolInvocationID, defaults.ToolInvocationID, false},
+		{"destination_id", &result.DestinationID, defaults.DestinationID, false},
+		{"connector_id", &result.ConnectorID, defaults.ConnectorID, false},
+		{"sidecar_instance_id", &result.SidecarInstanceID, defaults.SidecarInstanceID, false},
+	}
+	for _, field := range fields {
+		if field.defaultVal == "" {
+			continue
+		}
+		if field.strict && *field.existing != "" && *field.existing != field.defaultVal {
+			return Correlation{}, fmt.Errorf("correlation default conflicts with existing %s", field.name)
+		}
+		if *field.existing == "" {
+			*field.existing = strings.Clone(field.defaultVal)
+		}
+	}
+	return result, nil
+}
 
 // ProjectionPolicy returns the immutable local projection override associated
 // with this occurrence. It is intentionally absent from MarshalJSON.
@@ -929,6 +1023,9 @@ func (record Record) MarshalJSON() ([]byte, error) {
 func correlationWire(correlation Correlation) map[string]any {
 	wire := make(map[string]any)
 	for key, value := range map[string]string{
+		"semantic_event_id":     correlation.SemanticEventID,
+		"logical_event_id":      correlation.LogicalEventID,
+		"connector_instance_id": correlation.ConnectorInstanceID,
 		"run_id":                correlation.RunID,
 		"request_id":            correlation.RequestID,
 		"session_id":            correlation.SessionID,

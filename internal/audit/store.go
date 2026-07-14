@@ -1676,6 +1676,14 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Correlation state is additive protected/index state in audit.db. The
+		// migration creates no trigger over audit_events and performs no data
+		// scan or backfill, keeping rollback readers compatible with the same
+		// database file.
+		description: "observability v8: add durable focused correlation ledger",
+		apply:       migrateCorrelationStateV8,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1773,6 +1781,16 @@ func (s *Store) Init() error {
 		"alert_acknowledgement_baselines",
 		"alert_acknowledgement_health",
 		"observability_store_readiness",
+		"correlation_connector_instances",
+		"correlation_events",
+		"correlation_identifiers",
+		"correlation_observations",
+		"correlation_relationships",
+		"correlation_relationship_evidence",
+		"correlation_cursors",
+		"correlation_pending_operations",
+		"correlation_receipts",
+		"correlation_identity_claims",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1974,6 +1992,18 @@ var knownTables = map[string]bool{
 	"alert_acknowledgement_baselines":  true,
 	"alert_acknowledgement_health":     true,
 	"observability_store_readiness":    true,
+	// Observability v8 durable correlation state. These are all additive
+	// tables in the existing audit database.
+	"correlation_connector_instances":   true,
+	"correlation_events":                true,
+	"correlation_identifiers":           true,
+	"correlation_observations":          true,
+	"correlation_relationships":         true,
+	"correlation_relationship_evidence": true,
+	"correlation_cursors":               true,
+	"correlation_pending_operations":    true,
+	"correlation_receipts":              true,
+	"correlation_identity_claims":       true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

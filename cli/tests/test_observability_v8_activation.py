@@ -252,6 +252,32 @@ def test_activation_preserves_custom_paths_modes_crlf_and_creates_private_backup
         assert fixture["environment_path"].stat().st_uid == os.getuid()
 
 
+def test_activation_never_rewrites_connector_native_exporter_files(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    connector_files = {
+        tmp_path / ".codex" / "config.toml": b'[otel]\nendpoint = "https://operator.example"\n',
+        tmp_path / ".claude" / "settings.json": b'{"env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"https://operator.example"}}\n',
+        tmp_path / ".gemini" / "settings.json": b'{"telemetry":{"target":"gcp"}}\n',
+    }
+    before: dict[Path, tuple[bytes, int, int]] = {}
+    for path, payload in connector_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        os.chmod(path, 0o640)
+        before[path] = (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+
+    result = activate_v8_migration(
+        fixture["migration"],
+        validator=_validator(fixture["candidate"], fixture["secret"]),
+        data_dir=fixture["data_dir"],
+        config_path=fixture["config_path"],
+    )
+
+    assert result.activated
+    for path, expected in before.items():
+        assert (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns) == expected
+
+
 def test_absent_environment_is_created_private_and_manifest_records_absence(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, with_environment=False)
     result = activate_v8_migration(

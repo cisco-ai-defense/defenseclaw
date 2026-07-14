@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Dynamic drill-down for every automatically observed DefenseClaw agent. Stable agent/root/parent/lifecycle/execution IDs correlate Prometheus inventory and totals, Loki event detail, and Tempo traces.",
+  "description": "Dynamic drill-down for every automatically observed DefenseClaw agent. Durable relationship evidence defines lineage, logical-event identity prevents exact hook/native mirrors from inflating summaries, and raw Loki observations and Tempo traces remain independently inspectable.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -58,7 +58,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "# Agent360 \u00b7 `$agent`\nStable identity \u2192 lifecycle/executions \u2192 models, tools, websites, security decisions \u2192 Tempo trace. **Scope** chooses only this agent or its full descendant tree. The hook recovery section distinguishes enforced blocks from observe-mode would-blocks and shows the following agent path. Unknown tokens/cost remain absent rather than being rendered as zero."
+        "content": "# Agent360 \u00b7 `$agent`\nStable identity \u2192 evidence-backed lineage \u2192 logical work \u2192 raw observations \u2192 Tempo trace. **Scope** chooses only this agent or its full descendant tree. Summary counts use durable logical-event identity when exact hook/native mirrors exist; raw records remain visible below. Unknown tokens/cost remain absent rather than being rendered as zero."
       }
     },
     {
@@ -271,7 +271,7 @@
       "id": 4,
       "type": "stat",
       "title": "Turns",
-      "description": "Completed turns counted from the durable lifecycle event stream, so collector restarts and sparse counter samples do not erase the total.",
+      "description": "Distinct logical completed turns from the durable lifecycle event stream. Exact hook/native mirrors sharing one logical-event ID count once; every raw observation remains in the raw stream. An observation without a logical-event ID falls back to its semantic-event ID, then record ID, so unresolved evidence is counted separately instead of dropped.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -284,7 +284,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"turn_end\" [$__range])) or vector(0)",
+          "expr": "count(sum by (logical_event_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"turn_end\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" [$__range]))) or vector(0)",
           "instant": true,
           "queryType": "instant",
           "datasource": {
@@ -309,7 +309,7 @@
       "id": 26,
       "type": "stat",
       "title": "Model calls",
-      "description": "Model responses counted from the durable LLM event stream. This includes intermediate responses that do not close the overall agent turn.",
+      "description": "Distinct logical model responses from the durable LLM event stream. Exact connector/native mirrors count once while intermediate responses that are genuinely different occurrences remain separate. Missing logical identity falls back to semantic-event ID, then record ID, so unresolved responses remain visible as separate observations.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -322,7 +322,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"model.response\" [$__range])) or vector(0)",
+          "expr": "count(sum by (logical_event_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"model.response\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" [$__range]))) or vector(0)",
           "instant": true,
           "queryType": "instant",
           "datasource": {
@@ -347,7 +347,7 @@
       "id": 5,
       "type": "stat",
       "title": "Tool calls",
-      "description": "Completed tool results counted from the durable tool event stream. Post-only hook connectors remain visible even when no matching pre-hook was observed.",
+      "description": "Distinct logical completed tool results from the durable tool event stream. Exact mirrors count once; post-only connector events remain separate logical occurrences when no exact join evidence exists. Missing logical identity falls back to semantic-event ID, then record ID, so unresolved results remain visible as separate observations.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -360,7 +360,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" [$__range])) or vector(0)",
+          "expr": "count(sum by (logical_event_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" [$__range]))) or vector(0)",
           "instant": true,
           "queryType": "instant",
           "datasource": {
@@ -1840,7 +1840,7 @@
       "id": 40,
       "type": "logs",
       "title": "Ordered lifecycle and work sequence \u2014 root to terminal",
-      "description": "Ascending canonical chronology for the selected root tree or agent. Every retained v8 event is included; the rendered line exposes stable session, lineage, lifecycle, execution, request, turn, operation, model, tool, approval, and W3C trace correlation, while expanded rows retain every exported field.",
+      "description": "Ascending raw-observation chronology for the selected root tree or agent. Every retained v8 event is included; semantic and logical IDs show which records are one source occurrence or exact mirrors without changing Loki time order, and expanded rows retain every exported field.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1853,7 +1853,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id=~\"$execution\" | connector=~\"$connector\" | line_format \"#{{.body_defenseclaw_agent_sequence}} \u00b7 {{.event_name}} \u00b7 agent={{.body_gen_ai_agent_id}}/{{.body_gen_ai_agent_name}} type={{.body_defenseclaw_agent_type}} instance={{.body_defenseclaw_agent_instance_id}} root={{.body_defenseclaw_agent_root_id}} parent={{.body_defenseclaw_agent_parent_id}} depth={{.body_defenseclaw_agent_depth}} lineage={{.body_defenseclaw_agent_lineage_provenance}} \u00b7 session={{.body_gen_ai_conversation_id}} root_session={{.body_defenseclaw_session_root_id}} parent_session={{.body_defenseclaw_session_parent_id}} source={{.body_defenseclaw_session_source}} resumed={{.body_defenseclaw_session_resumed}} \u00b7 lifecycle={{.body_defenseclaw_agent_lifecycle_id}}/{{.body_defenseclaw_agent_lifecycle_event}}/{{.body_defenseclaw_agent_lifecycle_state}} execution={{.body_defenseclaw_agent_execution_id}} phase={{.body_defenseclaw_agent_phase_previous}}\u2192{{.body_defenseclaw_agent_phase}} \u00b7 request={{.body_defenseclaw_request_id}} turn={{.body_defenseclaw_turn_id}} run={{.body_defenseclaw_run_id}} operation={{.body_defenseclaw_operation_id}} \u00b7 model={{.body_gen_ai_provider_name}}/{{.body_gen_ai_request_model}}\u2192{{.body_gen_ai_response_model}} model_request={{.body_defenseclaw_model_request_id}} model_response={{.body_defenseclaw_model_response_id}} \u00b7 tool={{.body_gen_ai_tool_name}} type={{.body_gen_ai_tool_type}} call={{.body_gen_ai_tool_call_id}} provider={{.body_defenseclaw_tool_provider}} skill={{.body_defenseclaw_tool_skill_key}} status={{.body_defenseclaw_tool_status}} exit={{.body_defenseclaw_tool_exit_code}} destination={{.body_defenseclaw_destination_app}} \u00b7 approval={{.body_defenseclaw_approval_id}} result={{.body_defenseclaw_approval_result}} actor={{.body_defenseclaw_approval_actor_type}} dangerous={{.body_defenseclaw_approval_dangerous}} \u00b7 outcome={{.outcome}} \u00b7 trace_id={{.correlation_trace_id}} span_id={{.correlation_span_id}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id=~\"$execution\" | connector=~\"$connector\" | line_format \"#{{.body_defenseclaw_agent_sequence}} \u00b7 {{.event_name}} \u00b7 semantic={{.correlation_semantic_event_id}} logical={{.correlation_logical_event_id}} connector_instance={{.correlation_connector_instance_id}} \u00b7 agent={{.body_gen_ai_agent_id}}/{{.body_gen_ai_agent_name}} type={{.body_defenseclaw_agent_type}} instance={{.body_defenseclaw_agent_instance_id}} root={{.body_defenseclaw_agent_root_id}} parent={{.body_defenseclaw_agent_parent_id}} depth={{.body_defenseclaw_agent_depth}} lineage={{.body_defenseclaw_agent_lineage_provenance}} \u00b7 session={{.body_gen_ai_conversation_id}} root_session={{.body_defenseclaw_session_root_id}} parent_session={{.body_defenseclaw_session_parent_id}} source={{.body_defenseclaw_session_source}} resumed={{.body_defenseclaw_session_resumed}} \u00b7 lifecycle={{.body_defenseclaw_agent_lifecycle_id}}/{{.body_defenseclaw_agent_lifecycle_event}}/{{.body_defenseclaw_agent_lifecycle_state}} execution={{.body_defenseclaw_agent_execution_id}} phase={{.body_defenseclaw_agent_phase_previous}}\u2192{{.body_defenseclaw_agent_phase}} \u00b7 request={{.body_defenseclaw_request_id}} turn={{.body_defenseclaw_turn_id}} run={{.body_defenseclaw_run_id}} operation={{.body_defenseclaw_operation_id}} \u00b7 model={{.body_gen_ai_provider_name}}/{{.body_gen_ai_request_model}}\u2192{{.body_gen_ai_response_model}} model_request={{.body_defenseclaw_model_request_id}} model_response={{.body_defenseclaw_model_response_id}} \u00b7 tool={{.body_gen_ai_tool_name}} type={{.body_gen_ai_tool_type}} call={{.body_gen_ai_tool_call_id}} provider={{.body_defenseclaw_tool_provider}} skill={{.body_defenseclaw_tool_skill_key}} status={{.body_defenseclaw_tool_status}} exit={{.body_defenseclaw_tool_exit_code}} destination={{.body_defenseclaw_destination_app}} \u00b7 approval={{.body_defenseclaw_approval_id}} result={{.body_defenseclaw_approval_result}} actor={{.body_defenseclaw_approval_actor_type}} dangerous={{.body_defenseclaw_approval_dangerous}} \u00b7 outcome={{.outcome}} \u00b7 trace_id={{.correlation_trace_id}} span_id={{.correlation_span_id}}\"",
           "refId": "A"
         }
       ],
@@ -2076,7 +2076,7 @@
       "id": 24,
       "type": "nodeGraph",
       "title": "Lifecycle DAG \u2014 prompt \u2192 agents \u2192 work \u2192 outcomes",
-      "description": "Canonical Loki event DAG for the selected root or agent, not a total event timeline. Session-start and spawn anchors are recovered from the last 24 hours; a recovered spawn is retained only when that child has graph-eligible activity in the selected range. Each recovered agent endpoint suppresses itself whenever that exact agent ID has graph-eligible activity in the selected range, keeping boundary edges renderable without duplicating the visual node. For graph-active agents, canonical 24-hour session_start or subagent_start identity metadata wins regardless of later event volume; only agents without a canonical start use a one-row-per-ID selected-range fallback. Stable agent IDs therefore define one node per agent, while optional session details remain in the linked raw views so totals are not split across duplicate node IDs. A Session start anchor is deliberately not presented as prompt content. A grouped Prompt inputs node counts canonical depth-zero prompt submissions in the selected range, including the initial request and later follow-ups, without adding one node per message. Codex uses connector-source UserPromptSubmit facts and excludes native OTLP model.request mirrors from the summary; other connectors use recognized prompt-submission hooks with model.request as a fallback so hook-only and model-only connectors remain visible. Prompt counts are distinct by turn ID, model request ID, request ID, operation ID, then occurrence ID inside each observation family/source, after which the largest source count is shown. Native and connector records remain unchanged in the linked raw and ordered drilldowns. The dashboard applies no redaction: it displays or links every field present in canonical OTEL, with DefenseClaw's central redaction and projection boundary upstream. Model, tool, and approval groups use request records so work remains visible without a terminal counterpart; totals are request counts, not assertions that work is still pending. Terminal records remain available in the linked lifecycle, raw, decision, and trace views. Repeated model calls collapse per owning agent, provider, and model. Model-call totals first sum within each observation source and then use the largest source total, preventing connector and OTLP-receiver mirrors from double-counting the same calls while retaining source-only observations. Repeated tool calls collapse per owning agent into normalized families: Skills, MCP, Bash, File edits, Collaboration, Web / browser, Visual, and Task control; an unrecognized tool keeps its reported name. Exact collaboration send_message requests are excluded from the generic tool-family groups so they are not represented twice. Canonical send_message requests to /root or /root/* collapse per sender into one Messages to root node whose target resolves to the exported root agent ID; exact root task paths and calls remain in the raw and ordered drilldowns, while non-root targets remain explicitly grouped as reported. Turn outcomes group completed, failed, and interrupted turns per owning agent; session and subagent outcomes remain execution-specific. Click a grouped node or edge for Total in range, count meaning, ownership, lineage provenance, and drill-down links to exact calls, operations, exit codes, and traces. Approval edges are dashed and agent/execution-scoped because approval events do not export an exact tool-call ID. The graph is directed acyclic and uses Grafana's layered layout.",
+      "description": "Canonical Loki event DAG for the selected root or agent, not a total event timeline. Session-start and durable lineage anchors are recovered from the last 24 hours; a recovered agent edge is retained only when its child has graph-eligible activity in the selected range. Agent edges come only from active typed agent-to-agent parent_of relationships or the contract-defined inverse of delegated_by; raw subagent parent fields and trace parentage never create graph lineage. Each recovered relationship endpoint suppresses itself whenever that exact agent ID has graph-eligible activity in the selected range, keeping boundary edges renderable without duplicating the visual node. For graph-active agents, canonical 24-hour session_start or subagent_start display metadata wins regardless of later event volume; durable relationship records alone establish parentage; only agents without a canonical start use a one-row-per-ID selected-range fallback. Stable agent IDs therefore define one node per agent, while optional session details remain in the linked raw views so totals are not split across duplicate node IDs. A Session start anchor is deliberately not presented as prompt content. A grouped Prompt inputs node counts canonical depth-zero prompt submissions in the selected range, including the initial request and later follow-ups, without adding one node per message. Codex uses connector-source UserPromptSubmit facts and excludes native OTLP model.request mirrors from the summary; other connectors use recognized prompt-submission hooks with model.request as a fallback so hook-only and model-only connectors remain visible. Prompt counts are distinct by turn ID, model request ID, request ID, operation ID, then occurrence ID inside each observation family/source, after which the largest source count is shown. Native and connector records remain unchanged in the linked raw and ordered drilldowns. The dashboard applies no redaction: it displays or links every field present in canonical OTEL, with DefenseClaw's central redaction and projection boundary upstream. Model, tool, and approval groups use request records so work remains visible without a terminal counterpart; totals are request counts, not assertions that work is still pending. Terminal records remain available in the linked lifecycle, raw, decision, and trace views. Repeated model calls collapse per owning agent, provider, and model. Model-call totals first sum within each observation source and then use the largest source total, preventing connector and OTLP-receiver mirrors from double-counting the same calls while retaining source-only observations. Repeated tool calls collapse per owning agent into normalized families: Skills, MCP, Bash, File edits, Collaboration, Web / browser, Visual, and Task control; an unrecognized tool keeps its reported name. Exact collaboration send_message requests are excluded from the generic tool-family groups so they are not represented twice. Canonical send_message requests to /root or /root/* collapse per sender into one Messages to root node whose target resolves to the exported root agent ID; exact root task paths and calls remain in the raw and ordered drilldowns, while non-root targets remain explicitly grouped as reported. Turn outcomes group completed, failed, and interrupted turns per owning agent; session and subagent outcomes remain execution-specific. Click a grouped node or edge for Total in range, count meaning, ownership, lineage provenance, and drill-down links to exact calls, operations, exit codes, and traces. Approval edges are dashed and agent/execution-scoped because approval events do not export an exact tool-call ID. The graph is directed acyclic and uses Grafana's layered layout.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -2097,7 +2097,7 @@
           "refId": "edgesSessionStart"
         },
         {
-          "expr": "(sum by (id, source, target, mainstat, secondarystat, color, graph_child_id, detail__edge_kind, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__lineage_provenance, detail__connector, detail__trace_id, detail__count_meaning, detail__correlation_note) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=`subagent_start` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=\"subagent_start\" | body_defenseclaw_agent_parent_id!=\"\" | body_defenseclaw_agent_parent_id!=\"none\" | label_format graph_child_id=`{{.body_gen_ai_agent_id}}`, id=`edge:spawn:{{.body_defenseclaw_agent_parent_id}}:{{.body_gen_ai_agent_id}}`, source=`agent:{{.body_defenseclaw_agent_parent_id}}`, target=`agent:{{.body_gen_ai_agent_id}}`, mainstat=`spawns`, secondarystat=`depth {{.body_defenseclaw_agent_depth}}`, color=`#5794F2`, detail__edge_kind=`parent_agent_to_subagent`, detail__agent_id=`{{.body_gen_ai_agent_id}}`, detail__root_agent_id=`{{.body_defenseclaw_agent_root_id}}`, detail__parent_agent_id=`{{.body_defenseclaw_agent_parent_id}}`, detail__lineage_provenance=`{{.body_defenseclaw_agent_lineage_provenance}}`, detail__connector=`{{.connector}}`, detail__trace_id=`{{.correlation_trace_id}}`, detail__count_meaning=`Canonical subagent_start observations recovered from the last 24 hours for this exact parent-child relationship.`, detail__correlation_note=`The recovered edge is retained only while the child has graph-eligible activity in the selected range; exported parent identity and lineage provenance are never invented.` [24h]))) and on (graph_child_id) (sum by (graph_child_id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format graph_child_id=`{{.body_gen_ai_agent_id}}` [$__range])))",
+          "expr": "(max by (id, source, target, mainstat, secondarystat, color, connector, graph_child_id, detail__edge_kind, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__lineage_provenance, detail__connector, detail__trace_id, detail__count_meaning, detail__correlation_note) (sum by (id, source, target, mainstat, secondarystat, color, connector, graph_child_id, detail__edge_kind, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__lineage_provenance, detail__connector, detail__trace_id, detail__count_meaning, detail__correlation_note, lineage_orientation) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=`correlation.relationship.changed` | json | __error__=\"\" | connector=~\"${connector:regex}\" | event_name=\"correlation.relationship.changed\" | body_defenseclaw_correlation_relationship_status=\"active\" | body_defenseclaw_correlation_relationship_source_kind=\"agent\" | body_defenseclaw_correlation_relationship_target_kind=\"agent\" | body_defenseclaw_correlation_relationship_type=~\"parent_of|delegated_by\" | label_format lineage_orientation=`{{.body_defenseclaw_correlation_relationship_type}}`, graph_parent_id=`{{if eq .body_defenseclaw_correlation_relationship_type \"parent_of\"}}{{.body_defenseclaw_correlation_relationship_source_id}}{{else}}{{.body_defenseclaw_correlation_relationship_target_id}}{{end}}`, graph_child_id=`{{if eq .body_defenseclaw_correlation_relationship_type \"parent_of\"}}{{.body_defenseclaw_correlation_relationship_target_id}}{{else}}{{.body_defenseclaw_correlation_relationship_source_id}}{{end}}` | label_format id=`edge:spawn:{{.graph_parent_id}}:{{.graph_child_id}}`, source=`agent:{{.graph_parent_id}}`, target=`agent:{{.graph_child_id}}`, mainstat=`spawns`, secondarystat=`durable lineage`, color=`#5794F2`, detail__edge_kind=`parent_agent_to_subagent`, detail__agent_id=`{{.graph_child_id}}`, detail__root_agent_id=``, detail__parent_agent_id=`{{.graph_parent_id}}`, detail__lineage_provenance=`durable parent_of/delegated_by relationship`, detail__connector=`{{.connector}}`, detail__trace_id=`{{.correlation_trace_id}}`, detail__count_meaning=`Active typed agent-lineage relationship observations recovered from the last 24 hours; paired inverse orientations count once.`, detail__correlation_note=`parent_of is used directly; delegated_by is its contract-defined inverse fallback. Trace parentage and raw subagent parent fields never create this edge.` [24h])))) and on (connector, graph_child_id) (sum by (connector, graph_child_id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format graph_child_id=`{{.body_gen_ai_agent_id}}` [$__range])))",
           "format": "table",
           "instant": true,
           "queryType": "instant",
@@ -2169,7 +2169,7 @@
           "refId": "nodesRootAnchor"
         },
         {
-          "expr": "(sum by (id, title, subtitle, mainstat, secondarystat, color, detail__node_type, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__connector, detail__count_meaning) ((sum by (id, title, subtitle, mainstat, secondarystat, color, graph_child_id, detail__node_type, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__connector, detail__count_meaning) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=`subagent_start` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=\"subagent_start\" | body_defenseclaw_agent_parent_id!=\"\" | body_defenseclaw_agent_parent_id!=\"none\" | label_format graph_child_id=`{{.body_gen_ai_agent_id}}`, id=`agent:{{.body_defenseclaw_agent_parent_id}}`, title=`{{.body_defenseclaw_agent_parent_id}}`, subtitle=`reported parent endpoint`, mainstat=`agent`, secondarystat=`spawn parent`, color=`#5794F2`, detail__node_type=`spawn_parent_anchor`, detail__agent_id=`{{.body_defenseclaw_agent_parent_id}}`, detail__root_agent_id=`{{.body_defenseclaw_agent_root_id}}`, detail__parent_agent_id=``, detail__connector=`{{.connector}}`, detail__count_meaning=`Parent endpoint recovered from 24-hour canonical subagent_start facts for children active in the selected range only when that exact parent has no graph-eligible activity in range.` [24h]))) and on (graph_child_id) (sum by (graph_child_id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format graph_child_id=`{{.body_gen_ai_agent_id}}` [$__range]))))) unless on (id) (sum by (id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range])))",
+          "expr": "((max by (id, title, subtitle, mainstat, secondarystat, color, connector, graph_child_id, detail__node_type, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__connector, detail__count_meaning) (sum by (id, title, subtitle, mainstat, secondarystat, color, connector, graph_child_id, detail__node_type, detail__agent_id, detail__root_agent_id, detail__parent_agent_id, detail__connector, detail__count_meaning, lineage_orientation) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=`correlation.relationship.changed` | json | __error__=\"\" | connector=~\"${connector:regex}\" | event_name=\"correlation.relationship.changed\" | body_defenseclaw_correlation_relationship_status=\"active\" | body_defenseclaw_correlation_relationship_source_kind=\"agent\" | body_defenseclaw_correlation_relationship_target_kind=\"agent\" | body_defenseclaw_correlation_relationship_type=~\"parent_of|delegated_by\" | label_format lineage_orientation=`{{.body_defenseclaw_correlation_relationship_type}}`, graph_parent_id=`{{if eq .body_defenseclaw_correlation_relationship_type \"parent_of\"}}{{.body_defenseclaw_correlation_relationship_source_id}}{{else}}{{.body_defenseclaw_correlation_relationship_target_id}}{{end}}`, graph_child_id=`{{if eq .body_defenseclaw_correlation_relationship_type \"parent_of\"}}{{.body_defenseclaw_correlation_relationship_target_id}}{{else}}{{.body_defenseclaw_correlation_relationship_source_id}}{{end}}` | label_format id=`agent:{{.graph_parent_id}}`, title=`{{.graph_parent_id}}`, subtitle=`durable lineage parent`, mainstat=`agent`, secondarystat=`spawn parent`, color=`#5794F2`, detail__node_type=`spawn_parent_anchor`, detail__agent_id=`{{.graph_parent_id}}`, detail__root_agent_id=``, detail__parent_agent_id=``, detail__connector=`{{.connector}}`, detail__count_meaning=`Parent endpoint recovered from typed parent_of or inverse delegated_by relationship evidence for children active in the selected range, only when that exact parent has no graph-eligible activity in range.` [24h])))) and on (connector, graph_child_id) (sum by (connector, graph_child_id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format graph_child_id=`{{.body_gen_ai_agent_id}}` [$__range])))) unless on (connector, id) (sum by (connector, id) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` |= \"$agent\" | json | __error__=\"\" | connector=~\"${connector:regex}\" | body_$scope_label=~\"$agent\" | event_name=~`session_start|subagent_start|turn_end|model\\.(request|response|call\\.failed)|tool\\.invocation\\.(requested|completed|failed|blocked)|approval\\.(requested|resolved)|hook_decision|session_end|subagent_stop` | label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range])))",
           "format": "table",
           "instant": true,
           "queryType": "instant",
@@ -3296,7 +3296,7 @@
       "id": 25,
       "type": "logs",
       "title": "Raw correlated event stream",
-      "description": "Unformatted canonical OTEL JSON after DefenseClaw's central redaction boundary. The dashboard applies no additional hiding or field projection; expand a row to inspect every exported field and use any correlation trace ID to pivot to Tempo.",
+      "description": "Unformatted canonical OTEL JSON after DefenseClaw's central redaction boundary. The dashboard applies no additional hiding or field projection and no raw observation is collapsed: expand a row to inspect its semantic-event, logical-event, connector-instance, and trace/span identities, and pivot any reported trace ID to Tempo.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -3320,6 +3320,171 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Correlation identity and relationship evidence",
+      "description": "Logical summaries and immutable raw observations are shown side by side. Relationship changes mirror the durable correlation graph exposed by the authenticated graph, explain, timeline, and conflicts APIs.",
+      "gridPos": {
+        "x": 0,
+        "y": 186,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "stat",
+      "title": "Logical events",
+      "description": "Distinct durable logical-event IDs in scope. Exact hook, proxy, and native-OTLP mirrors count once; unresolved observations remain separate logical events. Missing logical identity falls back to semantic-event ID, then record ID; no canonical observation is omitted from this summary.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 187,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "count(sum by (logical_event_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" [$__range]))) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 52,
+      "type": "stat",
+      "title": "Raw observations",
+      "description": "Every canonical Loki record in scope before logical grouping. Compare with Logical events to see exact mirrors without hiding any source observation.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 187,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | body_$scope_label=~\"$agent\" | connector=~\"$connector\" [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 53,
+      "type": "stat",
+      "title": "Relationship warnings observed",
+      "description": "Unresolved, conflicted, or rejected relationship-change records mentioning the selected agent. This is a transition count; the authenticated conflicts API is the source for current durable conflict state.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 187,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"correlation.relationship.changed\" | body_defenseclaw_correlation_relationship_status=~\"unresolved|conflicted|rejected\" [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 54,
+      "type": "logs",
+      "title": "Relationship evidence and conflict chronology",
+      "description": "Content-free relationship changes exported from the durable correlation ledger. Method identifies reported, trace-exact, derived, or inferred evidence; status exposes active, unresolved, conflicted, superseded, and rejected edges. Stable rule ID and version plus the cumulative durable evidence count let remote consumers reconstruct the same edge state. This chronological Loki view never substitutes trace parentage for agent lineage.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 192,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"correlation.relationship.changed\" | line_format \"{{.body_defenseclaw_correlation_relationship_status}} \u00b7 {{.body_defenseclaw_correlation_relationship_type}} \u00b7 source={{.body_defenseclaw_correlation_relationship_source_kind}}:{{.body_defenseclaw_correlation_relationship_source_id}} target={{.body_defenseclaw_correlation_relationship_target_kind}}:{{.body_defenseclaw_correlation_relationship_target_id}} \u00b7 method={{.body_defenseclaw_correlation_relationship_method}} confidence={{.body_defenseclaw_correlation_relationship_confidence}} rule={{.body_defenseclaw_correlation_relationship_rule_id}}@{{.body_defenseclaw_correlation_relationship_rule_version}} evidence={{.body_defenseclaw_correlation_relationship_evidence_count}}/{{.body_defenseclaw_correlation_relationship_evidence_record_id}} \u00b7 semantic={{.correlation_semantic_event_id}} logical={{.correlation_logical_event_id}} connector_instance={{.correlation_connector_instance_id}} \u00b7 trace_id={{.correlation_trace_id}} span_id={{.correlation_span_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": false,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
       }
     }
   ],
@@ -3480,6 +3645,6 @@
   "timezone": "browser",
   "title": "DefenseClaw \u2014 Agent360",
   "uid": "defenseclaw-agent-360",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

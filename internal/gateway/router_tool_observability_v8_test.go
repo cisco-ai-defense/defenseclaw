@@ -162,10 +162,14 @@ func TestEventRouterToolV8GeneratedLogsBuildAndPersist(t *testing.T) {
 	if _, err := buildEventRouterToolLog(builder, eventRouterToolLogRequested, directInput); err != nil {
 		t.Fatalf("direct requested builder: %v", err)
 	}
-	if err := router.emitEventRouterToolLogV8(t.Context(), eventRouterToolLogRequested, observation); err != nil {
+	if persisted, err := router.emitEventRouterToolLogV8(
+		t.Context(), eventRouterToolLogRequested, observation,
+	); err != nil || !persisted {
 		t.Fatalf("requested log: %v", err)
 	}
-	if err := router.emitEventRouterToolLogV8(t.Context(), eventRouterToolLogCompleted, observation); err != nil {
+	if persisted, err := router.emitEventRouterToolLogV8(
+		t.Context(), eventRouterToolLogCompleted, observation,
+	); err != nil || !persisted {
 		t.Fatalf("completed log: %v", err)
 	}
 	assertEventRouterToolLocalLogs(t, databasePath, []string{"private-log-input", "private-log-output"})

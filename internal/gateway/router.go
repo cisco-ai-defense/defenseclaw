@@ -600,7 +600,15 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 		msgCtx := ContextWithSessionID(context.Background(), envelope.SessionKey)
 		msgMeta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, msg.Provider, msg.Model, "")
-		msgMeta.TurnID = firstNonEmpty(envelope.MessageID, intString(envelope.MessageSeq))
+		// messageId is exact message/source-frame evidence, never a turn. The
+		// stream coordinator mints a UUIDv7 turn at the user-prompt boundary
+		// and restores it for the assistant frame from durable pending state.
+		msgMeta.MessageID = envelope.MessageID
+		msgMeta.SourceEventID = envelope.MessageID
+		msgMeta.SourceSequence = intString(envelope.MessageSeq)
+		modelEventCtx := msgCtx
+		modelEventMeta := msgMeta
+		emitModelOperation := true
 		switch msg.Role {
 		case "user":
 			msgMeta.PromptID = promptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq, envelope.MessageID)
@@ -612,7 +620,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			if msg.StopReason != "" {
 				finishReasons = []string{msg.StopReason}
 			}
-			r.emitLLMResponseEventV8(msgCtx, msgMeta, contentStr, string(msg.Content), finishReasons)
+			_, modelEventCtx, modelEventMeta, emitModelOperation = r.emitLLMResponseEventV8Correlated(
+				msgCtx, msgMeta, contentStr, string(msg.Content), finishReasons,
+			)
 		}
 
 		if r.hilt != nil && r.hilt.ResolveFromMessage(envelope.SessionKey, msg.Role, contentStr) {
@@ -634,7 +644,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// operation. The source reports no start instant, so the adapter
 		// records a truthful zero-duration span and retains only its ended
 		// W3C context for a subsequent tool or approval child.
-		if msg.Role == "assistant" && msg.Model != "" {
+		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
 			promptTokens, completionTokens := int64(0), int64(0)
 			if msg.Usage != nil {
 				promptTokens = int64(msg.Usage.PromptTokens)
@@ -649,8 +659,11 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				r, envelope.SessionKey, envelope.RunID, envelope.MessageID,
 				envelope.MessageSeq, msg.Provider, msg.Model,
 			)
+			meta.TurnID = modelEventMeta.TurnID
+			meta.PromptID = modelEventMeta.PromptID
+			meta.ResponseID = modelEventMeta.ResponseID
 			llmCtx := r.emitEventRouterModelV8(
-				context.Background(), meta, msg.Provider, msg.Model, contentStr,
+				modelEventCtx, meta, msg.Provider, msg.Model, contentStr,
 				promptTokens, completionTokens, toolCallCount, finishReasons, time.Now().UTC(),
 			)
 			r.rememberEventRouterModelContext(
@@ -687,12 +700,12 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				// Async read-loop context — stamp session_id so the
 				// verdict event carries the conversation identifier
 				// even though we're outside any HTTP request.
-				vctx := r.streamContext(envelope.SessionKey, audit.CorrelationEnvelope{TurnID: envelope.MessageID})
+				vctx := r.streamContext(envelope.SessionKey, audit.CorrelationEnvelope{})
 				emitVerdict(vctx, gatewaylog.StageMultiTurn, gatewaylog.DirectionPrompt, "",
 					"warn", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
 				meta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, "builtin", msg.Model, "")
-				meta.TurnID = envelope.MessageID
+				meta.MessageID = envelope.MessageID
 				r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
 					meta: meta, severity: "HIGH", alertType: "prompt-injection",
 					alertSource: "local-pattern", observedAt: time.Now().UTC(),
@@ -772,7 +785,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	severity := deriveSeverity(verdict.Severity)
 	categories := categoriesOf(verdict.Findings)
 
-	vctx := r.streamContext(sessionKey, audit.CorrelationEnvelope{TurnID: messageID})
+	vctx := r.streamContext(sessionKey, audit.CorrelationEnvelope{})
 	emitVerdict(
 		vctx,
 		gatewaylog.StageSessionMessage,
@@ -785,7 +798,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		latencyMs,
 	)
 	meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
-	meta.TurnID = messageID
+	meta.MessageID = messageID
 	r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
 		meta: meta, action: verdict.Action, severity: verdict.Severity,
 		alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),

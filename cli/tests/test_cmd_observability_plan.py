@@ -13,6 +13,10 @@ import click
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_observability
 from defenseclaw.config_inspect import ConfigV8WireResult
+from defenseclaw.observability.custody_status import (
+    ConnectorCustodyReport,
+    ConnectorCustodyStatus,
+)
 
 
 def _effective() -> dict:
@@ -211,6 +215,7 @@ def test_top_level_plan_skips_legacy_runtime_config_load(tmp_path: Path) -> None
     payload = json.loads(result.output)
     assert payload["basis"] == "canonical_go_compiled_routes"
     assert payload["plan_digest"] == "plan-digest"
+    assert payload["connector_export_custody"]["state"] == "unavailable"
     assert payload["delivery"] == [
         {
             "destination": "soc",
@@ -223,6 +228,37 @@ def test_top_level_plan_skips_legacy_runtime_config_load(tmp_path: Path) -> None
         }
     ]
     assert len(payload["rows"]) == 2
+
+
+def test_top_level_plan_json_reports_per_instance_export_custody(tmp_path: Path) -> None:
+    from defenseclaw.main import cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
+    custody = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000001",
+                connector="codex",
+                custody="external",
+                profile_version="codex-correlation-v1",
+                default=True,
+            ),
+        ),
+    )
+    with (
+        patch.object(cmd_observability.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_observability, "inspect_v8_config", return_value=_wire()),
+        patch.object(cmd_observability, "inspect_connector_custody", return_value=custody),
+    ):
+        result = CliRunner().invoke(cli, ["observability", "plan", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["connector_export_custody"] == custody.as_json()
 
 
 def test_top_level_plan_json_reports_exact_go_compatibility_and_reload(tmp_path: Path) -> None:

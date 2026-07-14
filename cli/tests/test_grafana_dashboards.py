@@ -355,16 +355,29 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in root_anchor
 
     spawn_parent_anchor = expressions["nodesSpawnParent"]
-    assert 'event_name="subagent_start"' in spawn_parent_anchor
-    assert 'id=`agent:{{.body_defenseclaw_agent_parent_id}}`' in spawn_parent_anchor
+    assert 'event_name="correlation.relationship.changed"' in spawn_parent_anchor
+    assert 'id=`agent:{{.graph_parent_id}}`' in spawn_parent_anchor
     assert 'detail__node_type=`spawn_parent_anchor`' in spawn_parent_anchor
-    assert 'body_defenseclaw_agent_parent_id!=""' in spawn_parent_anchor
-    assert "Parent endpoint recovered from 24-hour canonical subagent_start facts" in spawn_parent_anchor
+    assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_parent_anchor
+    assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_parent_anchor
+    assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_parent_anchor
+    assert "Parent endpoint recovered from typed parent_of or inverse delegated_by" in spawn_parent_anchor
+    assert "body_defenseclaw_agent_parent_id" not in spawn_parent_anchor
     assert "[24h]" in spawn_parent_anchor
     assert "[$__range]" in spawn_parent_anchor
-    assert "and on (graph_child_id)" in spawn_parent_anchor
-    assert "unless on (id)" in spawn_parent_anchor
+    assert "and on (connector, graph_child_id)" in spawn_parent_anchor
+    assert "unless on (connector, id)" in spawn_parent_anchor
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in spawn_parent_anchor
+
+    spawn_edge = expressions["edgesSpawn"]
+    assert 'event_name="correlation.relationship.changed"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_status="active"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_edge
+    assert 'source=`agent:{{.graph_parent_id}}`' in spawn_edge
+    assert 'target=`agent:{{.graph_child_id}}`' in spawn_edge
+    assert "body_defenseclaw_agent_parent_id" not in spawn_edge
 
     agent_nodes = expressions["nodesAgent"]
     assert agent_nodes.startswith("((topk by (id) (1,")
@@ -2209,9 +2222,11 @@ def test_live_golden_executes_authored_agent360_target_semantics(
     queries = [query for _url, query in observed_requests]
     assert any("count(count by (gen_ai_agent_id)" in query for query in queries)
     assert any(
-        "count_over_time" in query
-        and "label_format" in query
-        and "body_defenseclaw_agent_parent_id" in query
+        'event_name="correlation.relationship.changed"' in query
+        and 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"'
+        in query
+        and 'body_defenseclaw_correlation_relationship_source_kind="agent"' in query
+        and 'body_defenseclaw_correlation_relationship_target_kind="agent"' in query
         for query in queries
     )
     assert any('"direction"' in query and "defenseclaw_agent_phase_transitions_total" in query for query in queries)
@@ -2230,13 +2245,13 @@ def test_live_golden_executes_authored_agent360_target_semantics(
         for query in topology_queries
     )
     assert any(
-        'event_name="subagent_start"' in query
+        'event_name="correlation.relationship.changed"' in query
         and 'detail__node_type=`spawn_parent_anchor`' in query
-        and 'id=`agent:{{.body_defenseclaw_agent_parent_id}}`' in query
+        and 'id=`agent:{{.graph_parent_id}}`' in query
         and "[24h]" in query
         and "[10m]" in query
-        and "and on (graph_child_id)" in query
-        and "unless on (id)" in query
+        and "and on (connector, graph_child_id)" in query
+        and "unless on (connector, id)" in query
         for query in topology_queries
     )
     assert any(

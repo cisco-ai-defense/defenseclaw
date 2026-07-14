@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -146,17 +147,19 @@ type AssetScanTrace struct {
 }
 
 type generatedTraceSession struct {
-	mu         sync.Mutex
-	lease      *runtimegraph.Lease
-	provider   *telemetry.Provider
-	builder    *observability.FamilyBuilder
-	resource   telemetry.V8TraceResourceFields
-	digest     string
-	generation uint64
-	version    string
-	root       *generatedTraceNode
-	nodes      []*generatedTraceNode
-	closed     bool
+	mu                  sync.Mutex
+	lease               *runtimegraph.Lease
+	store               *audit.Store
+	provider            *telemetry.Provider
+	builder             *observability.FamilyBuilder
+	correlationDefaults observability.Correlation
+	resource            telemetry.V8TraceResourceFields
+	digest              string
+	generation          uint64
+	version             string
+	root                *generatedTraceNode
+	nodes               []*generatedTraceNode
+	closed              bool
 }
 
 type generatedTraceNode struct {
@@ -469,8 +472,9 @@ func (runtime *Runtime) startGeneratedTrace(
 		ctx: startedContext, span: span,
 	}
 	session := &generatedTraceSession{
-		lease: lease, provider: provider, builder: builder,
-		resource: resourceContext.TraceResourceFields(), digest: digest,
+		lease: lease, store: runtime.store, provider: provider, builder: builder,
+		correlationDefaults: correlationDefaultsFromContext(ctx, correlationDefaultsGeneratedTrace),
+		resource:            resourceContext.TraceResourceFields(), digest: digest,
 		generation: generation, version: version, root: node,
 		nodes: []*generatedTraceNode{node},
 	}
@@ -955,7 +959,7 @@ func (session *generatedTraceSession) recordGeneratedMetricBatch(
 	results := make([]telemetry.V8MetricRecordResult, len(items))
 	for index, item := range items {
 		result, err := recordGeneratedMetricWithLease(
-			ctx, lease, item.Family, item.Builder,
+			ctx, lease, session.store, item.Family, item.Builder, session.correlationDefaults,
 		)
 		results[index] = result
 		if err != nil {
@@ -1473,6 +1477,16 @@ func (session *generatedTraceSession) registerEndLocked(
 	if !setGeneratedPhysicalStatus(node.span, status) {
 		session.abortLocked()
 		return generatedTraceError(GeneratedTraceInvalidInput)
+	}
+	var err error
+	record, err = stampRuntimeCorrelation(record, session.correlationDefaults)
+	if err != nil {
+		session.abortLocked()
+		return generatedTraceError(GeneratedTraceBuildRejected)
+	}
+	if err := persistRuntimeCorrelationObservation(node.ctx, session.store, record); err != nil {
+		session.abortLocked()
+		return generatedTraceError(GeneratedTraceRegistrationFailed)
 	}
 	registration := session.provider.EndV8CanonicalSpan(node.span, record)
 	// EndV8CanonicalSpan ends the physical span on every registration result.

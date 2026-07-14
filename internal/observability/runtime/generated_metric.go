@@ -13,6 +13,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -107,7 +108,10 @@ func (runtime *Runtime) RecordGeneratedMetric(
 		return telemetry.V8MetricRecordResult{}, err
 	}
 	defer lease.Release()
-	return recordGeneratedMetricWithLease(ctx, lease, family, builder)
+	return recordGeneratedMetricWithLease(
+		ctx, lease, runtime.store, family, builder,
+		correlationDefaultsFromContext(ctx, correlationDefaultsGenerated),
+	)
 }
 
 // RecordGeneratedMetricBatch pins one runtime generation across a bounded
@@ -133,7 +137,10 @@ func (runtime *Runtime) RecordGeneratedMetricBatch(
 	defer lease.Release()
 	results := make([]telemetry.V8MetricRecordResult, len(items))
 	for index, item := range items {
-		result, recordErr := recordGeneratedMetricWithLease(ctx, lease, item.Family, item.Builder)
+		result, recordErr := recordGeneratedMetricWithLease(
+			ctx, lease, runtime.store, item.Family, item.Builder,
+			correlationDefaultsFromContext(ctx, correlationDefaultsGenerated),
+		)
 		results[index] = result
 		if recordErr != nil {
 			return results, recordErr
@@ -158,8 +165,10 @@ func validateGeneratedMetricBatchItems(items []GeneratedMetricBatchItem) error {
 func recordGeneratedMetricWithLease(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
+	store *audit.Store,
 	family observability.EventName,
 	builder GeneratedMetricBuilder,
+	correlationDefaults observability.Correlation,
 ) (telemetry.V8MetricRecordResult, error) {
 	if ctx == nil || lease == nil || family == "" || builder == nil ||
 		!observability.IsRegisteredEventNameForSignal(observability.SignalMetrics, family) {
@@ -184,11 +193,18 @@ func recordGeneratedMetricWithLease(
 	if buildErr != nil {
 		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
 	}
+	record, buildErr = stampRuntimeCorrelation(record, correlationDefaults)
+	if buildErr != nil {
+		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
+	}
 	provenance := record.Provenance()
 	if record.Signal() != observability.SignalMetrics || record.EventName() != family ||
 		provenance.ConfigGeneration < 0 || uint64(provenance.ConfigGeneration) != generation ||
 		provenance.ConfigDigest != digest {
 		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
+	}
+	if err := persistRuntimeCorrelationObservation(ctx, store, record); err != nil {
+		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
 	}
 	result, recordErr := provider.RecordGeneratedMetric(ctx, record)
 	if recordErr != nil {
@@ -205,11 +221,14 @@ func (runtime *Runtime) recordGeneratedMetricWithLease(
 	lease *runtimegraph.Lease,
 	family observability.EventName,
 	builder GeneratedMetricBuilder,
+	defaultMode correlationDefaultMode,
 ) (telemetry.V8MetricRecordResult, error) {
 	if runtime == nil {
 		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricInvalidInput}
 	}
-	return recordGeneratedMetricWithLease(ctx, lease, family, builder)
+	return recordGeneratedMetricWithLease(
+		ctx, lease, runtime.store, family, builder, correlationDefaultsFromContext(ctx, defaultMode),
+	)
 }
 
 var _ error = (*GeneratedMetricError)(nil)

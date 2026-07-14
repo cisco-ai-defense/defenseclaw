@@ -23,7 +23,7 @@ func TestInboundCatalogGeneratedInventoryAndCrossReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadInboundCatalog() error = %v", err)
 	}
-	if got, want := len(catalog.Aliases()), 11; got != want {
+	if got, want := len(catalog.Aliases()), 18; got != want {
 		t.Fatalf("aliases = %d, want %d", got, want)
 	}
 	if got, want := len(catalog.snapshot.normalizers), 6; got != want {

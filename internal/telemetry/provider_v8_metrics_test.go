@@ -5,6 +5,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -227,6 +229,43 @@ func TestV8MetricCollectionGatePrecedesSDKInstrumentConstruction(t *testing.T) {
 	names := metricNames(collected)
 	if !containsMetric(names, "defenseclaw.scan.count") || containsMetric(names, "defenseclaw.agent.lifecycle.transitions") {
 		t.Fatalf("collected metric names=%v", names)
+	}
+}
+
+func TestV8MetricsExposeOnlySampledTraceContextAsExemplars(t *testing.T) {
+	provider, reader, _ := activeV8MetricProvider(t, metricPlanForTest(
+		t, observability.BucketAssetScan,
+	))
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
+	}))
+	provider.metrics.scanCount.Add(ctx, 1)
+
+	var collected metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &collected); err != nil {
+		t.Fatal(err)
+	}
+	point := int64Point(t, collected, "defenseclaw.scan.count")
+	if point.Attributes.Len() != 0 {
+		t.Fatalf("trace context became metric labels: %v", point.Attributes)
+	}
+	if len(point.Exemplars) != 1 {
+		t.Fatalf("exemplars=%d want 1", len(point.Exemplars))
+	}
+	exemplar := point.Exemplars[0]
+	if got := hex.EncodeToString(exemplar.TraceID); got != traceID.String() {
+		t.Fatalf("exemplar trace id=%s want %s", got, traceID)
+	}
+	if got := hex.EncodeToString(exemplar.SpanID); got != spanID.String() {
+		t.Fatalf("exemplar span id=%s want %s", got, spanID)
 	}
 }
 

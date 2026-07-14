@@ -108,10 +108,121 @@ def test_agent360_durable_counts_use_loki_event_history() -> None:
         assert 'connector=~"$connector"' in panel["targets"][0]["expr"]
         assert '| json | __error__=""' in panel["targets"][0]["expr"]
         assert 'body_$scope_label=~"$agent"' in panel["targets"][0]["expr"]
+        assert "count(sum by (logical_event_id)" in panel["targets"][0]["expr"]
+        assert 'correlation_logical_event_id' in panel["targets"][0]["expr"]
+        assert 'logical_event_id!=""' not in panel["targets"][0]["expr"]
+        for fallback in (
+            "logical:{{.correlation_logical_event_id}}",
+            "semantic:{{.correlation_semantic_event_id}}",
+            "record:{{.record_id}}",
+        ):
+            assert fallback in panel["targets"][0]["expr"]
 
     funnel = _panel_by_title(dashboard, "Lifecycle event totals")
     assert funnel["datasource"]["uid"] == "defenseclaw-loki"
     assert "count_over_time" in funnel["targets"][0]["expr"]
+
+
+def test_agent360_separates_logical_summaries_from_raw_correlation_evidence() -> None:
+    dashboard = _dashboard(AGENT360)
+
+    logical = _panel_by_title(dashboard, "Logical events")
+    raw = _panel_by_title(dashboard, "Raw observations")
+    warnings = _panel_by_title(dashboard, "Relationship warnings observed")
+    relationships = _panel_by_title(
+        dashboard, "Relationship evidence and conflict chronology"
+    )
+
+    assert logical["datasource"]["uid"] == "defenseclaw-loki"
+    assert "count(sum by (logical_event_id)" in logical["targets"][0]["expr"]
+    assert "correlation_logical_event_id" in logical["targets"][0]["expr"]
+    assert 'logical_event_id!=""' not in logical["targets"][0]["expr"]
+    assert "semantic:{{.correlation_semantic_event_id}}" in logical["targets"][0]["expr"]
+    assert "record:{{.record_id}}" in logical["targets"][0]["expr"]
+    assert "exact hook, proxy, and native-otlp mirrors count once" in logical[
+        "description"
+    ].lower()
+    assert "no canonical observation is omitted" in logical["description"].lower()
+
+    assert raw["datasource"]["uid"] == "defenseclaw-loki"
+    assert raw["targets"][0]["expr"].startswith("sum(count_over_time(")
+    assert "logical_event_id" not in raw["targets"][0]["expr"]
+    assert "every canonical loki record" in raw["description"].lower()
+
+    warning_expr = warnings["targets"][0]["expr"]
+    assert 'event_name="correlation.relationship.changed"' in warning_expr
+    assert 'unresolved|conflicted|rejected' in warning_expr
+    assert "transition count" in warnings["description"].lower()
+    assert "conflicts api" in warnings["description"].lower()
+
+    assert relationships["type"] == "logs"
+    assert relationships["options"]["sortOrder"] == "Ascending"
+    assert relationships["options"]["dedupStrategy"] == "none"
+    relationship_expr = relationships["targets"][0]["expr"]
+    assert 'event_name="correlation.relationship.changed"' in relationship_expr
+    for field in (
+        "body_defenseclaw_correlation_relationship_type",
+        "body_defenseclaw_correlation_relationship_source_kind",
+        "body_defenseclaw_correlation_relationship_source_id",
+        "body_defenseclaw_correlation_relationship_target_kind",
+        "body_defenseclaw_correlation_relationship_target_id",
+        "body_defenseclaw_correlation_relationship_method",
+        "body_defenseclaw_correlation_relationship_status",
+        "body_defenseclaw_correlation_relationship_rule_id",
+        "body_defenseclaw_correlation_relationship_rule_version",
+        "body_defenseclaw_correlation_relationship_confidence",
+        "body_defenseclaw_correlation_relationship_evidence_count",
+        "correlation_semantic_event_id",
+        "correlation_logical_event_id",
+        "correlation_connector_instance_id",
+        "correlation_trace_id",
+        "correlation_span_id",
+    ):
+        assert field in relationship_expr
+    assert "never substitutes trace parentage for agent lineage" in relationships[
+        "description"
+    ].lower()
+    assert "cumulative durable evidence count" in relationships["description"].lower()
+
+    topology = _panel_by_title(
+        dashboard, "Lifecycle DAG — prompt → agents → work → outcomes"
+    )
+    topology_queries = " ".join(
+        target.get("expr", "") for target in topology["targets"]
+    )
+    for forbidden_parentage in ("parent_span_id", "parentSpanID", "traceparent"):
+        assert forbidden_parentage not in topology_queries
+
+    ordered = _panel_by_title(
+        dashboard, "Ordered lifecycle and work sequence — root to terminal"
+    )
+    ordered_expr = ordered["targets"][0]["expr"]
+    assert "semantic={{.correlation_semantic_event_id}}" in ordered_expr
+    assert "logical={{.correlation_logical_event_id}}" in ordered_expr
+    assert "connector_instance={{.correlation_connector_instance_id}}" in ordered_expr
+    assert ordered["options"]["sortOrder"] == "Ascending"
+
+    raw_stream = _panel_by_title(dashboard, "Raw correlated event stream")
+    assert raw_stream["options"]["dedupStrategy"] == "none"
+    assert "no raw observation is collapsed" in raw_stream["description"].lower()
+
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            datasource = target.get("datasource", panel.get("datasource", {})).get(
+                "type"
+            )
+            if datasource != "prometheus":
+                continue
+            expression = target.get("expr", "")
+            for forbidden_metric_label in (
+                "semantic_event_id",
+                "logical_event_id",
+                "request_id",
+                "turn_id",
+                "tool_invocation_id",
+                "correlation_relationship_id",
+            ):
+                assert forbidden_metric_label not in expression
 
 
 def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
@@ -332,16 +443,15 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     assert "Lifecycle update" not in node_query
     assert "agent_emits_update" not in edge_query
     assert 'event_name="event"' not in edge_query
-    assert 'body_defenseclaw_agent_parent_id!=""' in edge_query
-    assert 'body_defenseclaw_agent_parent_id!="none"' in edge_query
     assert "detail__edge_kind=`parent_agent_to_subagent`" in edge_query
-    assert '| event_name="subagent_start"' in edge_query
     assert "detail__lineage_provenance" in edge_query
     assert edge_query.count("[24h]") == 2
     assert node_query.count("[24h]") == 5
     assert edge_query.count('body_defenseclaw_session_resumed!="true"') == 1
     assert node_query.count('body_defenseclaw_session_resumed!="true"') == 4
-    assert "session-start and spawn anchors are recovered from the last 24 hours" in topology["description"].lower()
+    assert "session-start and durable lineage anchors are recovered from the last 24 hours" in topology["description"].lower()
+    assert "durable relationship records alone establish parentage" in topology["description"].lower()
+    assert "raw subagent parent fields and trace parentage never create graph lineage" in topology["description"].lower()
     assert "one node per agent" in topology["description"].lower()
     assert "deliberately not presented as prompt content" in topology["description"].lower()
     assert "counts canonical depth-zero prompt submissions" in topology["description"].lower()
@@ -369,17 +479,32 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     assert "unless on (id)" in root_anchor
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in root_anchor
     spawn_parent = targets_by_ref["nodesSpawnParent"]
-    assert "id=`agent:{{.body_defenseclaw_agent_parent_id}}`" in spawn_parent
+    assert "id=`agent:{{.graph_parent_id}}`" in spawn_parent
     assert "detail__node_type=`spawn_parent_anchor`" in spawn_parent
     assert "graph_child_id" in spawn_parent
-    assert "and on (graph_child_id)" in spawn_parent
+    assert "and on (connector, graph_child_id)" in spawn_parent
     assert "detail__trace_id" not in spawn_parent
-    assert "unless on (id)" in spawn_parent
+    assert "unless on (connector, id)" in spawn_parent
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in spawn_parent
+    assert 'event_name="correlation.relationship.changed"' in spawn_parent
+    assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_parent
+    assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_parent
+    assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_parent
+    assert "body_defenseclaw_agent_parent_id" not in spawn_parent
     spawn_edge = targets_by_ref["edgesSpawn"]
     assert "graph_child_id" in spawn_edge
-    assert "and on (graph_child_id)" in spawn_edge
+    assert "and on (connector, graph_child_id)" in spawn_edge
     assert "[24h]" in spawn_edge
+    assert 'event_name="correlation.relationship.changed"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_status="active"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_edge
+    assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_edge
+    assert 'source=`agent:{{.graph_parent_id}}`' in spawn_edge
+    assert 'target=`agent:{{.graph_child_id}}`' in spawn_edge
+    assert "paired inverse orientations count once" in spawn_edge
+    assert "raw subagent parent fields never create this edge" in spawn_edge
+    assert "body_defenseclaw_agent_parent_id" not in spawn_edge
     agent_nodes = targets_by_ref["nodesAgent"]
     assert agent_nodes.startswith("((topk by (id) (1,")
     assert 'defenseclaw_event_name=~`session_start|subagent_start`' in agent_nodes

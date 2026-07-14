@@ -469,7 +469,11 @@ coverage rather than pretending every panel will work.
 
 ### Agent360 lifecycle DAG and correlation
 
-Agent360's node graph is a directed acyclic graph of canonical Loki facts. It keeps
+Agent360's node graph is a directed acyclic graph of canonical Loki facts backed by
+the durable correlation ledger. Agent lineage comes only from active, typed
+agent-to-agent `parent_of` relationship-change records, with `delegated_by` accepted
+as the contract-defined inverse fallback. Raw subagent parent fields, a shared OTLP
+trace, or a parent span never create an agent edge. It keeps
 session creation as its own anchor, groups canonical depth-zero prompt submissions
 into one root **Prompt inputs** node, connects each parent agent to its child,
 and connects the owning agent to grouped model/tool work, real message
@@ -477,10 +481,10 @@ updates, approvals, turn outcomes, and terminal outcomes. The root is depth `0`;
 direct and recursive children are depth `1`, `2`, and so on through the accepted
 maximum depth `64`. A four-level validation tree therefore means root depth 0 plus
 subagents at depths 1, 2, and 3—not four subagent generations. Node and edge detail
-state whether lineage was connector-reported or DefenseClaw-inferred. Session and
-spawn anchors use a bounded 24-hour recovery lookup so a selected-range boundary
-does not leave an edge endpoint missing; a recovered spawn is retained only when
-that child has graph-eligible activity in the selected range.
+state the durable relationship method. Session and lineage anchors use a bounded
+24-hour recovery lookup so a selected-range boundary does not leave an edge
+endpoint missing; a recovered relationship is retained only when that child has
+graph-eligible activity in the selected range.
 
 Some Codex versions complete a spawn tool call without emitting `SubagentStart`.
 DefenseClaw correlates the first event from a previously unseen child only when one
@@ -493,15 +497,20 @@ For Codex, the prompt node comes from canonical connector-source
 `UserPromptSubmit` facts and includes the initial request plus later follow-ups;
 native OTLP `model.request` mirrors remain in the ordered and raw views. Other
 connectors use recognized prompt hooks with `model.request` as a fallback. Prompt
-families deduplicate by turn ID, model-request ID, request ID, operation ID, then
-occurrence ID and show the largest observation-source total. When a
+families group exact mirrors by `defenseclaw.logical_event.id`; an observation
+without that ID falls back to its semantic-event ID and then record ID so unresolved
+evidence remains separate instead of disappearing. Each retained raw record keeps
+its own `defenseclaw.semantic_event.id`. Typed turn, model-request,
+request, and operation identifiers remain evidence and never become interchangeable
+fallbacks. When a
 connector supplies prompt content or any other field in canonical OTEL, Agent360
 shows it directly or links to the exact raw record; the dashboard does not remove,
 truncate, or mask it.
 
-Model request records are grouped per owning agent, provider, and model. Counts are
-summed within an observation source and then take the largest source total, avoiding
-connector/native mirror double-counting while retaining source-only observations. Tool
+Model request records are grouped per owning agent, provider, and model. Logical
+counts use the durable logical-event ID, then semantic-event ID and record ID as
+separate-observation fallbacks, avoiding connector/native mirror double-counting
+without dropping unresolved source observations from Loki. Tool
 request records are grouped per owning agent into Bash, MCP, Skills, Collaboration,
 File edits, Web/browser, Visual, or Task control; an unrecognized tool retains its
 reported name. Exact `collaboration.send_message` requests are excluded from the
@@ -524,15 +533,18 @@ records. For each emitting agent, `/root` and `/root/*` collapse into one
 Exact root task paths, calls, and terminal results remain in the ordered and raw
 drill-downs. A non-root task path remains an exact explicit group until telemetry
 reports a canonical target-agent mapping. No generic lifecycle event is
-reinterpreted as an update, and `parent_agent_id` proves lineage rather than
-message delivery. Approvals remain agent/execution-scoped when no exact work ID is
+reinterpreted as an update, and only durable `parent_of`/`delegated_by` relationship
+evidence proves lineage rather than message delivery. Approvals remain
+agent/execution-scoped when no exact work ID is
 reported. The dashboard exposes these limits instead of inventing edges.
 
 Cross-backend correlation uses the strongest facts each signal carries:
 
 | Scope | Join fields and meaning |
 |---|---|
-| Agent tree | current/root/parent agent IDs, depth, and current/root/parent session IDs |
+| One accepted occurrence | semantic-event ID; every log/span/metric derived from that accepted occurrence shares it |
+| One exact logical event | logical-event ID; exact hook/proxy/native mirrors group without rewriting or hiding raw records |
+| Agent tree | active typed agent `parent_of` edges or inverse `delegated_by` edges; event-carried root/parent/depth/session fields remain display and matching evidence |
 | Resumed lifetime | lifecycle ID plus session source/resumed state |
 | One attempt | execution ID and sequence; sequence is monotonic within that execution, not across the whole tree |
 | One unit of work | operation, tool-call, model request/response, approval, turn, and run IDs when reported |
@@ -544,6 +556,29 @@ trace parent across an asynchronous lifetime. Prometheus supplies aggregates wit
 bounded lineage/execution labels rather than event-level trace IDs. Node clicks show
 all available lineage/work IDs and preserve time ranges in links to Agent360,
 ordered logs, and exact Tempo traces.
+
+The **Correlation identity and relationship evidence** row compares distinct logical
+events with immutable raw observations and renders the chronological
+`correlation.relationship.changed` stream, including relationship type, method,
+typed source and target node kinds, status, stable rule ID and version, confidence,
+and cumulative durable evidence count. `reported`, `trace_exact`,
+`derived`, and `inferred` describe how an edge was established; `unresolved`,
+`conflicted`, `superseded`, and `rejected` remain visible rather than being folded
+into the graph. The authenticated read-only endpoints provide the durable query view
+for automation and exact investigation:
+
+```text
+GET /api/v1/correlation/graph
+GET /api/v1/correlation/explain
+GET /api/v1/correlation/timeline
+GET /api/v1/correlation/conflicts
+```
+
+Each endpoint accepts exactly one correlation anchor. The Grafana row consumes the
+corresponding content-free relationship-change logs so local and remote Loki users
+can reconstruct the same evidence without giving Grafana direct database access.
+Prometheus receives only bounded aggregate dimensions; semantic, logical, request,
+turn, tool, and relationship IDs are never metric labels.
 
 Token range panels include a first-publication fallback: Prometheus `increase()`
 cannot see a counter's initial nonzero sample, so a series first published inside

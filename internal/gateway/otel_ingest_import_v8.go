@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -98,10 +99,31 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		if disposition, terminal := inboundTerminalDisposition(classifier, leaf, classification); terminal {
 			return accounting.addPrimary(disposition)
 		}
+		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
+			ctx, leaf, classification.match, authenticatedSource, receipt,
+		)
+		if correlationErr != nil {
+			if errors.Is(correlationErr, errNativeOTLPCorrelationInputV8) {
+				return accounting.addPrimary(otlpInboundInvalidMappedField)
+			}
+			// Correlation state is part of local acceptance in v8. Never hand a
+			// leaf to the runtime/provider after the occurrence transaction has
+			// failed; account the leaf through the existing bounded local failure
+			// disposition so batch acknowledgement remains mathematically exact.
+			return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+		}
+		if correlated.suppressEmission {
+			return accounting.addPrimary(otlpInboundExactReplaySuppressed)
+		}
 		leafResult := a.importClassifiedOTLPLeafV8(
-			ctx, batch, leaf, classification.match, classifier.catalog.WireContract(),
+			correlated.ctx, batch, leaf, classification.match, classifier.catalog.WireContract(),
 			authenticatedSource, receipt,
 		)
+		if nativeOTLPLeafCanarySucceeded(leafResult) {
+			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
+				return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+			}
+		}
 		for _, derivative := range leafResult.derivatives {
 			switch {
 			case derivative.invalidMapped || derivative.invalidRecord:
@@ -292,12 +314,16 @@ func inboundLocalProvenanceV8(
 }
 
 func inboundCorrelationWithSnapshotV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	authenticatedSource string,
 	snapshot observabilityruntime.EmitContext,
 ) (observability.Correlation, error) {
-	correlation := inboundCorrelationV8(leaf, match, authenticatedSource)
+	correlation, err := inboundCorrelationV8(ctx, leaf, match, authenticatedSource)
+	if err != nil {
+		return observability.Correlation{}, err
+	}
 	instanceID, ok := snapshot.InboundLocalInstanceID()
 	if !ok {
 		return observability.Correlation{}, errOTLPInboundMappingV8
@@ -313,21 +339,18 @@ func inboundCorrelationWithSnapshotV8(
 // guessed root agent.
 func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	leaf otlpDecodedLeaf,
-	match observability.InboundMatch,
 	target observability.InboundTarget,
 	authenticatedSource string,
 	correlation *observability.Correlation,
 	fields []observability.InboundMappedField,
 	selected map[string]bool,
 ) ([]observability.InboundMappedField, bool, error) {
-	conversationID, state := inboundGeneratedStringValue(
-		leaf, match, "gen_ai.conversation.id", authenticatedSource,
-	)
-	if state == otlpTypedAttributeAbsent {
-		return fields, false, nil
-	}
-	if state != otlpTypedAttributeUnique || conversationID == "" {
+	if correlation == nil {
 		return nil, false, errOTLPInboundMappingV8
+	}
+	conversationID := correlation.SessionID
+	if conversationID == "" {
+		return fields, false, nil
 	}
 	meta, found := a.hookLifecycleSnapshot(authenticatedSource, conversationID, "")
 	if !found {
@@ -343,8 +366,7 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		*current = source
 		return true
 	}
-	if correlation == nil ||
-		!mergeCorrelation(&correlation.SessionID, conversationID) ||
+	if !mergeCorrelation(&correlation.SessionID, conversationID) ||
 		!mergeCorrelation(&correlation.AgentID, meta.AgentID) ||
 		!mergeCorrelation(&correlation.TurnID, meta.TurnID) {
 		return nil, false, errOTLPInboundMappingV8
@@ -585,10 +607,11 @@ func inboundMatchDeclaresField(match observability.InboundMatch, key string) boo
 }
 
 func inboundCorrelationV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	authenticatedSource string,
-) observability.Correlation {
+) (observability.Correlation, error) {
 	// Process/run identity is trusted local correlation, not sender-derived
 	// lifecycle data.  In particular the local sidecar instance establishes the
 	// semantic resource identity for an external (non-native) first import.
@@ -610,9 +633,6 @@ func inboundCorrelationV8(
 	}
 	read(&correlation.RunID, "defenseclaw.run.id")
 	read(&correlation.RequestID, "defenseclaw.request.id")
-	read(&correlation.SessionID, "gen_ai.conversation.id")
-	read(&correlation.TurnID, "defenseclaw.turn.id")
-	read(&correlation.AgentID, "gen_ai.agent.id")
 	read(&correlation.AgentInstanceID, "defenseclaw.agent.instance_id")
 	read(&correlation.PolicyID, "defenseclaw.policy.id")
 	read(&correlation.PolicyVersion, "defenseclaw.policy.version")
@@ -620,10 +640,80 @@ func inboundCorrelationV8(
 	read(&correlation.ScanID, "defenseclaw.scan.id")
 	read(&correlation.FindingOccurrenceID, "defenseclaw.finding.occurrence.id")
 	read(&correlation.EnforcementActionID, "defenseclaw.enforcement.action.id")
-	read(&correlation.ModelRequestID, "defenseclaw.model.request.id")
-	read(&correlation.ModelResponseID, "defenseclaw.model.response.id")
-	read(&correlation.ToolInvocationID, "gen_ai.tool.call.id")
-	return correlation
+	if values, ok := nativeOTLPCorrelationValuesFromContext(ctx, authenticatedSource); ok {
+		if err := applyConnectorNativeCorrelationValuesV8(&correlation, values); err != nil {
+			return observability.Correlation{}, err
+		}
+	} else if err := applyConnectorNativeCorrelationV8(&correlation, leaf, authenticatedSource); err != nil {
+		return observability.Correlation{}, err
+	}
+	return correlation, nil
+}
+
+// applyConnectorNativeCorrelationV8 maps business identity only through the
+// authenticated connector's reviewed profile. The generated inbound alias
+// catalog remains useful for non-business protocol fields, but it must never
+// turn a generic session_id, thread.id, request.id, or step value into a
+// session/turn/model/tool identity for every provider.
+func applyConnectorNativeCorrelationV8(
+	correlation *observability.Correlation,
+	leaf otlpDecodedLeaf,
+	authenticatedSource string,
+) error {
+	if correlation == nil {
+		return errOTLPInboundMappingV8
+	}
+	spec := connector.DefaultCorrelationSpec(authenticatedSource)
+	if spec.Connector != authenticatedSource || spec.NativeTelemetry.Stability == connector.NativeTelemetryNone {
+		return nil
+	}
+	attributes, err := nativeOTLPDeclaredAttributes(leaf, spec)
+	if err != nil {
+		return errOTLPInboundMappingV8
+	}
+	values := spec.NativeOTLPValues(attributes)
+	return applyConnectorNativeCorrelationValuesV8(correlation, values)
+}
+
+// applyConnectorNativeCorrelationValuesV8 projects the exact values already
+// accepted by the native occurrence transaction. Keeping this as a separate
+// step prevents the canonical record from resolving a different profile than
+// the durable ledger when an installed connector is version-locked.
+func applyConnectorNativeCorrelationValuesV8(
+	correlation *observability.Correlation,
+	values []connector.CorrelationValue,
+) error {
+	if correlation == nil {
+		return errOTLPInboundMappingV8
+	}
+	if err := connector.ValidateCorrelationValues(values); err != nil {
+		return errOTLPInboundMappingV8
+	}
+	for _, value := range values {
+		var destination *string
+		switch value.Target {
+		case connector.CorrelationTargetSession:
+			destination = &correlation.SessionID
+		case connector.CorrelationTargetTurn:
+			destination = &correlation.TurnID
+		case connector.CorrelationTargetAgent:
+			destination = &correlation.AgentID
+		case connector.CorrelationTargetModelRequest:
+			destination = &correlation.ModelRequestID
+		case connector.CorrelationTargetModelResponse:
+			destination = &correlation.ModelResponseID
+		case connector.CorrelationTargetTool:
+			destination = &correlation.ToolInvocationID
+		default:
+			continue
+		}
+		// A profile may preserve multiple differently typed IDs for one broad
+		// target. Binding order is its canonical preference: connector-specific
+		// declarations follow generic fallbacks, so the last applicable value is
+		// projected while every typed value remains available to the ledger.
+		*destination = value.Value
+	}
+	return nil
 }
 
 // inboundGeneratedStringValue resolves one canonical string only through the
@@ -699,7 +789,7 @@ func (a *APIServer) importOTLPLogTargetV8(
 			return observability.Record{}, errOTLPInboundMappingV8
 		}
 		input, err := a.mapInboundLogV8(
-			leaf, match, target, wire, authenticatedSource, receipt, snapshot,
+			ctx, leaf, match, target, wire, authenticatedSource, receipt, snapshot,
 		)
 		if err != nil {
 			mapFailed = true
@@ -838,6 +928,7 @@ func inboundOptionalExportPolicyV8(
 }
 
 func (a *APIServer) mapInboundLogV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	target observability.InboundTarget,
@@ -854,7 +945,7 @@ func (a *APIServer) mapInboundLogV8(
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err
 	}
-	correlation, err := inboundCorrelationWithSnapshotV8(leaf, match, authenticatedSource, snapshot)
+	correlation, err := inboundCorrelationWithSnapshotV8(ctx, leaf, match, authenticatedSource, snapshot)
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err
 	}
@@ -893,14 +984,19 @@ func (a *APIServer) mapInboundLogV8(
 	for key := range directSelected {
 		selected[key] = true
 	}
-	if match.MappingStrategy() == observability.InboundMappingConnectorModelLog {
+	if match.MappingStrategy() == observability.InboundMappingConnectorModelLog ||
+		match.MappingStrategy() == observability.InboundMappingConnectorToolLog {
+		expectedOperation := "chat"
+		if match.MappingStrategy() == observability.InboundMappingConnectorToolLog {
+			expectedOperation = "execute_tool"
+		}
 		operation, state := leaf.leafAttributes.stringValue("gen_ai.operation.name")
-		if state != otlpTypedAttributeAbsent && (state != otlpTypedAttributeUnique || operation != "chat") {
+		if state != otlpTypedAttributeAbsent && (state != otlpTypedAttributeUnique || operation != expectedOperation) {
 			return observability.InboundImportedLogInput{}, errOTLPInboundMappingV8
 		}
 		// Capability-preserving direct mapping may already have selected the
 		// canonical operation field. Only synthesize the connector contract's
-		// fixed chat operation when the sender omitted it; appending it twice
+		// fixed operation when the sender omitted it; appending it twice
 		// makes an otherwise valid imported record fail duplicate-field
 		// validation.
 		if !selected["gen_ai.operation.name"] {
@@ -908,12 +1004,12 @@ func (a *APIServer) mapInboundLogV8(
 			if !ok {
 				return observability.InboundImportedLogInput{}, errOTLPInboundMappingV8
 			}
-			fields = append(fields, observability.NewInboundMappedString(field, "chat"))
+			fields = append(fields, observability.NewInboundMappedString(field, expectedOperation))
 			selected["gen_ai.operation.name"] = true
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, match, target, authenticatedSource, &input.Correlation, fields, selected,
+		leaf, target, authenticatedSource, &input.Correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err
@@ -1163,16 +1259,24 @@ func inboundAliasAnyValue(
 }
 
 // normalizeInboundAliasValueV8 applies only transformations named by the
-// generated alias contract. Codex 0.136 emits response token counters through
-// tracing's display formatter, so the official OTLP AnyValue arm is a decimal
-// string even though the value is numeric. Accept that vendor shape only for
-// the authenticated Codex token aliases; every other source and alias retains
-// the ordinary exact-arm contract.
+// generated alias contract. Codex emits response token counters and tool fields
+// through tracing's display formatter, so numeric counters and structured tool
+// payloads arrive as strings. Accept those vendor shapes only for the exact
+// authenticated Codex aliases; every other source and alias retains the
+// ordinary exact-arm contract.
 func normalizeInboundAliasValueV8(
 	value *commonpb.AnyValue,
 	alias observability.InboundAlias,
 	authenticatedSource string,
 ) (*commonpb.AnyValue, bool) {
+	if authenticatedSource == "codex" {
+		switch alias.ID() {
+		case "codex-tool-arguments-v1":
+			return normalizeCodexToolPayloadV8(value, "raw")
+		case "codex-tool-result-v1":
+			return normalizeCodexToolPayloadV8(value, "content")
+		}
+	}
 	if inboundAliasValueType(value, alias.ValueType()) {
 		return value, true
 	}
@@ -1198,6 +1302,35 @@ func normalizeInboundAliasValueV8(
 		return nil, false
 	}
 	return &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: parsed}}, true
+}
+
+func normalizeCodexToolPayloadV8(value *commonpb.AnyValue, scalarKey string) (*commonpb.AnyValue, bool) {
+	if value == nil || (scalarKey != "raw" && scalarKey != "content") {
+		return nil, false
+	}
+	if object, ok := value.Value.(*commonpb.AnyValue_KvlistValue); ok {
+		return value, object.KvlistValue != nil
+	}
+	text, ok := value.Value.(*commonpb.AnyValue_StringValue)
+	if !ok {
+		return nil, false
+	}
+	if json.Valid([]byte(text.StringValue)) {
+		parsed, err := inboundJSONAnyValue([]byte(text.StringValue), 0)
+		if err == nil {
+			if object, isObject := parsed.Value.(*commonpb.AnyValue_KvlistValue); isObject && object.KvlistValue != nil {
+				return parsed, true
+			}
+		}
+	}
+	return &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{
+		KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{{
+			Key: scalarKey,
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{
+				StringValue: text.StringValue,
+			}},
+		}}},
+	}}, true
 }
 
 func inboundAliasValueType(value *commonpb.AnyValue, want observability.InboundValueType) bool {

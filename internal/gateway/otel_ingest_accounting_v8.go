@@ -25,6 +25,7 @@ const (
 	otlpInboundImportedAndDerived     otlpInboundPrimaryDisposition = "imported_and_derived"
 	otlpInboundCollectionDisabled     otlpInboundPrimaryDisposition = "collection_disabled"
 	otlpInboundSelfSuppressed         otlpInboundPrimaryDisposition = "self_suppressed"
+	otlpInboundExactReplaySuppressed  otlpInboundPrimaryDisposition = "exact_replay_suppressed"
 	otlpInboundHopLimit               otlpInboundPrimaryDisposition = "hop_limit"
 	otlpInboundUnsupportedIdentity    otlpInboundPrimaryDisposition = "unsupported_identity"
 	otlpInboundAmbiguousIdentity      otlpInboundPrimaryDisposition = "ambiguous_identity"
@@ -60,6 +61,7 @@ type otlpInboundBatchAccounting struct {
 	importedAndDerived     int64
 	collectionDisabled     int64
 	selfSuppressed         int64
+	exactReplaySuppressed  int64
 	hopLimit               int64
 	unsupportedIdentity    int64
 	ambiguousIdentity      int64
@@ -106,6 +108,8 @@ func (accounting *otlpInboundBatchAccounting) addPrimary(disposition otlpInbound
 		count = &accounting.collectionDisabled
 	case otlpInboundSelfSuppressed:
 		count = &accounting.selfSuppressed
+	case otlpInboundExactReplaySuppressed:
+		count = &accounting.exactReplaySuppressed
 	case otlpInboundHopLimit:
 		count = &accounting.hopLimit
 	case otlpInboundUnsupportedIdentity:
@@ -152,7 +156,7 @@ func (accounting *otlpInboundBatchAccounting) addDerivative(
 
 func (accounting otlpInboundBatchAccounting) primaryTotal() int64 {
 	return accounting.imported + accounting.derivedOnly + accounting.importedAndDerived +
-		accounting.collectionDisabled + accounting.selfSuppressed + accounting.hopLimit +
+		accounting.collectionDisabled + accounting.selfSuppressed + accounting.exactReplaySuppressed + accounting.hopLimit +
 		accounting.unsupportedIdentity + accounting.ambiguousIdentity +
 		accounting.invalidMappedField + accounting.invalidRecord + accounting.localPersistenceFailed
 }

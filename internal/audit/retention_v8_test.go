@@ -1090,6 +1090,14 @@ func TestRetentionMigrationCatalogCompletenessAndProtectedExclusions(t *testing.
 		if ownership == retentionOwnedProtected && registered[table] {
 			t.Errorf("protected table %s is present in retention registry", table)
 		}
+		if ownership == retentionOwnedGraph && !retentionCorrelationGraphTables[table] {
+			t.Errorf("graph-owned table %s is missing from the correlation retention registry", table)
+		}
+	}
+	for table := range retentionCorrelationGraphTables {
+		if retentionAuditMigrationCatalog[table] != retentionOwnedGraph {
+			t.Errorf("correlation retention table %s is not declared graph-owned", table)
+		}
 	}
 	for table, ownership := range retentionJudgeMigrationCatalog {
 		if ownership == retentionOwnedHistory && table != "judge_responses" {
@@ -1163,6 +1171,55 @@ func seedRetentionHistory(
 	if err := judge.CutoverLegacyJudgeBodies(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
+	seedRetentionCorrelationHistory(t, store, before)
+}
+
+func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) {
+	t.Helper()
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := mustCorrelationInstance(t, repo, "retention", ConnectorCustodyHookOnly)
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{
+		receivedAt: old,
+		receipt: &CorrelationReceiptClaim{
+			SourceKeyDigest:   correlationDigest("retention-receipt"),
+			FingerprintSHA256: correlationDigest("retention-payload"),
+			ReceivedAt:        old, ExpiresAt: old.Add(time.Nanosecond),
+		},
+	})
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutCursor(t.Context(), CorrelationCursor{
+			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "old-session", AgentID: "old-agent",
+			Phase: "completed", Sequence: 1, LastSemanticEventID: event.SemanticEventID,
+			ProfileVersion: instance.ProfileVersion, Active: false, UpdatedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutPendingOperation(t.Context(), CorrelationPendingOperation{
+			ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "codex", Kind: CorrelationIdentifierTool,
+			OperationID: "old-tool", Type: CorrelationOperationTool,
+			ScopeKind: CorrelationOperationScopeConnectorInstance, ScopeID: string(instance.ConnectorInstanceID),
+			StartSemanticEventID: event.SemanticEventID,
+			StartedAt:            old, TerminalSemanticEventID: event.SemanticEventID,
+			TerminalAt: old, Status: CorrelationOperationCompleted, UpdatedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, _ CorrelationEvent) {
+		if _, err := tx.PutRelationship(t.Context(), CorrelationRelationshipInput{
+			FromKind: CorrelationNodeSession, FromID: "old-session-node",
+			ToKind: CorrelationNodeTurn, ToID: "old-turn-node", Type: CorrelationBelongsTo,
+			Method: CorrelationMethodReported, RuleID: "retention-fixture", RuleVersion: "v1",
+			Status: CorrelationRelationshipActive, ObservedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
 }
 
 func seedSimpleRetentionBoundary(
@@ -1258,6 +1315,12 @@ func assertRetentionBoundaryRows(t *testing.T, store *Store, judge *JudgeBodySto
 	}
 	if baseline != 1 || projection != 1 {
 		t.Fatalf("legacy ACK baseline=%d projection=%d want 1,1", baseline, projection)
+	}
+	for _, table := range []string{"correlation_receipts", "correlation_cursors",
+		"correlation_pending_operations", "correlation_relationships", "correlation_events"} {
+		if countRetentionRows(t, store.db, table) != 0 {
+			t.Errorf("old correlation table %s was not fully reaped", table)
+		}
 	}
 }
 

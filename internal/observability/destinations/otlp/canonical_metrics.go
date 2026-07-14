@@ -119,7 +119,10 @@ func (factory *Factory) NewCanonicalMetricSink(
 		sdkmetric.WithResource(options.Resource),
 		sdkmetric.WithReader(sdkReader),
 		sdkmetric.WithCardinalityLimit(options.CardinalityLimit),
-		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
+		// Offer only sampled trace context to the SDK exemplar reservoir. The
+		// resulting trace/span IDs remain exemplar metadata and never become
+		// metric attributes or Prometheus labels.
+		sdkmetric.WithExemplarFilter(exemplar.TraceBasedFilter),
 	)
 	timeout := factory.config.Timeout + factory.config.Batch.ExportTimeout
 	if timeout <= 0 || timeout > 10*time.Minute {

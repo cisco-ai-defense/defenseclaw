@@ -200,10 +200,12 @@ Use **Scope = This agent** for a single agent, or **Agent tree** to include
 all descendants. Prometheus supplies directory, state, throughput, latency,
 token, reported-cost totals, and directed phase aggregates. Loki supplies the
 prompt-to-outcome lifecycle DAG plus compact lifecycle/model/tool/network/security
-summaries with the full event available in log details. Session and spawn anchors
-may be recovered from the prior 24 hours so selected-range boundaries remain
-renderable; a recovered spawn is kept only when its child has graph-eligible
-activity in the selected range. Repeated model work is
+summaries with the full event available in log details. Session and durable
+lineage anchors may be recovered from the prior 24 hours so selected-range
+boundaries remain renderable; a recovered relationship edge is kept only when its
+child has graph-eligible activity in the selected range. Active typed `parent_of`
+and inverse `delegated_by` relationship records establish agent parentage; raw
+parent fields and trace topology do not. Repeated model work is
 grouped per owning agent, provider, and model. Repeated tools are grouped per
 owning agent as Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual,
 or Task control; an unrecognized tool keeps its reported name. Exact

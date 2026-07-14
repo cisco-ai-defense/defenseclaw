@@ -681,7 +681,10 @@ func newProviderV8Inactive(
 		meterOptions := []sdkmetric.Option{
 			sdkmetric.WithResource(res),
 			sdkmetric.WithCardinalityLimit(v8MetricCardinalityLimit),
-			sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
+			// Sampled trace context may correlate an aggregate metric point back
+			// to one trace through an OTLP exemplar. It is never promoted into
+			// the metric attribute set, preserving the cardinality contract.
+			sdkmetric.WithExemplarFilter(exemplar.TraceBasedFilter),
 		}
 		for _, reader := range preparedReaders {
 			meterOptions = append(meterOptions, sdkmetric.WithReader(reader))

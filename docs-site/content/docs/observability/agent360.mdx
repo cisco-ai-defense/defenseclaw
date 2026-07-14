@@ -52,9 +52,9 @@ execution detail:
 | --- | --- | --- |
 | **Agent Directory** | Agents observed for the selected connector and time range, including root/parent relationships and last-seen time. | Confirms discovery and provides a one-click drill-down to another agent. |
 | **Last seen** | Age of the newest correlated signal. | Finds silent, disconnected, or unexpectedly idle agents. |
-| **Turns** | De-duplicated completed conversational turns. | Compares useful interaction volume without counting every hook delivery. |
-| **Model calls** | Completed chat/model operations. | Separates model work from lifecycle envelopes and tool calls. |
-| **Tool calls** | De-duplicated completed tool operations. | Reveals automation intensity and tool-heavy executions. |
+| **Turns** | Distinct logical completed conversational turns. | Exact hook/native mirrors count once while every raw observation remains inspectable. |
+| **Model calls** | Distinct logical completed chat/model operations. | Separates real model work from mirrored telemetry records. |
+| **Tool calls** | Distinct logical completed tool operations. | Reveals automation intensity without mirror inflation. |
 | **Descendants in selected root tree** | Correlated transitive child agents under the selected root. | Detects delegation and unexpected fan-out at any observed depth. |
 | **Input/output tokens** | Connector- or provider-reported usage only. | Tracks context growth and response volume without inventing estimates. |
 | **Reported cost** | Cost reported by the connector, normalized for cumulative and per-call semantics. | Supports cost investigation while preserving the source's meaning. |
@@ -93,6 +93,45 @@ tree. Use timestamps plus root/parent/depth fields to read interleaved sibling
 work. A missing trace ID does not sever the lifecycle: asynchronous hook
 deliveries are joined through root agent, root session, lifecycle, execution,
 and operation identities rather than fabricated span parentage.
+
+## Explain logical grouping and relationship evidence
+
+The **Correlation identity and relationship evidence** row keeps two views side by
+side:
+
+- **Logical events** counts distinct `defenseclaw.logical_event.id` values. Exact
+  hook, proxy, and native-OTLP mirrors can share one ID. When an observation has
+  not yet joined a logical group, Agent360 falls back to its semantic event ID and
+  then its record ID so unresolved observations are never dropped.
+- **Raw observations** counts every canonical Loki record. Each accepted source
+  occurrence keeps its own `defenseclaw.semantic_event.id`; Agent360 never deletes
+  or hides a mirror.
+- **Relationship evidence and conflict chronology** renders content-free
+  `correlation.relationship.changed` records in Loki timestamp order. Expand a row
+  to inspect relationship type, typed source and target node kinds, method, status,
+  stable rule ID and version, confidence, cumulative durable evidence count,
+  semantic/logical identity, and any exact trace/span pivot.
+
+Relationship methods are `reported`, `trace_exact`, `derived`, or `inferred`.
+Statuses such as `unresolved`, `conflicted`, `superseded`, and `rejected` stay
+visible instead of being silently folded into the graph. Agent lineage is accepted
+from reported or explicitly derived relationship evidence; a shared trace ID or
+span parent alone never creates a parent/child agent edge.
+
+For automation or exact durable-state investigation, use one authenticated,
+read-only endpoint with exactly one anchor:
+
+```text
+GET /api/v1/correlation/graph
+GET /api/v1/correlation/explain
+GET /api/v1/correlation/timeline
+GET /api/v1/correlation/conflicts
+```
+
+The Grafana row reads the corresponding relationship-change log stream so the
+local stack needs no direct SQLite access. Prometheus remains aggregate-only:
+semantic, logical, request, turn, tool, and relationship IDs are never metric
+labels.
 
 ## Follow an enforced or alternative path
 
@@ -143,11 +182,14 @@ retry loop or an agent that is still active.
 ![Agent360 lifecycle DAG connecting session start, grouped prompt inputs, root agent, delegated agents, grouped work, message updates, approvals, and outcomes](/images/grafana/agent360-topology.jpg)
 
 The **Lifecycle DAG — prompt → agents → work → outcomes** is built from canonical
-Loki events. Work and outcomes use the selected time range. Session and spawn
-anchors may be recovered from the prior 24 hours so a boundary window does not
-leave an edge endpoint missing; a recovered spawn remains only when that child has
-graph-eligible activity in the selected range. Its arrows are causal or ownership
-relationships that DefenseClaw can prove:
+Loki events and durable relationship evidence, never trace parentage or raw
+subagent parent fields. An active typed `parent_of` relationship is read in its
+reported direction; an active typed `delegated_by` relationship is read in the
+inverse direction. Work and outcomes use the selected time range. Session and
+durable lineage anchors may be recovered from the prior 24 hours so a boundary
+window does not leave an edge endpoint missing; a recovered lineage edge remains
+only when that child has graph-eligible activity in the selected range. Its arrows
+are causal or ownership relationships that DefenseClaw can prove:
 
 Some Codex versions complete a spawn tool call without emitting `SubagentStart`.
 DefenseClaw correlates a previously unseen child's first event only when one
@@ -160,7 +202,8 @@ no false parent-child edge is drawn.
 - canonical depth-zero prompt submissions increment one grouped **Prompt inputs**
   node for the root; Codex uses connector-source `UserPromptSubmit` facts while
   keeping native OTLP `model.request` mirrors in the ordered/raw views;
-- a parent agent points to each child observed at `subagent_start`;
+- a parent agent points to each child established by an active durable typed
+  `parent_of` or inverse `delegated_by` relationship;
 - an agent points to one summary node for each observed provider/model pair;
 - an agent points to one summary node for each normalized tool family: Bash, MCP,
   Skills, Collaboration, File edits, Web/browser, Visual, or Task control; an

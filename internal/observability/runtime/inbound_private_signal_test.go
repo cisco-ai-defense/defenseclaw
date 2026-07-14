@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
@@ -61,7 +62,7 @@ func TestInboundPrivateTraceAndMetricCollectionPrecedesBuilderAndSQLite(t *testi
 	}
 }
 
-func TestInboundPrivateTraceAndMetricUsePinnedCanonicalPipelinesWithoutSQLite(t *testing.T) {
+func TestInboundPrivateTraceAndMetricPreserveNativeTopologyAndPersistOnlyCorrelationMetadata(t *testing.T) {
 	traceTarget, metricTarget := inboundRuntimeSignalTargets(t)
 	dependencies := newRuntimeTestDependencies(t)
 	consumer := &generatedTraceConsumer{}
@@ -126,19 +127,26 @@ func TestInboundPrivateTraceAndMetricUsePinnedCanonicalPipelinesWithoutSQLite(t 
 			t.Errorf("close runtime: %v", closeErr)
 		}
 	})
-	batch, err := runtime.BeginInboundImportBatch(t.Context())
+	fixture := newRuntimeCorrelationFixture(t, dependencies, audit.CorrelationRailNativeOTLP)
+	batch, err := runtime.BeginInboundImportBatch(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer batch.Close()
 	var ids atomic.Int64
-	traceResult, err := batch.ImportTrace(t.Context(), traceTarget, "codex", func(snapshot EmitContext) (observability.Record, error) {
-		return inboundRuntimeTraceRecord(t, snapshot, traceTarget, &ids)
+	traceResult, err := batch.ImportTrace(fixture.ctx, traceTarget, "codex", func(snapshot EmitContext) (observability.Record, error) {
+		record, buildErr := inboundRuntimeTraceRecord(t, snapshot, traceTarget, &ids)
+		if buildErr != nil {
+			return observability.Record{}, buildErr
+		}
+		return record.WithCorrelationDefaults(observability.Correlation{
+			RequestID: "native-request", SessionID: "native-session", TurnID: "native-turn",
+		})
 	})
 	if err != nil || traceResult != (telemetry.V8ImportedSpanResult{Matched: 1, Delivered: 1}) {
 		t.Fatalf("trace result=%+v err=%v", traceResult, err)
 	}
-	metricResult, err := batch.RecordMetric(t.Context(), metricTarget, "codex", func(snapshot EmitContext) (observability.Record, error) {
+	metricResult, err := batch.RecordMetric(fixture.ctx, metricTarget, "codex", func(snapshot EmitContext) (observability.Record, error) {
 		return inboundRuntimeMetricRecord(t, snapshot, metricTarget, &ids)
 	})
 	if err != nil || metricResult != (telemetry.V8MetricRecordResult{Matched: 1, Delivered: 1}) {
@@ -157,6 +165,27 @@ func TestInboundPrivateTraceAndMetricUsePinnedCanonicalPipelinesWithoutSQLite(t 
 			spans[0].ResourceDroppedAttributesCount())
 	}
 	assertInboundRuntimeTraceComponents(t, spans[0])
+	assertRuntimeCorrelation(t, spans[0].Record().Correlation(), fixture)
+	nativeCorrelation := spans[0].Record().Correlation()
+	if nativeCorrelation.RequestID != "native-request" || nativeCorrelation.SessionID != "native-session" ||
+		nativeCorrelation.TurnID != "native-turn" {
+		t.Fatalf("native business IDs were replaced by receiver transport context: %+v", nativeCorrelation)
+	}
+	graph := runtimeCorrelationGraph(t, dependencies, fixture.semanticEventID)
+	if len(graph.Observations) != 2 {
+		t.Fatalf("native correlation observations=%+v", graph.Observations)
+	}
+	signals := map[audit.CorrelationSignal]bool{}
+	for _, observation := range graph.Observations {
+		signals[observation.Signal] = true
+		if observation.Signal == audit.CorrelationSignalTraces &&
+			(observation.SessionID != "native-session" || observation.TurnID != "native-turn") {
+			t.Fatalf("native trace observation IDs=%+v", observation)
+		}
+	}
+	if !signals[audit.CorrelationSignalTraces] || !signals[audit.CorrelationSignalMetrics] {
+		t.Fatalf("native observation signals=%+v", signals)
+	}
 	events, err := dependencies.store.ListEvents(16)
 	if err != nil || len(events) != 0 {
 		t.Fatalf("trace/metric created SQLite audit rows=%#v err=%v", events, err)

@@ -132,6 +132,98 @@ def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_s
     assert "Modern release provenance is mandatory; --allow-unverified cannot override it." in protocol
 
 
+def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() -> None:
+    continuity = (
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
+    ).read_text()
+
+    fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    fixture_end = continuity.index(
+        "\n}\n\nassert_local_candidate_provenance_verified()", fixture_start
+    )
+    fixture = continuity[fixture_start:fixture_end]
+    main = continuity[continuity.index("main_continuity() {") :]
+
+    assert '[[ "${LOCAL_CANDIDATE_PROVENANCE_FIXTURE}" == "1" ]]' in fixture
+    assert 'if [[ -z "${RELEASE_ROOT}" && -z "${RELEASE_DIR}" ]]' in main
+    assert 'LOCAL_CANDIDATE_PROVENANCE_FIXTURE="1"' in main
+    assert "--certificate-identity" in fixture
+    assert (
+        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/"
+        "release.yaml@refs/heads/main"
+    ) in fixture
+    assert "--certificate-oidc-issuer" in fixture
+    assert "https://token.actions.githubusercontent.com" in fixture
+    assert '[[ "$#" -eq 10 ]]' in fixture
+    assert "assert_local_candidate_provenance_verified" in main
+
+
+def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
+    continuity = (
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
+    ).read_text(encoding="utf-8")
+    start = continuity.index(
+        "assert_published_bridge_binary_sqlite_rollback_compatibility() {"
+    )
+    end = continuity.index("\n}\n\nresolve_continuity_upgrade_contract()", start)
+    compatibility = continuity[start:end]
+    main = continuity[continuity.index("main_continuity() {") :]
+
+    # The gate is specifically bound to the immutable POSIX 0.8.4 bridge and
+    # the material retained only after historical_release_auth.py succeeds.
+    assert '[[ "${FROM_VERSION}" == "0.8.4" ]]' in compatibility
+    assert 'darwin|linux) ;;' in compatibility
+    assert (
+        'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"'
+        in compatibility
+    )
+    assert (
+        'auth_marker="${WORKDIR}/published-release/${FROM_VERSION}/'
+        '.authenticated-${OS_NAME}-${ARCH_NAME}"'
+        in compatibility
+    )
+    assert '"${bridge_gateway}" --version | grep -F "${FROM_VERSION}"' in compatibility
+
+    # It restores the byte-preserved source config while keeping one exact DB
+    # path, then proves target-created correlation tables exist before boot.
+    assert 'v7_config="${SMOKE_HOME}/fixture-evidence/config.v7.source"' in compatibility
+    assert 'audit_db="${data_dir}/state/audit.db"' in compatibility
+    for table in (
+        "correlation_events",
+        "correlation_identifiers",
+        "correlation_identity_claims",
+        "correlation_observations",
+        "correlation_relationships",
+        "correlation_relationship_evidence",
+        "correlation_cursors",
+        "correlation_pending_operations",
+        "correlation_receipts",
+    ):
+        assert f'"{table}"' in compatibility
+    assert 'stop_smoke_gateway\n    cp -p "${v7_config}"' in compatibility
+
+    # Health is provenance-bound, and the old API itself performs both the
+    # authenticated write and read. SQLite then verifies exact old-binary
+    # provenance without putting the token in argv or evidence files.
+    assert 'provenance.get("binary_version") != sys.argv[2]' in compatibility
+    assert '"http://127.0.0.1:18970/audit/event"' in compatibility
+    assert '"http://127.0.0.1:18970/alerts?limit=500"' in compatibility
+    assert '"X-DefenseClaw-Client": "upgrade-continuity-gate"' in compatibility
+    assert 'event.get("binary_version") == "0.8.4"' in compatibility
+    assert "SELECT COUNT(*), COALESCE(MAX(binary_version), '')" in compatibility
+
+    # The target config and binary are restored and health-checked before the
+    # ordinary post-upgrade history/dashboard assertions continue.
+    assert 'cp -p "${v8_config}" "${data_dir}/config.yaml"' in compatibility
+    assert '"${target_gateway}" start' in compatibility
+    activation = main.index("verify_target_activation")
+    old_binary_probe = main.index(
+        "assert_published_bridge_binary_sqlite_rollback_compatibility"
+    )
+    post_emit = main.index("emit_continuity_phase post")
+    assert activation < old_binary_probe < post_emit
+
+
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
     start = smoke.index("seed_pre_v8_otel_fixture() {")
