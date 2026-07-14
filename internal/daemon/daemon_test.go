@@ -496,3 +496,30 @@ func TestRemovePIDFileIfStartedPreservesReusedPID(t *testing.T) {
 		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
 	}
 }
+
+func TestRemovePIDFileIfStartedPreservesStrongReplacementAfterLegacyRead(t *testing.T) {
+	d := New(t.TempDir())
+	legacy := pidInfo{PID: 404}
+	replacement := pidInfo{
+		PID:           legacy.PID,
+		Executable:    "gateway",
+		StartIdentity: "replacement-start",
+	}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(legacy)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("strong replacement PID record was removed: %v", err)
+	}
+	if got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
+	}
+}

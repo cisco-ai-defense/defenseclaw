@@ -649,14 +649,26 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 }
 
 func (d *Daemon) removePIDFileIfStarted(started pidInfo) {
-	current, err := d.readPIDInfo()
-	if err != nil || current.PID != started.PID {
-		return
+	_ = removePIDFileIf(d.pidFile, func(data []byte) bool {
+		current, err := parsePIDInfo(data)
+		return err == nil && pidInfoMatchesStarted(current, started)
+	})
+}
+
+func pidInfoMatchesStarted(current, started pidInfo) bool {
+	if current.PID != started.PID {
+		return false
 	}
-	if started.StartIdentity != "" && current.StartIdentity != started.StartIdentity {
-		return
+	if started.StartIdentity != "" {
+		return current.StartIdentity == started.StartIdentity
 	}
-	_ = os.Remove(d.pidFile)
+	// A legacy bare-PID observation is weaker than a subsequently published
+	// strong identity. Even when the numeric PID matches, preserve the strong
+	// record because it may belong to a replacement process after PID reuse.
+	if current.StartIdentity != "" {
+		return false
+	}
+	return started.Executable == "" || current.Executable == started.Executable
 }
 
 func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
@@ -673,7 +685,10 @@ func (d *Daemon) readPIDInfo() (pidInfo, error) {
 	if err != nil {
 		return pidInfo{}, err
 	}
+	return parsePIDInfo(data)
+}
 
+func parsePIDInfo(data []byte) (pidInfo, error) {
 	var info pidInfo
 	if err := json.Unmarshal(data, &info); err != nil {
 		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
