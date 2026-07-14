@@ -450,3 +450,49 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
 	}
 }
+
+func TestRemovePIDFileIfStartedPreservesReplacement(t *testing.T) {
+	d := New(t.TempDir())
+	old := pidInfo{PID: 101, Executable: "old-gateway", StartIdentity: "old-start"}
+	replacement := pidInfo{PID: 202, Executable: "new-gateway", StartIdentity: "new-start"}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(old)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("replacement PID record was removed: %v", err)
+	}
+	if got.PID != replacement.PID || got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("PID record = %+v, want replacement %+v", got, replacement)
+	}
+}
+
+func TestRemovePIDFileIfStartedPreservesReusedPID(t *testing.T) {
+	d := New(t.TempDir())
+	old := pidInfo{PID: 303, Executable: "gateway", StartIdentity: "old-start"}
+	replacement := pidInfo{PID: old.PID, Executable: "gateway", StartIdentity: "new-start"}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(old)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("PID-reuse replacement record was removed: %v", err)
+	}
+	if got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
+	}
+}

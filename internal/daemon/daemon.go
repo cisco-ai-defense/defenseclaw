@@ -141,7 +141,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	if !processExists(info.PID) {
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
 	if !d.verifyProcess(info) {
@@ -149,7 +149,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
 		// and remove it so the next operation gets a clean slate.
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
 	return true, info.PID
@@ -576,6 +576,14 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	if !running {
 		return ErrNotRunning
 	}
+	// Bind every cleanup decision to the exact process identity observed before
+	// signalling. A concurrent restart can publish a new gateway.pid while the
+	// old process is still exiting; unconditionally removing the pathname here
+	// would orphan the healthy replacement daemon.
+	started, err := d.readPIDInfo()
+	if err != nil || started.PID != pid || !d.verifyProcess(started) {
+		return ErrNotRunning
+	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -585,7 +593,7 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	// Send termination signal for graceful shutdown
 	if err := sendTermSignal(proc); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
-			_ = os.Remove(d.pidFile)
+			d.removePIDFileIfStarted(started)
 			return nil
 		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
@@ -595,7 +603,7 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	// asynchronous, and reopening the PID can report "gone" before the
 	// original kernel object is signaled and its listener is released.
 	if waitForProcessExit(proc, pid, timeout) {
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(started)
 		return nil
 	}
 
@@ -605,7 +613,7 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 		return ErrStopTimeout
 	}
 
-	_ = os.Remove(d.pidFile)
+	d.removePIDFileIfStarted(started)
 	return nil
 }
 
