@@ -144,17 +144,17 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.max_per_minute"].kind == "int"
 
 
-def test_windows_notifications_enabled_field_is_visible_but_read_only() -> None:
+def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
     section = _section(
         build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
         "Notifications",
     )
     fields = {field.key: field for field in section.fields if field.key}
     enabled = fields["notifications.enabled"]
-    assert enabled.interactive is False
-    assert "unsupported" in enabled.label.lower()
-    assert "inactive" in enabled.hint.lower()
-    assert "unsupported" in section.summary.lower()
+    assert enabled.interactive is True
+    assert enabled.kind == "bool"
+    assert "unsupported" not in enabled.label.lower()
+    assert "desktop toasts" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:

@@ -1068,19 +1068,11 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         await pilot.press("N")
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "NotificationsToggleScreen"
-        if os.name == "nt":
-            assert app.screen_stack[-1].model.title == "Desktop notifications — unsupported"
-            await pilot.press("enter")
-            await pilot.pause()
-            assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
-            assert config.notifications.enabled is True
-            await pilot.press("escape")
-        else:
-            assert app.screen_stack[-1].model.title == "Desktop notifications"
-            await pilot.press("enter")
-            await pilot.pause()
-            assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
-            assert config.notifications.enabled is False
+        assert app.screen_stack[-1].model.title == "Desktop notifications"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
+        assert config.notifications.enabled is False
 
         app.action_switch_panel("overview")
         await pilot.press("X")

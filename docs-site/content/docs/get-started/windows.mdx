@@ -285,7 +285,9 @@ defenseclaw doctor
 ```
 
 Native Windows is hook-only. Sandbox, enterprise hooks, OpenHands, OmniGent,
-OpenClaw, ZeptoClaw, and native desktop toasts are unsupported on Windows.
+OpenClaw and ZeptoClaw are unsupported on Windows. Desktop security
+notifications are delivered natively by the signed gateway through the Windows
+notification area; enable them with `defenseclaw setup notifications on`.
 Bundled Local Splunk and the separate local observability stack are supported
 from PowerShell/cmd on native Windows x64 with Docker Desktop using Linux
 containers through the Hyper-V backend on Windows Pro, Enterprise, or
