@@ -478,6 +478,15 @@ func (a *APIServer) emitHookDecisionEvent(
 			meta.Sequence = snapshot.Sequence
 		}
 	}
+	var retainedAnchor trace.SpanContext
+	if anchor, ok := a.hookSessionSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+		// The final decision is part of the hook delivery that already emitted
+		// this prompt/tool anchor. Prefer that retained per-delivery identity
+		// over the independently reconstructed decision identity so the anchor
+		// is reused without preventing the next hook delivery from rotating.
+		meta.TraceEventID = firstNonEmpty(anchor.traceEventID, anchor.meta.TraceEventID, meta.TraceEventID)
+		retainedAnchor = anchor.spanContext
+	}
 
 	// A request that did not create an LLM/lifecycle anchor (for example a
 	// malformed early hook) can still carry reliable identity in the context.
@@ -505,7 +514,20 @@ func (a *APIServer) emitHookDecisionEvent(
 		result = "panic"
 	}
 
-	emitEvent(ctx, gatewaylog.Event{
+	// The HTTP request span is intentionally filtered from user-facing trace
+	// destinations. Parent derived control telemetry to the short hook anchor
+	// that ensureHookSessionTrace exports instead; otherwise the asynchronous
+	// Agent Control bridge receives a valid-looking trace/span pair whose
+	// parent never reaches Galileo, and ingest can only create a stub trace.
+	// This mirrors Agent Control's in-process OTEL integration, where the
+	// control event inherits the exported application span context.
+	eventCtx := ctx
+	if retainedAnchor.IsValid() {
+		eventCtx = trace.ContextWithSpanContext(ctx, retainedAnchor)
+	} else {
+		eventCtx = a.ensureHookSessionTrace(ctx, meta, "")
+	}
+	event := gatewaylog.Event{
 		EventType:           gatewaylog.EventHookDecision,
 		Severity:            deriveSeverity(resp.Severity),
 		RunID:               meta.RunID,
@@ -556,7 +578,16 @@ func (a *APIServer) emitHookDecisionEvent(
 			EvaluationID: resp.EvaluationID,
 			RuleIDs:      append([]string(nil), resp.RuleIDs...),
 		},
-	})
+	}
+	// eventCtx retains the HTTP request's explicit correlation value, which
+	// stampEventCorrelation normally prefers for audit continuity. Override
+	// both IDs together here so the derived ControlSpan cannot combine that
+	// filtered request trace with the exported anchor's span ID.
+	if spanContext := trace.SpanContextFromContext(eventCtx); spanContext.IsValid() {
+		event.TraceID = spanContext.TraceID().String()
+		event.SpanID = spanContext.SpanID().String()
+	}
+	emitEvent(eventCtx, event)
 }
 
 // renderAgentHookResponse projects the unified agentHookResponse

@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // withCapturedEvents installs a temporary gatewaylog.Writer backed
@@ -597,6 +598,31 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		if e.DestinationApp != "builtin" {
 			t.Errorf("event[%d] DestinationApp=%q want %q (type=%s)", i, e.DestinationApp, "builtin", e.EventType)
 		}
+	}
+}
+
+func TestStampEventCorrelation_StampsActiveSpanIdentity(t *testing.T) {
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanID, err := trace.SpanIDFromHex("89abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID,
+		SpanID:  spanID,
+	}))
+	event := gatewaylog.Event{}
+
+	stampEventCorrelation(&event, ctx)
+
+	if event.TraceID != traceID.String() {
+		t.Fatalf("TraceID=%q want %q", event.TraceID, traceID.String())
+	}
+	if event.SpanID != spanID.String() {
+		t.Fatalf("SpanID=%q want %q", event.SpanID, spanID.String())
 	}
 }
 

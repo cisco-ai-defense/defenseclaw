@@ -216,6 +216,11 @@ func (w *Writer) EmitContext(ctx context.Context, e Event) {
 			e.TraceID = sp.SpanContext().TraceID().String()
 		}
 	}
+	if e.SpanID == "" {
+		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+			e.SpanID = sp.SpanContext().SpanID().String()
+		}
+	}
 	StampAgentWatchContext(&e)
 	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
 	// payload using the per-boot device-key-derived HMAC key. No-op

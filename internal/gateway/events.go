@@ -196,6 +196,11 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 			}
 		}
 	}
+	if ev.SpanID == "" {
+		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+			ev.SpanID = sp.SpanContext().SpanID().String()
+		}
+	}
 	if ev.RunID == "" {
 		ev.RunID = firstNonEmpty(env.RunID, gatewaylog.ProcessRunID())
 	}

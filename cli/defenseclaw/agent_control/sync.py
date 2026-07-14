@@ -22,6 +22,7 @@ from defenseclaw.audit_actions import (
     ACTION_AGENT_CONTROL_SYNC,
 )
 
+from .coordinated_otel import CoordinatedOTELTraceWriter
 from .models import (
     OPA_EVALUATOR,
     RULE_PACK_EVALUATOR,
@@ -227,12 +228,21 @@ class AgentControlSynchronizer:
             if self.settings.observability.include_content and cfg.privacy.disable_redaction:
                 event_log_path = Path(cfg.data_dir) / "agent-control" / "gateway-events-unredacted.jsonl"
             try:
+                trace_writer = None
+                if self.settings.observability.sink == "otel":
+                    sink_config = agent_control_observability_init_kwargs(cfg)["observability_sink_config"]
+                    trace_writer = CoordinatedOTELTraceWriter(
+                        endpoint=sink_config["endpoint"],
+                        headers=sink_config["headers"],
+                        service_name=sink_config["service_name"],
+                    )
                 self.event_bridge = EnforcementEventBridge(
                     event_log_path=event_log_path,
                     agent_name=self.settings.agent_name,
                     sdk=self.sdk,
                     state=self.state,
                     include_content=self.settings.observability.include_content,
+                    trace_writer=trace_writer,
                 )
                 self.state.observability_status = "waiting_for_log"
                 self.state.observability_last_error = None

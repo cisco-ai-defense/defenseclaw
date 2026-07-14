@@ -282,8 +282,8 @@ func (c *AgentControlConfig) Validate() error {
 	if c.AgentName != "defenseclaw-policy-sync" {
 		return fmt.Errorf("agent_name must be defenseclaw-policy-sync")
 	}
-	if c.TargetType != "defenseclaw.installation" {
-		return fmt.Errorf("target_type must be defenseclaw.installation")
+	if c.TargetType != "defenseclaw.installation" && c.TargetType != "log_stream" {
+		return fmt.Errorf("target_type must be defenseclaw.installation or log_stream")
 	}
 	if c.Enabled && c.Deployment != "cisco_cloud" && c.Deployment != "self_hosted" {
 		return fmt.Errorf("deployment must be cisco_cloud or self_hosted when enabled")

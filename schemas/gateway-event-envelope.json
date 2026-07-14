@@ -23,6 +23,7 @@
     "session_id": { "type": ["string", "null"] },
     "turn_id":    { "type": ["string", "null"] },
     "trace_id":   { "type": ["string", "null"] },
+	"span_id":    { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{16}$" },
 
     "provider":  { "type": ["string", "null"] },
     "model":     { "type": ["string", "null"] },
