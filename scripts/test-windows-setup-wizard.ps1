@@ -288,6 +288,25 @@ function Get-WizardObservation(
     if (Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf) {
         $maintenanceBytes = (Get-Item -LiteralPath $observedMaintenancePath -Force).Length
     }
+    $payloadRoot = $null
+    if (Test-Path -LiteralPath $observedInstallerTempRoot -PathType Container) {
+        $payloadRoot = Get-ChildItem -LiteralPath $observedInstallerTempRoot -Force -Directory `
+            -Filter '.DefenseClawSetup.*' -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    $stagingRoot = $null
+    if (Test-Path -LiteralPath $observedInstallParent -PathType Container) {
+        $stagingRoot = Get-ChildItem -LiteralPath $observedInstallParent -Force -Directory `
+            -Filter 'DefenseClaw.staging.*' -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    $payloadReady = $null -ne $payloadRoot -and
+        (Test-Path -LiteralPath (Join-Path $payloadRoot.FullName 'payload\manifest.json') -PathType Leaf)
+    $stagingPresent = $null -ne $stagingRoot
+    $stagedPython = $stagingPresent -and
+        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'runtime\python\python.exe') -PathType Leaf)
+    $stagedGateway = $stagingPresent -and
+        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'bin\defenseclaw-gateway.exe') -PathType Leaf)
+    $stagedState = $stagingPresent -and
+        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'installer\install-state.json') -PathType Leaf)
     return [ordered]@{
         process_id       = $WizardProcess.Id
         process_exited   = $WizardProcess.HasExited
@@ -299,6 +318,11 @@ function Get-WizardObservation(
         install_state    = Test-Path -LiteralPath $observedInstallState -PathType Leaf
         maintenance_copy = Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf
         maintenance_size = $maintenanceBytes
+        payload_ready     = $payloadReady
+        staging_present   = $stagingPresent
+        staged_python     = $stagedPython
+        staged_gateway    = $stagedGateway
+        staged_state      = $stagedState
         installed_app    = Test-Path -LiteralPath $observedARPKey
         config_present   = Test-Path -LiteralPath $observedConfigPath -PathType Leaf
         gateway_pid      = Test-Path -LiteralPath $observedGatewayPID -PathType Leaf
@@ -316,6 +340,10 @@ $observedInstallRoot = Join-Path ([Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )) 'Programs\DefenseClaw'
 $observedInstallState = Join-Path $observedInstallRoot 'installer\install-state.json'
+$observedInstallParent = Split-Path -Parent $observedInstallRoot
+$observedInstallerTempRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)) 'DefenseClaw\InstallerTemp'
 $observedMaintenancePath = Join-Path ([Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )) 'DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe'

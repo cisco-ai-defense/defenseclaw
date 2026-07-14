@@ -1061,12 +1061,17 @@ type loadedPayload struct {
 }
 
 func loadPayload(tempParent string) (loadedPayload, error) {
-	data, err := embeddedPayload.ReadFile("payload/installer-payload.zip")
+	archive, err := embeddedPayload.Open("payload/installer-payload.zip")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return loadedPayload{}, errors.New("installer payload missing; build with scripts/build-windows-installer.ps1")
 		}
 		return loadedPayload{}, err
+	}
+	defer archive.Close()
+	reader, err := zipReaderAtFile(archive)
+	if err != nil {
+		return loadedPayload{}, fmt.Errorf("open embedded payload: %w", err)
 	}
 	if err := os.MkdirAll(tempParent, 0o755); err != nil {
 		return loadedPayload{}, err
@@ -1077,11 +1082,6 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 	tempRoot, err := os.MkdirTemp(tempParent, ".DefenseClawSetup.")
 	if err != nil {
 		return loadedPayload{}, err
-	}
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		_ = os.RemoveAll(tempRoot)
-		return loadedPayload{}, fmt.Errorf("open embedded payload: %w", err)
 	}
 	if err := extractZipReader(reader, tempRoot); err != nil {
 		_ = os.RemoveAll(tempRoot)
@@ -1097,6 +1097,18 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 		return loadedPayload{}, err
 	}
 	return loadedPayload{Root: filepath.Join(tempRoot, "payload"), TempRoot: tempRoot, Manifest: manifest}, nil
+}
+
+func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	readerAt, ok := file.(io.ReaderAt)
+	if !ok {
+		return nil, errors.New("embedded payload does not support random access")
+	}
+	return zip.NewReader(readerAt, info.Size())
 }
 
 func verifyPayloadManifest(root string, manifest payloadManifest) error {
@@ -1209,7 +1221,7 @@ func extractZipReader(reader *zip.Reader, dest string) error {
 		if err != nil {
 			return err
 		}
-		err = writeNewFile(target, src, file.Mode())
+		err = writeExtractedFile(target, src, file.Mode())
 		closeErr := src.Close()
 		if err != nil {
 			return err
@@ -1239,6 +1251,45 @@ func validPayloadVersion(value string) bool {
 		}
 	}
 	return semver.IsValid("v" + value)
+}
+
+// writeExtractedFile writes one entry directly into a random, unpublished
+// extraction tree. The outer payload is hash-verified before staging and ZIP
+// readers verify each entry's CRC before returning EOF. A partial extraction
+// is therefore disposable and setup recovery removes it before any retry.
+//
+// Do not use the durable write-and-rename path here. The managed runtime has
+// thousands of small files; flushing each file and then issuing a
+// MOVEFILE_WRITE_THROUGH rename serializes thousands of storage barriers and
+// can leave a healthy Windows installer on its Working page for many minutes.
+// CREATE_NEW retains the important security property that a concurrently
+// planted target is rejected rather than followed or overwritten. On Windows
+// the new handle also denies sharing until the entry is complete.
+func writeExtractedFile(path string, src io.Reader, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	dst, err := createExclusiveUnpublishedFile(path)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		_ = dst.Close()
+		_ = os.Remove(path)
+	}
+	if err := dst.Chmod(mode.Perm()); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		cleanup()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func writeNewFile(path string, src io.Reader, mode fs.FileMode) error {

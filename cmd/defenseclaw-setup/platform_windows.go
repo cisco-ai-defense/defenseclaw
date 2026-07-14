@@ -178,6 +178,26 @@ func defaultPayloadTempRoot() (string, error) {
 	return filepath.Join(local, "DefenseClaw", "InstallerTemp"), nil
 }
 
+func createExclusiveUnpublishedFile(path string) (*os.File, error) {
+	encoded, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		encoded,
+		windows.GENERIC_WRITE,
+		0,
+		nil,
+		windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_SEQUENTIAL_SCAN,
+		0,
+	)
+	if err != nil {
+		return nil, &os.PathError{Op: "create", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
 func renameDurableFile(source, destination string) error {
 	from, err := winpath.UTF16Ptr(source)
 	if err != nil {

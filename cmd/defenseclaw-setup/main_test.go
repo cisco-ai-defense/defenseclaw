@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -510,6 +511,103 @@ func TestExtractZipReaderRejectsExpandedSizeLimit(t *testing.T) {
 	if err := extractZipReader(reader, t.TempDir()); err == nil {
 		t.Fatal("extractZipReader accepted oversized metadata")
 	}
+}
+
+func TestZipReaderAtFileAndUnpublishedExtraction(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "payload.zip")
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(archive)
+	entry, err := writer.Create("payload/nested.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("verified payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	archive, err = os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	reader, err := zipReaderAtFile(archive)
+	if err != nil {
+		t.Fatalf("zipReaderAtFile: %v", err)
+	}
+	destination := t.TempDir()
+	if err := extractZipReader(reader, destination); err != nil {
+		t.Fatalf("extractZipReader: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "payload", "nested.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "verified payload" {
+		t.Fatalf("extracted payload = %q", data)
+	}
+}
+
+func TestWriteExtractedFileIsExclusiveAndCleansPartialWrites(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		lockedPath := filepath.Join(root, "locked.txt")
+		locked, err := createExclusiveUnpublishedFile(lockedPath)
+		if err != nil {
+			t.Fatalf("createExclusiveUnpublishedFile: %v", err)
+		}
+		concurrent, concurrentErr := os.OpenFile(lockedPath, os.O_WRONLY, 0)
+		if concurrentErr == nil {
+			_ = concurrent.Close()
+			_ = locked.Close()
+			t.Fatal("unpublished extraction leaf allowed a concurrent writer")
+		}
+		if err := locked.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(root, "nested", "entry.txt")
+	if err := writeExtractedFile(target, strings.NewReader("original"), 0o644); err != nil {
+		t.Fatalf("writeExtractedFile: %v", err)
+	}
+	if err := writeExtractedFile(target, strings.NewReader("replacement"), 0o644); err == nil {
+		t.Fatal("writeExtractedFile replaced a concurrently existing leaf")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("existing leaf changed to %q", data)
+	}
+
+	partial := filepath.Join(root, "partial.txt")
+	if err := writeExtractedFile(partial, &readerThatFailsAfterData{}, 0o644); err == nil {
+		t.Fatal("writeExtractedFile accepted a failed source read")
+	}
+	if _, err := os.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial extraction leaf survived: %v", err)
+	}
+}
+
+type readerThatFailsAfterData struct {
+	wrote bool
+}
+
+func (reader *readerThatFailsAfterData) Read(buffer []byte) (int, error) {
+	if !reader.wrote {
+		reader.wrote = true
+		return copy(buffer, "partial"), nil
+	}
+	return 0, errors.New("injected source failure")
 }
 
 func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
