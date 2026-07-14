@@ -193,10 +193,14 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		targetConnector = "none"
 		targetServices = serviceState{}
 	}
-	if action == "install" && targetServices.Gateway && autoStartSnapshot.Existed &&
-		autoStartSnapshot.Value != gatewayAutoStartCommand(gatewayPath) &&
-		autoStartSnapshot.Value != legacyGatewayAutoStartCommand(gatewayPath) {
-		return setupTransaction{}, errors.New("refusing an unrelated DefenseClawGateway startup registration")
+	if action == "install" && targetServices.Gateway && autoStartSnapshot.Existed {
+		owned, ownedErr := gatewayAutoStartValueOwned(gatewayPath, autoStartSnapshot.Value)
+		if ownedErr != nil {
+			return setupTransaction{}, ownedErr
+		}
+		if !owned {
+			return setupTransaction{}, errors.New("refusing an unrelated DefenseClawGateway startup registration")
+		}
 	}
 	defaultCodexHome, err := defaultConnectorConfigHome(".codex")
 	if err != nil {

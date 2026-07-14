@@ -48,6 +48,9 @@ func captureGatewayAutoStart() (gatewayAutoStartSnapshot, error) {
 func createExclusiveUnpublishedFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 }
+func gatewayAutoStartValueOwned(gatewayPath, value string) (bool, error) {
+	return value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath), nil
+}
 func defaultInstallRoot() (string, error)                   { return "", errors.New("windows-only operation") }
 func defaultDataRoot() (string, error)                      { return "", errors.New("windows-only operation") }
 func defaultProfileRoot() (string, error)                   { return "", errors.New("windows-only operation") }

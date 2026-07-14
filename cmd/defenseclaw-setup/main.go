@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"golang.org/x/mod/semver"
@@ -50,6 +51,7 @@ const (
 	setupValidationTimeout     = 30 * time.Second
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
+	maxRunCommandUTF16Units    = 260
 )
 
 func newCapturedSetupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -76,6 +78,25 @@ func gatewayAutoStartCommand(gatewayPath string) string {
 
 func legacyGatewayAutoStartCommand(gatewayPath string) string {
 	return `"` + gatewayPath + `" start`
+}
+
+func runCommandUTF16Units(command string) int {
+	return len(utf16.Encode([]rune(command)))
+}
+
+func validateRunCommand(command string) error {
+	if strings.ContainsRune(command, '\x00') {
+		return errors.New("Windows Run command contains an embedded NUL")
+	}
+	units := runCommandUTF16Units(command)
+	if units > maxRunCommandUTF16Units {
+		return fmt.Errorf(
+			"Windows Run command is %d UTF-16 code units; the supported maximum is %d",
+			units,
+			maxRunCommandUTF16Units,
+		)
+	}
+	return nil
 }
 
 type options struct {

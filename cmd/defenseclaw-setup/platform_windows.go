@@ -1485,6 +1485,75 @@ func unregisterInstalledAppOwned(installRoot string, previousState *installState
 
 const gatewayAutoStartValueName = "DefenseClawGateway"
 
+func gatewayAutoStartRegistryCommand(gatewayPath string) (string, error) {
+	localAppData, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	if err != nil {
+		return "", fmt.Errorf("resolve LocalAppData for gateway auto-start: %w", err)
+	}
+	profile, err := windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT)
+	if err != nil {
+		return "", fmt.Errorf("resolve user profile for gateway auto-start: %w", err)
+	}
+	return gatewayAutoStartRegistryCommandForRoots(gatewayPath, localAppData, profile)
+}
+
+func gatewayAutoStartRegistryCommandForRoots(gatewayPath, localAppData, profile string) (string, error) {
+	startupPath := filepath.Join(filepath.Dir(gatewayPath), "defenseclaw-startup.exe")
+	command := quote(startupPath)
+	for _, root := range []struct {
+		path     string
+		variable string
+	}{
+		{path: localAppData, variable: `%LOCALAPPDATA%`},
+		{path: profile, variable: `%USERPROFILE%`},
+	} {
+		compact, ok := compactRunPath(startupPath, root.path, root.variable)
+		if !ok {
+			continue
+		}
+		candidate := quote(compact)
+		if runCommandUTF16Units(candidate) < runCommandUTF16Units(command) {
+			command = candidate
+		}
+	}
+	if err := validateRunCommand(command); err != nil {
+		return "", fmt.Errorf("configure %s startup registration: %w", gatewayAutoStartValueName, err)
+	}
+	return command, nil
+}
+
+func compactRunPath(target, root, variable string) (string, bool) {
+	if strings.TrimSpace(root) == "" {
+		return "", false
+	}
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, `..\`) {
+		return "", false
+	}
+	if relative == "." {
+		return variable, true
+	}
+	return filepath.Join(variable, relative), true
+}
+
+func gatewayAutoStartValueOwned(gatewayPath, value string) (bool, error) {
+	if value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath) {
+		return true, nil
+	}
+	want, err := gatewayAutoStartRegistryCommand(gatewayPath)
+	if err != nil {
+		return false, err
+	}
+	return value == want, nil
+}
+
+func setGatewayAutoStartValue(key registry.Key, command string) error {
+	if err := validateRunCommand(command); err != nil {
+		return err
+	}
+	return key.SetExpandStringValue(gatewayAutoStartValueName, command)
+}
+
 func captureGatewayAutoStart() (gatewayAutoStartSnapshot, error) {
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
@@ -1521,14 +1590,21 @@ func gatewayAutoStartConfigured(gatewayPath string) (bool, error) {
 		return false, err
 	}
 	defer key.Close()
-	value, _, err := key.GetStringValue(gatewayAutoStartValueName)
+	value, valueType, err := key.GetStringValue(gatewayAutoStartValueName)
 	if err == registry.ErrNotExist {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath), nil
+	if value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath) {
+		return true, nil
+	}
+	want, err := gatewayAutoStartRegistryCommand(gatewayPath)
+	if err != nil {
+		return false, err
+	}
+	return value == want && valueType == registry.EXPAND_SZ, nil
 }
 
 func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
@@ -1542,16 +1618,26 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 	}
 	defer key.Close()
 
-	previous, _, readErr := key.GetStringValue(gatewayAutoStartValueName)
+	previous, previousType, readErr := key.GetStringValue(gatewayAutoStartValueName)
 	snapshot := gatewayAutoStartSnapshot{Existed: readErr == nil, Value: previous}
 	if readErr != nil && readErr != registry.ErrNotExist {
 		return gatewayAutoStartSnapshot{}, false, readErr
 	}
 	want := ""
 	if enabled {
-		want = gatewayAutoStartCommand(gatewayPath)
+		want, err = gatewayAutoStartRegistryCommand(gatewayPath)
+		if err != nil {
+			return snapshot, false, err
+		}
 	}
-	owned := previous == gatewayAutoStartCommand(gatewayPath) || previous == legacyGatewayAutoStartCommand(gatewayPath)
+	owned := false
+	if snapshot.Existed {
+		var ownedErr error
+		owned, ownedErr = gatewayAutoStartValueOwned(gatewayPath, previous)
+		if ownedErr != nil {
+			return snapshot, false, ownedErr
+		}
+	}
 	if snapshot.Existed && !owned {
 		if enabled {
 			return snapshot, false, fmt.Errorf("refusing to replace unrelated %s startup registration", gatewayAutoStartValueName)
@@ -1559,7 +1645,7 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 		// Uninstall only removes the exact value this installation owns.
 		return snapshot, false, nil
 	}
-	if snapshot.Existed && previous == want {
+	if snapshot.Existed && previous == want && previousType == registry.EXPAND_SZ {
 		if err := flushRegistryKey(key); err != nil {
 			return snapshot, false, err
 		}
@@ -1580,7 +1666,7 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 		}
 		return snapshot, true, nil
 	}
-	if err := key.SetStringValue(gatewayAutoStartValueName, want); err != nil {
+	if err := setGatewayAutoStartValue(key, want); err != nil {
 		return snapshot, false, err
 	}
 	if err := flushRegistryKey(key); err != nil {
