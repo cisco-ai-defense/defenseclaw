@@ -1147,6 +1147,9 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 
 func requireOpenClawExtensionBundle(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
 	if !OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
@@ -6363,6 +6366,12 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 	managed := buildClaudeCodeOtelEnv(opts)
 	if len(managed) != len(claudeCodeOtelEnvKeys) {
 		t.Fatalf("managed env has %d keys, canonical ownership list has %d: %v", len(managed), len(claudeCodeOtelEnvKeys), managed)
+	}
+	if err := NewClaudeCodeConnector().saveBackup(dir, claudeCodeBackup{
+		EnvBackupCaptured: true,
+		ManagedEnv:        managed,
+	}); err != nil {
+		t.Fatalf("save exact managed env backup: %v", err)
 	}
 	keys := make([]string, 0, len(managed))
 	for key := range managed {

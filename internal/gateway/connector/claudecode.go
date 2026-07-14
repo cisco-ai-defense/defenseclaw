@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -144,6 +145,11 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
 		}
 	}
+	if len(errs) == 0 {
+		if err := c.discardRestoreMetadata(opts); err != nil {
+			errs = append(errs, fmt.Sprintf("discard restore metadata: %v", err))
+		}
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
@@ -175,11 +181,32 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 			// malformed hooks subtree must not hide uninstall residue.
 			if envMap, ok := settings["env"].(map[string]interface{}); ok {
 				managedEnv := buildClaudeCodeOtelEnv(opts)
+				exactOwnership := false
+				originalEnv := map[string]interface{}{}
 				if backup, err := c.loadBackup(opts.DataDir); err == nil && len(backup.ManagedEnv) > 0 {
 					managedEnv = backup.ManagedEnv
+					exactOwnership = true
+					if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
+						_ = json.Unmarshal(backup.OriginalEnv, &originalEnv)
+					}
 				}
 				for _, key := range claudeCodeOtelEnvKeys {
-					if value, present := envMap[key]; present && claudeCodeOtelValueIsManaged(value, managedEnv[key]) {
+					value, present := envMap[key]
+					if !present {
+						continue
+					}
+					owned := claudeCodeOtelValueLooksManaged(key, value, managedEnv[key])
+					if exactOwnership {
+						owned = claudeCodeOtelValueIsManaged(value, managedEnv[key])
+						if original, existed := originalEnv[key]; existed {
+							originalString, originalIsString := original.(string)
+							valueString, valueIsString := value.(string)
+							if originalIsString && valueIsString && originalString == valueString {
+								owned = false
+							}
+						}
+					}
+					if owned {
 						residual = append(residual, fmt.Sprintf("settings.json env[%s] still contains defenseclaw OTel env", key))
 					}
 				}
@@ -442,10 +469,18 @@ type claudeCodeBackup struct {
 	// original collector/exporter values exactly.
 	HadEnvKey   bool            `json:"had_env_key"`
 	OriginalEnv json.RawMessage `json:"original_env,omitempty"`
+	// EnvBackupCaptured distinguishes a pristine missing env block from an old
+	// backup that predates env capture. Without this marker, a repeated Setup
+	// could mistake DefenseClaw's already-managed env block for operator state.
+	EnvBackupCaptured bool `json:"env_backup_captured,omitempty"`
 	// ManagedEnv records the exact values written by the most recent Setup.
 	// Teardown compares current values against this map before restoring or
 	// deleting them, so operator changes made after Setup remain untouched.
 	ManagedEnv map[string]string `json:"managed_env,omitempty"`
+	// ManagedAbsentEnv records keys that Setup intentionally removed. Teardown
+	// restores their pristine values only while they remain absent; an operator
+	// value added after Setup takes ownership and is preserved.
+	ManagedAbsentEnv []string `json:"managed_absent_env,omitempty"`
 }
 
 func (c *ClaudeCodeConnector) saveBackup(dataDir string, backup claudeCodeBackup) error {
@@ -596,7 +631,7 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 
 	for _, group := range hookGroups {
 		entries, ok := hooks[group.eventType].([]interface{})
-		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, opts) {
+		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, opts) {
 			return false, nil
 		}
 	}
@@ -604,7 +639,7 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 }
 
 func claudeCodeEventHasEnforcingHook(
-	entries []interface{}, eventType, requiredMatcher string, opts SetupOpts,
+	entries []interface{}, eventType, requiredMatcher string, requiredAsync bool, opts SetupOpts,
 ) bool {
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]interface{})
@@ -617,7 +652,7 @@ func claudeCodeEventHasEnforcingHook(
 		}
 		for _, rawHandler := range handlers {
 			handler, ok := rawHandler.(map[string]interface{})
-			if !ok || !claudeCodeHandlerEnforces(handler, opts) {
+			if !ok || !claudeCodeHandlerMatchesContract(handler, requiredAsync, opts) {
 				continue
 			}
 			return true
@@ -662,14 +697,10 @@ func claudeCodeMatcherCovers(eventType string, raw interface{}, required string)
 	return false
 }
 
-func claudeCodeHandlerEnforces(handler map[string]interface{}, opts SetupOpts) bool {
-	for _, field := range [...]string{"async", "asyncRewake"} {
-		if async, exists := handler[field]; exists {
-			value, ok := async.(bool)
-			if !ok || value {
-				return false
-			}
-		}
+func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAsync bool, opts SetupOpts) bool {
+	asynchronous, err := claudeCodeHandlerAsync(handler)
+	if err != nil || asynchronous != requiredAsync {
+		return false
 	}
 	if condition, exists := handler["if"]; exists {
 		value, ok := condition.(string)
@@ -770,6 +801,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 					backup.OriginalEnv = raw
 					backup.HadEnvKey = true
 				}
+				backup.EnvBackupCaptured = true
 			}
 
 			hooks, _ := settings["hooks"].(map[string]interface{})
@@ -1004,18 +1036,12 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				}
 			}
 
-			// Backup: only on first patch. patchClaudeCodeHooks runs
-			// before this method in Setup() and creates the backup file
-			// with HadHooksKey populated; here we augment the SAME
-			// backup with HadEnvKey/OriginalEnv. This keeps the file
-			// single-source-of-truth for Teardown.
+			// Backup only before the first managed env application. The explicit
+			// marker is necessary because HadEnvKey=false is a valid pristine state;
+			// using it as the sentinel would bless our own env on repeated Setup.
 			backup := baseBackup
 			backup.ManagedHookCommands = append([]string(nil), baseBackup.ManagedHookCommands...)
-			backup.ManagedEnv = make(map[string]string, len(baseBackup.ManagedEnv))
-			for key, value := range baseBackup.ManagedEnv {
-				backup.ManagedEnv[key] = value
-			}
-			if !backup.HadEnvKey && len(backup.OriginalEnv) == 0 {
+			if !backup.EnvBackupCaptured {
 				if envRaw, present := settings["env"]; present {
 					envMap, ok := envRaw.(map[string]interface{})
 					if !ok {
@@ -1030,28 +1056,53 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 					}
 					backup.HadEnvKey = true
 				}
+				backup.EnvBackupCaptured = true
 			}
+
+			previousManaged := baseBackup.ManagedEnv
+			previousAbsent := make(map[string]struct{}, len(baseBackup.ManagedAbsentEnv))
+			for _, key := range baseBackup.ManagedAbsentEnv {
+				previousAbsent[key] = struct{}{}
+			}
+			hadManagedPolicy := len(previousManaged) > 0 || len(previousAbsent) > 0
 			managedEnv := buildClaudeCodeOtelEnv(opts)
 			backup.ManagedEnv = make(map[string]string, len(managedEnv))
 			for key, value := range managedEnv {
 				backup.ManagedEnv[key] = value
 			}
-			backupNeedsSave = true
-			backupToSave = backup
 
-			// Replace the complete managed OTel surface. Deleting first is
-			// important for values that are intentionally absent in the
-			// current policy (for example prompt logging while redaction is
-			// enabled); merely assigning the rendered map would preserve a
-			// stale higher-precedence value from the pristine environment.
-			// Operator-set keys outside our list (PATH, NODE_OPTIONS, etc.)
-			// are preserved verbatim.
+			// Enforce intentional absence without erasing operator drift. On the
+			// first application, every policy-managed key not rendered by the
+			// current profile is removed and recorded. On later applications we
+			// remove only our own unchanged prior value, or preserve an absence we
+			// already owned. A newly-added operator value transfers ownership.
+			backup.ManagedAbsentEnv = nil
 			for _, key := range claudeCodeOtelEnvKeys {
+				if _, rendered := managedEnv[key]; rendered {
+					continue
+				}
+				current, present := existing[key]
+				_, wasAbsent := previousAbsent[key]
+				previousValue, wasManaged := previousManaged[key]
+				remove := !hadManagedPolicy
+				if wasAbsent && !present {
+					remove = true
+				}
+				if wasManaged {
+					currentString, isString := current.(string)
+					remove = present && isString && currentString == previousValue
+				}
+				if !remove {
+					continue
+				}
 				delete(existing, key)
+				backup.ManagedAbsentEnv = append(backup.ManagedAbsentEnv, key)
 			}
 			for k, v := range managedEnv {
 				existing[k] = v
 			}
+			backupNeedsSave = true
+			backupToSave = backup
 			settings["env"] = existing
 
 			out, err := json.MarshalIndent(settings, "", "  ")
@@ -1120,6 +1171,65 @@ func claudeCodeOtelValueIsManaged(value interface{}, managed string) bool {
 	// operator-edited values as uninstall residue even though teardown correctly
 	// preserved them.
 	return managed != "" && got == managed
+}
+
+// claudeCodeOtelValueLooksManaged is the conservative fallback used when the
+// exact backup is unavailable. Generic OpenTelemetry values such as "otlp" or
+// "http/json" are not ownership proof; only DefenseClaw-scoped endpoints and
+// explicit DefenseClaw markers can be classified without restore metadata.
+func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed string) bool {
+	got, _ := value.(string)
+	if got == "" {
+		return false
+	}
+	switch key {
+	case "OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":
+		if managed != "" && got == managed {
+			return true
+		}
+		base := strings.TrimRight(managed, "/")
+		if index := strings.Index(base, "/otlp/"); index >= 0 {
+			base = base[:index]
+		}
+		if !strings.HasPrefix(base, "http://") {
+			return false
+		}
+		apiAddr := strings.TrimPrefix(base, "http://")
+		parsed, err := url.Parse(got)
+		if err != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return false
+		}
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) != 3 && len(parts) != 5 {
+			return false
+		}
+		if !otlpTokenHexRE.MatchString(parts[2]) {
+			return false
+		}
+		if len(parts) == 3 {
+			return isScopedOTLPBaseEndpoint(got, apiAddr, OTLPScopeClaude)
+		}
+		for _, signal := range AllNativeOTLPSignals() {
+			if isScopedOTLPEndpoint(got, apiAddr, OTLPScopeClaude, signal) {
+				return true
+			}
+		}
+		return false
+	case "OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":
+		return (managed != "" && got == managed) ||
+			got == "x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode"
+	case "OTEL_RESOURCE_ATTRIBUTES":
+		return (managed != "" && got == managed) ||
+			got == "defenseclaw.connector=claudecode,service.name=claudecode"
+	default:
+		return false
+	}
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
@@ -1203,6 +1313,14 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 						delete(envMap, key)
 					}
 				}
+				for _, key := range backup.ManagedAbsentEnv {
+					if _, operatorSupplied := envMap[key]; operatorSupplied {
+						continue
+					}
+					if original, existed := originalEnv[key]; existed {
+						envMap[key] = original
+					}
+				}
 
 				if backup.HadEnvKey {
 					settings["env"] = envMap
@@ -1223,7 +1341,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		}); err != nil {
 			return fmt.Errorf("write restored settings: %w", err)
 		}
-		return c.discardRestoreMetadata(opts)
+		return nil
 	})
 	// The settings parent can disappear before the lock file is opened (for
 	// example, when Claude is uninstalled concurrently). Treat that the same
@@ -1232,12 +1350,12 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		return nil
 	}
 	if os.IsNotExist(err) {
-		return c.discardRestoreMetadata(opts)
+		return nil
 	}
 	// On Windows, opening a child of a missing directory can report
 	// ERROR_PATH_NOT_FOUND, which os.IsNotExist does not classify.
 	if _, statErr := os.Stat(filepath.Dir(settingsPath)); os.IsNotExist(statErr) {
-		return c.discardRestoreMetadata(opts)
+		return nil
 	}
 	return err
 }
