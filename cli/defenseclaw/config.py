@@ -38,6 +38,7 @@ from typing import Any
 import yaml
 
 from defenseclaw import connector_paths
+from defenseclaw import migration_state as migration_state_helpers
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -84,6 +85,51 @@ VALID_DEPLOYMENT_MODES = {
     "server",
     "saas",
 }
+
+
+class ConfigVersionError(RuntimeError):
+    """The upgrade preflight could not read the schema discriminator."""
+
+
+def source_config_version(*, path: str | None = None) -> int | None:
+    """Read only ``config_version`` without loading either runtime schema.
+
+    The 0.8.4 bridge remains a config-v7 runtime.  It uses this bounded YAML
+    node inspection solely to prove that the separately verified 0.8.5 wheel
+    can migrate the source before any installed artifact is changed.
+    """
+
+    cfg_file = path or str(config_path())
+    try:
+        with open(cfg_file, encoding="utf-8") as stream:
+            root = yaml.compose(stream)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ConfigVersionError("unable to read configuration schema version") from exc
+    if not isinstance(root, yaml.MappingNode):
+        return 0
+    version_nodes = [
+        value
+        for key, value in root.value
+        if isinstance(key, yaml.ScalarNode) and key.value == "config_version"
+    ]
+    if len(version_nodes) != 1 or not isinstance(version_nodes[0], yaml.ScalarNode):
+        return 0
+    node = version_nodes[0]
+    if node.tag == "tag:yaml.org,2002:bool":
+        return 0
+    return _exact_config_version(node.value)
+
+
+def _exact_config_version(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return 0
 LEGACY_DEPLOYMENT_MODE_ALIASES = {
     "managed": "managed_enterprise",
     "standalone": "unmanaged_byod",
@@ -2697,8 +2743,9 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     except OSError:
         existing_mode = None
 
+    token_suffix = migration_state_helpers.upgrade_mutation_temp_suffix()
     fd, tmp = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.",
+        prefix=f".{os.path.basename(path)}.{token_suffix}",
         suffix=".tmp",
         dir=directory,
     )
@@ -4606,11 +4653,16 @@ def _warn_disable_redaction_config(cfg: Config) -> None:
     )
 
 
-def load() -> Config:
-    """Load config from ~/.defenseclaw/config.yaml, applying defaults."""
-    data_dir = str(default_data_path())
+def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
+    """Load config from the active config path, applying defaults.
+
+    ``data_dir`` scopes transactional reloads (notably upgrades) to the
+    installation that is actually being mutated.  ``DEFENSECLAW_CONFIG``
+    remains authoritative when set, including for a scoped load.
+    """
+    data_dir = str(Path(data_dir) if data_dir is not None else default_data_path())
     _load_dotenv_into_os(data_dir)
-    cfg_file = str(config_path())
+    cfg_file = str(config_path_for_data_dir(data_dir))
 
     raw: dict[str, Any] = {}
     try:

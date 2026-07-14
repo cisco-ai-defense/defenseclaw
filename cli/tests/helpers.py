@@ -102,6 +102,14 @@ def invoke_with_app(cli_group, args: list[str], app: AppContext | None = None):
     return runner.invoke(cli_group, args, obj=app, catch_exceptions=False)
 
 
+def make_separate_stderr_runner() -> CliRunner:
+    """Create a Click runner with stderr captured separately across Click versions."""
+    try:
+        return CliRunner(mix_stderr=False)  # type: ignore[call-arg]
+    except TypeError:
+        return CliRunner()
+
+
 def cleanup_app(app: AppContext, db_path: str, tmp_dir: str) -> None:
     """Close store and clean up temp files."""
     import shutil

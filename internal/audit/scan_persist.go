@@ -77,9 +77,9 @@ func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Fin
 	for i := range findings {
 		f := &findings[i]
 		tagsJSON, _ := json.Marshal(f.Tags)
-		safeDescription := redaction.ForSinkString(f.Description)
-		safeLocation := redaction.ForSinkString(f.Location)
-		safeRemediation := redaction.ForSinkString(f.Remediation)
+		safeDescription := redaction.StringForSink(f.Description, meta.SinkPolicy)
+		safeLocation := redaction.StringForSink(f.Location, meta.SinkPolicy)
+		safeRemediation := redaction.StringForSink(f.Remediation, meta.SinkPolicy)
 
 		var line interface{}
 		if f.LineNumber != nil {

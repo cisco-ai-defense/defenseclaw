@@ -42,6 +42,14 @@ Common flags:
 
 Full reference: `./install.sh --help`.
 
+`install.sh` is fresh-install-only. It refuses current managed paths, legacy
+managed paths, per-user DefenseClaw state, or loaded DefenseClaw launchd jobs
+before building, stopping, or writing anything. Existing deployments must use
+the release-owned staged upgrade path. If a managed-enterprise staged upgrader
+is not published for the target release, remain on the current version and
+contact the deployment owner; uninstalling or overwriting state is not a safe
+upgrade procedure.
+
 **Pre-flight requirement:** the target user's home must not be group/other-writable. If it is, `install.sh` refuses with the exact `chmod` fix in its error output.
 
 ### Custom plist source
@@ -112,7 +120,7 @@ curl -sS http://127.0.0.1:18970/healthz
 
 - The shipped binary is **adhoc-signed** (`Signature=adhoc`, no `TeamIdentifier`, no entitlements).
 - Consequences for distribution:
-  - Downloading the tarball onto another Mac will trigger **Gatekeeper quarantine** (`com.apple.quarantine` xattr). Either strip it (`xattr -d com.apple.quarantine defenseclaw-gateway`) or sign + notarize before shipping.
+  - Downloading the tarball onto another Mac will trigger **Gatekeeper quarantine** (`com.apple.quarantine` xattr). Either strip it (`xattr -d com.apple.quarantine defenseclaw`) or sign + notarize before shipping.
   - For MDM/enterprise deployment, sign with a Developer ID cert and notarize — LaunchDaemon load may succeed, but user-facing invocation can be blocked otherwise.
 
 ### Root-level actions during install
@@ -129,10 +137,13 @@ Requires `sudo`. The installer:
 - Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
 - Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
 - Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
-- Sweeps legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `com.defenseclaw.gateway.plist`) if present — an upgrade from an older install produces a clean cutover.
+- Refuses legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `/Library/LaunchDaemons/com.defenseclaw.gateway.plist`, and `/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist`) and the corresponding `com.defenseclaw.gateway` / `com.defenseclaw.hook-guardian` launchd jobs before mutation. Existing deployments must use the release-owned staged upgrader; the fresh installer does not sweep or cut over legacy state.
 
 ### Runtime privileges
 
 The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. No dedicated service user is created. Every install-time chown of a DefenseClaw-owned path uses `root:wheel`.
 
-Upgrades from a pre-root install (which provisioned a `defenseclaw` service user via `dscl` / `sysadminctl`) are handled by `uninstall.sh --purge`, which sweeps the legacy uid/gid so a subsequent reinstall starts from a clean uid namespace.
+Do not turn a pre-root deployment into an upgrade by running
+`uninstall.sh --purge` and reinstalling: that discards the rollback and state
+migration contract. Use the release-owned staged upgrader. Purge is reserved
+for an intentional decommission and removes the legacy service uid/gid.

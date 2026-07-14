@@ -95,13 +95,23 @@ For more details on the Free-tier behavior and limits, see
 
 ## Building from Source
 
-This section covers building DefenseClaw from the repository.
+This section covers developer builds from the repository. Source targets and
+`scripts/install-dev.sh` are not an alternate upgrade mechanism: they refuse to
+overwrite a release-managed installation or one owned by another checkout
+before changing installed entry points or the gateway. Rebuilding from the same
+checkout is supported only while its reviewed release, source-install
+compatibility epoch, and runtime schema match the existing strict ownership
+marker. Legacy markers fail closed because an editable checkout may already
+have crossed a release boundary. A source-owned version transition has no
+tested in-place path: keep it in place, use an isolated fresh developer
+`HOME`/install directory, or contact support. The release-owned resolver is for
+release-managed layouts; it must not be presented as recovery for a source venv.
 
 ### Prerequisites
 
 | Tool | Minimum | Check | Install |
 |------|---------|-------|---------|
-| Go | 1.26.2+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
+| Go | 1.26.4+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
 | Python | 3.10+ (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
 | uv | latest | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js / npm | 18+ | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node` |
@@ -135,7 +145,7 @@ make install
 ```
 
 `make install` builds all components and installs them to their
-target locations:
+target locations after the source-install ownership preflight:
 
 | Component | Installed to |
 |-----------|-------------|
@@ -233,8 +243,9 @@ source .venv/bin/activate
 
 ## Building Release Artifacts (`make dist`)
 
-The `make dist` target builds all release artifacts for distribution.
-Use this when preparing a release or testing the installer locally.
+The `make dist` target builds unsigned inputs for the protected release
+workflow. It is useful for development inspection and release preparation, but
+it is not a publishable or authenticated `0.8.4+` release candidate by itself.
 
 ### Produce All Artifacts
 
@@ -242,17 +253,18 @@ Use this when preparing a release or testing the installer locally.
 make dist
 ```
 
-This runs `dist-cli`, `dist-gateway`, `dist-plugin`, and
-`dist-checksums` in sequence. Output goes to `dist/`:
+This runs `dist-cli`, `dist-gateway`, `dist-plugin`, `dist-sandbox`,
+`dist-upgrade-manifest`, and `dist-checksums` in sequence. Output goes to `dist/`:
 
 ```
 dist/
-├── defenseclaw-0.2.0-py3-none-any.whl       # Python CLI wheel
+├── defenseclaw-0.8.4-py3-none-any.whl       # unsigned Python CLI input
 ├── defenseclaw-gateway-linux-amd64           # Gateway binary (linux/amd64)
 ├── defenseclaw-gateway-linux-arm64           # Gateway binary (linux/arm64)
 ├── defenseclaw-gateway-darwin-amd64          # Gateway binary (macOS Intel)
 ├── defenseclaw-gateway-darwin-arm64          # Gateway binary (macOS Apple Silicon)
-├── defenseclaw-plugin-0.2.0.tar.gz           # OpenClaw plugin tarball
+├── defenseclaw-plugin-0.8.4.tar.gz           # OpenClaw plugin tarball
+├── upgrade-manifest.json                     # reviewed transition policy
 └── checksums.txt                             # SHA-256 checksums
 ```
 
@@ -268,23 +280,31 @@ make dist-checksums # Generate SHA-256 checksums.txt
 `dist-cli` bundles data files into the wheel before building:
 Rego policies, `data.json`, YAML policy templates, and the CodeGuard skill.
 
-### Install from Local Dist
+### Test Local Development or Release Assets
 
-Test the release artifacts locally using the install script:
+For a source-owned development installation, use the source workflow:
 
 ```bash
-./scripts/install.sh --local dist/
+make install
 ```
 
-This installs the gateway binary, Python CLI wheel (into
-`~/.defenseclaw/.venv`), and plugin without downloading anything.
+Do not pass the unsigned output of `make dist` to `install.sh --local` or
+`install.ps1 -Local` for `0.8.4+`. Those entry points require a complete
+release-owned asset set: signed checksums and certificate, schema-2 manifest,
+and protected `.dcwheel`/`.dcgateway` payloads. This refusal is intentional;
+otherwise a local directory could bypass release provenance and bridge policy.
+
+`--local` remains useful for testing a complete authenticated release-asset
+directory. It is fresh-install-only and refuses any existing or partial
+installation before dependency or artifact changes.
 
 ### Cut a GitHub Release
 
-The `Release` GitHub Actions workflow is the only supported way to cut a
-release. It validates the tag, builds and signs all artifacts, and
-creates the GitHub release atomically so Immutable Releases can't strand
-half-built assets.
+The manually dispatched `Release` GitHub Actions workflow is the only supported
+way to cut a release. It validates the requested version, builds and signs all
+artifacts, runs the native upgrade gates, and creates the remote tag and GitHub
+release together only after protected release approval. This ordering keeps
+Immutable Releases from stranding half-built assets.
 
 Preferred — from the Actions UI:
 
@@ -292,13 +312,17 @@ Preferred — from the Actions UI:
 Actions -> Release -> Run workflow -> version: 0.4.0
 ```
 
-Or from the CLI by pushing the tag (workflow runs automatically):
+Or dispatch the same workflow with GitHub CLI:
 
 ```bash
-git tag 0.4.0 && git push origin 0.4.0
+gh workflow run release.yaml --ref main -f version=0.4.0
 ```
 
-> The tag MUST be bare `X.Y.Z` with no `v` prefix. `scripts/install.sh`,
+Do not create or push the tag yourself. The workflow must retain exclusive
+ownership of that namespace until its tested candidate is approved and
+published.
+
+> The version MUST be bare `X.Y.Z` with no `v` prefix. `scripts/install.sh`,
 > `scripts/upgrade.sh`, and `defenseclaw upgrade` all build URLs of the
 > form `releases/download/X.Y.Z/...`, and the workflow rejects any tag
 > that doesn't match `^[0-9]+\.[0-9]+\.[0-9]+$`.
@@ -319,7 +343,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-VERSION=0.8.3
+VERSION=0.8.4
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -327,12 +351,26 @@ curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 The installer detects the platform, downloads the correct gateway
 binary + CLI wheel + plugin tarball, installs them, and prompts to run
 `defenseclaw init --enable-guardrail`. Use `--yes` / `-y` to skip
-confirmations.
+confirmations. The release installers are fresh-install-only. If the CLI,
+gateway, or managed virtual environment already exists, they exit before
+platform/dependency setup or artifact replacement. Use the authenticated
+current release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver
+for an existing pre-bridge host. A `0.8.3`-or-older built-in
+`defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
+required two-process bridge handoff retroactively.
+
+Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
+directory for inactive rollback objects. A durable mode-0600 in-progress marker
+is present only while a fresh install may need recovery and is retired before a
+successful install is reported. Consequently, retained custody from a healthy
+completed install does not bypass the early existing-install refusal; missing,
+malformed, or symlinked marker state also fails closed before dependency or
+artifact work.
 
 Pin a specific version:
 
 ```bash
-VERSION=0.8.3
+VERSION=0.8.4
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -344,7 +382,7 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
-VERSION=0.8.3
+VERSION=0.8.4
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
@@ -652,41 +690,94 @@ running `defenseclaw doctor` for the full report.
 
 ## Upgrading
 
-### Upgrading from 0.2.0 to an artifact-backed release
+### Unsupported historical sources
 
-Release 0.2.0 does not include the `defenseclaw upgrade` CLI command. Use the
-standalone upgrade shell script instead. Historical 0.3.x tags do not publish
-the wheel and gateway release assets required by the upgrader, so use 0.4.0 or
-newer as the target release.
+Automatic upgrades are supported only from versions named in the candidate's
+published-baseline matrix. Sources outside it—including assetless `0.7.0`,
+pre-upgrader `0.2.x`, and historical `0.3.x` releases—have no tested in-place
+path. The resolver fails closed before stopping services and prints the exact
+tested source versions.
+
+Support is platform-specific. POSIX release gates cover the reviewed global
+matrix through `0.4.0`; the native Windows matrix currently covers only
+`0.8.0` through `0.8.3`. A Windows source older than `0.8.0` therefore fails
+closed and prints those exact supported Windows sources—global POSIX coverage
+must not be treated as a Windows upgrade claim.
+
+If the installed version is not in that list, remain on the current version and
+contact support for a source-specific, state-aware recovery plan. Do not infer
+an intermediate hop, uninstall the old runtime, copy release artifacts over it,
+or use a fresh installer as an upgrader.
+
+### Supported staged upgrades
+
+Run the current release-owned resolver in latest mode. Do not add a version
+override when crossing the bridge boundary:
+
+For an installed release without a source checkout, use the authenticated
+POSIX or PowerShell resolver-asset bootstrap in [CLI Reference](CLI.md#upgrade).
+The local paths below are only the equivalent entry points from a checkout of
+the current release:
 
 ```bash
-# Upgrade to 0.4.0 (downloads from GitHub Releases)
-UPGRADE_SCRIPT_VERSION=0.8.3
-UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
-curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.4.0
+./scripts/upgrade.sh --yes
+# Windows:
+.\scripts\upgrade.ps1 -Yes
 ```
 
-`UPGRADE_SCRIPT_VERSION` pins the upgrade script itself; `--version` is the
-release you are installing.
+Release `0.8.4` is the config-v7/runtime-v7 protocol bridge for the subsequent
+observability-v8 hard cut. Run the current release-owned updater without
+`--version` when crossing that boundary so its signed manifest can select and
+health-check the bridge before a fresh controller starts the target phase.
+Explicit targets that skip a required bridge fail before installed state is
+changed. Release `0.8.4` and later require `cosign`; `--allow-unverified` cannot
+override their provenance checks.
 
-Or, if you have the repository cloned:
+The supported staged path is the authenticated current-release
+`defenseclaw-upgrade.sh` or `defenseclaw-upgrade.ps1` asset in latest mode (or
+the equivalent `scripts/upgrade.sh` / `scripts/upgrade.ps1` from a trusted
+current-release checkout). An already-published `0.8.3`-or-older
+`defenseclaw upgrade` command cannot gain the new two-hop orchestration after
+installation, so its signed protocol check deliberately refuses the hard cut
+before stopping services. Some frozen versions then print an obsolete raw
+network-to-shell hint that must not be executed; use the authenticated
+release-owned resolver instead. This is a safe preflight refusal, not a partial
+upgrade.
 
-```bash
-./scripts/upgrade.sh --version 0.4.0
-```
+Before the first service stop, the resolver commits a private phase-one journal
+covering the exact source CLI, gateway, configuration, migration cursor, policy,
+connector, and OpenClaw state plus whether the source gateway was running. If
+bridge installation, migration, start, or version-bound health fails—or the
+resolver is killed—the next invocation restores and health-checks that exact
+source before it detects versions or begins new upgrade work.
 
-Add `--yes` to skip the confirmation prompt.
+If a rollback-renamed inode can still receive writes through an open file
+descriptor, the resolver does not delete it. It remains in a plan-scoped,
+mode-0700 custody directory on the same filesystem as the original path, with
+its location recorded privately in the backup's
+`phase1-state/retained-quarantines.json`. Preserve the directory and index until
+validation is complete, and inspect them before manual cleanup.
 
-The script will:
+The bridge commits a private phase-two recovery journal and fixed mutator
+lease before stopping services. Wheel, migration, bundle, and service child
+processes inherit that lease, so an abrupt controller or host interruption
+cannot race rollback. Re-run the release-owned resolver: it waits for any
+surviving child, bootstraps the retained authenticated `0.8.4` wheel without
+trusting a partial target install, restores exact bridge state, proves bridge
+health, and only then retries.
 
-1. Verify release artifacts exist on GitHub before touching anything
-2. Download the gateway binary and Python CLI wheel to a temp directory
-3. Back up `~/.defenseclaw/` config files and `~/.openclaw/openclaw.json`
-4. Stop the gateway, install the new artifacts, run migrations
-5. Restart the gateway and verify health
+Once the bridge is installed, its fresh CLI controller performs the target
+phase: preflight artifact verification, config backup,
+stop-install-migrate-restart, rollback on failure, and version-bound health
+polling. The release-owned shell or PowerShell resolver coordinates the
+initial bridge selection. See the [CLI Reference](CLI.md#upgrade) for the
+complete path and flag behavior.
 
-After this upgrade completes, the `defenseclaw upgrade` CLI command becomes
-available for all future upgrades.
+A coherent installed `0.8.4` bridge may start the hard-cut target phase with
+its built-in command after it authenticates and privately acquires the exact
+published `0.8.4` rollback artifacts. A `0.8.3`-or-older frozen controller must
+use the release-owned resolver described below and correctly refuses to skip
+the bridge.
 
 #### 0.3.0 migration: legacy model provider cleanup
 
@@ -714,25 +805,53 @@ plugins, models, workspaces, and ordering. It saves a
 
 If none of these legacy entries exist, the migration is a no-op.
 
-### Upgrading from 0.3.0 and later
+### Upgrading artifact-backed releases
 
-Starting with 0.3.0, use the built-in CLI command:
+An installed, coherent `0.8.4` bridge controller can cross the `0.8.5` hard cut
+with its built-in command. Before backup or service stop, it authenticates and
+privately acquires the exact published `0.8.4` wheel and gateway needed for
+rollback. A `0.8.3`-or-older controller cannot learn the two-process bridge
+handoff retroactively, so those hosts must use the authenticated current
+release-owned resolver in latest mode.
 
 ```bash
-# Upgrade to the latest release
-defenseclaw upgrade
-
-# Upgrade to a specific version
-defenseclaw upgrade --version 0.4.0
-
-# Skip confirmation prompt
+# A coherent installed 0.8.4 bridge securely self-acquires rollback custody
 defenseclaw upgrade --yes
+
+# For `0.8.3` or older, run an authenticated target-release asset in latest mode
+bash defenseclaw-upgrade.sh --yes
+
+# Equivalent resolver entry point from an authenticated current-release checkout
+./scripts/upgrade.sh --yes
 ```
 
-The CLI command performs the same steps as the shell script: pre-flight
-artifact verification, config backup, stop-install-migrate-restart, and
-health polling. See the [CLI Reference](CLI.md#upgrade) for full flag
-documentation.
+```powershell
+# Run the already-authenticated Windows target-release asset in latest mode
+& .\defenseclaw-upgrade.ps1 -Yes
+```
+
+Do not add `--version` or `-Version` to the resolver commands. The complete
+Sigstore and SHA-256 bootstrap is in the [CLI Reference](CLI.md#upgrade). The
+coherent bridge controller performs the same authenticated rollback-artifact
+acquisition, backup, migration, restart, and health checks when invoked through
+its built-in command.
+
+Do not replace the managed CLI wheel through `pip`, `uv`, or another package
+manager, and do not copy the wheel or gateway archive over an existing
+installation. Those operations cannot provide bridge selection, durable
+rollback, or version-bound health verification. The local shell and PowerShell
+installers are fresh-install-only and refuse existing managed state before
+dependency setup or artifact replacement. Pre-bridge hosts must use the
+release-owned upgrade resolver; a coherent installed `0.8.4` bridge may use its
+built-in controller as described above.
+
+For protocol-2 releases, the installable bytes are published only inside
+manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads
+are deliberately not ZIP, wheel, gzip, or executable bytes until a verified
+release-owned resolver materializes them privately. The conventional `.whl`,
+`.tar.gz`, and `.zip` asset names are signed refusal envelopes. Renaming,
+extracting, or package-installing either form is not a supported manual path;
+use the resolver so the bridge and rollback contract cannot be skipped.
 
 ### What gets upgraded
 
@@ -746,23 +865,28 @@ documentation.
 
 ### Rollback
 
-If an upgrade fails or causes issues, restore from the timestamped backup:
+The release-owned resolver restores the authenticated bridge automatically if
+the hard-cut phase fails. It preserves the pending recovery journal across a
+crash. Re-run that same resolver in latest mode, without a version override; it
+completes recovery before it detects a new target or continues.
+
+For operator inspection, timestamped backups remain under:
 
 ```bash
 # Backups are saved to ~/.defenseclaw/backups/upgrade-<timestamp>/
+# Inspect only; do not manually copy a backup over live state.
 ls ~/.defenseclaw/backups/
 
-# Restore config files
-cp ~/.defenseclaw/backups/upgrade-20260429T120000/config.yaml ~/.defenseclaw/
-cp ~/.defenseclaw/backups/upgrade-20260429T120000/openclaw.json ~/.openclaw/
-
-# Downgrade to the previous version
-defenseclaw upgrade --version 0.2.0
-# Or use the shell script if the CLI is broken:
-UPGRADE_SCRIPT_VERSION=0.8.3
-UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
-curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.2.0
+# Re-run the release-owned resolver without a version override.
+scripts/upgrade.sh
+# Windows:
+.\scripts\upgrade.ps1
 ```
+
+`defenseclaw upgrade` and the release-owned resolvers refuse downgrades.
+Do not copy an older wheel or gateway over an installation. If automatic
+recovery remains incomplete, keep the backup and journal intact and contact
+support for a state-aware recovery plan.
 
 ---
 

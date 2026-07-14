@@ -27,6 +27,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -165,6 +168,16 @@ func applyPrivacyConfig(c *config.Config) {
 		return
 	}
 	redaction.SetDisableAll(c.Privacy.DisableRedaction)
+	// managed_enterprise carve-out: the local coding agent must always
+	// see the full, non-redacted verdict reason in its own UI regardless
+	// of DisableRedaction. Scoped to ReasonForAgent only — persistent and
+	// enterprise sinks keep redacting.
+	managedEnterprise := managed.IsManagedEnterprise(c.DeploymentMode)
+	redaction.SetAgentReasonRedactionDisabled(managedEnterprise)
+	// Gate the cloud-controlled per-inspection redaction directive
+	// (Cisco AI Defense is_redaction_enabled) on managed_enterprise so
+	// the gateway emit choke points only honor it in that mode.
+	gateway.SetManagedEnterpriseActive(managedEnterprise)
 }
 
 func initOTelProvider() {
@@ -172,7 +185,19 @@ func initOTelProvider() {
 		return
 	}
 
-	p, err := telemetry.NewProvider(context.Background(), cfg, appVersion)
+	var opts []telemetry.ProviderOption
+	// In managed_enterprise, construct the CMID credential provider once and
+	// share it with the telemetry provider so the Cisco AI Defense telemetry
+	// sink and the managed inspector coordinate one token cache. Best-effort:
+	// on OSS builds cloudreg.New returns ErrNoProviderRegistered and the sink
+	// fail-closes inside NewProvider.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if prov, provErr := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath}); provErr == nil {
+			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
+		}
+	}
+
+	p, err := telemetry.NewProvider(context.Background(), cfg, appVersion, opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: otel init: %v\n", err)
 		return

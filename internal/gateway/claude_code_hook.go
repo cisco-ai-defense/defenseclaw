@@ -92,6 +92,11 @@ type claudeCodeHookResponse struct {
 	// verdict (capped at 8). Lets operators correlate a block
 	// without joining against scan_findings. Additive.
 	RuleIDs []string `json:"rule_ids,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive back through the unified dispatch so
+	// finalizeAgentHook can honor it on the hook_decision event +
+	// audit row. Never serialized on the hook response wire.
+	RedactionEnabled *bool `json:"-"`
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -161,6 +166,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
 	}
 
+	// Inject the cloud-controlled per-inspection redaction directive
+	// onto the context so the downstream emit choke points and the OS
+	// toast honor it (managed_enterprise only; no-op otherwise).
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
@@ -200,7 +210,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 	// Stamp the unified-pipeline correlation keys so the agent-hook
@@ -209,6 +220,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
 }
 
@@ -235,7 +247,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -243,7 +255,10 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 	if target == "" {
 		target = req.HookEventName
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	// Honor the cloud-controlled per-inspection redaction policy
+	// (all-sinks scope, managed_enterprise only) when a caller passes
+	// one; otherwise default to the historical ForSinkReason behavior.
+	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -335,7 +350,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	safeReason := redaction.ReasonForAgent(reason)
 	additional := claudeCodeAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := claudeCodeHookResponse{
 		Action:            action,

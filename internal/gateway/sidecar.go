@@ -370,6 +370,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
 	}
 	SetEventWriter(events)
+	// Endpoint-inventory device anchor: stamp discovery-inventory
+	// events (connector/mcp/agent) with the same device.id the
+	// telemetry resource carries so AI Defense can bind them to this
+	// endpoint whether it keys on the resource or the body.
+	SetEndpointInventoryAnchor(client.device.DeviceID)
 	// Layer 3 egress observability: wire the OTel provider so
 	// RecordEgress fires alongside every EventEgress emission.
 	// Resets to no-op on shutdown via the matching SetEventWriter(nil) path.
@@ -493,6 +498,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] ai discovery init failed: %v\n", err)
 		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
+	}
+	// managed_enterprise: ship the connector / MCP endpoint inventory
+	// to AI Defense. Wire it onto the scan cadence (when the discovery
+	// service is running) and emit an initial snapshot at boot so the
+	// cloud sees the endpoint immediately, before the first scan tick.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		inventoryEmit := makeEndpointInventoryEmitter(cfg)
+		if aiDiscovery != nil {
+			aiDiscovery.SetManagedInventoryEmitHook(inventoryEmit)
+		}
+		inventoryEmit(context.Background())
 	}
 
 	sidecar := &Sidecar{
@@ -1227,6 +1243,13 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	redaction.SetDisableAll(next.Privacy.DisableRedaction)
+	// Keep the managed_enterprise agent-reason carve-out consistent across
+	// hot reloads (mirrors internal/cli/root.go applyPrivacyConfig).
+	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
+	redaction.SetAgentReasonRedactionDisabled(nextManagedEnterprise)
+	// Keep the cloud-controlled per-inspection redaction gate consistent
+	// across hot reloads too.
+	SetManagedEnterpriseActive(nextManagedEnterprise)
 	appliedCfg := current
 	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
 		appliedCfg = s.publishConfig(&next)
@@ -1323,6 +1346,21 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
 
+	// managed_enterprise: refresh the connector / MCP endpoint inventory
+	// on every reload — MCP servers and connectors can change via config
+	// without restarting the discovery scanner. Rebuild the emitter from
+	// the just-published config, re-arm the scan-cadence hook (the
+	// discovery service may have been recreated above), and emit an
+	// immediate snapshot so AI Defense sees the change without waiting
+	// for the next scan tick.
+	if nextManagedEnterprise {
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig())
+		if svc := s.aiDiscoverySnapshot(); svc != nil {
+			svc.SetManagedInventoryEmitHook(inventoryEmit)
+		}
+		inventoryEmit(ctx)
+	}
+
 	if watcherRestart {
 		signalRestart(s.watcherRestartCh)
 	}
@@ -1339,7 +1377,16 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 }
 
 func (s *Sidecar) buildReloadOTelProvider(ctx context.Context, cfg *config.Config) (*telemetry.Provider, error) {
-	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion)
+	var opts []telemetry.ProviderOption
+	// Reuse the already-cached CMID provider so the reloaded telemetry sink and
+	// the managed inspector keep sharing one token cache + Invalidate. Best-
+	// effort: on error (OSS build, agent unavailable) the sink fail-closes.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if prov, provErr := s.ensureCMIDProvider(ctx); provErr == nil && prov != nil {
+			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
+		}
+	}
+	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("config reload otel: %w", err)
 	}
@@ -1558,6 +1605,14 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
+	}
+	// Prefer the telemetry provider's CMID instance so the inspector and the
+	// Cisco AI Defense telemetry log sink share one token cache + Invalidate.
+	if tel := s.otelSnapshot(); tel != nil {
+		if prov := tel.CloudAuthProvider(); prov != nil {
+			s.cmidProviderInst = prov
+			return prov, nil
+		}
 	}
 	cfg := s.currentConfig()
 	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
@@ -2480,6 +2535,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
+			// AID-only posture: every local detector (guardrail regex,
+			// CodeGuard/ClawShield) and explicit local policy (static
+			// block/allow, MCP block, block-list, approval, multi-turn,
+			// judge) is disabled across proxy/hook/router lanes. Cisco AI
+			// Defense is the sole decision-maker; requests it cannot decide
+			// (AID down/timeout/unwired) fail open. Log once at boot so
+			// operators see the posture in the sidecar log.
+			fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (fail-open on AID unavailable)")
 		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,

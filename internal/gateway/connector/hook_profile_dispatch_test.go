@@ -670,7 +670,11 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 			out := hookOnlyProfileRespond(HookRespondInput{
 				Req: HookProfileRequest{
 					ConnectorName: "cursor",
-					HookEventName: "beforeSubmitPrompt",
+					// Permission-gated event: block→deny, confirm→ask,
+					// alert/allow→allow. beforeSubmitPrompt is continue-gated
+					// and covered separately (see
+					// TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue).
+					HookEventName: "beforeShellExecution",
 				},
 				Action:            tc.action,
 				RawAction:         tc.rawAction,
@@ -691,6 +695,42 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
 			}
 		})
+	}
+}
+
+// TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue pins the
+// continue-gated contract for Cursor's beforeSubmitPrompt: per
+// https://cursor.com/docs/hooks it blocks ONLY via {"continue":false}
+// and ignores the `permission` field. Emitting the permission-gated
+// {"continue":true,"permission":"deny"} shape here silently submits the
+// prompt (regression guard for the block-message-never-shown bug).
+func TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue(t *testing.T) {
+	out := hookOnlyProfileRespond(HookRespondInput{
+		Req: HookProfileRequest{
+			ConnectorName: "cursor",
+			HookEventName: "beforeSubmitPrompt",
+		},
+		Action:    "block",
+		RawAction: "block",
+		Reason:    "matched SEC-AWS-KEY",
+		Caps:      HookCapability{CanBlock: true},
+	})
+	if out.FieldName != "hook_output" {
+		t.Errorf("FieldName=%q want hook_output", out.FieldName)
+	}
+	want := map[string]interface{}{
+		"continue":      false,
+		"user_message":  "matched SEC-AWS-KEY",
+		"agent_message": "matched SEC-AWS-KEY",
+	}
+	if !reflect.DeepEqual(out.Output, want) {
+		t.Errorf("beforeSubmitPrompt block Output mismatch\n got: %#v\nwant: %#v", out.Output, want)
+	}
+	if cont, _ := out.Output["continue"].(bool); cont {
+		t.Errorf("beforeSubmitPrompt block must set continue:false to actually block the prompt")
+	}
+	if _, hasPerm := out.Output["permission"]; hasPerm {
+		t.Errorf("beforeSubmitPrompt block must not rely on `permission` (Cursor ignores it): %#v", out.Output)
 	}
 }
 
