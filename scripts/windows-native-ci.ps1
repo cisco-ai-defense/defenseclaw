@@ -621,7 +621,9 @@ function Invoke-WindowsSetupStandardUserProcess {
     }
     $application = [IO.Path]::GetFullPath($FilePath)
     if (-not (Test-Path -LiteralPath $application -PathType Leaf) -or
-        [IO.Path]::GetExtension($application) -cne '.exe') {
+        -not [IO.Path]::GetExtension($application).Equals(
+            '.exe', [StringComparison]::OrdinalIgnoreCase
+        )) {
         throw "standard-user Setup launcher requires an existing .exe: $application"
     }
     $working = if ($WorkingDirectory) {
@@ -740,7 +742,13 @@ $payload = [ordered]@{
         $env:DC_SETUP_LAUNCH_OUTPUT = $outputPath
         $env:DC_SETUP_LAUNCH_UNICODE = $expectedEnvironment
         $powershell = (Get-Process -Id $PID).Path
-        $result = Invoke-WindowsSetupStandardUserProcess $powershell @(
+        # Windows paths and executable extensions are case-insensitive. Use an
+        # uppercase extension alias so this smoke test covers hosted runners
+        # that report PowerShell as pwsh.EXE.
+        $powershellCaseAlias = [IO.Path]::ChangeExtension(
+            $powershell, [IO.Path]::GetExtension($powershell).ToUpperInvariant()
+        )
+        $result = Invoke-WindowsSetupStandardUserProcess $powershellCaseAlias @(
             '-NoProfile', '-File', $scriptPath, '-Argument', $expectedArgument
         ) -TimeoutSeconds 30 -LogPath $logPath -WorkingDirectory $Root
     } finally {
