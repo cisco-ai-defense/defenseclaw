@@ -88,6 +88,7 @@ async def test_tab_acknowledges_before_blocked_overview_and_discards_stale_gener
     app = DefenseClawTUI(overview_model=_multi_connector_overview())
     entered = threading.Event()
     release = threading.Event()
+    first_builder_finished = threading.Event()
     calls = 0
     # This regression targets switch-generated renders only. Mounted network
     # and periodic pollers can legitimately enqueue an additional Overview
@@ -107,26 +108,32 @@ async def test_tab_acknowledges_before_blocked_overview_and_discards_stale_gener
             calls += 1
             call_number = calls
             entered.set()
-            if call_number == 1:
-                assert release.wait(5)
-            snapshot = original(detached, generation, source)
-            label = "stale overview generation" if call_number == 1 else "fresh overview generation"
-            return replace(
-                snapshot,
-                body_text=label,
-                body_renderable=Text(label),
-                body_signature=("overview", False, label),
-            )
+            try:
+                if call_number == 1:
+                    assert release.wait(5)
+                snapshot = original(detached, generation, source)
+                label = "stale overview generation" if call_number == 1 else "fresh overview generation"
+                return replace(
+                    snapshot,
+                    body_text=label,
+                    body_renderable=Text(label),
+                    body_signature=("overview", False, label),
+                )
+            finally:
+                if call_number == 1:
+                    first_builder_finished.set()
 
         monkeypatch.setattr(app, "_build_overview_render_snapshot", blocked_builder)
-        started = perf_counter()
         app.action_switch_panel("overview")
-        acknowledgement_seconds = perf_counter() - started
 
         # The tab and panel chrome are already correct while the provider is
-        # queued to block after the acknowledgement paint. Worker-thread start
-        # latency is deliberately outside this synchronous UI budget.
-        assert acknowledgement_seconds < 0.5
+        # queued to block after the acknowledgement paint. This is a
+        # condition-based guard: if the provider ran synchronously, its
+        # release.wait(5) assertion above would fail because release is set
+        # only after these acknowledgement checks. Avoid a wall-clock budget
+        # here because busy Windows runners can delay an otherwise nonblocking
+        # UI action without changing that ordering contract.
+        assert not first_builder_finished.is_set()
         assert app.active_panel == "overview"
         assert app.query_one("#tabs").active == "tab-overview"
         assert not app.query_one("#overview-controls").has_class("hidden")
