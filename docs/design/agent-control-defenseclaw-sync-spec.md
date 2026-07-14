@@ -233,18 +233,22 @@ with ordinary application guardrails.
 
 ### 6.2 Stable target identity
 
-Use this target pair:
+Use the deployment-specific target pair:
 
 ```text
-target_type = defenseclaw.installation
-target_id   = <configured DefenseClaw installation_id>
+Cisco Enterprise Cloud: target_type = log_stream
+                        target_id   = <Galileo log-stream ID>
+
+Self-hosted:             target_type = defenseclaw.installation
+                        target_id   = <configured DefenseClaw installation_id>
 ```
 
-The setup command defaults `installation_id` to a readable
+Self-hosted setup defaults `installation_id` to a readable
 `defenseclaw-<hostname>` value and accepts an externally provisioned inventory
-or MDM identifier. It persists the value in `config.yaml` and passes it to the
-Agent Control wire contract as `target_id`; it is not regenerated during
-normal startup. Resetting identity is an explicit operator action.
+or MDM identifier. Cloud setup requires the provisioned Galileo log-stream ID
+and never substitutes a hostname. The value is persisted in `config.yaml` and
+passed to the Agent Control wire contract as `target_id`; it is not regenerated
+during normal startup. Resetting identity is an explicit operator action.
 
 The target values are limited to 255 characters to match Agent Control's
 target contract.
@@ -253,7 +257,9 @@ target contract.
 
 - Read `agent_control.server_url` from configuration and resolve the secret
   named by `agent_control.api_key_env` through DefenseClaw's credential store.
-- Pass the URL and resolved key explicitly to every SDK `init()` call.
+- Pass the URL, resolved key, and deployment-specific API-key header explicitly
+  to every SDK `init()` call (`Galileo-API-Key` for cloud, `X-API-Key` for
+  self-hosted by default).
 - Agent Control starts with an environment-provisioned bootstrap administrator
   key. That key is unscoped and may create users/keys, assign control grants,
   and mutate rules; it must never be installed on a DefenseClaw endpoint.
@@ -707,7 +713,8 @@ agent_control.init(
     agent_name="defenseclaw-policy-sync",
     server_url=server_url,
     api_key=resolved_api_key,
-    target_type="defenseclaw.installation",
+    api_key_header=resolved_api_key_header,
+    target_type=resolved_target_type,
     target_id=installation_id,
     policy_refresh_interval_seconds=refresh_seconds,
 )
@@ -791,8 +798,9 @@ agent_control:
   server_url: ""
   installation_id: ""
   api_key_env: AGENT_CONTROL_API_KEY
+  api_key_header: ""  # cloud: Galileo-API-Key; self-hosted: X-API-Key
   agent_name: defenseclaw-policy-sync
-  target_type: defenseclaw.installation
+  target_type: ""  # cloud: log_stream; self-hosted: defenseclaw.installation
   refresh_seconds: 60
   cache_poll_seconds: 2
   init_retry_max_seconds: 300
@@ -811,6 +819,8 @@ agent_control:
   observability:
     enabled: true          # async final managed blocks
     include_content: true  # content follows global redaction; false is metadata-only
+    sink: agent_control     # agent_control | otel
+    otel_destination: galileo
 ```
 
 Validation rejects:
@@ -982,7 +992,7 @@ Persist state atomically as a diagnostic index, not as policy authority:
   "status": "active",
   "sdk_version": "8.2.0",
   "agent_name": "defenseclaw-policy-sync",
-  "target_type": "defenseclaw.installation",
+  "target_type": "log_stream",
   "target_id_hash": "sha256:...",
   "snapshot_state": "nonempty",
   "snapshot_freshness": "known",

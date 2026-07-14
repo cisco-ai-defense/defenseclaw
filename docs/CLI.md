@@ -528,7 +528,11 @@ defenseclaw setup guardrail [--regex-source local|agent_control|hybrid]
 defenseclaw agent-control setup --server-url URL
   [--deployment cisco_cloud|self_hosted]
   [--installation-id ID] [--api-key-env ENV]
+  [--target-type log_stream|defenseclaw.installation]
+  [--api-key-header HEADER]
   [--enable-rule-pack --regex-source agent_control|hybrid]
+  [--observability-sink agent_control|otel]
+  [--otel-destination NAME]
 defenseclaw agent-control sync --once
 defenseclaw agent-control sync --watch
 defenseclaw agent-control status [--json-output]
@@ -545,6 +549,10 @@ downloads and validates an initial target-effective snapshot, saves
 last-known-good artifacts, and only then switches configuration and restarts.
 The lower-level `agent-control setup` command exposes the same preflight for
 automation and requires `--regex-source` whenever rule buckets are enabled.
+For Cisco Enterprise Cloud, `--installation-id` is the Galileo log-stream ID,
+the default target type is `log_stream`, and the SDK authenticates with
+`Galileo-API-Key`. Self-hosted Agent Control defaults to the
+`defenseclaw.installation` target and `X-API-Key` header.
 
 The same database-managed member key authenticates both the SDK and Agent
 Control UI. Its grants limit the effective rule buckets and visible execution
@@ -562,6 +570,12 @@ private spool and reports blocks caused by Agent Control-managed rules through
 the SDK observability sink. Exact blocked input, raw request body, and
 enforcement reason are included by default; set
 `agent_control.observability.include_content: false` for metadata-only export.
+Set `agent_control.observability.sink: otel` to send the same SDK
+`ControlSpan`s through a named DefenseClaw OTLP destination instead of Agent
+Control Monitor. The named destination supplies the endpoint and routing
+headers; for Galileo, UUID project/log-stream values are written as
+`projectid`/`logstreamid` headers. Run `defenseclaw setup galileo` first, then
+select that destination with `otel_destination: galileo`.
 Other sinks continue to follow the global `privacy.disable_redaction` setting.
 `status` shows event delivery counters but never prints credentials or raw
 policy/content. `validate` runs both the

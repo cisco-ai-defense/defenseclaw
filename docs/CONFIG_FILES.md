@@ -518,12 +518,13 @@ guardrail:
 
 agent_control:
   enabled: true
-  deployment: self_hosted      # cisco_cloud | self_hosted
+  deployment: cisco_cloud      # cisco_cloud | self_hosted
   server_url: https://agent-control.example.internal
-  installation_id: defenseclaw-laptop-01
+  installation_id: 281be261-4e70-4a89-ad4a-68f511335401  # Galileo log-stream ID for cloud
   api_key_env: AGENT_CONTROL_API_KEY
+  api_key_header: Galileo-API-Key
   agent_name: defenseclaw-policy-sync
-  target_type: defenseclaw.installation
+  target_type: log_stream
   refresh_seconds: 60
   cache_poll_seconds: 2
   init_retry_max_seconds: 300
@@ -539,6 +540,8 @@ agent_control:
   observability:
     enabled: true
     include_content: true
+    sink: otel                 # agent_control | otel
+    otel_destination: galileo
 ```
 
 `guardrail.regex_source` is the explicit regex authority. `local` uses only
@@ -557,6 +560,11 @@ rule buckets returned to DefenseClaw and the member-owned execution history
 visible in Monitor; it cannot mutate controls. Rotating the credential keeps
 those grants and the user's history intact.
 
+Deployment defaults are explicit: Cisco Enterprise Cloud uses target type
+`log_stream` with `Galileo-API-Key`, while self-hosted Agent Control uses
+`defenseclaw.installation` with `X-API-Key`. The cloud target ID is the Galileo
+log-stream ID, not a generated DefenseClaw hostname.
+
 `stricter` keeps whichever local/remote threshold activates earlier and the
 stricter Cisco trust level. `remote` uses the remote threshold/trust values
 while a control is present. HILT, guardrail mode, hook fail mode, scanner
@@ -573,6 +581,15 @@ and enforcement reasons come from the protected
 `privacy.disable_redaction: true`. Content fields are capped at 64 KiB. Disable
 observability to keep Agent Control policy distribution one-way. The setting
 does not affect local enforcement.
+
+`observability.sink: agent_control` sends SDK events to Agent Control Monitor.
+`observability.sink: otel` instead asks the Agent Control SDK to emit native
+`ControlSpan`s to the named DefenseClaw OTLP destination. DefenseClaw resolves
+the destination's environment-backed headers in memory and never copies the
+API key into `config.yaml`. The OTLP destination must be enabled for traces,
+use HTTPS and OTLP/HTTP, and include Galileo API-key, project, and log-stream
+routing headers. These sink choices are mutually exclusive for this SDK
+session.
 
 Set `observability.include_content: false` to export decision/correlation
 metadata only. In that mode the synchronizer tails the standard

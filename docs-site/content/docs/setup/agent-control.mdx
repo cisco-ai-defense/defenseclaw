@@ -11,7 +11,7 @@ keywords:
   - self-hosted Agent Control
 ---
 
-Agent Control gives DefenseClaw a central authoring and distribution plane. Operators attach versioned DefenseClaw controls to one stable installation target; a dedicated local synchronizer reads the Agent Control SDK cache, converts matching controls into native DefenseClaw policy, and activates them locally.
+Agent Control gives DefenseClaw a central authoring and distribution plane. Operators attach versioned DefenseClaw controls to one stable deployment target; a dedicated local synchronizer reads the Agent Control SDK cache, converts matching controls into native DefenseClaw policy, and activates them locally.
 
 You can run that control plane in either of two ways:
 
@@ -64,13 +64,13 @@ The synchronizer fetches the target-effective **policy snapshot** through the Ag
   <Edge from="sdk" to="monitor" label="ingest" />
 </Flow>
 
-The synchronizer uses one dedicated Agent Control identity:
+The synchronizer uses one dedicated Agent Control identity and a
+deployment-specific policy target:
 
-| Field | Required value |
-| --- | --- |
-| Agent name | `defenseclaw-policy-sync` |
-| Target type | `defenseclaw.installation` |
-| Installation ID | A stable value such as `defenseclaw-<hostname>` or an ID provisioned by inventory/MDM |
+| Deployment | Agent name | Target type | Target ID |
+| --- | --- | --- | --- |
+| Cisco Enterprise Cloud | `defenseclaw-policy-sync` | `log_stream` | Provisioned Galileo log-stream ID |
+| Self-hosted Agent Control | `defenseclaw-policy-sync` | `defenseclaw.installation` | Stable `defenseclaw-<hostname>` or inventory/MDM ID |
 
 Bind DefenseClaw controls to that target. Do not reuse an application agent identity: the controls in this integration distribute policy; they do not evaluate application steps in Agent Control.
 
@@ -151,13 +151,13 @@ the deployment.
 
 Cisco operates the cloud control plane; you still own:
 
-- the stable `defenseclaw.installation` installation ID;
+- the provisioned Galileo `log_stream` target ID;
 - the DefenseClaw gateway and synchronizer service on each endpoint;
 - local precedence, activation mode, Human-in-the-Loop Threshold (HILT), and fail-mode choices;
 - local service credentials, policy-directory permissions, health monitoring, and rollback response.
 
-<Callout type="info" title="Same wire contract">
-Self-hosted Agent Control and Cisco Cloud Control use the same evaluator IDs, target identity, SDK cache, deterministic artifacts, and activation/readback flow. Moving between them changes endpoint and credentials, not the DefenseClaw policy model.
+<Callout type="info" title="Deployment-specific authentication and targeting">
+Both deployments use the same evaluator IDs, SDK cache, deterministic artifacts, and activation/readback flow. Cisco Enterprise Cloud defaults to the `Galileo-API-Key` header and `log_stream` target; self-hosted Agent Control defaults to `X-API-Key` and `defenseclaw.installation`.
 </Callout>
 
 </Tab>
@@ -207,7 +207,7 @@ For Agent Control managed or Hybrid, setup asks for:
 
 - Cisco Enterprise Cloud or self-hosted deployment;
 - the Agent Control HTTPS URL (plain HTTP is accepted only for loopback development);
-- a stable installation ID, defaulting to `defenseclaw-<hostname>`;
+- a policy target ID: the Galileo log-stream ID for Cisco Enterprise Cloud, or a stable installation ID defaulting to `defenseclaw-<hostname>` for self-hosted;
 - the environment-variable name that holds the API key;
 - whether Agent Control manages OPA thresholds;
 - whether blocked content is sent to Monitor (enabled by default; global redaction still applies).
@@ -245,7 +245,7 @@ defenseclaw agent-control status
 
 `keys list` resolves the configured `agent_control.api_key_env` (including a
 custom name), `doctor` checks that the managed source, deployment, URL,
-installation, and rule lane agree, and `agent-control status` reports snapshot,
+policy target, and rule lane agree, and `agent-control status` reports snapshot,
 activation, and Monitor-delivery health.
 
 The DefenseClaw TUI **Overview → Configuration** panel shows the same posture
@@ -501,6 +501,40 @@ By default, the continuous watcher tails new records from the redacted `<data_di
 
 The source cursor is persisted with the Agent Control state. First enablement starts at the end of the current log, so historical endpoint activity is not uploaded. Retries reuse a deterministic control-execution ID, which Agent Control stores idempotently. Rotation and truncation are detected; unsafe source files are refused.
 
+#### Send ControlSpans to Galileo OTLP
+
+The default `agent_control` sink populates Agent Control Monitor. To emit the
+same control executions as native SDK `ControlSpan`s through Galileo OTLP,
+first configure a trace destination, then select it for Agent Control:
+
+```bash
+defenseclaw setup galileo \
+  --deployment self-hosted \
+  --trace-endpoint "https://<enterprise-api>/otel/v1/traces" \
+  --project "<project-id>" \
+  --logstream "<log-stream-id>"
+```
+
+```yaml
+agent_control:
+  observability:
+    enabled: true
+    include_content: true
+    sink: otel
+    otel_destination: galileo
+```
+
+DefenseClaw reuses the destination endpoint and resolves its
+environment-backed headers in memory; the API key is never copied into the
+Agent Control block. UUID routing values use Galileo's `projectid` and
+`logstreamid` headers. The destination must use HTTPS and OTLP/HTTP with traces
+enabled. `agent_control` and `otel` are alternative SDK sinks for one watcher,
+so choose Monitor or OTLP for that process.
+
+<Callout type="info" title="ControlSpan rendering depends on enterprise ingest support">
+A successful SDK/exporter acknowledgement proves that DefenseClaw delivered the span. Showing it as a typed ControlSpan in Galileo additionally requires an ingest release that recognizes Agent Control's native span schema; older enterprise images may omit it or classify it as a generic workflow span.
+</Callout>
+
 To disable all enforcement export while continuing policy synchronization:
 
 ```yaml
@@ -563,7 +597,7 @@ The command runs the closed Python schema checks and the authoritative native Go
 
 1. Start with `opa.precedence: stricter`.
 2. Keep the managed rule lane disabled until supervised restart/readback is tested.
-3. Bind a canary `defenseclaw.installation` target.
+3. Bind a canary target (`log_stream` for Cisco Enterprise Cloud or `defenseclaw.installation` when self-hosted).
 4. Run `sync --once` and compare published/active digests.
 5. Exercise one allow and one block through every enabled connector.
 6. Start the continuous service and alert on LKG preservation, repeated activation errors, or disk/runtime divergence.

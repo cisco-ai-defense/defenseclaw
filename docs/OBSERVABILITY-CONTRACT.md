@@ -207,6 +207,13 @@ event-log failures never change a DefenseClaw decision. `defenseclaw
 agent-control status` exposes `watching`, `waiting_for_log`, `degraded`, or
 `disabled` plus sent/dropped/unmapped counters.
 
+The SDK export can target either Agent Control Monitor (`sink: agent_control`)
+or a named OTLP destination (`sink: otel`). The OTLP mode emits the same
+control execution as a native `ControlSpan`, reusing the configured endpoint
+and protected routing credentials. A successful SDK/exporter acknowledgement
+proves client delivery; typed ControlSpan rendering additionally requires a
+Galileo ingest version that recognizes Agent Control spans.
+
 ---
 
 ## Structured audit payloads

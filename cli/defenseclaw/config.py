@@ -75,6 +75,7 @@ _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -2309,6 +2310,8 @@ class AgentControlObservabilityConfig:
 
     enabled: bool = True
     include_content: bool = True
+    sink: str = "agent_control"
+    otel_destination: str = "galileo"
 
 
 @dataclass
@@ -2319,9 +2322,10 @@ class AgentControlConfig:
     deployment: str = "cisco_cloud"
     server_url: str = ""
     agent_name: str = "defenseclaw-policy-sync"
-    target_type: str = "defenseclaw.installation"
+    target_type: str = ""
     installation_id: str = ""
     api_key_env: str = "AGENT_CONTROL_API_KEY"
+    api_key_header: str = ""
     refresh_seconds: int = 60
     cache_poll_seconds: int = 2
     init_retry_max_seconds: int = 300
@@ -2330,13 +2334,23 @@ class AgentControlConfig:
     rule_pack: AgentControlRulePackConfig = field(default_factory=AgentControlRulePackConfig)
     observability: AgentControlObservabilityConfig = field(default_factory=AgentControlObservabilityConfig)
 
+    def resolved_target_type(self) -> str:
+        if self.target_type:
+            return self.target_type
+        return "log_stream" if self.deployment == "cisco_cloud" else "defenseclaw.installation"
+
+    def resolved_api_key_header(self) -> str:
+        if self.api_key_header:
+            return self.api_key_header
+        return "Galileo-API-Key" if self.deployment == "cisco_cloud" else "X-API-Key"
+
     def validate(self) -> None:
         if self.deployment not in {"cisco_cloud", "self_hosted"}:
             raise ValueError("agent_control.deployment must be 'cisco_cloud' or 'self_hosted'")
         if self.agent_name != "defenseclaw-policy-sync":
             raise ValueError("agent_control.agent_name must be 'defenseclaw-policy-sync'")
-        if self.target_type != "defenseclaw.installation":
-            raise ValueError("agent_control.target_type must be 'defenseclaw.installation'")
+        if self.resolved_target_type() not in {"defenseclaw.installation", "log_stream"}:
+            raise ValueError("agent_control.target_type must be 'defenseclaw.installation' or 'log_stream'")
         if len(self.installation_id) > 255:
             raise ValueError("agent_control.installation_id cannot exceed 255 characters")
         if self.enabled and not self.installation_id.strip():
@@ -2360,6 +2374,8 @@ class AgentControlConfig:
                 raise ValueError("agent_control.server_url requires HTTPS except for loopback development")
         if not _ENV_VAR_NAME_RE.fullmatch(self.api_key_env):
             raise ValueError("agent_control.api_key_env must be an environment variable name")
+        if not _HTTP_HEADER_NAME_RE.fullmatch(self.resolved_api_key_header()):
+            raise ValueError("agent_control.api_key_header must be a valid HTTP header name")
         if self.refresh_seconds <= 0:
             raise ValueError("agent_control.refresh_seconds must be greater than zero")
         if self.cache_poll_seconds <= 0:
@@ -2374,6 +2390,10 @@ class AgentControlConfig:
             raise ValueError("agent_control.rule_pack.activation must be 'restart' or 'manual'")
         if not 1 <= self.rule_pack.max_rules <= 1000:
             raise ValueError("agent_control.rule_pack.max_rules must be between 1 and 1000")
+        if self.observability.sink not in {"agent_control", "otel"}:
+            raise ValueError("agent_control.observability.sink must be 'agent_control' or 'otel'")
+        if not self.observability.otel_destination.strip():
+            raise ValueError("agent_control.observability.otel_destination cannot be empty")
 
 
 @dataclass
@@ -4200,6 +4220,7 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         "target_type",
         "installation_id",
         "api_key_env",
+        "api_key_header",
         "refresh_seconds",
         "cache_poll_seconds",
         "init_retry_max_seconds",
@@ -4229,7 +4250,9 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
     unknown_rule = sorted(set(rule_raw) - {"enabled", "activation", "max_rules"})
     if unknown_rule:
         raise ValueError(f"agent_control.rule_pack contains unsupported keys: {unknown_rule}")
-    unknown_observability = sorted(set(observability_raw) - {"enabled", "include_content"})
+    unknown_observability = sorted(
+        set(observability_raw) - {"enabled", "include_content", "sink", "otel_destination"}
+    )
     if unknown_observability:
         raise ValueError(f"agent_control.observability contains unsupported keys: {unknown_observability}")
     return AgentControlConfig(
@@ -4237,9 +4260,10 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         deployment=str(raw.get("deployment", "cisco_cloud") or ""),
         server_url=str(raw.get("server_url", "") or ""),
         agent_name=str(raw.get("agent_name", "defenseclaw-policy-sync") or ""),
-        target_type=str(raw.get("target_type", "defenseclaw.installation") or ""),
+        target_type=str(raw.get("target_type", "") or ""),
         installation_id=str(raw.get("installation_id", "") or ""),
         api_key_env=str(raw.get("api_key_env", "AGENT_CONTROL_API_KEY") or ""),
+        api_key_header=str(raw.get("api_key_header", "") or ""),
         refresh_seconds=int(raw.get("refresh_seconds", 60)),
         cache_poll_seconds=int(raw.get("cache_poll_seconds", 2)),
         init_retry_max_seconds=int(raw.get("init_retry_max_seconds", 300)),
@@ -4257,6 +4281,8 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         observability=AgentControlObservabilityConfig(
             enabled=_coerce_bool(observability_raw.get("enabled", True), default=True),
             include_content=_coerce_bool(observability_raw.get("include_content", True), default=True),
+            sink=str(observability_raw.get("sink", "agent_control") or ""),
+            otel_destination=str(observability_raw.get("otel_destination", "galileo") or ""),
         ),
     )
 

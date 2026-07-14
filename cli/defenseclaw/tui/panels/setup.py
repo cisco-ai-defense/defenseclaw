@@ -4245,6 +4245,7 @@ def _guardrail_wizard_fields_for(
         regex_source in {"agent_control", "hybrid"}
         and "--agent-control-installation-id" not in overrides
         and not agent_control_installation_id
+        and agent_control_deployment == "self_hosted"
     ):
         # Keep the Textual wizard aligned with the Click setup wizard without
         # accepting the API-key secret itself in this form.
@@ -4393,13 +4394,13 @@ def _guardrail_wizard_fields_for(
             visible_when=agent_control_source,
         ),
         WizardFormField(
-            "Installation ID",
+            "Policy Target ID",
             "string",
             "--agent-control-installation-id",
             value=agent_control_installation_id,
             default=agent_control_installation_id,
             required=True,
-            hint="Stable identity used to bind managed controls to this DefenseClaw installation.",
+            hint="Galileo log stream ID for Cisco Cloud; stable DefenseClaw installation ID when self-hosted.",
             visible_when=agent_control_source,
         ),
         WizardFormField(

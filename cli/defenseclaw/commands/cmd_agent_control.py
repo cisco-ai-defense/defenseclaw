@@ -46,6 +46,7 @@ from defenseclaw.agent_control.state import load_state
 from defenseclaw.agent_control.sync import (
     AgentControlSynchronizer,
     SynchronizationError,
+    agent_control_observability_init_kwargs,
     configured_rule_pack_base_dirs,
     load_agent_control_sdk,
     resolve_agent_control_sdk_credentials,
@@ -74,6 +75,10 @@ def configure_agent_control(
     enable_rule_pack: bool,
     manage_opa: bool,
     include_content: bool,
+    target_type: str | None = None,
+    api_key_header: str | None = None,
+    observability_sink: str | None = None,
+    otel_destination: str | None = None,
     manual_activation: bool = False,
     require_rules: bool = False,
     save_config: bool = True,
@@ -97,11 +102,25 @@ def configure_agent_control(
         settings.enabled = True
         settings.deployment = deployment.strip()
         settings.server_url = server_url.strip().rstrip("/")
-        settings.installation_id = installation_id.strip() or default_installation_id()
         settings.api_key_env = api_key_env.strip()
+        settings.target_type = (target_type or "").strip() or (
+            "log_stream" if settings.deployment == "cisco_cloud" else "defenseclaw.installation"
+        )
+        settings.installation_id = installation_id.strip()
+        if not settings.installation_id and settings.target_type == "defenseclaw.installation":
+            settings.installation_id = default_installation_id()
+        if not settings.installation_id:
+            raise click.ClickException("--installation-id must be the enterprise Galileo log stream ID")
+        settings.api_key_header = (api_key_header or "").strip() or (
+            "Galileo-API-Key" if settings.deployment == "cisco_cloud" else "X-API-Key"
+        )
         settings.rule_pack.enabled = enable_rule_pack
         settings.opa.enabled = manage_opa
         settings.observability.include_content = include_content
+        if observability_sink is not None:
+            settings.observability.sink = observability_sink.strip()
+        if otel_destination is not None:
+            settings.observability.otel_destination = otel_destination.strip()
         if manual_activation:
             settings.opa.activation = "manual"
             settings.rule_pack.activation = "manual"
@@ -130,9 +149,11 @@ def configure_agent_control(
                 agent_description="DefenseClaw policy synchronization",
                 server_url=server_url_resolved,
                 api_key=api_key,
-                target_type=settings.target_type,
+                api_key_header=settings.resolved_api_key_header(),
+                target_type=settings.resolved_target_type(),
                 target_id=settings.installation_id,
                 policy_refresh_interval_seconds=settings.refresh_seconds,
+                **agent_control_observability_init_kwargs(app.cfg),
             )
             snapshot = sdk.get_server_controls()
             if snapshot is None:
@@ -229,6 +250,13 @@ def configure_agent_control(
 @click.option("--server-url", required=True, help="Agent Control service URL")
 @click.option("--installation-id", default="", help="Stable installation ID (default: defenseclaw-<hostname>)")
 @click.option("--api-key-env", default="AGENT_CONTROL_API_KEY", help="Environment variable holding the API key")
+@click.option(
+    "--target-type",
+    type=click.Choice(["log_stream", "defenseclaw.installation"]),
+    default=None,
+    help="Agent Control policy target (deployment default when omitted).",
+)
+@click.option("--api-key-header", default=None, help="API-key HTTP header (deployment default when omitted).")
 @click.option("--enable-rule-pack/--no-enable-rule-pack", default=None)
 @click.option(
     "--regex-source",
@@ -238,6 +266,13 @@ def configure_agent_control(
 )
 @click.option("--manage-opa/--no-manage-opa", default=None)
 @click.option("--include-content/--metadata-only", default=None)
+@click.option(
+    "--observability-sink",
+    type=click.Choice(["agent_control", "otel"]),
+    default=None,
+    help="Send enforcement ControlSpans to Agent Control Monitor or a named OTEL destination.",
+)
+@click.option("--otel-destination", default=None, help="Named DefenseClaw OTEL destination for ControlSpans.")
 @click.option("--manual-activation", is_flag=True, help="Publish without reloading/restarting the gateway")
 @pass_ctx
 def setup_agent_control(
@@ -246,10 +281,14 @@ def setup_agent_control(
     server_url: str,
     installation_id: str,
     api_key_env: str,
+    target_type: str | None,
+    api_key_header: str | None,
     enable_rule_pack: bool | None,
     regex_source: str | None,
     manage_opa: bool | None,
     include_content: bool | None,
+    observability_sink: str | None,
+    otel_destination: str | None,
     manual_activation: bool,
 ) -> None:
     """Configure a stable DefenseClaw installation target and managed paths."""
@@ -269,9 +308,13 @@ def setup_agent_control(
             server_url=server_url,
             installation_id=installation_id,
             api_key_env=api_key_env,
+            target_type=target_type,
+            api_key_header=api_key_header,
             enable_rule_pack=effective_rule_pack,
             manage_opa=settings.opa.enabled if manage_opa is None else manage_opa,
             include_content=(settings.observability.include_content if include_content is None else include_content),
+            observability_sink=observability_sink,
+            otel_destination=otel_destination,
             manual_activation=manual_activation,
         )
     except Exception:
@@ -281,10 +324,11 @@ def setup_agent_control(
 
     click.echo("Agent Control synchronization configured.")
     click.echo(f"  agent:       {settings.agent_name}")
-    click.echo(f"  target_type: {settings.target_type}")
+    click.echo(f"  target_type: {settings.resolved_target_type()}")
     click.echo(f"  deployment:    {settings.deployment}")
     click.echo(f"  server_url:    {settings.server_url}")
-    click.echo(f"  installation:  {settings.installation_id}")
+    click.echo(f"  target_id:     {settings.installation_id}")
+    click.echo(f"  visibility:    {settings.observability.sink}")
     click.echo(f"  managed_dir:   {managed_dir}")
     click.echo("Bind the DefenseClaw controls to this exact target, then run:")
     click.echo("  defenseclaw agent-control sync --once")
@@ -336,6 +380,9 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     value["deployment"] = app.cfg.agent_control.deployment
     value["server_url"] = app.cfg.agent_control.server_url
     value["installation_id"] = app.cfg.agent_control.installation_id
+    value["target_type"] = app.cfg.agent_control.resolved_target_type()
+    value["api_key_header"] = app.cfg.agent_control.resolved_api_key_header()
+    value["observability_sink"] = app.cfg.agent_control.observability.sink
     value["regex_source"] = app.cfg.guardrail.regex_source
     try:
         sdk = load_agent_control_sdk()
@@ -371,6 +418,8 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     click.echo(f"Deployment:          {value['deployment']}")
     click.echo(f"Server:              {value['server_url'] or '-'}")
     click.echo(f"Installation:        {value['installation_id'] or '-'}")
+    click.echo(f"Policy target:       {value['target_type']}")
+    click.echo(f"ControlSpan sink:    {value['observability_sink']}")
     click.echo(f"SDK compatible:      {value['sdk_compatible']}")
     click.echo(f"Gateway readback:    {value['runtime_status']}")
     click.echo(f"Snapshot:            {state.snapshot_state} (freshness: {state.snapshot_freshness})")

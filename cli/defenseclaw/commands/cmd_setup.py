@@ -3574,11 +3574,15 @@ def _configure_agent_control_values(
     settings.enabled = True
     settings.rule_pack.enabled = True
     settings.deployment = deployment or settings.deployment or "cisco_cloud"
+    settings.target_type = (
+        "log_stream" if settings.deployment == "cisco_cloud" else "defenseclaw.installation"
+    )
+    settings.api_key_header = "Galileo-API-Key" if settings.deployment == "cisco_cloud" else "X-API-Key"
     if server_url is not None:
         settings.server_url = server_url.strip().rstrip("/")
-    settings.installation_id = (
-        (installation_id or "").strip() or settings.installation_id.strip() or default_installation_id()
-    )
+    settings.installation_id = (installation_id or "").strip() or settings.installation_id.strip()
+    if not settings.installation_id and settings.deployment == "self_hosted":
+        settings.installation_id = default_installation_id()
     settings.api_key_env = (api_key_env or settings.api_key_env or "AGENT_CONTROL_API_KEY").strip()
     if manage_opa is not None:
         settings.opa.enabled = manage_opa
@@ -3634,11 +3638,16 @@ def _prompt_regex_policy_source(
         default=default_url,
         show_default=bool(default_url),
     )
-    from defenseclaw.commands.cmd_agent_control import default_installation_id
+    installation_label = "Galileo log stream ID" if deployment == "cisco_cloud" else "Installation ID"
+    installation_default = settings.installation_id
+    if not installation_default and deployment == "self_hosted":
+        from defenseclaw.commands.cmd_agent_control import default_installation_id
 
+        installation_default = default_installation_id()
     installation_id = click.prompt(
-        "  Installation ID",
-        default=settings.installation_id or default_installation_id(),
+        f"  {installation_label}",
+        default=installation_default,
+        show_default=bool(installation_default),
     )
     api_key_env = _prompt_env_var_name(settings.api_key_env or "AGENT_CONTROL_API_KEY")
     manage_opa = click.confirm("  Manage OPA thresholds through Agent Control?", default=False)
@@ -3690,9 +3699,11 @@ def _render_guardrail_review(app: AppContext, gc) -> None:
     if gc.regex_source in {"agent_control", "hybrid"}:
         settings = app.cfg.agent_control
         ux.kv("Agent Control", _AGENT_CONTROL_DEPLOYMENT_LABELS.get(settings.deployment, settings.deployment))
-        ux.kv("Installation", settings.installation_id)
+        ux.kv("Endpoint", settings.server_url)
+        ux.kv("Policy target", f"{settings.resolved_target_type()}:{settings.installation_id}")
         ux.kv("Policy activation", "automatic restart")
         ux.kv("OPA thresholds", "Agent Control" if settings.opa.enabled else "local")
+        ux.kv("ControlSpan sink", settings.observability.sink)
         ux.kv(
             "Monitor content",
             (
@@ -3723,9 +3734,13 @@ def _preflight_guardrail_agent_control(
         server_url=settings.server_url,
         installation_id=settings.installation_id,
         api_key_env=settings.api_key_env,
+        target_type=settings.resolved_target_type(),
+        api_key_header=settings.resolved_api_key_header(),
         enable_rule_pack=True,
         manage_opa=settings.opa.enabled,
         include_content=settings.observability.include_content,
+        observability_sink=settings.observability.sink,
+        otel_destination=settings.observability.otel_destination,
         require_rules=gc.regex_source == "agent_control",
         save_config=False,
         api_key_override=api_key_override,

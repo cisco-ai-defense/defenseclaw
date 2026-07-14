@@ -2526,10 +2526,23 @@ def _check_agent_control_config(cfg, r: _DoctorResult) -> None:
     if settings.deployment == "cisco_cloud" and not settings.server_url.startswith("https://"):
         _emit("fail", "Agent Control", "Cisco Enterprise Cloud requires an HTTPS URL", r=r)
         return
+    if settings.observability.enabled and settings.observability.sink == "otel":
+        from defenseclaw.agent_control.sync import (
+            SynchronizationError,
+            agent_control_observability_init_kwargs,
+        )
+
+        try:
+            agent_control_observability_init_kwargs(cfg)
+        except SynchronizationError as exc:
+            _emit("fail", "Agent Control", str(exc), r=r)
+            return
     _emit(
         "pass",
         "Agent Control",
-        f"{regex_source} · {settings.deployment} · installation={settings.installation_id} · last-known-good",
+        f"{regex_source} · {settings.deployment} · "
+        f"target={settings.resolved_target_type()}:{settings.installation_id} · "
+        f"spans={settings.observability.sink} · last-known-good",
         r=r,
     )
 

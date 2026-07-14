@@ -543,7 +543,7 @@ def test_guardrail_wizard_managed_source_shows_complete_secret_free_agent_contro
         "Agent Control",
         "Deployment",
         "Agent Control URL",
-        "Installation ID",
+        "Policy Target ID",
         "Agent Control API Key Env",
         "Manage OPA Thresholds",
         "Send Monitor Content",
@@ -573,12 +573,17 @@ def test_guardrail_regex_source_goal_rebuilds_agent_control_fields_for_hybrid() 
     labels = {field.label for field in model.form_fields}
     assert "Agent Control URL" in labels
     assert "Strategy" not in labels
-    assert missing_required_fields(SetupWizard.GUARDRAIL, model.form_fields) == ("Agent Control URL",)
+    assert missing_required_fields(SetupWizard.GUARDRAIL, model.form_fields) == (
+        "Agent Control URL",
+        "Policy Target ID",
+    )
 
     model.form_fields = list(_with_field(model.form_fields, "Agent Control URL", "https://control.example.test"))
+    model.form_fields = list(_with_field(model.form_fields, "Policy Target ID", "log-stream-id"))
     argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
     assert _pair_after(argv, "--regex-source") == "hybrid"
     assert _pair_after(argv, "--agent-control-url") == "https://control.example.test"
+    assert _pair_after(argv, "--agent-control-installation-id") == "log-stream-id"
 
 
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:

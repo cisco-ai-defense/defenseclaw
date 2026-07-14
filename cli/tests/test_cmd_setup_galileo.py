@@ -117,6 +117,40 @@ def test_cloud_non_interactive_writes_named_trace_destination(tmp_path, monkeypa
     assert "enabled" not in (after_save["otel"].get("metrics") or {})
 
 
+def test_uuid_routes_use_galileo_id_headers(tmp_path, monkeypatch) -> None:
+    app = _app(tmp_path, monkeypatch)
+    monkeypatch.setenv("GALILEO_API_KEY", "test-key")
+    project_id = "9dad2593-7941-426f-9eb5-cef985c01ed3"
+    logstream_id = "281be2614e704a89ad4a68f511335401"
+    initial = CliRunner().invoke(
+        galileo,
+        ["--non-interactive", "--project", "old-project", "--logstream", "old-stream"],
+        obj=app,
+    )
+    assert initial.exit_code == 0, initial.output
+
+    result = CliRunner().invoke(
+        galileo,
+        [
+            "--non-interactive",
+            "--project",
+            project_id,
+            "--logstream",
+            logstream_id,
+        ],
+        obj=app,
+    )
+
+    assert result.exit_code == 0, result.output
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    headers = raw["otel"]["destinations"][0]["headers"]
+    assert headers == {
+        "Galileo-API-Key": "${GALILEO_API_KEY}",
+        "projectid": project_id,
+        "logstreamid": logstream_id,
+    }
+
+
 def test_rerun_reports_update_without_duplicating_destination(tmp_path, monkeypatch) -> None:
     app = _app(tmp_path, monkeypatch)
     monkeypatch.setenv("GALILEO_API_KEY", "test-key")

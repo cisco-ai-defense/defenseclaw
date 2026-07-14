@@ -49,6 +49,7 @@ from defenseclaw.agent_control.sync import (
     SynchronizationError,
     _safe_error,
     _watch_retry_delay,
+    agent_control_observability_init_kwargs,
     configured_rule_pack_base_dirs,
 )
 from defenseclaw.commands.cmd_agent_control import agent_control_cmd, configure_agent_control
@@ -56,6 +57,7 @@ from defenseclaw.config import (
     AgentControlConfig,
     Config,
     GuardrailConfig,
+    OTelDestinationConfig,
     _config_to_dict,
     _merge_agent_control,
     _merge_guardrail,
@@ -457,7 +459,44 @@ class ConfigTests(unittest.TestCase):
 
     def test_default_agent_control_block_is_not_serialized(self) -> None:
         self.assertNotIn("agent_control", _config_to_dict(Config()))
-        self.assertEqual(AgentControlConfig().target_type, "defenseclaw.installation")
+        self.assertEqual(AgentControlConfig().resolved_target_type(), "log_stream")
+        self.assertEqual(AgentControlConfig().resolved_api_key_header(), "Galileo-API-Key")
+
+    def test_agent_control_otel_sink_reuses_named_galileo_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config(data_dir=tmp)
+            cfg.agent_control.observability.sink = "otel"
+            cfg.otel.enabled = True
+            destination = OTelDestinationConfig(
+                name="galileo",
+                preset="galileo",
+                protocol="http",
+                endpoint="https://api.example.test/otel/v1/traces",
+                headers={
+                    "Galileo-API-Key": "${GALILEO_API_KEY}",
+                    "project": "defenseclaw-amd",
+                    "logstream": "defenseclaw-amd",
+                },
+            )
+            destination.traces.enabled = True
+            cfg.otel.destinations = [destination]
+
+            with mock.patch.dict(os.environ, {"GALILEO_API_KEY": "protected-test-key"}, clear=False):
+                values = agent_control_observability_init_kwargs(cfg)
+
+            self.assertEqual(values["observability_sink_name"], "otel")
+            sink = values["observability_sink_config"]
+            self.assertEqual(sink["endpoint"], "https://api.example.test/otel/v1/traces")
+            self.assertEqual(sink["headers"]["Galileo-API-Key"], "protected-test-key")
+            self.assertEqual(sink["headers"]["project"], "defenseclaw-amd")
+            serialized = _config_to_dict(cfg)
+            self.assertNotIn("protected-test-key", json.dumps(serialized))
+
+    def test_agent_control_otel_sink_requires_enabled_trace_destination(self) -> None:
+        cfg = Config()
+        cfg.agent_control.observability.sink = "otel"
+        with self.assertRaisesRegex(SynchronizationError, "is not configured"):
+            agent_control_observability_init_kwargs(cfg)
 
     def test_guardrail_rejects_duplicate_overlay_dirs(self) -> None:
         value = GuardrailConfig(rule_pack_overlay_dirs=["/tmp/rules", "/tmp/rules/"])
@@ -693,6 +732,8 @@ class SetupCommandTests(unittest.TestCase):
 
             self.assertEqual(sdk.init_kwargs["server_url"], "https://agent-control.example.test")
             self.assertEqual(sdk.init_kwargs["api_key"], "setup-secret")
+            self.assertEqual(sdk.init_kwargs["api_key_header"], "X-API-Key")
+            self.assertEqual(sdk.init_kwargs["target_type"], "defenseclaw.installation")
             self.assertEqual(sdk.init_kwargs["target_id"], "defenseclaw-test-host")
             self.assertEqual(managed_dir, (root / "agent-control").resolve())
             self.assertTrue(cfg.agent_control.rule_pack.enabled)
@@ -1195,7 +1236,8 @@ class SynchronizerTests(unittest.TestCase):
             self.assertEqual(state.status, "active")
             self.assertEqual(state.opa_active_digest, gateway.opa[-1])
             self.assertEqual(state.rule_pack_active_digest, gateway.rules[-1])
-            self.assertEqual(sdk.init_kwargs["target_type"], "defenseclaw.installation")
+            self.assertEqual(sdk.init_kwargs["target_type"], "log_stream")
+            self.assertEqual(sdk.init_kwargs["api_key_header"], "Galileo-API-Key")
             self.assertEqual(sdk.init_kwargs["server_url"], "https://agent-control.example.test")
             self.assertEqual(sdk.init_kwargs["api_key"], "sdk-secret")
             self.assertEqual(sdk.shutdown_calls, 1)

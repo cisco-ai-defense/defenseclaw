@@ -6,12 +6,14 @@ import hashlib
 import json
 import logging
 import random
+import re
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from defenseclaw.audit_actions import (
     ACTION_AGENT_CONTROL_ACTIVATE,
@@ -43,6 +45,8 @@ from .publisher import (
 from .state import SyncState, load_state, save_state, utc_now
 
 logger = logging.getLogger(__name__)
+
+_ENV_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class SynchronizationError(RuntimeError):
@@ -83,6 +87,84 @@ def resolve_agent_control_sdk_credentials(settings: Any, data_dir: str, *, requi
             f"run 'defenseclaw keys set {settings.api_key_env}'"
         )
     return settings.server_url.rstrip("/"), credential.value
+
+
+def agent_control_observability_init_kwargs(cfg: Any) -> dict[str, Any]:
+    """Build secret-safe SDK observability options from DefenseClaw config.
+
+    The normal ``agent_control`` sink preserves Agent Control Monitor delivery.
+    The ``otel`` sink reuses one named DefenseClaw OTLP destination, resolving
+    its environment references in memory so credentials never enter the Agent
+    Control configuration block.
+    """
+    settings = cfg.agent_control.observability
+    if not settings.enabled:
+        return {"observability_enabled": False}
+    if settings.sink == "agent_control":
+        return {"observability_enabled": True}
+
+    destination = next(
+        (item for item in cfg.otel.destinations if item.name == settings.otel_destination),
+        None,
+    )
+    if destination is None:
+        raise SynchronizationError(
+            f"Agent Control OTEL destination {settings.otel_destination!r} is not configured; "
+            "run 'defenseclaw setup galileo' first"
+        )
+    if not cfg.otel.enabled or not destination.enabled or not destination.traces.enabled:
+        raise SynchronizationError(
+            f"Agent Control OTEL destination {settings.otel_destination!r} must have trace export enabled"
+        )
+    protocol = (destination.traces.protocol or destination.protocol).strip().lower()
+    if protocol != "http":
+        raise SynchronizationError("Agent Control ControlSpan export requires an OTLP HTTP destination")
+
+    endpoint = (destination.traces.endpoint or destination.endpoint).strip()
+    url_path = destination.traces.url_path.strip()
+    if url_path:
+        endpoint = endpoint.rstrip("/") + "/" + url_path.lstrip("/")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise SynchronizationError("Agent Control OTEL endpoint must be an absolute HTTPS URL without credentials")
+
+    from defenseclaw.credentials import resolve
+
+    headers: dict[str, str] = {}
+    for name, raw_value in destination.headers.items():
+        value = str(raw_value)
+
+        def replace_secret(match: re.Match[str]) -> str:
+            env_name = match.group(1)
+            credential = resolve(env_name, cfg.data_dir)
+            if not credential.is_set:
+                raise SynchronizationError(
+                    f"Agent Control OTEL credential ${env_name} is not set; run 'defenseclaw keys set {env_name}'"
+                )
+            return credential.value
+
+        value = _ENV_REFERENCE_RE.sub(replace_secret, value)
+        if "\r" in value or "\n" in value:
+            raise SynchronizationError(f"Agent Control OTEL header {name!r} contains a newline")
+        headers[str(name)] = value
+
+    if not any(name.lower() == "galileo-api-key" for name in headers):
+        raise SynchronizationError("Agent Control OTEL destination is missing the Galileo-API-Key header")
+    if not any(name.lower() in {"project", "projectid"} for name in headers):
+        raise SynchronizationError("Agent Control OTEL destination is missing a Galileo project routing header")
+    if not any(name.lower() in {"logstream", "logstreamid"} for name in headers):
+        raise SynchronizationError("Agent Control OTEL destination is missing a Galileo log stream routing header")
+
+    return {
+        "observability_enabled": True,
+        "observability_sink_name": "otel",
+        "observability_sink_config": {
+            "enabled": True,
+            "endpoint": endpoint,
+            "headers": headers,
+            "service_name": cfg.agent_control.agent_name,
+        },
+    }
 
 
 class AgentControlSynchronizer:
@@ -134,7 +216,7 @@ class AgentControlSynchronizer:
         self.audit_logger = audit_logger
         self.state = load_state(self.publisher.state_path)
         self.state.agent_name = self.settings.agent_name
-        self.state.target_type = self.settings.target_type
+        self.state.target_type = self.settings.resolved_target_type()
         self.state.target_id_hash = (
             "sha256:" + hashlib.sha256(self.settings.installation_id.encode("utf-8")).hexdigest()
         )
@@ -464,10 +546,11 @@ class AgentControlSynchronizer:
                     agent_description="DefenseClaw policy synchronization",
                     server_url=self.sdk_server_url,
                     api_key=self.sdk_api_key,
-                    target_type=self.settings.target_type,
+                    api_key_header=self.settings.resolved_api_key_header(),
+                    target_type=self.settings.resolved_target_type(),
                     target_id=self.settings.installation_id,
                     policy_refresh_interval_seconds=self.settings.refresh_seconds,
-                    observability_enabled=self.settings.observability.enabled,
+                    **agent_control_observability_init_kwargs(self.cfg),
                 )
                 controls = self.sdk.get_server_controls()
                 if controls is not None:
