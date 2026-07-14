@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -34,13 +35,23 @@ func runStartup() error {
 	if err != nil {
 		return fmt.Errorf("resolve startup launcher: %w", err)
 	}
-	home, err := currentUserProfile()
-	if err != nil {
-		return fmt.Errorf("resolve user profile: %w", err)
+	state, packaged, stateErr := nativeinstallstate.LoadForExecutable(executable)
+	if stateErr != nil {
+		return fmt.Errorf("validate native install state: %w", stateErr)
 	}
-	gatewayPath, dataRoot, err := startupPaths(executable, home)
-	if err != nil {
-		return err
+	var gatewayPath, dataRoot string
+	if packaged {
+		gatewayPath = filepath.Join(state.InstallRoot, "bin", "defenseclaw-gateway.exe")
+		dataRoot = state.DataRoot
+	} else {
+		home, err := currentUserProfile()
+		if err != nil {
+			return fmt.Errorf("resolve user profile: %w", err)
+		}
+		gatewayPath, dataRoot, err = startupPaths(executable, home)
+		if err != nil {
+			return err
+		}
 	}
 	if info, err := os.Stat(gatewayPath); err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("installed gateway is unavailable: %s", gatewayPath)
@@ -53,7 +64,11 @@ func runStartup() error {
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, gatewayPath, "start")
 	cmd.Dir = dataRoot
-	cmd.Env = withDefenseClawHome(os.Environ(), dataRoot)
+	if packaged {
+		cmd.Env = state.Environment(os.Environ())
+	} else {
+		cmd.Env = withDefenseClawHome(os.Environ(), dataRoot)
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("start DefenseClaw gateway: %w", err)
 	}

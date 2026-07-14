@@ -4,8 +4,12 @@
 package main
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
 func TestLauncherArgs(t *testing.T) {
@@ -34,5 +38,43 @@ func TestLauncherArgs(t *testing.T) {
 func TestLauncherArgsRejectsUnknownName(t *testing.T) {
 	if _, err := launcherArgs("renamed.exe", nil); err == nil {
 		t.Fatal("launcherArgs() accepted an unknown launcher name")
+	}
+}
+
+func TestLauncherEnvRehydratesManagedConnectorHomes(t *testing.T) {
+	t.Setenv("CODEX_HOME", `C:\project\codex`)
+	t.Setenv("CLAUDE_CONFIG_DIR", `C:\project\claude`)
+	t.Setenv("DEFENSECLAW_HOME", `C:\project\defenseclaw`)
+	state := nativeinstallstate.State{
+		InstallRoot:     `C:\Users\tester\Programs\DefenseClaw`,
+		DataRoot:        `C:\Users\tester\.defenseclaw`,
+		CodexHome:       `D:\Agent Profiles\Codex`,
+		ClaudeConfigDir: `D:\Agent Profiles\Claude`,
+	}
+	env := launcherEnv(
+		`C:\Users\tester\Programs\DefenseClaw\bin`,
+		`C:\Users\tester\Programs\DefenseClaw\runtime\python`,
+		state.InstallRoot,
+		state,
+		true,
+	)
+	joined := strings.Join(env, "\n")
+	for _, expected := range []string{
+		"CODEX_HOME=" + state.CodexHome,
+		"CLAUDE_CONFIG_DIR=" + state.ClaudeConfigDir,
+		"DEFENSECLAW_HOME=" + state.DataRoot,
+		"DEFENSECLAW_INSTALL_ROOT=" + state.InstallRoot,
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("launcher environment missing %q: %v", expected, env)
+		}
+	}
+	for _, inherited := range []string{`C:\project\codex`, `C:\project\claude`, `C:\project\defenseclaw`} {
+		if strings.Contains(joined, inherited) {
+			t.Fatalf("launcher retained ambient profile %q: %v", inherited, env)
+		}
+	}
+	if os.Getenv("CODEX_HOME") == state.CodexHome {
+		t.Fatal("launcher environment construction mutated the parent process")
 	}
 }

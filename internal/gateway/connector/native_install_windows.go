@@ -26,16 +26,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// canonicalNativeWindowsInstallRoot returns the native setup's fixed per-user
-// application root. The Known Folder API is authoritative here: environment
-// variables and installer state are attacker-controlled inputs and cannot
-// establish trust in an otherwise arbitrary executable tree.
+// canonicalNativeWindowsInstallRoot returns the native setup's redirected
+// per-user Programs root. The Known Folder API is authoritative here:
+// environment variables and installer state cannot establish trust in an
+// otherwise arbitrary executable tree.
 func canonicalNativeWindowsInstallRoot() string {
-	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
-	if err != nil || strings.TrimSpace(localAppData) == "" {
+	programs, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_UserProgramFiles)
+	if err != nil || strings.TrimSpace(programs) == "" {
 		return ""
 	}
-	return filepath.Join(localAppData, "Programs", "DefenseClaw")
+	return filepath.Join(programs, "DefenseClaw")
 }
 
 func nativeWindowsPathHasNoReparsePoints(path string) bool {

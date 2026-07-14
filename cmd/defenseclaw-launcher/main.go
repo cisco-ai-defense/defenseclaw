@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
 const consoleEntryPointScript = `import importlib.metadata as m, sys; name=sys.argv[1]; sys.argv=[name, *sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
@@ -28,6 +30,11 @@ func main() {
 	}
 	binDir := filepath.Dir(self)
 	installRoot := filepath.Dir(binDir)
+	installState, packaged, stateErr := nativeinstallstate.LoadForExecutable(self)
+	if stateErr != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: validate native install state: %v\n", stateErr)
+		os.Exit(1)
+	}
 	python := filepath.Join(installRoot, "runtime", "python", "python.exe")
 	if _, err := os.Stat(python); err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: embedded Python runtime is missing: %s\n", python)
@@ -43,7 +50,7 @@ func main() {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = launcherEnv(binDir, filepath.Dir(python), installRoot)
+	cmd.Env = launcherEnv(binDir, filepath.Dir(python), installRoot, installState, packaged)
 	if cwd, err := os.Getwd(); err == nil {
 		cmd.Dir = cwd
 	}
@@ -74,11 +81,15 @@ func launcherArgs(executable string, userArgs []string) ([]string, error) {
 	return append([]string{"-I", "-c", consoleEntryPointScript, entryPoint}, userArgs...), nil
 }
 
-func launcherEnv(binDir, pythonDir, installRoot string) []string {
+func launcherEnv(binDir, pythonDir, installRoot string, state nativeinstallstate.State, packaged bool) []string {
 	pathValue := binDir + string(os.PathListSeparator) + pythonDir
-	env := make([]string, 0, len(os.Environ())+3)
+	base := os.Environ()
+	if packaged {
+		base = state.Environment(base)
+	}
+	env := make([]string, 0, len(base)+3)
 	sawPath := false
-	for _, entry := range os.Environ() {
+	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
@@ -96,6 +107,8 @@ func launcherEnv(binDir, pythonDir, installRoot string) []string {
 	if !sawPath {
 		env = append(env, "PATH="+pathValue)
 	}
-	env = append(env, "DEFENSECLAW_INSTALL_ROOT="+installRoot)
+	if !packaged {
+		env = append(env, "DEFENSECLAW_INSTALL_ROOT="+installRoot)
+	}
 	return env
 }
