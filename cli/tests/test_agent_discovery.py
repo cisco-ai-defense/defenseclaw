@@ -524,6 +524,76 @@ def test_codex_desktop_bin_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     assert ad._path_key(str(desktop_bin.parent)) not in prefixes
 
 
+def test_codex_windows_discovery_enumerates_bun_and_custom_manager_prefixes(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    home = tmp_path / "home"
+    local_app_data = tmp_path / "local-app-data"
+    roaming_app_data = tmp_path / "roaming-app-data"
+    bun_install = tmp_path / "custom-bun"
+    pnpm_home = tmp_path / "custom-pnpm"
+    npm_prefix = tmp_path / "custom-npm"
+    volta_home = tmp_path / "custom-volta"
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("APPDATA", str(roaming_app_data))
+    monkeypatch.setenv("BUN_INSTALL", str(bun_install))
+    monkeypatch.setenv("PNPM_HOME", str(pnpm_home))
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(npm_prefix))
+    monkeypatch.setenv("VOLTA_HOME", str(volta_home))
+
+    prefixes = {
+        ad._path_key(path)
+        for path in ad._windows_package_manager_bin_prefixes(
+            local_app_data=str(local_app_data),
+            roaming_app_data=str(roaming_app_data),
+            home=str(home),
+        )
+    }
+    expected = {
+        home / ".bun" / "bin",
+        home / ".volta" / "bin",
+        local_app_data / "pnpm",
+        roaming_app_data / "npm",
+        bun_install / "bin",
+        pnpm_home,
+        npm_prefix,
+        volta_home / "bin",
+    }
+    assert {ad._path_key(str(path)) for path in expected} <= prefixes
+
+    candidates = {
+        ad._path_key(path)
+        for path in ad._windows_binary_candidates("codex", "codex")
+    }
+    for prefix in expected:
+        assert ad._path_key(str(prefix / "codex.exe")) in candidates
+
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    assert {ad._path_key(str(path)) for path in expected} <= trusted
+
+
+def test_windows_package_manager_prefixes_ignore_relative_environment_roots(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("BUN_INSTALL", "relative-bun")
+    monkeypatch.setenv("PNPM_HOME", "relative-pnpm")
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", "relative-npm")
+    monkeypatch.setenv("VOLTA_HOME", "relative-volta")
+
+    prefixes = ad._windows_package_manager_bin_prefixes(
+        local_app_data="",
+        roaming_app_data="",
+        home="",
+    )
+
+    assert prefixes == ()
+
+
 def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     local_app_data = tmp_path / "local-app-data"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))

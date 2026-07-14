@@ -113,6 +113,60 @@ _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX: tuple[str, ...] = (
 )
 
 
+def _windows_package_manager_bin_prefixes(
+    *,
+    local_app_data: str,
+    roaming_app_data: str,
+    home: str,
+) -> tuple[str, ...]:
+    """Return documented per-user JavaScript package-manager bin roots.
+
+    Custom roots are accepted only when absolute. Executables below every
+    returned root still pass the normal owner/DACL/reparse validation before
+    discovery launches them.
+    """
+
+    candidates: list[str] = []
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "pnpm"))
+    if roaming_app_data:
+        candidates.append(os.path.join(roaming_app_data, "npm"))
+    if home:
+        candidates.extend(
+            (
+                os.path.join(home, ".bun", "bin"),
+                os.path.join(home, ".volta", "bin"),
+            )
+        )
+
+    custom_roots = (
+        ("BUN_INSTALL", "bin"),
+        ("PNPM_HOME", ""),
+        ("NPM_CONFIG_PREFIX", ""),
+        ("VOLTA_HOME", "bin"),
+    )
+    for variable, suffix in custom_roots:
+        raw = os.environ.get(variable, "").strip().strip('"')
+        if not raw:
+            continue
+        root = os.path.expandvars(os.path.expanduser(raw))
+        if not os.path.isabs(root):
+            continue
+        candidates.append(os.path.join(root, suffix) if suffix else root)
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        # This helper runs while module-level trusted defaults are initialized,
+        # before the shared _path_key helper is defined below.
+        key = os.path.normcase(os.path.normpath(os.path.abspath(candidate)))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
+
+
 def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     """Return narrow, documented Windows CLI installation roots.
 
@@ -160,11 +214,15 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
                 os.path.join(local_app_data, "Programs", "Windsurf", "bin"),
                 os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
-                os.path.join(local_app_data, "pnpm"),
             )
         )
-    if roaming_app_data:
-        candidates.append(os.path.join(roaming_app_data, "npm"))
+    candidates.extend(
+        _windows_package_manager_bin_prefixes(
+            local_app_data=local_app_data,
+            roaming_app_data=roaming_app_data,
+            home=home,
+        )
+    )
     if home:
         candidates.extend(
             (
@@ -1317,14 +1375,14 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
 
     prefixes: list[str] = []
     if local_app_data:
-        prefixes.extend(
-            (
-                os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
-                os.path.join(local_app_data, "pnpm"),
-            )
+        prefixes.append(os.path.join(local_app_data, "Microsoft", "WinGet", "Links"))
+    prefixes.extend(
+        _windows_package_manager_bin_prefixes(
+            local_app_data=local_app_data,
+            roaming_app_data=roaming_app_data,
+            home=home,
         )
-    if roaming_app_data:
-        prefixes.append(os.path.join(roaming_app_data, "npm"))
+    )
     if home:
         prefixes.extend((os.path.join(home, ".local", "bin"), os.path.join(home, "scoop", "shims")))
 
