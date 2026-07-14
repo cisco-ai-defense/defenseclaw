@@ -3,8 +3,11 @@
 
 package main
 
-import "golang.org/x/sys/windows"
+import (
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
+)
 
 func currentUserProfile() (string, error) {
-	return windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT)
+	return winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
 }

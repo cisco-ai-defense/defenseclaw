@@ -573,15 +573,16 @@ function Invoke-PackagedInstaller(
     if (-not (Test-Path -LiteralPath $Artifacts -PathType Container)) { throw "artifact directory missing: $Artifacts" }
     $pwsh = (Get-Process -Id $PID).Path
     $install = Join-Path $WorkspaceRoot 'scripts\install.ps1'
-    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $result = Invoke-WindowsNativeProcess $pwsh @(
-        '-NoLogo', '-NoProfile', '-File', $install, '-Local', ([IO.Path]::GetFullPath($Artifacts)),
-        '-Connector', 'none', '-Yes', '-NoPersistPath'
-    ) -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds 1800 `
-        -LogPath (Join-Path $Root "logs\$LogName")
-    $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (-not [string]::Equals($userPathBefore, $userPathAfter, [StringComparison]::Ordinal)) {
-        throw 'packaged install mutated the runner user PATH despite -NoPersistPath'
+    $userPathBefore = Get-UserPathRegistrySnapshot
+    try {
+        $result = Invoke-WindowsNativeProcess $pwsh @(
+            '-NoLogo', '-NoProfile', '-File', $install, '-Local', ([IO.Path]::GetFullPath($Artifacts)),
+            '-Connector', 'none', '-Yes', '-NoPersistPath'
+        ) -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds 1800 `
+            -LogPath (Join-Path $Root "logs\$LogName")
+    } finally {
+        Assert-UserPathRegistrySnapshot $userPathBefore `
+            'packaged install mutated the runner user PATH despite -NoPersistPath'
     }
     return [pscustomobject]@{ Profile = $profile; Result = $result }
 }
@@ -1440,10 +1441,66 @@ function Get-DefenseClawGatewayAutoStart {
 }
 
 function Assert-GatewayAutoStart([string]$Gateway) {
+    $gatewayPath = [IO.Path]::GetFullPath($Gateway)
+    $startup = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $gatewayPath) 'defenseclaw-startup.exe'))
+    if (-not (Test-Path -LiteralPath $startup -PathType Leaf)) {
+        throw "gateway logon launcher is missing: $startup"
+    }
     $actual = Get-DefenseClawGatewayAutoStart
-    $expected = '"' + $Gateway + '" start'
+    $expected = '"' + $startup + '"'
     if (-not [string]::Equals([string]$actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
         throw "gateway logon registration mismatch: '$actual', expected '$expected'"
+    }
+}
+
+function Get-UserPathRegistrySnapshot {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+    if ($null -eq $key) {
+        return [pscustomobject]@{ Exists = $false; Kind = $null; Value = $null }
+    }
+    try {
+        $exists = $false
+        foreach ($name in $key.GetValueNames()) {
+            if ([string]::Equals([string]$name, 'Path', [StringComparison]::OrdinalIgnoreCase)) {
+                $exists = $true
+                break
+            }
+        }
+        if (-not $exists) {
+            return [pscustomobject]@{ Exists = $false; Kind = $null; Value = $null }
+        }
+        $kind = [string]$key.GetValueKind('Path')
+        $value = $key.GetValue(
+            'Path',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        return [pscustomobject]@{
+            Exists = $true
+            Kind = $kind
+            Value = [string]$value
+        }
+    } finally {
+        $key.Dispose()
+    }
+}
+
+function Assert-UserPathRegistrySnapshot([object]$Expected, [string]$Context) {
+    $actual = Get-UserPathRegistrySnapshot
+    $matches = [bool]$Expected.Exists -eq [bool]$actual.Exists
+    if ($matches -and [bool]$Expected.Exists) {
+        $matches = [string]::Equals(
+            [string]$Expected.Kind,
+            [string]$actual.Kind,
+            [StringComparison]::Ordinal
+        ) -and [string]::Equals(
+            [string]$Expected.Value,
+            [string]$actual.Value,
+            [StringComparison]::Ordinal
+        )
+    }
+    if (-not $matches) {
+        throw "$Context (before: exists=$($Expected.Exists), kind=$($Expected.Kind); after: exists=$($actual.Exists), kind=$($actual.Kind))"
     }
 }
 
@@ -1606,7 +1663,7 @@ function Invoke-WizardConfigureLaterAcceptance(
     [string]$Gateway,
     [string]$ARPKey,
     [string[]]$ConnectorConfigPaths,
-    [AllowNull()][string]$UserPathBefore
+    [object]$UserPathBefore
 ) {
     Invoke-WizardInstall $Setup $Root 'none' 'observe' $false `
         (Join-Path $Logs 'wizard-configure-later.json')
@@ -1641,13 +1698,8 @@ function Invoke-WizardConfigureLaterAcceptance(
     if (Test-Path -LiteralPath $ARPKey) {
         throw 'Configure later uninstall left Installed Apps registration behind'
     }
-    if (-not [string]::Equals(
-        $UserPathBefore,
-        [Environment]::GetEnvironmentVariable('Path', 'User'),
-        [StringComparison]::Ordinal
-    )) {
-        throw 'Configure later uninstall did not restore the original user PATH exactly'
-    }
+    Assert-UserPathRegistrySnapshot $UserPathBefore `
+        'Configure later uninstall did not restore the original user PATH exactly'
 }
 
 function Invoke-WizardConnectorAcceptance(
@@ -1659,7 +1711,7 @@ function Invoke-WizardConnectorAcceptance(
     [string]$ARPKey,
     [string]$UserProfile,
     [string]$FixtureBin,
-    [AllowNull()][string]$UserPathBefore,
+    [object]$UserPathBefore,
     [string]$ConnectorName,
     [ValidateSet('observe', 'action')][string]$Mode
 ) {
@@ -1757,13 +1809,8 @@ function Invoke-WizardConnectorAcceptance(
     )
     Assert-NoGatewayAutoStart
     Assert-NoInstalledGatewayProcess $gateway
-    if (-not [string]::Equals(
-        $UserPathBefore,
-        [Environment]::GetEnvironmentVariable('Path', 'User'),
-        [StringComparison]::Ordinal
-    )) {
-        throw "wizard $ConnectorName uninstall did not restore the original user PATH exactly"
-    }
+    Assert-UserPathRegistrySnapshot $UserPathBefore `
+        "wizard $ConnectorName uninstall did not restore the original user PATH exactly"
 }
 
 function Invoke-SetupAcceptance {
@@ -1805,7 +1852,7 @@ function Invoke-SetupAcceptance {
     if (Test-Path -LiteralPath $dataRoot) { throw "refusing to overwrite existing current-user data: $dataRoot" }
     if (Test-Path -LiteralPath $arpKey) { throw 'refusing to overwrite existing DefenseClaw Installed Apps registration' }
     Assert-NoGatewayAutoStart
-    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $userPathBefore = Get-UserPathRegistrySnapshot
     $processPathBefore = $env:PATH
     $trustedPrefixesBefore = [Environment]::GetEnvironmentVariable('DEFENSECLAW_TRUSTED_BIN_PREFIXES')
     $launcher = Join-Path $installRoot 'bin\defenseclaw.exe'
@@ -2008,9 +2055,8 @@ function Invoke-SetupAcceptance {
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Assert-NoGatewayAutoStart
-        if (-not [string]::Equals($userPathBefore, [Environment]::GetEnvironmentVariable('Path', 'User'), [StringComparison]::Ordinal)) {
-            throw 'setup uninstall did not restore the original user PATH exactly'
-        }
+        Assert-UserPathRegistrySnapshot $userPathBefore `
+            'setup uninstall did not restore the original user PATH exactly'
 
         Invoke-WindowsNativeProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
@@ -2056,6 +2102,8 @@ function Invoke-SetupAcceptance {
         if ($disposableGithubRunner) {
             Assert-NoDefenseClawRegistration $connectorConfigPaths
         }
+        Assert-UserPathRegistrySnapshot $userPathBefore `
+            'setup failure cleanup did not restore the original user PATH exactly'
     }
 }
 
@@ -2085,7 +2133,7 @@ function Invoke-Contract {
     if (Test-Path -LiteralPath $arpKey) {
         throw 'refusing to overwrite existing DefenseClaw Installed Apps registration'
     }
-    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $userPathBefore = Get-UserPathRegistrySnapshot
     $originalEnvironment = @{}
     foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
         $originalEnvironment[[string]$entry.Key] = [string]$entry.Value
@@ -2198,13 +2246,12 @@ function Invoke-Contract {
                 'Process'
             )
         }
-        if (-not [string]::Equals(
-            $userPathBefore,
-            [Environment]::GetEnvironmentVariable('Path', 'User'),
-            [StringComparison]::Ordinal
-        )) {
+        try {
+            Assert-UserPathRegistrySnapshot $userPathBefore `
+                'native Setup contract did not restore the original user PATH exactly'
+        } catch {
             if ($null -eq $cleanupError) {
-                $cleanupError = 'native Setup contract did not restore the original user PATH exactly'
+                $cleanupError = $_
             }
         }
         if ($null -ne $cleanupError) { throw $cleanupError }

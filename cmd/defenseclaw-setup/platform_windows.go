@@ -127,7 +127,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 }
 
 func defaultInstallRoot() (string, error) {
-	local, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +143,7 @@ func defaultDataRoot() (string, error) {
 }
 
 func defaultProfileRoot() (string, error) {
-	return windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT)
+	return winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
 }
 
 func defaultOpenClawRoot() (string, error) {
@@ -155,7 +155,7 @@ func defaultOpenClawRoot() (string, error) {
 }
 
 func defaultMaintenancePath() (string, error) {
-	local, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return "", err
 	}
@@ -163,7 +163,7 @@ func defaultMaintenancePath() (string, error) {
 }
 
 func defaultTransactionRoot() (string, error) {
-	local, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return "", err
 	}
@@ -171,7 +171,7 @@ func defaultTransactionRoot() (string, error) {
 }
 
 func defaultPayloadTempRoot() (string, error) {
-	local, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return "", err
 	}

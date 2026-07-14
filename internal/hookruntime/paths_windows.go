@@ -10,11 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
 func CurrentUserPaths() (Paths, error) {
-	localAppData, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve LocalAppData Known Folder: %w", err)
 	}

@@ -468,6 +468,13 @@ try {
         $wizardAcceptance -match 'Assert-OnlyInstalledGatewayProcesses' -and
         $wizardAcceptance -notmatch "@\('watchdog', 'start'\)") `
         'wizard lifecycle requires STARTGATEWAY to auto-start an owned gateway and watchdog'
+    $autoStartAssertion = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Assert-GatewayAutoStart\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($autoStartAssertion -match 'defenseclaw-startup\.exe' -and
+        $autoStartAssertion -notmatch '\$Gateway \+ ''" start') `
+        'setup acceptance binds logon startup to the no-console startup sibling without gateway CLI arguments'
     Assert-True ($nativeHarnessText -match '\[IO\.FileShare\]::None' -and
         $nativeHarnessText -notmatch 'import time; time\.sleep\(60\)') `
         'setup locked-file acceptance uses a deterministic non-shareable handle'
@@ -487,9 +494,18 @@ try {
         $nativeWorkflowText -match '-Operation setup-acceptance') `
         'required lifecycle certification no longer routes through the legacy wheel materializer'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
-    Assert-True ($contractFunction -match "GetEnvironmentVariable\('Path', 'User'\)" -and
+    $pathSnapshotFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Get-UserPathRegistrySnapshot\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($pathSnapshotFunction -match 'GetValueNames' -and
+        $pathSnapshotFunction -match 'GetValueKind' -and
+        $pathSnapshotFunction -match 'DoNotExpandEnvironmentNames') `
+        'PATH lifecycle snapshots distinguish a missing value from an empty value and preserve registry type/raw text'
+    Assert-True ($contractFunction -match 'Get-UserPathRegistrySnapshot' -and
+        $contractFunction -match 'Assert-UserPathRegistrySnapshot' -and
         $contractFunction -match 'restore the original user PATH exactly') `
-        'native Setup connector contract proves uninstall restores the runner user PATH'
+        'native Setup connector contract proves uninstall restores exact PATH registry existence, type, and value'
     $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
     $stateProcessesFunction = [regex]::Match(
         $nativeHarnessText,

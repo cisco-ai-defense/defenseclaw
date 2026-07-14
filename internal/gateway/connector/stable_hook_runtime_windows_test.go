@@ -9,11 +9,32 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestCanonicalNativeWindowsInstallRootIgnoresConnectorEnvironmentOverrides(t *testing.T) {
+	want := canonicalNativeWindowsInstallRoot()
+	if strings.TrimSpace(want) == "" {
+		t.Fatal("token-bound native install root is empty before environment overrides")
+	}
+	foreignProfile := t.TempDir()
+	for name, value := range map[string]string{
+		"USERPROFILE":  foreignProfile,
+		"HOME":         foreignProfile,
+		"LOCALAPPDATA": filepath.Join(foreignProfile, "AppData", "Local"),
+		"APPDATA":      filepath.Join(foreignProfile, "AppData", "Roaming"),
+	} {
+		t.Setenv(name, value)
+	}
+	got := canonicalNativeWindowsInstallRoot()
+	if !sameWindowsInstallPath(got, want) {
+		t.Fatalf("token-bound native install root changed with connector environment: got %q, want %q", got, want)
+	}
+}
 
 const stableHookUninstallTransactionID = "0123456789abcdef0123456789abcdef"
 

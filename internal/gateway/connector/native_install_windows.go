@@ -31,7 +31,7 @@ import (
 // variables and installer state are attacker-controlled inputs and cannot
 // establish trust in an otherwise arbitrary executable tree.
 func canonicalNativeWindowsInstallRoot() string {
-	localAppData, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil || strings.TrimSpace(localAppData) == "" {
 		return ""
 	}

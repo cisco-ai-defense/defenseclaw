@@ -9,7 +9,43 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
+
+func TestCurrentUserKnownFolderPathIgnoresProcessEnvironmentOverrides(t *testing.T) {
+	wantProfile, err := CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLocal, err := CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignProfile := t.TempDir()
+	for name, value := range map[string]string{
+		"USERPROFILE":  foreignProfile,
+		"HOME":         foreignProfile,
+		"LOCALAPPDATA": filepath.Join(foreignProfile, "AppData", "Local"),
+		"APPDATA":      filepath.Join(foreignProfile, "AppData", "Roaming"),
+	} {
+		t.Setenv(name, value)
+	}
+	gotProfile, err := CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLocal, err := CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Clean(gotProfile), filepath.Clean(wantProfile)) {
+		t.Fatalf("token-bound profile changed with process environment: got %q, want %q", gotProfile, wantProfile)
+	}
+	if !strings.EqualFold(filepath.Clean(gotLocal), filepath.Clean(wantLocal)) {
+		t.Fatalf("token-bound LocalAppData changed with process environment: got %q, want %q", gotLocal, wantLocal)
+	}
+}
 
 func TestExtendedLocalAndUNCPaths(t *testing.T) {
 	local, err := Extended(filepath.Join(t.TempDir(), "nested", "file"))

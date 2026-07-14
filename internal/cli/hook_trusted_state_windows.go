@@ -113,7 +113,7 @@ func trustedNativeHookHome() (string, bool) {
 		// The canonical stable launcher never falls back to project environment,
 		// even while publishing or after uninstall. main exits it as a no-op; the
 		// fallback only keeps direct unit callers deterministic.
-		if profile, err := windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT); err == nil {
+		if profile, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile); err == nil {
 			return filepath.Join(profile, config.DefaultDataDirName), true
 		}
 		return "", true
@@ -126,7 +126,7 @@ func trustedNativeHookHome() (string, bool) {
 	// DEFENSECLAW_HOME. If its installer state is unavailable, the Windows
 	// profile known-folder remains independent of project-supplied environment.
 	fallbackHome := ""
-	if profile, knownFolderErr := windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT); knownFolderErr == nil {
+	if profile, knownFolderErr := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile); knownFolderErr == nil {
 		fallbackHome = filepath.Join(profile, config.DefaultDataDirName)
 	}
 
