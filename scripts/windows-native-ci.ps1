@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Native Windows x64 CI build, packaged-install, lifecycle, and cleanup harness.
+    Native Windows x64 CI build, Setup lifecycle, and cleanup harness.
 
 .DESCRIPTION
     Keeps every mutable profile/cache/temp path below StateRoot. The harness is
@@ -12,7 +12,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('stage-package-data', 'build-artifacts', 'build-installer', 'acceptance', 'setup-acceptance', 'contract', 'capture', 'cleanup', 'self-test')]
+    [ValidateSet('stage-package-data', 'build-artifacts', 'build-installer', 'setup-acceptance', 'contract', 'capture', 'cleanup', 'self-test')]
     [string]$Operation = 'self-test',
     [string]$WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-windows-native-ci'),
@@ -72,12 +72,6 @@ function Assert-CiscoAuthenticodeSignature([string]$Path) {
     if ($state.Status -ne 'Valid' -or $state.Publisher -ne 'Cisco Systems, Inc.') {
         throw "Cisco Authenticode validation failed for ${Path}: status=$($state.Status), publisher=$($state.Publisher)"
     }
-}
-
-function Test-PathWithin([string]$Path, [string]$Root) {
-    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Assert-NoReparseAncestors([string]$Path) {
@@ -2068,10 +2062,36 @@ function Invoke-SetupAcceptance {
 function Invoke-Contract {
     Assert-NativeWindowsX64
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for contract' }
+    if (-not $AllowCurrentUserSetupAcceptance -and $env:GITHUB_ACTIONS -ne 'true') {
+        throw 'contract installs native Setup for the current Windows user. Run only on a disposable CI user, or pass -AllowCurrentUserSetupAcceptance explicitly.'
+    }
+    $root = Assert-SafeStateRoot $StateRoot
+    $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
+    $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
+    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+        throw "native setup executable not found: $setup"
+    }
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $realProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $installRoot = Join-Path $localAppData 'Programs\DefenseClaw'
+    $dataRoot = Join-Path $realProfile '.defenseclaw'
+    $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
+    if (Test-Path -LiteralPath $installRoot) {
+        throw "refusing to overwrite an existing current-user install: $installRoot"
+    }
+    if (Test-Path -LiteralPath $dataRoot) {
+        throw "refusing to overwrite existing current-user data: $dataRoot"
+    }
+    if (Test-Path -LiteralPath $arpKey) {
+        throw 'refusing to overwrite existing DefenseClaw Installed Apps registration'
+    }
+    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     $originalEnvironment = @{}
     foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
         $originalEnvironment[[string]$entry.Key] = [string]$entry.Value
     }
+    $installed = $false
+    $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
     try {
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
@@ -2080,11 +2100,26 @@ function Invoke-Contract {
         )) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }
-        $root = Assert-SafeStateRoot $StateRoot
-        $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
-        $installedProfile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
-        $contractRoot = [IO.Path]::GetFullPath($installedProfile.Root).TrimEnd('\')
-        $contractHome = [IO.Path]::GetFullPath($installedProfile.Profile).TrimEnd('\')
+        # The connector contract consumes the same offline native Setup
+        # artifact shipped to users. The legacy install.ps1/uv/wheel
+        # materializer is intentionally absent from this release gate.
+        Invoke-WindowsNativeProcess $setup @(
+            '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
+            'MODE=observe', 'STARTGATEWAY=0'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $root 'setup-contract-install.log') | Out-Null
+        $installed = $true
+        $managedBin = Join-Path $installRoot 'bin'
+        $managedPython = Join-Path $installRoot 'runtime\python'
+        $launcher = Join-Path $managedBin 'defenseclaw.exe'
+        foreach ($required in @($launcher, $gateway, (Join-Path $managedPython 'python.exe'))) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                throw "native Setup contract is missing installed artifact: $required"
+            }
+        }
+        Assert-ManagedDistributionIntegrity (Join-Path $managedPython 'python.exe') $managedPython
+
+        $contractRoot = [IO.Path]::GetFullPath($root).TrimEnd('\')
+        $contractHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'home')).TrimEnd('\')
         $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
         $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
         $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
@@ -2114,7 +2149,7 @@ function Invoke-Contract {
         $env:TMP = $env:TEMP
         $env:CODEX_HOME = $codexHome
         $env:CLAUDE_CONFIG_DIR = $claudeHome
-        $env:PATH = "$($installedProfile.VenvScripts);$($installedProfile.Bin);$env:PATH"
+        $env:PATH = "$managedPython;$managedBin;$env:PATH"
         $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
         & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
             -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
@@ -2134,6 +2169,19 @@ function Invoke-Contract {
             throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
         }
     } finally {
+        $cleanupError = $null
+        try {
+            if ($installed -and (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+                Invoke-WindowsNativeProcess $gateway @('stop') -AllowedExitCodes @(0, 1) `
+                    -TimeoutSeconds 90 -LogPath (Join-Path $root 'setup-contract-stop.log') | Out-Null
+            }
+            if ($installed -or (Test-Path -LiteralPath $installRoot)) {
+                Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+                    -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
+            }
+        } catch {
+            $cleanupError = $_
+        }
         $currentNames = @(
             [Environment]::GetEnvironmentVariables('Process').Keys |
                 ForEach-Object { [string]$_ }
@@ -2150,6 +2198,16 @@ function Invoke-Contract {
                 'Process'
             )
         }
+        if (-not [string]::Equals(
+            $userPathBefore,
+            [Environment]::GetEnvironmentVariable('Path', 'User'),
+            [StringComparison]::Ordinal
+        )) {
+            if ($null -eq $cleanupError) {
+                $cleanupError = 'native Setup contract did not restore the original user PATH exactly'
+            }
+        }
+        if ($null -ne $cleanupError) { throw $cleanupError }
     }
 }
 
@@ -2293,7 +2351,6 @@ if (-not $NoRun) {
         'stage-package-data' { Stage-PackageData (Join-Path $WorkspaceRoot 'cli\defenseclaw') }
         'build-artifacts' { Invoke-BuildArtifacts }
         'build-installer' { Invoke-BuildInstaller }
-        'acceptance' { Invoke-Acceptance }
         'setup-acceptance' { Invoke-SetupAcceptance }
         'contract' { Invoke-Contract }
         'capture' { Invoke-Capture }

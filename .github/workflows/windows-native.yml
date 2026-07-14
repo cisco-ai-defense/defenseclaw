@@ -276,7 +276,7 @@ jobs:
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
   packaged-acceptance:
-    name: Windows packaged install and lifecycle acceptance
+    name: Windows native Setup install and lifecycle acceptance
     needs: package-artifact
     runs-on: windows-latest
     timeout-minutes: 75
@@ -286,17 +286,11 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
-      - name: Fresh isolated install, smoke, lifecycle, reset, uninstall, and reinstall
-        run: ./scripts/windows-native-ci.ps1 -Operation acceptance -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
-      - name: Native setup EXE isolated install, repair, and uninstall smoke
+      - name: Native Setup EXE install, CLI/TUI smoke, repair, and uninstall
         run: ./scripts/windows-native-ci.ps1 -Operation setup-acceptance -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}

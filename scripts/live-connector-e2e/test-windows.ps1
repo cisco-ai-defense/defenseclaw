@@ -471,53 +471,25 @@ try {
     Assert-True ($nativeHarnessText -match '\[IO\.FileShare\]::None' -and
         $nativeHarnessText -notmatch 'import time; time\.sleep\(60\)') `
         'setup locked-file acceptance uses a deterministic non-shareable handle'
-    $acceptance = [regex]::Match(
+    $contractFunction = [regex]::Match(
         $nativeHarnessText,
-        '(?s)function Invoke-Acceptance\b.*?\n\}'
+        '(?s)function Invoke-Contract\b.*?(?=\r?\nfunction Get-StateProcesses)'
     ).Value
-    foreach ($phase in @('Invoke-InstallerAcceptance', 'Invoke-GatewayLifecycleAcceptance')) {
-        Assert-True ($acceptance -match "\b$([regex]::Escape($phase))\b") `
-            "packaged acceptance reaches $phase"
-    }
-    $installerAcceptance = [regex]::Match(
-        $nativeHarnessText,
-        '(?s)function Invoke-InstallerAcceptance\b.*?\n\}'
-    ).Value
-    foreach ($acceptanceHelper in @(
-        'Assert-PackagedDoctorSmoke',
-        'Assert-PackagedDaclAcceptance',
-        'Assert-PackagedRepairAcceptance',
-        'Assert-ResetAcceptance',
-        'Invoke-FullUninstallCycle'
-    )) {
-        $definition = [regex]::Match(
-            $nativeHarnessText,
-            "(?s)function $([regex]::Escape($acceptanceHelper))\b.*?\n\}"
-        ).Value
-        Assert-True ($definition -and $installerAcceptance -match "\b$([regex]::Escape($acceptanceHelper))\b") `
-            "packaged installer acceptance reaches $acceptanceHelper"
-    }
-    $gatewayAcceptance = [regex]::Match(
-        $nativeHarnessText,
-        '(?s)function Invoke-GatewayLifecycleAcceptance\b.*?\n\}'
-    ).Value
-    foreach ($acceptanceHelper in @(
-        'Assert-RunningReinstallAcceptance',
-        'Assert-TransactionalRollbackAcceptance'
-    )) {
-        $definition = [regex]::Match(
-            $nativeHarnessText,
-            "(?s)function $([regex]::Escape($acceptanceHelper))\b.*?\n\}"
-        ).Value
-        Assert-True ($definition -and $gatewayAcceptance -match "\b$([regex]::Escape($acceptanceHelper))\b") `
-            "packaged gateway acceptance reaches $acceptanceHelper"
-    }
-    Assert-True ($gatewayAcceptance -match "@\('start'\) -Timeout 90" -and
-        $gatewayAcceptance -match "@\('restart'\) -Timeout 90") `
-        'packaged gateway lifecycle lets the native 60-second readiness deadline report and clean up'
+    Assert-True ($contractFunction -match 'DefenseClawSetup-x64\.exe' -and
+        $contractFunction -match "'CONNECTOR=none'" -and
+        $contractFunction -match 'Assert-ManagedDistributionIntegrity' -and
+        $contractFunction -match "@\('/uninstall', '/quiet', 'DELETEUSERDATA=1'\)" -and
+        $contractFunction -notmatch 'Install-PackagedArtifacts' -and
+        $contractFunction -notmatch 'scripts\\install\.ps1') `
+        'connector contract installs, validates, and removes the exact native Setup artifact'
+    Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
+        $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
+        $nativeWorkflowText -match '-Operation setup-acceptance') `
+        'required lifecycle certification no longer routes through the legacy wheel materializer'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
-    Assert-True ($installerText -match '\[switch\]\$NoPersistPath' -and $nativeHarnessText -match '-NoPersistPath') 'CI install opts out of persistent user PATH changes'
-    Assert-True ($nativeHarnessText -match "GetEnvironmentVariable\('Path', 'User'\)" -and $nativeHarnessText -match 'runner user PATH despite -NoPersistPath') 'packaged install verifies the runner user PATH was unchanged'
+    Assert-True ($contractFunction -match "GetEnvironmentVariable\('Path', 'User'\)" -and
+        $contractFunction -match 'restore the original user PATH exactly') `
+        'native Setup connector contract proves uninstall restores the runner user PATH'
     $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
     $stateProcessesFunction = [regex]::Match(
         $nativeHarnessText,
