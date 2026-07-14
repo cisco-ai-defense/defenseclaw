@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -265,6 +266,9 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 }
 
 func TestGatewayAutoStartCommandQuotesPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Run-key command quoting")
+	}
 	path := `C:\Users\Jane Doe\DefenseClaw\bin\defenseclaw-gateway.exe`
 	if got, want := gatewayAutoStartCommand(path), `"C:\Users\Jane Doe\DefenseClaw\bin\defenseclaw-startup.exe"`; got != want {
 		t.Fatalf("auto-start command = %q, want %q", got, want)

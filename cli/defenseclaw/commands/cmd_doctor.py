@@ -1416,7 +1416,11 @@ def _check_claudecode_hooks(
             pathext=pathext,
         )
         return
-    settings_path = connector_config_files("claudecode")[0]
+    # Honor an explicitly modeled config path on every platform.  This keeps
+    # Doctor bound to the same Claude invocation that the caller selected and
+    # avoids accidentally inspecting an unrelated process-wide
+    # CLAUDE_CONFIG_DIR while validating a project or alternate home.
+    settings_path = config_path or connector_config_files("claudecode")[0]
     if not os.path.isfile(settings_path):
         _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
         return

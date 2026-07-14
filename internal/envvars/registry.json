@@ -1740,6 +1740,84 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_CLEANUP_PARENT_PID",
+      "category": "hook_internal",
+      "purpose": "Parent process identifier awaited by the bounded delayed InstallerCache cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["decimal process id", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper waits for the originating Setup process before acquiring the setup mutex"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_TARGET",
+      "category": "hook_internal",
+      "purpose": "Canonical InstallerCache directory considered for delayed removal.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute installer-cache path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper receives the exact cache target"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated Codex effective-policy helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/codex_policy_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LONG_PATH_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup long-path helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/long_path_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_LOCK_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the cross-process native Setup mutex fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/setup_lock_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded native Setup child-timeout helper.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/main_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

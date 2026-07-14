@@ -232,6 +232,9 @@ func TestCommittedInstallCleanupPreservesNewTreeAndRemovesArtifacts(t *testing.T
 }
 
 func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows delayed maintenance-cache cleanup")
+	}
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
 	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, &previous)

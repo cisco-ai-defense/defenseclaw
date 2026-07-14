@@ -1521,12 +1521,12 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 )
             result = _DoctorResult()
 
-            with patch.object(
-                cmd_doctor.os.path,
-                "expanduser",
-                side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
-            ):
-                cmd_doctor._check_claudecode_hooks(cfg, result, platform_name="posix")
+            cmd_doctor._check_claudecode_hooks(
+                cfg,
+                result,
+                platform_name="posix",
+                config_path=os.path.join(settings_dir, "settings.json"),
+            )
 
         freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
