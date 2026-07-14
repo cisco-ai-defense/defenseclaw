@@ -10,9 +10,13 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $harness = Join-Path $PSScriptRoot 'run-windows.ps1'
 $nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
 $wizardHarness = Join-Path $root 'scripts\test-windows-setup-wizard.ps1'
+$standardUserCI = Join-Path $root 'scripts\invoke-windows-setup-standard-user-ci.ps1'
+$standardUserLauncher = Join-Path $root 'scripts\windows-disposable-standard-user-launcher.cs'
+$setupStandardUserLauncher = Join-Path $root 'scripts\windows-setup-standard-user-launcher.cs'
 $nativePathHelpers = Join-Path $root 'scripts\windows-native-paths.ps1'
 $nativePathInitializer = Join-Path $root 'scripts\initialize-windows-native-ci-paths.ps1'
 $nativeWorkflow = Join-Path $root '.github\workflows\windows-native.yml'
+$releaseWorkflow = Join-Path $root '.github\workflows\release.yaml'
 $liveWorkflow = Join-Path $root '.github\workflows\connector-live-e2e.yml'
 $ciWorkflow = Join-Path $root '.github\workflows\ci.yml'
 $installer = Join-Path $root 'scripts\install.ps1'
@@ -68,6 +72,7 @@ try {
         $harness,
         $nativeHarness,
         $wizardHarness,
+        $standardUserCI,
         $nativePathHelpers,
         $nativePathInitializer,
         $installer
@@ -508,11 +513,15 @@ try {
     Assert-True (Test-OtlpEvent $jsonl 'codex' 0) 'OTLP evidence seam'
 
     $nativeWorkflowText = [IO.File]::ReadAllText($nativeWorkflow)
+    $releaseWorkflowText = [IO.File]::ReadAllText($releaseWorkflow)
     $liveWorkflowText = [IO.File]::ReadAllText($liveWorkflow)
     $ciWorkflowText = [IO.File]::ReadAllText($ciWorkflow)
     $harnessText = [IO.File]::ReadAllText($harness)
     $nativeHarnessText = [IO.File]::ReadAllText($nativeHarness)
     $wizardHarnessText = [IO.File]::ReadAllText($wizardHarness)
+    $standardUserCIText = [IO.File]::ReadAllText($standardUserCI)
+    $standardUserLauncherText = [IO.File]::ReadAllText($standardUserLauncher)
+    $setupStandardUserLauncherText = [IO.File]::ReadAllText($setupStandardUserLauncher)
     $nativePathHelpersText = [IO.File]::ReadAllText($nativePathHelpers)
     $nativePathInitializerText = [IO.File]::ReadAllText($nativePathInitializer)
     $installerText = [IO.File]::ReadAllText($installer)
@@ -702,8 +711,42 @@ try {
         'connector contract installs, validates, and removes the exact native Setup artifact'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
         $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
-        $nativeWorkflowText -match '-Operation setup-acceptance') `
+        $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
+        $nativeWorkflowText -match '-Mode setup-acceptance') `
         'required lifecycle certification no longer routes through the legacy wheel materializer'
+    Assert-True ($standardUserCIText -match 'New-LocalUser' -and
+        $standardUserCIText -match 'Remove-DisposableProfileAndAccount' -and
+        $standardUserCIText -match 'DefenseClaw disposable Setup CI account' -and
+        $standardUserCIText -match '\^dcacc\[0-9a-f\]\{10\}\$' -and
+        $standardUserCIText -match 'private disposable-user sandbox layout' -and
+        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$workspace \$sidObject' -and
+        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$scripts \$sidObject' -and
+        $standardUserCIText -match 'Set-ReadOnlyPayloadAcl \$childArtifacts \$sidObject' -and
+        $standardUserCIText -match 'GrantInteractiveDesktop' -and
+        $standardUserCIText -match 'Get-LocalGroupMember -SID \$administratorsSid' -and
+        $standardUserCIText -match '-Operation setup-acceptance' -and
+        $standardUserCIText -match '\$env:RUNNER_TEMP = Split-Path -Parent \$state' -and
+        $standardUserCIText -match 'Remove-Item Env:DC_WINDOWS_NATIVE_BASE_ROOT' -and
+        $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
+        $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
+        'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($standardUserLauncherText -match 'CreateProcessWithLogonW' -and
+        $standardUserLauncherText -match 'LOGON_WITH_PROFILE' -and
+        $standardUserLauncherText -match 'SecureString password' -and
+        $standardUserLauncherText -match 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE' -and
+        $standardUserLauncherText -match 'InteractiveDesktopGrant' -and
+        $standardUserLauncherText -match 'TokenIsElevated != 0') `
+        'disposable-user launcher validates identity/elevation and bounds the complete process tree'
+    Assert-True ($setupStandardUserLauncherText -match 'TokenLinkedToken' -and
+        $setupStandardUserLauncherText -match 'TokenElevationTypeLimited' -and
+        $setupStandardUserLauncherText -match 'ValidateStandardUserPrimaryToken' -and
+        $setupStandardUserLauncherText -match 'CurrentElevatedTokenHasLinkedLimitedToken' -and
+        $nativeHarnessText -match 'requires-disposable-standard-user') `
+        'Setup launcher prefers and verifies a linked limited token and reports UAC-disabled hosts honestly'
+    Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
+        $releaseWorkflowText -match '-Mode setup-acceptance' -and
+        $releaseWorkflowText -notmatch '(?s)Validate the exact signed installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
+        'signed Setup acceptance uses the same real standard-user boundary'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     $pathSnapshotFunction = [regex]::Match(
         $nativeHarnessText,

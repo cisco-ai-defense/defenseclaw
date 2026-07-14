@@ -252,7 +252,13 @@ jobs:
       - name: Build unsigned native Windows setup executable
         run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Verify native setup wizard responsiveness
-        run: ./scripts/test-windows-setup-wizard.ps1 -SetupPath (Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe') -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-smoke')
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode wizard-smoke
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-standard-user')
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 600
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -291,7 +297,13 @@ jobs:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
       - name: Native Setup EXE install, CLI/TUI smoke, repair, and uninstall
-        run: ./scripts/windows-native-ci.ps1 -Operation setup-acceptance -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 4200
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS

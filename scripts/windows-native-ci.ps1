@@ -667,7 +667,7 @@ function Invoke-WindowsSetupStandardUserProcess {
             StdErr = ''
             TimedOut = $timedOut
             ProcessId = $process.Id
-            LaunchContext = 'restricted-lua'
+            LaunchContext = 'verified-standard-user-token'
         }
     } catch {
         $cleanupFailure = $_
@@ -712,7 +712,7 @@ function Invoke-WindowsSetupStandardUserProcess {
     if ($LogPath) { Write-BoundedText -Path $LogPath -Text $summary }
     if ($result.ExitCode -notin $AllowedExitCodes) {
         $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $($result.ExitCode)" }
-        throw "$application $reason under verified restricted LUA token"
+        throw "$application $reason under a verified standard-user token"
     }
     return $result
 }
@@ -722,10 +722,16 @@ function Test-WindowsSetupStandardUserLauncher([string]$Root) {
     $outputPath = Join-Path $Root 'standard-user-launch-smoke.json'
     $logPath = Join-Path $Root 'standard-user-launch-smoke.log'
     $scriptBody = @'
-param([Parameter(Mandatory)][string]$Argument)
+param(
+    [Parameter(Mandatory)][string]$Argument,
+    [Parameter(Mandatory)][string]$LauncherSource
+)
+Add-Type -Path $LauncherSource
 $payload = [ordered]@{
     argument = $Argument
     environment = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE')
+    elevated = [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()
+    restricted_or_limited = [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessRestrictedOrLimited()
 }
 [IO.File]::WriteAllText(
     [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT'),
@@ -738,6 +744,15 @@ $payload = [ordered]@{
     $expectedEnvironment = 'environment → Ω quote " trailing \'
     $previousOutput = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT')
     $previousUnicode = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE')
+    $parentElevated = [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()
+    if ($parentElevated -and
+        -not [DefenseClaw.SetupStandardUserLauncher]::CurrentElevatedTokenHasLinkedLimitedToken()) {
+        Write-Host (@{
+            setup_standard_user_launcher = 'requires-disposable-standard-user'
+            reason = 'elevated host has no UAC-linked limited token'
+        } | ConvertTo-Json -Compress)
+        return
+    }
     try {
         $env:DC_SETUP_LAUNCH_OUTPUT = $outputPath
         $env:DC_SETUP_LAUNCH_UNICODE = $expectedEnvironment
@@ -749,7 +764,9 @@ $payload = [ordered]@{
             $powershell, [IO.Path]::GetExtension($powershell).ToUpperInvariant()
         )
         $result = Invoke-WindowsSetupStandardUserProcess $powershellCaseAlias @(
-            '-NoProfile', '-File', $scriptPath, '-Argument', $expectedArgument
+            '-NoProfile', '-File', $scriptPath,
+            '-Argument', $expectedArgument,
+            '-LauncherSource', $setupStandardUserLauncherSource
         ) -TimeoutSeconds 30 -LogPath $logPath -WorkingDirectory $Root
     } finally {
         [Environment]::SetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT', $previousOutput, 'Process')
@@ -763,8 +780,14 @@ $payload = [ordered]@{
         [string]$observed.environment -cne $expectedEnvironment) {
         throw 'standard-user Setup launcher did not preserve Unicode argv/environment bytes'
     }
-    $expectedContext = if ([DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
-        'restricted-lua'
+    if ([bool]$observed.elevated) {
+        throw 'standard-user Setup launcher smoke child remained elevated'
+    }
+    if ($parentElevated -and -not [bool]$observed.restricted_or_limited) {
+        throw 'standard-user Setup launcher smoke child was neither limited nor restricted'
+    }
+    $expectedContext = if ($parentElevated) {
+        'verified-standard-user-token'
     } else {
         'inherited-standard'
     }

@@ -11,9 +11,10 @@ using System.Text;
 namespace DefenseClaw
 {
     // Native release jobs need administrator authority for machine policy, but
-    // user-scope Setup deliberately rejects elevation. This helper derives a
-    // filtered LUA primary token, verifies the suspended child token, and only
-    // then lets the exact Setup image execute.
+    // user-scope Setup deliberately rejects elevation. This helper prefers the
+    // elevated user's linked limited primary token, falls back to a filtered
+    // LUA token when no linked token exists, verifies the suspended child, and
+    // only then lets the exact Setup image execute.
     public static class SetupStandardUserLauncher
     {
         private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
@@ -24,12 +25,32 @@ namespace DefenseClaw
         private const uint CREATE_SUSPENDED = 0x00000004;
         private const uint CREATE_NO_WINDOW = 0x08000000;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const int TokenTypeInformation = 8;
+        private const int TokenElevationType = 18;
+        private const int TokenLinkedToken = 19;
         private const int TokenElevation = 20;
+        private const int TokenPrimary = 1;
+        private const int TokenElevationTypeDefault = 1;
+        private const int TokenElevationTypeFull = 2;
+        private const int TokenElevationTypeLimited = 3;
+        private const int SecurityImpersonation = 2;
+
+        private enum LaunchTokenKind
+        {
+            LinkedLimited,
+            RestrictedLua
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TOKEN_ELEVATION
         {
             public int TokenIsElevated;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_LINKED_TOKEN
+        {
+            public IntPtr LinkedToken;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -100,10 +121,50 @@ namespace DefenseClaw
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetTokenInformation(
+        private static extern bool DuplicateTokenEx(
+            IntPtr existingToken,
+            uint desiredAccess,
+            IntPtr tokenAttributes,
+            int impersonationLevel,
+            int tokenType,
+            out IntPtr newToken);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "GetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformationElevation(
             IntPtr token,
             int informationClass,
             out TOKEN_ELEVATION information,
+            int informationLength,
+            out int returnLength);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "GetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformationInteger(
+            IntPtr token,
+            int informationClass,
+            out int information,
+            int informationLength,
+            out int returnLength);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "GetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformationLinkedToken(
+            IntPtr token,
+            int informationClass,
+            out TOKEN_LINKED_TOKEN information,
             int informationLength,
             out int returnLength);
 
@@ -145,7 +206,7 @@ namespace DefenseClaw
         {
             TOKEN_ELEVATION elevation;
             int returned;
-            if (!GetTokenInformation(
+            if (!GetTokenInformationElevation(
                 token,
                 TokenElevation,
                 out elevation,
@@ -159,6 +220,176 @@ namespace DefenseClaw
             return elevation.TokenIsElevated != 0;
         }
 
+        private static int GetTokenInteger(IntPtr token, int informationClass, string label)
+        {
+            int value;
+            int returned;
+            if (!GetTokenInformationInteger(
+                token,
+                informationClass,
+                out value,
+                sizeof(int),
+                out returned))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "GetTokenInformation(" + label + ") failed");
+            }
+            if (returned < sizeof(int))
+            {
+                throw new InvalidOperationException(
+                    "GetTokenInformation(" + label + ") returned a truncated value");
+            }
+            return value;
+        }
+
+        private static bool TryGetLinkedToken(IntPtr sourceToken, out IntPtr linkedToken)
+        {
+            linkedToken = IntPtr.Zero;
+            TOKEN_LINKED_TOKEN linked;
+            int returned;
+            if (!GetTokenInformationLinkedToken(
+                sourceToken,
+                TokenLinkedToken,
+                out linked,
+                Marshal.SizeOf(typeof(TOKEN_LINKED_TOKEN)),
+                out returned))
+            {
+                return false;
+            }
+            if (returned < Marshal.SizeOf(typeof(TOKEN_LINKED_TOKEN)) || linked.LinkedToken == IntPtr.Zero)
+            {
+                if (linked.LinkedToken != IntPtr.Zero) CloseHandle(linked.LinkedToken);
+                throw new InvalidOperationException(
+                    "GetTokenInformation(TokenLinkedToken) returned an invalid token handle");
+            }
+            linkedToken = linked.LinkedToken;
+            return true;
+        }
+
+        private static IntPtr DuplicatePrimaryToken(IntPtr token, string label)
+        {
+            IntPtr primary;
+            if (!DuplicateTokenEx(
+                token,
+                TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+                IntPtr.Zero,
+                SecurityImpersonation,
+                TokenPrimary,
+                out primary))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "DuplicateTokenEx failed for " + label);
+            }
+            return primary;
+        }
+
+        private static void ValidateStandardUserPrimaryToken(
+            IntPtr token,
+            LaunchTokenKind kind,
+            string label)
+        {
+            if (token == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(label + " token handle is null");
+            }
+            if (GetTokenInteger(token, TokenTypeInformation, "TokenType") != TokenPrimary)
+            {
+                throw new InvalidOperationException(label + " token is not a primary token");
+            }
+            if (IsElevated(token))
+            {
+                throw new InvalidOperationException(label + " token remains elevated");
+            }
+
+            int elevationType = GetTokenInteger(token, TokenElevationType, "TokenElevationType");
+            if (kind == LaunchTokenKind.LinkedLimited)
+            {
+                if (elevationType != TokenElevationTypeLimited)
+                {
+                    throw new InvalidOperationException(
+                        label + " linked token is not TokenElevationTypeLimited");
+                }
+                return;
+            }
+            if (!IsTokenRestricted(token))
+            {
+                throw new InvalidOperationException(label + " fallback token is not restricted");
+            }
+        }
+
+        private static IntPtr OpenStandardUserPrimaryToken(
+            IntPtr sourceToken,
+            out LaunchTokenKind kind)
+        {
+            int sourceElevationType = GetTokenInteger(
+                sourceToken,
+                TokenElevationType,
+                "TokenElevationType");
+            IntPtr launchToken = IntPtr.Zero;
+            try
+            {
+                if (sourceElevationType == TokenElevationTypeFull)
+                {
+                    IntPtr linkedToken;
+                    if (TryGetLinkedToken(sourceToken, out linkedToken))
+                    {
+                        try
+                        {
+                            if (GetTokenInteger(linkedToken, TokenTypeInformation, "TokenType") == TokenPrimary)
+                            {
+                                launchToken = linkedToken;
+                                linkedToken = IntPtr.Zero;
+                            }
+                            else
+                            {
+                                launchToken = DuplicatePrimaryToken(linkedToken, "linked limited Setup");
+                            }
+                            kind = LaunchTokenKind.LinkedLimited;
+                            ValidateStandardUserPrimaryToken(launchToken, kind, "linked limited Setup");
+                            IntPtr result = launchToken;
+                            launchToken = IntPtr.Zero;
+                            return result;
+                        }
+                        finally
+                        {
+                            if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+                        }
+                    }
+                }
+                else if (sourceElevationType != TokenElevationTypeDefault)
+                {
+                    throw new InvalidOperationException(
+                        "elevated Setup launcher has an inconsistent token elevation type " +
+                        sourceElevationType);
+                }
+
+                kind = LaunchTokenKind.RestrictedLua;
+                if (!CreateRestrictedToken(
+                    sourceToken,
+                    DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    out launchToken))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken failed");
+                }
+                ValidateStandardUserPrimaryToken(launchToken, kind, "restricted LUA Setup");
+                IntPtr fallback = launchToken;
+                launchToken = IntPtr.Zero;
+                return fallback;
+            }
+            finally
+            {
+                if (launchToken != IntPtr.Zero) CloseHandle(launchToken);
+            }
+        }
+
         public static bool IsCurrentProcessElevated()
         {
             IntPtr token = IntPtr.Zero;
@@ -166,6 +397,53 @@ namespace DefenseClaw
             {
                 token = OpenToken(GetCurrentProcess(), TOKEN_QUERY);
                 return IsElevated(token);
+            }
+            finally
+            {
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+
+        // GitHub-hosted Windows disables UAC, so its administrator token has
+        // no linked limited half. CI uses this probe to distinguish that host
+        // limitation from a failure of the real UAC-linked launch path.
+        public static bool CurrentElevatedTokenHasLinkedLimitedToken()
+        {
+            IntPtr sourceToken = IntPtr.Zero;
+            IntPtr linkedToken = IntPtr.Zero;
+            try
+            {
+                sourceToken = OpenToken(GetCurrentProcess(), TOKEN_QUERY);
+                if (!IsElevated(sourceToken) ||
+                    GetTokenInteger(sourceToken, TokenElevationType, "TokenElevationType") !=
+                        TokenElevationTypeFull)
+                {
+                    return false;
+                }
+                if (!TryGetLinkedToken(sourceToken, out linkedToken)) return false;
+                return !IsElevated(linkedToken) &&
+                    GetTokenInteger(linkedToken, TokenElevationType, "TokenElevationType") ==
+                        TokenElevationTypeLimited;
+            }
+            finally
+            {
+                if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+                if (sourceToken != IntPtr.Zero) CloseHandle(sourceToken);
+            }
+        }
+
+        // Exposed for the real launcher smoke child so CI can assert that an
+        // elevated parent produced either a linked limited token or the
+        // restricted fallback, rather than merely trusting process creation.
+        public static bool IsCurrentProcessRestrictedOrLimited()
+        {
+            IntPtr token = IntPtr.Zero;
+            try
+            {
+                token = OpenToken(GetCurrentProcess(), TOKEN_QUERY);
+                if (IsElevated(token)) return false;
+                return GetTokenInteger(token, TokenElevationType, "TokenElevationType") ==
+                    TokenElevationTypeLimited || IsTokenRestricted(token);
             }
             finally
             {
@@ -273,7 +551,7 @@ namespace DefenseClaw
             }
 
             IntPtr sourceToken = IntPtr.Zero;
-            IntPtr restrictedToken = IntPtr.Zero;
+            IntPtr launchToken = IntPtr.Zero;
             IntPtr childToken = IntPtr.Zero;
             IntPtr environment = IntPtr.Zero;
             PROCESS_INFORMATION processInfo = new PROCESS_INFORMATION();
@@ -289,31 +567,15 @@ namespace DefenseClaw
                     throw new InvalidOperationException(
                         "restricted Setup launch was requested from an already non-elevated process");
                 }
-                if (!CreateRestrictedToken(
-                    sourceToken,
-                    DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
-                    0,
-                    IntPtr.Zero,
-                    0,
-                    IntPtr.Zero,
-                    0,
-                    IntPtr.Zero,
-                    out restrictedToken))
-                {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken failed");
-                }
-                if (!IsTokenRestricted(restrictedToken) || IsElevated(restrictedToken))
-                {
-                    throw new InvalidOperationException(
-                        "CreateRestrictedToken did not produce a non-elevated restricted LUA token");
-                }
+                LaunchTokenKind launchTokenKind;
+                launchToken = OpenStandardUserPrimaryToken(sourceToken, out launchTokenKind);
 
                 environment = BuildEnvironment(environmentEntries);
                 STARTUPINFO startupInfo = new STARTUPINFO();
                 startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
                 startupInfo.lpDesktop = @"winsta0\default";
                 if (!CreateProcessAsUser(
-                    restrictedToken,
+                    launchToken,
                     applicationPath,
                     BuildCommandLine(applicationPath, arguments),
                     IntPtr.Zero,
@@ -329,11 +591,10 @@ namespace DefenseClaw
                 }
 
                 childToken = OpenToken(processInfo.hProcess, TOKEN_QUERY);
-                if (!IsTokenRestricted(childToken) || IsElevated(childToken))
-                {
-                    throw new InvalidOperationException(
-                        "suspended Setup child did not inherit the verified non-elevated restricted LUA token");
-                }
+                ValidateStandardUserPrimaryToken(
+                    childToken,
+                    launchTokenKind,
+                    "suspended Setup child");
                 process = Process.GetProcessById(checked((int)processInfo.dwProcessId));
                 if (ResumeThread(processInfo.hThread) == UInt32.MaxValue)
                 {
@@ -352,7 +613,7 @@ namespace DefenseClaw
                 if (processInfo.hProcess != IntPtr.Zero) CloseHandle(processInfo.hProcess);
                 if (childToken != IntPtr.Zero) CloseHandle(childToken);
                 if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
-                if (restrictedToken != IntPtr.Zero) CloseHandle(restrictedToken);
+                if (launchToken != IntPtr.Zero) CloseHandle(launchToken);
                 if (sourceToken != IntPtr.Zero) CloseHandle(sourceToken);
                 if (!resumed && process != null) process.Dispose();
             }
