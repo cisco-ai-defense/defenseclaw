@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -117,7 +118,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 }
 
 func defaultInstallRoot() (string, error) {
-	programs, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_UserProgramFiles)
+	programs, err := winfolders.UserProgramFiles()
 	if err != nil {
 		return "", err
 	}

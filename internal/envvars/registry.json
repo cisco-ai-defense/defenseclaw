@@ -2189,6 +2189,101 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_LAUNCHER_LOGICAL_CWD",
+      "category": "test_fixture",
+      "purpose": "Carries the expected logical working directory to the long-CWD launcher fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LAUNCHER_LONG_CWD_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated long-CWD launcher helper subprocess.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER",
+      "category": "test_fixture",
+      "purpose": "Carries the marker used by the authenticated graceful-stop daemon fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT",
+      "category": "test_fixture",
+      "purpose": "Selects the native watchdog original-handle wait fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/watchdog_pidfile_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WINDOWS_NOTIFICATION",
+      "category": "test_fixture",
+      "purpose": "Selects and records the native Windows notification fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/notify/notify_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

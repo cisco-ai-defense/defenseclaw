@@ -416,7 +416,10 @@ try {
     $connectorControl = Get-WizardControl $window 1001 'connector'
     $modeControl = Get-WizardControl $window 1002 'mode'
     $startControl = Get-WizardControl $window 1003 'start-gateway'
-    $primaryControl = Get-WizardControl $window 1005 'primary action'
+    # The wizard intentionally uses the standard Win32 IDOK/IDCANCEL IDs so
+    # Enter, Escape, WM_CLOSE, accessibility tools, and automation agree on
+    # the primary and cancel semantics.
+    $primaryControl = Get-WizardControl $window 1 'primary action'
     $descriptionControl = Get-WizardControl $window 1009 'description'
     $headingControl = Get-WizardControl $window 1011 'heading'
 
@@ -442,7 +445,7 @@ try {
     $completion = $null
     if ($ActivateInstall) {
         $install = [Diagnostics.Stopwatch]::StartNew()
-        Send-WizardCommand $window 1005 'Install'
+        Send-WizardCommand $window 1 'Install'
         Write-WizardTrace 'install-posted'
         $nextTraceSeconds = 0
         $lastObservation = $null
@@ -483,7 +486,7 @@ try {
         if ($heading -ne 'DefenseClaw is installed') {
             throw "Setup wizard completion heading was '$heading': $description"
         }
-        Send-WizardCommand $window 1005 'Finish'
+        Send-WizardCommand $window 1 'Finish'
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             throw "Setup wizard did not exit after Finish within $TimeoutSeconds seconds."
         }
@@ -498,7 +501,7 @@ try {
         }
     } else {
         # WM_COMMAND/Cancel closes the initial page without entering startAction.
-        Send-WizardCommand $window 1006 'Cancel'
+        Send-WizardCommand $window 2 'Cancel'
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             throw "Setup wizard did not exit after Cancel within $TimeoutSeconds seconds."
         }

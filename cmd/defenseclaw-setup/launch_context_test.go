@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -177,6 +178,9 @@ func TestRunRejectsLaunchBeforeSetupLock(t *testing.T) {
 }
 
 func TestRunAllowsNormalInteractiveContextToReachSetupLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows setup launch-context integration")
+	}
 	originalProbe := inspectCurrentSetupLaunchContext
 	originalLock := acquireSetupOperationLock
 	inspectCurrentSetupLaunchContext = func() (setupLaunchFacts, error) {

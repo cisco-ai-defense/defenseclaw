@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -31,7 +32,7 @@ import (
 // environment variables and installer state cannot establish trust in an
 // otherwise arbitrary executable tree.
 func canonicalNativeWindowsInstallRoot() string {
-	programs, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_UserProgramFiles)
+	programs, err := winfolders.UserProgramFiles()
 	if err != nil || strings.TrimSpace(programs) == "" {
 		return ""
 	}

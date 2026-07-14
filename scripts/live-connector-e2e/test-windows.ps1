@@ -637,18 +637,21 @@ try {
         $wizardHarnessText -match "Write-WizardTrace 'install-timeout'" -and
         $nativeHarnessText -match "Name -eq 'wizard-driver\.log'") `
         'wizard automation records and prioritizes bounded install-transition diagnostics'
-    foreach ($controlID in @(1001, 1002, 1003, 1005, 1009, 1011)) {
+    foreach ($controlID in @(1001, 1002, 1003, 1009, 1011)) {
         Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window $controlID") `
             "wizard automation reaches required real control id $controlID"
     }
+    Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window 1 'primary action'" -and
+        $wizardHarnessText -match "Send-WizardCommand \`$window 2 'Cancel'") `
+        'wizard automation uses standard Win32 IDOK and IDCANCEL semantics'
     Assert-True ($wizardHarnessText -match 'foreach \(\$index in 0\.\.2\)' -and
         $wizardHarnessText -match 'foreach \(\$index in 0\.\.1\)' -and
         $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$false' -and
         $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$true') `
         'wizard automation deterministically exercises every connector, mode, and start choice'
-    Assert-True ($wizardHarnessText -match "Send-WizardCommand \`$window 1005 'Install'" -and
+    Assert-True ($wizardHarnessText -match "Send-WizardCommand \`$window 1 'Install'" -and
         $wizardHarnessText -match "heading -ne 'DefenseClaw is installed'" -and
-        $wizardHarnessText -match "Send-WizardCommand \`$window 1005 'Finish'") `
+        $wizardHarnessText -match "Send-WizardCommand \`$window 1 'Finish'") `
         'wizard automation activates Install and verifies the completion page before Finish'
     Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
         $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'") `

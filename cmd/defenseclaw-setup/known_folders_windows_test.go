@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golang.org/x/sys/windows"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 )
 
 func TestSetupKnownFoldersIgnoreConnectorEnvironmentOverrides(t *testing.T) {
@@ -62,7 +62,7 @@ func assertSameSetupPath(t *testing.T, label string, resolve func() (string, err
 }
 
 func TestDefaultInstallRootUsesUserProgramFilesKnownFolder(t *testing.T) {
-	wantRoot, err := windows.KnownFolderPath(windows.FOLDERID_UserProgramFiles, windows.KF_FLAG_DEFAULT)
+	wantRoot, err := winfolders.UserProgramFiles()
 	if err != nil {
 		t.Fatal(err)
 	}

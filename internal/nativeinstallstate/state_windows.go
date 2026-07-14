@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -19,7 +20,7 @@ import (
 // native install. recognized remains true for a damaged canonical install so
 // callers fail closed instead of falling back to ambient profile variables.
 func LoadForExecutable(executable string) (state State, recognized bool, err error) {
-	programs, err := windows.KnownFolderPath(windows.FOLDERID_UserProgramFiles, windows.KF_FLAG_DEFAULT)
+	programs, err := winfolders.UserProgramFiles()
 	if err != nil {
 		return state, false, fmt.Errorf("resolve UserProgramFiles Known Folder: %w", err)
 	}
