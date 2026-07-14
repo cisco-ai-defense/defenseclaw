@@ -83,6 +83,7 @@ _CLAUDE_EVENTS_WITHOUT_MATCHERS = {
     "WorktreeRemove",
     "CwdChanged",
 }
+_CLAUDE_ASYNC_EVENTS = frozenset({"MessageDisplay"})
 _REPAIR = {
     "codex": "defenseclaw setup codex --yes --restart",
     "claudecode": "defenseclaw setup claude-code --yes --restart",
@@ -633,7 +634,7 @@ def _matcher_covers(event: str, actual: Any, required: str) -> bool:
 def _validate_claude_hook_contract(
     managed_entries: list[tuple[str, dict[str, Any], dict[str, Any], str]],
 ) -> None:
-    """Require synchronous, unconditional coverage for every Claude event."""
+    """Require the exact execution mode and broad coverage for every Claude event."""
     covered: set[str] = set()
     rejected: dict[str, str] = {}
     for event, entry, hook, _command in managed_entries:
@@ -644,8 +645,13 @@ def _validate_claude_hook_contract(
             rejected[event] = "handler type is not command"
             continue
         async_value = hook.get("async", False)
-        if type(async_value) is not bool or async_value:
-            rejected[event] = "handler is asynchronous"
+        expected_async = event in _CLAUDE_ASYNC_EVENTS
+        if type(async_value) is not bool or async_value != expected_async:
+            rejected[event] = (
+                "observational handler is not asynchronous"
+                if expected_async
+                else "enforcement handler is asynchronous"
+            )
             continue
         async_rewake = hook.get("asyncRewake", False)
         if type(async_rewake) is not bool or async_rewake:
@@ -669,7 +675,8 @@ def _validate_claude_hook_contract(
         detail = f"{detail} ({reasons})"
     raise _InspectionError(
         "stale",
-        f"Claude Code hook contract is incomplete; missing synchronous broad DefenseClaw registrations for: {detail}",
+        f"Claude Code hook contract is incomplete; missing broad DefenseClaw registrations "
+        f"with the expected execution mode for: {detail}",
     )
 
 

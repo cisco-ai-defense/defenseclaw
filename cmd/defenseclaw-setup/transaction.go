@@ -555,6 +555,12 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 	if state.TransactionID != "" && !validSetupTransactionID(state.TransactionID) {
 		return errors.New("installer state has an invalid transaction identity")
 	}
+	if state.PathValueCreated && !state.PathEntryOwned {
+		return errors.New("installer state claims a PATH value without owning its entry")
+	}
+	if state.PathValueCreated && state.PathSeparatorReused {
+		return errors.New("installer state claims incompatible PATH value ownership metadata")
+	}
 	expectedPaths := map[string][2]string{
 		"install root":      {state.InstallRoot, installRoot},
 		"command directory": {state.CommandDir, filepath.Join(installRoot, "bin")},
@@ -1064,7 +1070,8 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 		if transaction.PreviousState != nil && transaction.PreviousState.PathEntryOwned {
 			reusedSeparator := transaction.PreviousState.PathSeparatorReused
-			if err := removeUserPath(filepath.Join(transaction.InstallRoot, "bin"), reusedSeparator); err != nil {
+			valueCreated := transaction.PreviousState.PathValueCreated
+			if err := removeUserPath(filepath.Join(transaction.InstallRoot, "bin"), reusedSeparator, valueCreated); err != nil {
 				return err
 			}
 		}
@@ -1163,8 +1170,21 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	if err := reconciliation.persist(); err != nil {
 		return fmt.Errorf("persist connector reconciliation residue: %w", err)
 	}
-	if _, _, err := addUserPath(filepath.Join(transaction.InstallRoot, "bin")); err != nil {
-		return err
+	pathAdded, reusedSeparator, valueCreated, pathMutationErr := addUserPath(
+		filepath.Join(transaction.InstallRoot, "bin"),
+	)
+	if pathAdded {
+		if err := updateInstalledPathOwnership(
+			transaction.InstallRoot,
+			true,
+			reusedSeparator,
+			valueCreated,
+		); err != nil {
+			return fmt.Errorf("record user PATH ownership: %w", err)
+		}
+	}
+	if pathMutationErr != nil {
+		return pathMutationErr
 	}
 	if err := registerInstalledAppOwned(
 		state.MaintenancePath,

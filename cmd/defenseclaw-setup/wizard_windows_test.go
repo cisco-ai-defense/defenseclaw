@@ -6,10 +6,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 func TestOwnedUserPathRoundTripPreservesExactSeparators(t *testing.T) {
@@ -67,6 +71,119 @@ func TestOwnedUserPathRemovalRefusesReorderedEntry(t *testing.T) {
 	}
 }
 
+func TestOwnedUserPathRemovalPlanDeletesOnlySetupCreatedEmptyValue(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	later := `C:\Users\runneradmin\bin`
+	tests := []struct {
+		name         string
+		current      string
+		valueCreated bool
+		want         string
+		wantDelete   bool
+	}{
+		{name: "setup-created value", current: commandDir, valueCreated: true, wantDelete: true},
+		{name: "pre-existing empty value", current: commandDir, valueCreated: false},
+		{
+			name:         "later user entry",
+			current:      commandDir + ";" + later,
+			valueCreated: true,
+			want:         later,
+		},
+		{
+			name:         "later duplicate",
+			current:      commandDir + ";" + commandDir,
+			valueCreated: true,
+			want:         commandDir,
+		},
+		{
+			name:         "later empty entry",
+			current:      commandDir + ";",
+			valueCreated: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, deleteValue, err := planOwnedUserPathRemoval(test.current, commandDir, false, test.valueCreated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want || deleteValue != test.wantDelete {
+				t.Fatalf("removal plan = value %q delete:%t, want value %q delete:%t", got, deleteValue, test.want, test.wantDelete)
+			}
+		})
+	}
+}
+
+func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	later := `C:\Users\runneradmin\bin`
+	tests := []struct {
+		name         string
+		current      string
+		valueCreated bool
+		expand       bool
+		wantExists   bool
+		want         string
+	}{
+		{name: "setup-created value", current: commandDir, valueCreated: true},
+		{name: "pre-existing empty value", current: commandDir, wantExists: true},
+		{
+			name:         "user-changed value type",
+			current:      commandDir,
+			valueCreated: true,
+			expand:       true,
+			wantExists:   true,
+		},
+		{
+			name:         "setup-created value with later entry",
+			current:      commandDir + ";" + later,
+			valueCreated: true,
+			wantExists:   true,
+			want:         later,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			keyPath := fmt.Sprintf(
+				`Software\DefenseClawSetupTests\path-%d-%d`,
+				os.Getpid(),
+				time.Now().UnixNano(),
+			)
+			key, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.ALL_ACCESS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = key.Close()
+				_ = registry.DeleteKey(registry.CURRENT_USER, keyPath)
+			})
+			setValue := key.SetStringValue
+			if test.expand {
+				setValue = key.SetExpandStringValue
+			}
+			if err := setValue("Path", test.current); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeOwnedUserPathValue(key, commandDir, false, test.valueCreated); err != nil {
+				t.Fatal(err)
+			}
+			got, _, err := key.GetStringValue("Path")
+			if !test.wantExists {
+				if err != registry.ErrNotExist {
+					t.Fatalf("Path still exists as %q: %v", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("Path = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestLegacyAppendedUserPathRemovalPreservesTrailingSeparator(t *testing.T) {
 	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
 	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`
@@ -102,15 +219,47 @@ func TestUpdateInstalledPathOwnershipRecordsReusedSeparator(t *testing.T) {
 	if err := writeJSON(statePath, installState{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateInstalledPathOwnership(installRoot, true, true); err != nil {
+	if err := updateInstalledPathOwnership(installRoot, true, true, false); err != nil {
 		t.Fatal(err)
 	}
 	var state installState
 	if err := readJSON(statePath, &state); err != nil {
 		t.Fatal(err)
 	}
-	if !state.PathEntryOwned || !state.PathSeparatorReused {
-		t.Fatalf("updated PATH ownership = owned:%t reused:%t", state.PathEntryOwned, state.PathSeparatorReused)
+	if !state.PathEntryOwned || !state.PathSeparatorReused || state.PathValueCreated {
+		t.Fatalf(
+			"updated PATH ownership = owned:%t reused:%t value-created:%t",
+			state.PathEntryOwned,
+			state.PathSeparatorReused,
+			state.PathValueCreated,
+		)
+	}
+}
+
+func TestUpdateInstalledPathOwnershipRecordsCreatedValue(t *testing.T) {
+	installRoot := t.TempDir()
+	installerDir := filepath.Join(installRoot, "installer")
+	if err := os.MkdirAll(installerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(installerDir, "install-state.json")
+	if err := writeJSON(statePath, installState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateInstalledPathOwnership(installRoot, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var state installState
+	if err := readJSON(statePath, &state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.PathEntryOwned || state.PathSeparatorReused || !state.PathValueCreated {
+		t.Fatalf(
+			"updated PATH ownership = owned:%t reused:%t value-created:%t",
+			state.PathEntryOwned,
+			state.PathSeparatorReused,
+			state.PathValueCreated,
+		)
 	}
 }
 

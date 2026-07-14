@@ -129,6 +129,7 @@ type installState struct {
 	MaintenancePath        string            `json:"maintenance_path"`
 	PathEntryOwned         bool              `json:"path_entry_owned"`
 	PathSeparatorReused    bool              `json:"path_separator_reused,omitempty"`
+	PathValueCreated       bool              `json:"path_value_created,omitempty"`
 	Connector              string            `json:"connector"`
 	Mode                   string            `json:"mode"`
 	CodexHome              string            `json:"codex_home,omitempty"`
@@ -252,6 +253,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	upgradeFrom := opts.FromVersion
 	pathEntryOwned := oldState != nil && oldState.PathEntryOwned
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
+	pathValueCreated := oldState != nil && oldState.PathValueCreated
 
 	payload, err := loadPayload(payloadTempRoot)
 	if err != nil {
@@ -319,13 +321,6 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		return 1, cause
 	}
 
-	targetPathOwned := pathEntryOwned
-	targetPathSeparatorReused := pathSeparatorReused
-	commandDir := filepath.Join(installRoot, "bin")
-	if !pathContains(strings.Split(transaction.PreviousPath.Value, ";"), commandDir) {
-		targetPathOwned = true
-		_, targetPathSeparatorReused = prependUserPathEntry(transaction.PreviousPath.Value, commandDir)
-	}
 	if err := stageInstallTree(
 		payload,
 		transaction.StagingPath,
@@ -333,8 +328,9 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		dataRoot,
 		maintenancePath,
 		transaction.ID,
-		targetPathOwned,
-		targetPathSeparatorReused,
+		pathEntryOwned,
+		pathSeparatorReused,
+		pathValueCreated,
 		opts,
 	); err != nil {
 		return tryRestore(err)
@@ -615,7 +611,7 @@ func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenan
 	return &state, nil
 }
 
-func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator bool) error {
+func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, valueCreated bool) error {
 	path := filepath.Join(installRoot, "installer", "install-state.json")
 	var state installState
 	if err := readJSON(path, &state); err != nil {
@@ -623,6 +619,7 @@ func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator boo
 	}
 	state.PathEntryOwned = owned
 	state.PathSeparatorReused = reusedSeparator
+	state.PathValueCreated = valueCreated
 	return writeJSON(path, state)
 }
 
@@ -700,7 +697,7 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
 	return nil
 }
 
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath, transactionID string, pathEntryOwned, pathSeparatorReused bool, opts options) error {
+func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath, transactionID string, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
 	if err := createExclusiveStagingRoot(staging); err != nil {
 		return err
 	}
@@ -770,6 +767,7 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		MaintenancePath:        maintenancePath,
 		PathEntryOwned:         pathEntryOwned,
 		PathSeparatorReused:    pathSeparatorReused,
+		PathValueCreated:       pathValueCreated,
 		Connector:              opts.Connector,
 		Mode:                   opts.Mode,
 		CodexHome:              opts.CodexHome,

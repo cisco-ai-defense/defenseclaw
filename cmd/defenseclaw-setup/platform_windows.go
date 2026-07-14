@@ -419,42 +419,45 @@ func isReparsePoint(path string) (bool, error) {
 	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, nil
 }
 
-func addUserPath(commandDir string) (bool, bool, error) {
+func addUserPath(commandDir string) (bool, bool, bool, error) {
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	defer key.Close()
 	current, valueType, err := key.GetStringValue("Path")
 	if err != nil && err != registry.ErrNotExist {
-		return false, false, err
+		return false, false, false, err
 	}
+	valueCreated := err == registry.ErrNotExist
 	entries := strings.Split(current, ";")
 	if pathContains(entries, commandDir) {
 		// A previous attempt may have observed its SetValue before RegFlushKey
 		// completed. Flush even on the idempotent retry path before convergence
 		// is allowed to advance.
 		if err := flushRegistryKey(key); err != nil {
-			return false, false, err
+			return false, false, false, err
 		}
 		updateCurrentProcessPath(commandDir, true)
 		if err := broadcastEnvironmentChange(); err != nil {
-			return false, false, err
+			return false, false, false, err
 		}
-		return false, false, nil
+		return false, false, false, nil
 	}
 	next, reusedSeparator := prependUserPathEntry(current, commandDir)
 	if err := setRegistryPath(key, next, valueType); err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	if err := flushRegistryKey(key); err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	updateCurrentProcessPath(commandDir, true)
 	if err := broadcastEnvironmentChange(); err != nil {
-		return false, false, err
+		// The registry mutation is already flushed and therefore owned even if
+		// another desktop process did not acknowledge the change broadcast.
+		return true, reusedSeparator, valueCreated, err
 	}
-	return true, reusedSeparator, nil
+	return true, reusedSeparator, valueCreated, nil
 }
 
 func captureUserPath() (userPathSnapshot, error) {
@@ -495,28 +498,13 @@ func prependUserPathEntry(current, commandDir string) (string, bool) {
 	return commandDir + separator + current, reusedSeparator
 }
 
-func removeUserPath(commandDir string, reusedSeparator bool) error {
+func removeUserPath(commandDir string, reusedSeparator, valueCreated bool) error {
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
 	defer key.Close()
-	current, valueType, err := key.GetStringValue("Path")
-	if err != nil {
-		if err == registry.ErrNotExist {
-			if err := flushRegistryKey(key); err != nil {
-				return err
-			}
-			updateCurrentProcessPath(commandDir, false)
-			return broadcastEnvironmentChange()
-		}
-		return err
-	}
-	next, err := removeOwnedUserPathEntry(current, commandDir, reusedSeparator)
-	if err != nil {
-		return err
-	}
-	if err := setRegistryPath(key, next, valueType); err != nil {
+	if err := removeOwnedUserPathValue(key, commandDir, reusedSeparator, valueCreated); err != nil {
 		return err
 	}
 	if err := flushRegistryKey(key); err != nil {
@@ -524,6 +512,41 @@ func removeUserPath(commandDir string, reusedSeparator bool) error {
 	}
 	updateCurrentProcessPath(commandDir, false)
 	return broadcastEnvironmentChange()
+}
+
+func removeOwnedUserPathValue(key registry.Key, commandDir string, reusedSeparator, valueCreated bool) error {
+	current, valueType, err := key.GetStringValue("Path")
+	if err == registry.ErrNotExist {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	next, deleteValue, err := planOwnedUserPathRemoval(current, commandDir, reusedSeparator, valueCreated)
+	if err != nil {
+		return err
+	}
+	// Missing values are created as REG_SZ. A different current type is a user
+	// mutation; preserve that value (empty) even when its content is otherwise
+	// identical to the original managed entry.
+	if deleteValue && valueType == registry.SZ {
+		if err := key.DeleteValue("Path"); err != nil && err != registry.ErrNotExist {
+			return err
+		}
+		return nil
+	}
+	return setRegistryPath(key, next, valueType)
+}
+
+func planOwnedUserPathRemoval(current, commandDir string, reusedSeparator, valueCreated bool) (string, bool, error) {
+	next, err := removeOwnedUserPathEntry(current, commandDir, reusedSeparator)
+	if err != nil {
+		return current, false, err
+	}
+	// A Setup-created value starts as the exact managed entry. Any syntactic
+	// change is user/concurrent state, so retain an empty value instead of
+	// claiming enough ownership to delete it.
+	return next, valueCreated && next == "" && current == commandDir, nil
 }
 
 func removeUserPathEntry(current, commandDir string, reusedSeparator bool) string {

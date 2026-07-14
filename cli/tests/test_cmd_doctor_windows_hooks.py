@@ -157,7 +157,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 "Elicitation",
                 "ElicitationResult",
             ):
-                entry: dict[str, object] = {"hooks": [{"type": "command", "command": command, "timeout": 30}]}
+                handler: dict[str, object] = {"type": "command", "command": command, "timeout": 30}
+                if event == "MessageDisplay":
+                    handler["async"] = True
+                entry: dict[str, object] = {"hooks": [handler]}
                 if event in matchers:
                     entry["matcher"] = matchers[event]
                 elif event in wildcard_events:
@@ -384,7 +387,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(check.state, "healthy", check.detail)
 
-    def test_claude_requires_complete_synchronous_broad_hook_contract(self) -> None:
+    def test_claude_requires_complete_broad_hook_contract_with_exact_execution_modes(self) -> None:
         runtime = self._runtime()
         command = f'"{runtime}" hook --connector claudecode'
         mutations = {
@@ -395,7 +398,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "narrow-pretooluse": lambda document: document["hooks"]["PreToolUse"][0].update({"matcher": "Bash"}),
             "whitespace-pretooluse": lambda document: document["hooks"]["PreToolUse"][0].update({"matcher": " * "}),
             "async-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update({"async": True}),
+            "sync-message-display": lambda document: document["hooks"]["MessageDisplay"][0]["hooks"][0].update(
+                {"async": False}
+            ),
             "async-rewake-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
+                {"asyncRewake": True}
+            ),
+            "async-rewake-message-display": lambda document: document["hooks"]["MessageDisplay"][0]["hooks"][0].update(
                 {"asyncRewake": True}
             ),
             "non-command-pretooluse": lambda document: document["hooks"]["PreToolUse"][0]["hooks"][0].update(
