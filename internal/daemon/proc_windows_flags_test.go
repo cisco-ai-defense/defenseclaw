@@ -91,6 +91,56 @@ func TestWindowsDaemonChildSelfRegistersStrongIdentity(t *testing.T) {
 	}
 }
 
+func TestWindowsDaemonStartWaitsForChildOwnedPIDRegistration(t *testing.T) {
+	if IsDaemonChild() {
+		// Make the ownership contract observable: a parent-side writer would
+		// return before this delay, while the real parent must wait for this
+		// child's authoritative strong PID record.
+		time.Sleep(200 * time.Millisecond)
+		if err := RegisterCurrentProcess(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	t.Setenv(EnvDaemon, "")
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	startedAt := time.Now()
+	pid, err := d.Start([]string{"-test.run=^TestWindowsDaemonStartWaitsForChildOwnedPIDRegistration$"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = d.StopStarted(pid, 5*time.Second)
+		}
+	})
+	if elapsed := time.Since(startedAt); elapsed < 200*time.Millisecond {
+		t.Fatalf("Start returned before the child registered its PID: %s", elapsed)
+	}
+	info, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.PID != pid || info.StartIdentity == "" || !d.verifyProcess(info) {
+		t.Fatalf("child-owned PID registration is not strong: %+v", info)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dataDir, "gateway.pid~RF*.TMP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("ReplaceFileW collision artifacts remain: %v", leftovers)
+	}
+	if err := d.StopStarted(pid, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	stopped = true
+}
+
 func TestWaitForProcessExitUsesOriginalWindowsHandle(t *testing.T) {
 	const helperEnv = "DEFENSECLAW_TEST_WAIT_PROCESS_EXIT"
 	if os.Getenv(helperEnv) == "1" {

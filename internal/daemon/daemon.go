@@ -57,6 +57,11 @@ var (
 	ErrStopTimeout    = errors.New("daemon did not stop within timeout")
 )
 
+const (
+	childPIDRegistrationTimeout = 5 * time.Second
+	childPIDRegistrationPoll    = 5 * time.Millisecond
+)
+
 type Daemon struct {
 	dataDir string
 	pidFile string
@@ -375,19 +380,36 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// the legacy behavior on platforms without /proc.
 	startIdentity, _ := processStartIdentity(pid)
 
-	// On Windows the breakaway child also writes this same strong identity at
-	// its earliest sidecar pre-run hook. That closes the launcher-cancellation
-	// window between CreateProcess and this parent-side write: a surviving
-	// breakaway child is always PID-file-managed. Keep the parent write as the
-	// authoritative handoff/error check and to preserve the existing Unix path.
-	if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
-		_ = cmd.Process.Kill()
-		<-exitCh // reap the child so it doesn't become a zombie
-		devNull.Close()
-		_ = logFile.Close()
-		return 0, fmt.Errorf("daemon: write pid: %w", err)
+	if daemonChildRegistersPID() {
+		// A Windows breakaway child publishes its strong identity before any
+		// fallible sidecar initialization. The parent used to publish the same
+		// file concurrently. ReplaceFileW can temporarily move the destination
+		// aside while merging metadata, so those two writers could strand an
+		// internal gateway.pid~RF*.TMP file and leave no canonical PID record.
+		// Treat the child as the sole writer and verify its exact handoff here.
+		registered, childExited, err := d.waitForChildPIDRegistration(
+			pid, executable, startIdentity, exitCh, childPIDRegistrationTimeout,
+		)
+		if err != nil {
+			if !childExited {
+				_ = cmd.Process.Kill()
+				<-exitCh // reap the child so it doesn't become a zombie
+			}
+			devNull.Close()
+			_ = logFile.Close()
+			return 0, err
+		}
+		d.started = registered
+	} else {
+		if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
+			_ = cmd.Process.Kill()
+			<-exitCh // reap the child so it doesn't become a zombie
+			devNull.Close()
+			_ = logFile.Close()
+			return 0, fmt.Errorf("daemon: write pid: %w", err)
+		}
+		d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 	}
-	d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
 	// fds now, and keeping these open in the parent only delays GC once the
@@ -404,7 +426,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// left a stale PID file ().
 	select {
 	case waitErr := <-exitCh:
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(d.started)
 		if waitErr != nil {
 			return 0, fmt.Errorf("daemon: process exited immediately (check %s for errors): %w", d.logFile, waitErr)
 		}
@@ -417,6 +439,68 @@ func (d *Daemon) Start(args []string) (int, error) {
 	}
 
 	return pid, nil
+}
+
+// waitForChildPIDRegistration waits for the Windows daemon child to publish
+// the one authoritative strong PID record. childExited reports whether this
+// function consumed exitCh, so the caller never waits twice while rolling back
+// a failed launch.
+func (d *Daemon) waitForChildPIDRegistration(
+	pid int,
+	executable string,
+	startIdentity string,
+	exitCh <-chan error,
+	timeout time.Duration,
+) (pidInfo, bool, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(childPIDRegistrationPoll)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		info, err := d.readPIDInfo()
+		if err == nil {
+			switch {
+			case info.PID != pid:
+				lastErr = fmt.Errorf("pid file contains process %d, want %d", info.PID, pid)
+			case info.Executable == "":
+				lastErr = errors.New("pid file executable is empty")
+			case !strings.EqualFold(filepath.Clean(info.Executable), filepath.Clean(executable)):
+				lastErr = fmt.Errorf("pid file executable %q does not match %q", info.Executable, executable)
+			case info.StartIdentity == "":
+				lastErr = errors.New("pid file start identity is empty")
+			case startIdentity != "" && info.StartIdentity != startIdentity:
+				lastErr = errors.New("pid file start identity does not match the spawned process")
+			case !d.verifyProcess(info):
+				lastErr = errors.New("pid file does not identify the spawned process")
+			default:
+				return info, false, nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case waitErr := <-exitCh:
+			d.removePIDFileIfStarted(pidInfo{PID: pid, StartIdentity: startIdentity})
+			if waitErr != nil {
+				return pidInfo{}, true, fmt.Errorf(
+					"daemon: process exited before PID registration (check %s for errors): %w",
+					d.logFile, waitErr,
+				)
+			}
+			return pidInfo{}, true, fmt.Errorf(
+				"daemon: process exited before PID registration with status 0 (check %s for errors)",
+				d.logFile,
+			)
+		case <-deadline.C:
+			return pidInfo{}, false, fmt.Errorf(
+				"daemon: timed out waiting for child PID registration: %w", lastErr,
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *Daemon) childEnv(parentEnv []string) []string {
