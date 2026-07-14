@@ -150,6 +150,44 @@ async def test_catalog_filter_clear_button_resets_model_and_input(panel: str) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("panel", CATALOG_PANELS)
+async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(panel: str) -> None:
+    """A late failed initial load must not restore pre-Clear input text.
+
+    Catalog loading can finish after the operator clears a filter.  Error
+    loads deliberately leave ``model.loaded`` false; that state used to make
+    the next chrome sync copy any stale Input value back into the model even
+    though the Input no longer owned focus.  Under a busy full-suite runner
+    this made the MCP Clear button intermittently appear to do nothing.
+    """
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel(panel)
+        await pilot.pause()
+        app.workers.cancel_all()
+        await pilot.pause()
+        model = app.catalog_models[panel]
+        inp = app.query_one(f"#{panel}-filter", Input)
+        inp.value = "needle"
+        await pilot.pause()
+        assert model.filter_text == "needle"
+
+        # Model a failed initial loader repainting just after Clear: the model
+        # remains unloaded while the old widget still temporarily displays its
+        # previous bytes.  Since that widget is not focused, model state wins.
+        app.set_focus(None)
+        model.loaded = False
+        model.clear_filter()
+        assert inp.value == "needle"
+        app._sync_catalog_controls(panel)  # noqa: SLF001
+        await pilot.pause()
+        assert model.filter_text == ""
+        assert inp.value == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("panel", CATALOG_PANELS)
 async def test_catalog_clear_filter_button_disabled_when_no_filter(panel: str) -> None:
     """The ``Clear`` button is greyed when there's no filter to clear so
     the bar honestly advertises "nothing to clear" instead of swallowing

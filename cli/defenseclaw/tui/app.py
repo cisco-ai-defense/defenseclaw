@@ -4386,12 +4386,14 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            if not model.loaded and filter_input.value:
+            if not model.loaded and filter_input.has_focus and filter_input.value:
                 # Initial catalog auto-loads can complete a repaint between
                 # Input.value changing and Textual delivering Input.Changed.
-                # Preserve that fresh operator text instead of copying the
-                # still-empty model value back over it; apply_loaded() will
-                # reapply the filter to the eventual rows.
+                # Preserve fresh text only while this exact widget owns input
+                # focus. A failed/slow loader can otherwise repaint after the
+                # operator clicked Clear and resurrect a stale value from an
+                # unfocused or replaced Input. Input.Changed remains the
+                # canonical model update once Textual delivers it.
                 model.set_filter(filter_input.value)
             else:
                 filter_input.value = model.filter_text
