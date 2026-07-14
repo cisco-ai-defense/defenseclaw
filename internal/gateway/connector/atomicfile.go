@@ -54,12 +54,11 @@ func atomicWriteFileWithReplace(
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
-	// On Windows a previous MoveFileEx(MOVEFILE_WRITE_THROUGH) may have
-	// published these bytes and still reported a late flush failure. Visible
-	// equality cannot prove the directory entry is durable, so retry through a
-	// fresh write-through replacement. POSIX callers retain the metadata-stable
-	// no-op path after their parent-directory fsync succeeds.
-	if runtime.GOOS != "windows" && atomicFileAlreadyMatches(writePath, data, perm) {
+	// Avoid replacing an already-correct config. This is especially important
+	// on Windows, where a replacement is a file-identity transition and must not
+	// churn NTFS metadata. The platform helper validates the effective owner-only
+	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
+	if atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
@@ -95,12 +94,17 @@ func atomicWriteFileWithReplace(
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
+	if err := atomicFilePrepareDestination(writePath, perm); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("prepare destination protection %s: %w", writePath, err)
+	}
 	if err := replace(tmpPath, writePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}
-	// MoveFileEx(MOVEFILE_WRITE_THROUGH) supplies the Windows durability
-	// boundary. POSIX rename needs an explicit parent-directory fsync.
+	// The staged file was synced before Windows publishes it with MoveFileEx
+	// (first creation) or ReplaceFileW (metadata-preserving replacement). POSIX
+	// rename additionally needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {
 		directory, err := os.Open(dir)
 		if err != nil {
@@ -126,7 +130,7 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	defer file.Close()
 
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != perm.Perm() {
+	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(path, openedInfo, perm) {
 		return false
 	}
 	pathInfo, err := os.Lstat(path)

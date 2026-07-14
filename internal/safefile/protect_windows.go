@@ -118,8 +118,16 @@ func preserveExistingProtection(source, destination string) error {
 		return err
 	}
 	safe, err := privateDACLIsSafe(source)
-	if err != nil || !safe {
+	if err != nil {
 		return err
+	}
+	if !safe {
+		// ReplaceFileW deliberately preserves the replaced file's DACL. Tighten
+		// an unsafe DefenseClaw-owned destination before publication so the
+		// metadata-preserving replace cannot retain a foreign read/write ACE.
+		if err := setPrivateDACL(source, false); err != nil {
+			return err
+		}
 	}
 	extendedSource, err := winpath.Extended(source)
 	if err != nil {

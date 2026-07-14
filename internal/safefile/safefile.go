@@ -59,9 +59,12 @@ func Write(path string, data []byte) error {
 }
 
 // ReplaceFile performs a replacement-style rename from source to destination.
-// On Windows it retries transient access, sharing, and lock violations commonly caused
-// by antivirus scanners briefly opening a newly written file. Callers remain
-// responsible for validating both paths and cleaning up source on failure.
+// On Windows an existing destination is published with ReplaceFileW so its
+// DACL, EFS/compression state, creation metadata, and non-conflicting named
+// streams survive. It retries transient access, sharing, and lock violations
+// commonly caused by antivirus scanners briefly opening a newly written file.
+// Callers remain responsible for validating both paths and cleaning up source
+// on failure.
 func ReplaceFile(source, destination string) error {
 	return replaceFile(source, destination)
 }
