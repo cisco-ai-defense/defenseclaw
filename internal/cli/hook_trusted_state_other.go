@@ -6,4 +6,4 @@
 package cli
 
 func trustedNativeHookHome() (string, bool) { return "", false }
-func NativeHookRuntimeNoop() bool            { return false }
+func NativeHookRuntimeNoop() bool           { return false }
