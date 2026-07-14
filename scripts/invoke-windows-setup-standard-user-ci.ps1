@@ -25,6 +25,7 @@ param(
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
     [switch]$Child,
     [switch]$ExerciseWmiEscape,
+    [string]$ExpectedSetupSha256 = '',
     [string]$ResultPath = ''
 )
 
@@ -49,6 +50,84 @@ function Write-ChildResult([string]$Path, [bool]$Succeeded, [string]$Detail) {
         detail = $bounded
     } | ConvertTo-Json -Depth 3
     [IO.File]::WriteAllText($Path, $payload, [Text.UTF8Encoding]::new($false))
+}
+
+function Test-ActualChildFilesystemBoundary {
+    param(
+        [string]$SandboxRoot,
+        [string]$Workspace,
+        [string]$Scripts,
+        [string]$Artifacts,
+        [string]$State,
+        [string]$Results,
+        [string]$ExpectedHash
+    )
+
+    if ($ExpectedHash -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw 'parent did not supply the exact expected Setup SHA-256'
+    }
+    foreach ($path in @($Workspace, $Scripts, $Artifacts, $State, $Results)) {
+        if (-not (Test-PathWithin $path $SandboxRoot)) {
+            throw "actual child probe path escaped the private sandbox: $path"
+        }
+    }
+    $setup = Join-Path $Artifacts 'DefenseClawSetup-x64.exe'
+    Assert-ChildOperationAccessDenied 'Setup overwrite probe' {
+        $stream = [IO.File]::Open(
+            $setup, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None
+        )
+        $stream.Dispose()
+    }
+    Assert-ChildOperationAccessDenied 'Setup delete probe' {
+        [IO.File]::Delete($setup)
+    }
+
+    foreach ($immutable in @($Workspace, $Scripts, $Artifacts)) {
+        $leaf = Split-Path -Leaf $immutable
+        Assert-ChildOperationAccessDenied "$leaf rename probe" {
+            [IO.Directory]::Move($immutable, "$immutable.dc-immutability-moved")
+        }
+        Assert-ChildOperationAccessDenied "$leaf delete probe" {
+            [IO.Directory]::Delete($immutable, $true)
+        }
+        Assert-ChildOperationAccessDenied "$leaf replacement probe" {
+            [IO.File]::WriteAllText(
+                (Join-Path $immutable 'dc-immutability-replacement.tmp'),
+                'replace'
+            )
+        }
+    }
+
+    foreach ($writable in @($State, $Results)) {
+        $probe = Join-Path $writable ('dc-writable-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        [IO.File]::WriteAllText($probe, 'writable')
+        if ([IO.File]::ReadAllText($probe) -cne 'writable') {
+            throw "actual child could not round-trip its writable root: $writable"
+        }
+        [IO.File]::Delete($probe)
+    }
+
+    foreach ($immutable in @($Workspace, $Scripts, $Artifacts)) {
+        if (-not (Test-Path -LiteralPath $immutable -PathType Container) -or
+            (Test-Path -LiteralPath "$immutable.dc-immutability-moved") -or
+            (Test-Path -LiteralPath (
+                Join-Path $immutable 'dc-immutability-replacement.tmp'
+            ))) {
+            throw "actual child immutability probe changed a protected path: $immutable"
+        }
+    }
+    if (-not (Test-Path -LiteralPath (
+            Join-Path $Scripts 'invoke-windows-setup-standard-user-ci.ps1'
+        ) -PathType Leaf)) {
+        throw 'actual child immutability probe removed the protected harness script'
+    }
+    $observedHash = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
+        $setup,
+        1073741824
+    )
+    if ($observedHash -cne $ExpectedHash.ToUpperInvariant()) {
+        throw 'actual child immutability probe changed the exact Setup bytes'
+    }
 }
 
 function Invoke-ChildMode {
@@ -112,6 +191,16 @@ function Invoke-ChildMode {
     ) }
     if ($null -eq $identity.User -or $interactive.Value -notin $groupSids) {
         throw 'disposable Setup acceptance child is not an interactive standard user'
+    }
+
+    $originalChildDirectory = [Environment]::CurrentDirectory
+    try {
+        [Environment]::CurrentDirectory = $state
+        Test-ActualChildFilesystemBoundary $sandboxRoot `
+            (Split-Path -Parent $PSScriptRoot) $PSScriptRoot $artifacts $state `
+            $expectedResults $ExpectedSetupSha256
+    } finally {
+        [Environment]::CurrentDirectory = $originalChildDirectory
     }
 
     $env:GITHUB_ACTIONS = 'true'
@@ -229,43 +318,92 @@ function New-RandomSecurePassword {
     return $password
 }
 
-function Get-DisposableSidProcesses([string]$Sid) {
+function Get-SameLiveProcess([object]$Process) {
+    $current = @(Get-CimInstance Win32_Process `
+        -Filter "ProcessId = $([int]$Process.ProcessId)" -ErrorAction Stop)
+    if ($current.Count -ne 1) { return $null }
+    if ((Get-DisposableProcessIdentityKey $current[0]) -cne
+        (Get-DisposableProcessIdentityKey $Process)) {
+        return $null
+    }
+    return $current[0]
+}
+
+function Get-UnverifiableProcessBaseline {
+    $baseline = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+        $unverifiable = $false
+        try {
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid `
+                -ErrorAction Stop
+            $unverifiable = [uint32]$owner.ReturnValue -ne 0
+        } catch { $unverifiable = $true }
+        if (-not $unverifiable) { continue }
+        $live = Get-SameLiveProcess $process
+        if ($null -ne $live) {
+            [void]$baseline.Add((Get-DisposableProcessIdentityKey $live))
+        }
+    }
+    return ,$baseline
+}
+
+function Get-DisposableSidProcesses(
+    [string]$Sid,
+    [Collections.Generic.HashSet[string]]$UnverifiableBaseline
+) {
     if ([string]::IsNullOrWhiteSpace($Sid)) { return @() }
     $matches = [Collections.Generic.List[object]]::new()
     foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+        $owner = $null
         try {
             $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid `
                 -ErrorAction Stop
         } catch {
-            if ($null -ne (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {
-                throw "could not verify owner SID for live process $($process.ProcessId): $($_.Exception.Message)"
+            $live = Get-SameLiveProcess $process
+            if ($null -ne $live) {
+                Assert-UnverifiableProcessWasBaselined $live $UnverifiableBaseline
             }
             continue
         }
-        if ([uint32]$owner.ReturnValue -eq 0 -and
-            [string]$owner.Sid -ceq $Sid) {
+        if ([uint32]$owner.ReturnValue -ne 0) {
+            $live = Get-SameLiveProcess $process
+            if ($null -ne $live) {
+                Assert-UnverifiableProcessWasBaselined $live $UnverifiableBaseline
+            }
+            continue
+        }
+        if ([string]$owner.Sid -ceq $Sid) {
             $matches.Add($process)
         }
     }
     return @($matches)
 }
 
-function Stop-AndVerifyDisposableSidProcesses([string]$Sid) {
+function Stop-AndVerifyDisposableSidProcesses(
+    [string]$Sid,
+    [Collections.Generic.HashSet[string]]$UnverifiableBaseline
+) {
     $terminated = [Collections.Generic.HashSet[int]]::new()
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        $owned = @(Get-DisposableSidProcesses $Sid)
+        $owned = @(Get-DisposableSidProcesses $Sid $UnverifiableBaseline)
         if ($owned.Count -eq 0) { return @($terminated) }
         foreach ($process in $owned) {
             $current = @(Get-CimInstance Win32_Process `
                 -Filter "ProcessId = $([int]$process.ProcessId)" -ErrorAction Stop)
             if ($current.Count -ne 1 -or
-                [string]$current[0].CreationDate -cne [string]$process.CreationDate) {
+                (Get-DisposableProcessIdentityKey $current[0]) -cne
+                    (Get-DisposableProcessIdentityKey $process)) {
                 continue
             }
             $owner = Invoke-CimMethod -InputObject $current[0] -MethodName GetOwnerSid `
                 -ErrorAction Stop
-            if ([uint32]$owner.ReturnValue -ne 0 -or [string]$owner.Sid -cne $Sid) {
-                continue
+            if ([uint32]$owner.ReturnValue -ne 0) {
+                throw "owner SID became unverifiable for exact-SID process $($process.ProcessId)"
+            }
+            if ([string]$owner.Sid -cne $Sid) {
+                throw "owner SID changed for exact-SID process $($process.ProcessId)"
             }
             $termination = Invoke-CimMethod -InputObject $current[0] -MethodName Terminate `
                 -Arguments @{ Reason = [uint32]1603 } -ErrorAction Stop
@@ -276,7 +414,7 @@ function Stop-AndVerifyDisposableSidProcesses([string]$Sid) {
         }
         Start-Sleep -Milliseconds 250
     }
-    $remaining = @(Get-DisposableSidProcesses $Sid)
+    $remaining = @(Get-DisposableSidProcesses $Sid $UnverifiableBaseline)
     if ($remaining.Count -ne 0) {
         throw "disposable account still owns live processes: $($remaining.ProcessId -join ', ')"
     }
@@ -325,7 +463,8 @@ function Complete-DisposableExecutionBoundary {
     param(
         [AllowNull()][object]$Process,
         [string]$AccountName,
-        [string]$Sid
+        [string]$Sid,
+        [Collections.Generic.HashSet[string]]$UnverifiableBaseline
     )
 
     $failures = [Collections.Generic.List[string]]::new()
@@ -349,14 +488,16 @@ function Complete-DisposableExecutionBoundary {
     } catch { $failures.Add("account disable: $($_.Exception.Message)") }
 
     $terminated = @()
-    try { $terminated = @(Stop-AndVerifyDisposableSidProcesses $Sid) }
+    try {
+        $terminated = @(Stop-AndVerifyDisposableSidProcesses $Sid $UnverifiableBaseline)
+    }
     catch { $failures.Add("exact-SID process termination: $($_.Exception.Message)") }
     try { Remove-AndVerifyDisposableScheduledTasks $AccountName $Sid }
     catch { $failures.Add("scheduled-task removal: $($_.Exception.Message)") }
     try {
-        $late = @(Stop-AndVerifyDisposableSidProcesses $Sid)
+        $late = @(Stop-AndVerifyDisposableSidProcesses $Sid $UnverifiableBaseline)
         foreach ($pidValue in $late) { $terminated += [int]$pidValue }
-        if (@(Get-DisposableSidProcesses $Sid).Count -ne 0) {
+        if (@(Get-DisposableSidProcesses $Sid $UnverifiableBaseline).Count -ne 0) {
             throw 'disposable SID process verification was not stable after shutdown'
         }
     } catch { $failures.Add("late exact-SID verification: $($_.Exception.Message)") }
@@ -443,7 +584,10 @@ $setupSourceItem = Get-Item -LiteralPath $setupSource -Force -ErrorAction Stop
 if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
-$expectedSetupHash = (Get-FileHash -LiteralPath $setupSource -Algorithm SHA256).Hash
+$expectedSetupHash = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
+    $setupSource,
+    1073741824
+)
 [IO.Directory]::CreateDirectory($stateBase) | Out-Null
 
 $launcherSource = Join-Path $PSScriptRoot 'windows-disposable-standard-user-launcher.cs'
@@ -471,6 +615,7 @@ $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $executionBoundaryComplete = $false
 $terminatedSidProcessIds = @()
+$unverifiableProcessBaseline = Get-UnverifiableProcessBaseline
 try {
     $account = New-LocalUser -Name $accountName -Password $password `
         -AccountNeverExpires -Description 'DefenseClaw disposable Setup CI account'
@@ -511,6 +656,7 @@ try {
         'invoke-windows-setup-standard-user-ci.ps1',
         'windows-native-ci.ps1',
         'windows-native-paths.ps1',
+        'windows-disposable-file-guard.cs',
         'windows-disposable-user-safety.ps1',
         'windows-setup-standard-user-launcher.cs',
         'test-windows-setup-wizard.ps1'
@@ -523,7 +669,10 @@ try {
     }
     $childSetup = Join-Path $childArtifacts 'DefenseClawSetup-x64.exe'
     [IO.File]::Copy($setupSource, $childSetup, $false)
-    if ((Get-FileHash -LiteralPath $childSetup -Algorithm SHA256).Hash -cne
+    if ([DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
+            $childSetup,
+            1073741824
+        ) -cne
         $expectedSetupHash) {
         throw 'disposable-user Setup copy does not match the exact input artifact'
     }
@@ -561,8 +710,13 @@ try {
         '-StateRoot', $childState,
         '-DiagnosticsRoot', $childDiagnostics,
         '-ResultPath', $result,
-        '-ExerciseWmiEscape'
+        '-ExerciseWmiEscape',
+        '-ExpectedSetupSha256', $expectedSetupHash
     )
+    # Refresh immediately before the untrusted logon. Only exact PID and
+    # CreationDate pairs that are already unverifiable at this point may remain
+    # unverifiable during teardown; PID reuse and every new unknown fail closed.
+    $unverifiableProcessBaseline = Get-UnverifiableProcessBaseline
     $childProcess = [DefenseClaw.DisposableStandardUserLauncher]::Start(
         $accountName,
         $env:COMPUTERNAME,
@@ -580,7 +734,7 @@ try {
     # the job reports ActiveProcesses=0, then the disabled account has no
     # remaining process or scheduled-task identity anywhere on the host.
     $terminatedSidProcessIds = @(Complete-DisposableExecutionBoundary `
-        $childProcess $accountName $accountSid)
+        $childProcess $accountName $accountSid $unverifiableProcessBaseline)
     $executionBoundaryComplete = $true
     if ($timedOut) {
         throw "disposable standard-user $Mode timed out after $TimeoutSeconds seconds"
@@ -590,8 +744,14 @@ try {
         -AllowedRoot $artifactSource -RequireExists
     $null = Assert-DisposableNoReparseAncestors -Path $childSetup `
         -AllowedRoot $sandbox -RequireExists
-    $sourceHashAfter = (Get-FileHash -LiteralPath $setupSource -Algorithm SHA256).Hash
-    $childHashAfter = (Get-FileHash -LiteralPath $childSetup -Algorithm SHA256).Hash
+    $sourceHashAfter = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
+        $setupSource,
+        1073741824
+    )
+    $childHashAfter = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
+        $childSetup,
+        1073741824
+    )
     if ($sourceHashAfter -cne $expectedSetupHash -or
         $childHashAfter -cne $expectedSetupHash) {
         throw 'exact Setup artifact hash changed during disposable-user lifecycle acceptance'
@@ -616,7 +776,7 @@ try {
     if ($accountCreated -and -not $executionBoundaryComplete) {
         try {
             $terminatedSidProcessIds = @(Complete-DisposableExecutionBoundary `
-                $childProcess $accountName $accountSid)
+                $childProcess $accountName $accountSid $unverifiableProcessBaseline)
             $executionBoundaryComplete = $true
         } catch {
             $cleanupFailures.Add("disposable execution boundary: $($_.Exception.Message)")

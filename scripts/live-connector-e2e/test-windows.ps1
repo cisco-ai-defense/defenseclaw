@@ -12,6 +12,7 @@ $nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
 $wizardHarness = Join-Path $root 'scripts\test-windows-setup-wizard.ps1'
 $standardUserCI = Join-Path $root 'scripts\invoke-windows-setup-standard-user-ci.ps1'
 $standardUserLauncher = Join-Path $root 'scripts\windows-disposable-standard-user-launcher.cs'
+$standardUserFileGuard = Join-Path $root 'scripts\windows-disposable-file-guard.cs'
 $standardUserSafety = Join-Path $root 'scripts\windows-disposable-user-safety.ps1'
 $standardUserSafetyTest = Join-Path $root 'scripts\test-windows-disposable-user-safety.ps1'
 $setupStandardUserLauncher = Join-Path $root 'scripts\windows-setup-standard-user-launcher.cs'
@@ -740,6 +741,7 @@ try {
         $nativeWorkflowText -match '-Mode setup-acceptance') `
         'required lifecycle certification no longer routes through the legacy wheel materializer'
     $standardUserSafetyText = Get-Content -LiteralPath $standardUserSafety -Raw
+    $standardUserFileGuardText = Get-Content -LiteralPath $standardUserFileGuard -Raw
     Assert-True ($standardUserCIText -match 'New-LocalUser' -and
         $standardUserCIText -match 'Remove-DisposableProfileAndAccount' -and
         $standardUserCIText -match 'DefenseClaw disposable Setup CI account' -and
@@ -779,13 +781,36 @@ try {
         $standardUserCIText -match 'Complete-DisposableExecutionBoundary' -and
         $standardUserCIText -notmatch 'Copy-Item[^\r\n]*-Recurse') `
         'privileged handoff drains the job, disables the account, sweeps exact-SID escapes, and avoids recursive copies'
+    Assert-True ($standardUserCIText -match 'Get-UnverifiableProcessBaseline' -and
+        [regex]::Matches(
+            $standardUserCIText,
+            '\$unverifiableProcessBaseline = Get-UnverifiableProcessBaseline'
+        ).Count -ge 2 -and
+        $standardUserCIText -match 'Get-DisposableProcessIdentityKey' -and
+        $standardUserSafetyText -match 'Assert-UnverifiableProcessWasBaselined' -and
+        $standardUserCIText -match 'owner SID became unverifiable for exact-SID process') `
+        'process teardown baselines exact PID/CreationDate unknowns before launch and fails closed on reuse or second-check errors'
     Assert-True ($standardUserSafetyText -match 'Copy-BoundedDisposableDiagnostics' -and
         $standardUserSafetyText -match 'MaximumFileBytes' -and
         $standardUserSafetyText -match 'MaximumTotalBytes' -and
         $standardUserSafetyText -match 'ReparsePoint' -and
         $standardUserSafetyText -match 'Remove-DisposableTreeSafely' -and
-        $standardUserSafetyText -match 'FileMode\]::CreateNew') `
-        'diagnostic and sandbox handoff uses bounded regular files and reparse-safe cleanup'
+        $standardUserSafetyText -match 'CopyBoundedRegularFile' -and
+        $standardUserSafetyText -match 'ReadBoundedUtf8' -and
+        $standardUserFileGuardText -match 'FILE_FLAG_OPEN_REPARSE_POINT' -and
+        $standardUserFileGuardText -match 'GetFileInformationByHandle' -and
+        $standardUserFileGuardText -match 'NumberOfLinks != 1' -and
+        $standardUserFileGuardText -match 'FileMode\.CreateNew') `
+        'diagnostic/result handoff validates and consumes one no-follow, single-link regular-file handle'
+    Assert-True ($standardUserCIText -match 'Test-ActualChildFilesystemBoundary' -and
+        $standardUserSafetyText -match 'function Assert-ChildOperationAccessDenied' -and
+        $standardUserCIText -match 'Setup overwrite probe' -and
+        $standardUserCIText -match 'Setup delete probe' -and
+        $standardUserCIText -match 'rename probe' -and
+        $standardUserCIText -match 'delete probe' -and
+        $standardUserCIText -match 'replacement probe' -and
+        $standardUserCIText -match 'actual child immutability probe changed the exact Setup bytes') `
+        'the real disposable child proves protected payload denial and writable state/results before Setup'
     Assert-True ($setupStandardUserLauncherText -match 'TokenLinkedToken' -and
         $setupStandardUserLauncherText -match 'TokenElevationTypeLimited' -and
         $setupStandardUserLauncherText -match 'ValidateStandardUserPrimaryToken' -and
@@ -798,10 +823,10 @@ try {
         'Setup launcher fails linked-token query errors and prohibits restricted-LUA fallback in certification'
     Assert-True ([regex]::Matches(
             $standardUserCIText,
-            'Get-FileHash -LiteralPath \$(?:setupSource|childSetup) -Algorithm SHA256'
-        ).Count -ge 3 -and
+            'DisposableFileGuard\]::ComputeSha256Hex'
+        ).Count -ge 4 -and
         $standardUserCIText -match 'exact Setup artifact hash changed during') `
-        'disposable acceptance revalidates the exact Setup hash before and after the lifecycle'
+        'disposable acceptance revalidates the exact single-link Setup handle before and after the lifecycle'
     Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $releaseWorkflowText -match '-Mode setup-acceptance' -and
         $releaseWorkflowText -notmatch '(?s)Validate the exact signed installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `

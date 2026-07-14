@@ -19,6 +19,25 @@ try {
     [IO.Directory]::CreateDirectory($base) | Out-Null
     [IO.Directory]::CreateDirectory($outside) | Out-Null
     [IO.File]::WriteAllText((Join-Path $outside 'sentinel.txt'), 'preserve')
+    $readOnlyProbe = Join-Path $base 'access-denied-probe.txt'
+    [IO.File]::WriteAllText($readOnlyProbe, 'preserve')
+    [IO.File]::SetAttributes($readOnlyProbe, [IO.FileAttributes]::ReadOnly)
+    Assert-ChildOperationAccessDenied 'wrapped access-denied regression' {
+        [IO.File]::Delete($readOnlyProbe)
+    }
+    if (-not (Test-Path -LiteralPath $readOnlyProbe -PathType Leaf)) {
+        throw 'access-denied assertion allowed its protected probe to be deleted'
+    }
+    [IO.File]::SetAttributes($readOnlyProbe, [IO.FileAttributes]::Normal)
+    $wrongFailureRejected = $false
+    try {
+        Assert-ChildOperationAccessDenied 'wrong-error regression' {
+            throw [IO.FileNotFoundException]::new('not access denied')
+        }
+    } catch { $wrongFailureRejected = $true }
+    if (-not $wrongFailureRejected) {
+        throw 'access-denied assertion accepted an unrelated failure code'
+    }
     $childSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-546')
     $sandbox = Join-Path $base 'sandbox'
     $state = Join-Path $sandbox 'state'
@@ -36,6 +55,24 @@ try {
     Assert-DisposableChildAcl $payload $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -ExpectInheritance
 
+    $created = [datetime]::UtcNow
+    $baselineProcess = [pscustomobject]@{ ProcessId = 4242; CreationDate = $created }
+    $unverifiableBaseline = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    [void]$unverifiableBaseline.Add((Get-DisposableProcessIdentityKey $baselineProcess))
+    Assert-UnverifiableProcessWasBaselined $baselineProcess $unverifiableBaseline
+    $reuseRejected = $false
+    try {
+        Assert-UnverifiableProcessWasBaselined ([pscustomobject]@{
+            ProcessId = 4242
+            CreationDate = $created.AddTicks(1)
+        }) $unverifiableBaseline
+    } catch { $reuseRejected = $true }
+    if (-not $reuseRejected) {
+        throw 'unverifiable-process baseline masked PID reuse with a new CreationDate'
+    }
+
     $diagnostics = Join-Path $sandbox 'diagnostics'
     Set-DisposableProtectedDirectoryAcl $diagnostics $childSid `
         ([Security.AccessControl.FileSystemRights]::Modify) -InheritChildRights
@@ -46,6 +83,41 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $handoff 'processes.json') -PathType Leaf)) {
         throw 'bounded diagnostic handoff did not copy the expected regular file'
     }
+
+    $results = Join-Path $sandbox 'results'
+    Set-DisposableProtectedDirectoryAcl $results $childSid `
+        ([Security.AccessControl.FileSystemRights]::Modify) -InheritChildRights
+    $result = Join-Path $results 'result.json'
+    [IO.File]::WriteAllText($result, '{"succeeded":true}')
+    if ((Read-BoundedDisposableResult $result $results) -cne '{"succeeded":true}') {
+        throw 'handle-validated result read changed the expected UTF-8 bytes'
+    }
+
+    $resultHardlink = Join-Path $base 'result-hardlink.json'
+    New-Item -ItemType HardLink -Path $resultHardlink -Target $result `
+        -ErrorAction Stop | Out-Null
+    $resultHardlinkRejected = $false
+    try { $null = Read-BoundedDisposableResult $result $results }
+    catch { $resultHardlinkRejected = $true }
+    if (-not $resultHardlinkRejected) {
+        throw 'result handoff accepted an NTFS file with more than one link'
+    }
+    Remove-Item -LiteralPath $resultHardlink -Force
+
+    $diagnosticHardlinkTarget = Join-Path $outside 'diagnostic-hardlink.log'
+    [IO.File]::WriteAllText($diagnosticHardlinkTarget, 'do not copy through a hardlink')
+    $diagnosticHardlink = Join-Path $diagnostics 'gateway.log'
+    New-Item -ItemType HardLink -Path $diagnosticHardlink `
+        -Target $diagnosticHardlinkTarget -ErrorAction Stop | Out-Null
+    $diagnosticHardlinkRejected = $false
+    try {
+        Copy-BoundedDisposableDiagnostics $diagnostics `
+            (Join-Path $base 'hardlink-handoff') $sandbox $base
+    } catch { $diagnosticHardlinkRejected = $true }
+    if (-not $diagnosticHardlinkRejected) {
+        throw 'diagnostic handoff accepted an NTFS file with more than one link'
+    }
+    Remove-Item -LiteralPath $diagnosticHardlink -Force
 
     $junction = Join-Path $diagnostics 'escape'
     New-Item -ItemType Junction -Path $junction -Target $outside -ErrorAction Stop | Out-Null

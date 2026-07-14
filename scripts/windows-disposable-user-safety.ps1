@@ -3,6 +3,61 @@
 
 Set-StrictMode -Version Latest
 
+$disposableFileGuardSource = Join-Path $PSScriptRoot 'windows-disposable-file-guard.cs'
+if (-not ('DefenseClaw.DisposableFileGuard' -as [type])) {
+    if (-not (Test-Path -LiteralPath $disposableFileGuardSource -PathType Leaf)) {
+        throw "disposable file guard source is missing: $disposableFileGuardSource"
+    }
+    Add-Type -Path $disposableFileGuardSource
+}
+
+function Assert-ChildOperationAccessDenied {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][scriptblock]$Operation
+    )
+    try {
+        & $Operation
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure) {
+            $errorCode = $failure.HResult -band 0xFFFF
+            if ($failure -is [UnauthorizedAccessException] -or $errorCode -eq 5) {
+                return
+            }
+            $failure = $failure.InnerException
+        }
+        throw "$Label failed without an ERROR_ACCESS_DENIED/5 cause"
+    }
+    throw "$Label unexpectedly succeeded"
+}
+
+function Get-DisposableProcessIdentityKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Process)
+
+    $processId = [int]$Process.ProcessId
+    if ($processId -le 0 -or $null -eq $Process.CreationDate) {
+        throw 'live process identity requires a positive PID and CreationDate'
+    }
+    $created = ([datetime]$Process.CreationDate).ToUniversalTime().Ticks
+    return ('{0}:{1}' -f $processId, $created)
+}
+
+function Assert-UnverifiableProcessWasBaselined {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Process,
+        [Parameter(Mandatory)][Collections.Generic.HashSet[string]]$Baseline
+    )
+
+    $identity = Get-DisposableProcessIdentityKey $Process
+    if (-not $Baseline.Contains($identity)) {
+        throw "new or PID-reused process has an unverifiable owner: $identity"
+    }
+}
+
 function Assert-DisposableNoReparseAncestors {
     [CmdletBinding()]
     param(
@@ -186,13 +241,6 @@ function Copy-BoundedDisposableDiagnostics {
         if ($entry.Name -notmatch $expectedName) {
             throw "disposable diagnostics contains an unexpected file: $($entry.Name)"
         }
-        if ($entry.Length -gt $MaximumFileBytes) {
-            throw "disposable diagnostic exceeds the per-file bound: $($entry.Name)"
-        }
-        $total += $entry.Length
-        if ($total -gt $MaximumTotalBytes) {
-            throw 'disposable diagnostics exceeds the aggregate byte bound'
-        }
     }
 
     $destination = Assert-DisposableNoReparseAncestors -Path $DestinationRoot `
@@ -208,21 +256,17 @@ function Copy-BoundedDisposableDiagnostics {
         $target = Join-Path $destination $entry.Name
         $null = Assert-DisposableNoReparseAncestors -Path $target `
             -AllowedRoot $destination
-        $input = [IO.File]::Open(
+        $remaining = $MaximumTotalBytes - $total
+        if ($remaining -lt 0) {
+            throw 'disposable diagnostics exceeds the aggregate byte bound'
+        }
+        $bound = [Math]::Min($MaximumFileBytes, $remaining)
+        $copied = [DefenseClaw.DisposableFileGuard]::CopyBoundedRegularFile(
             $entry.FullName,
-            [IO.FileMode]::Open,
-            [IO.FileAccess]::Read,
-            [IO.FileShare]::Read
+            $target,
+            $bound
         )
-        try {
-            $output = [IO.File]::Open(
-                $target,
-                [IO.FileMode]::CreateNew,
-                [IO.FileAccess]::Write,
-                [IO.FileShare]::None
-            )
-            try { $input.CopyTo($output) } finally { $output.Dispose() }
-        } finally { $input.Dispose() }
+        $total += $copied
     }
 }
 
@@ -236,11 +280,5 @@ function Read-BoundedDisposableResult {
 
     $full = Assert-DisposableNoReparseAncestors -Path $Path `
         -AllowedRoot $ResultsRoot -RequireExists
-    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
-    if ($item.PSIsContainer -or
-        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-        $item.Length -gt $MaximumBytes) {
-        throw "disposable result is not a bounded regular file: $full"
-    }
-    return [IO.File]::ReadAllText($full, [Text.Encoding]::UTF8)
+    return [DefenseClaw.DisposableFileGuard]::ReadBoundedUtf8($full, $MaximumBytes)
 }
