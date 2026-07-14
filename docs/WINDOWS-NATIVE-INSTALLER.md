@@ -105,9 +105,14 @@ development certificate or fabricated Cisco signature is generated.
 Setup resolves Windows Known Folders rather than trusting profile environment
 variables:
 
-- application: `%LOCALAPPDATA%\Programs\DefenseClaw`;
+- application: `FOLDERID_UserProgramFiles\DefenseClaw` (normally
+  `%LOCALAPPDATA%\Programs\DefenseClaw`, including Known Folder redirection);
 - maintenance setup cache:
   `%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe`;
+- durable setup transaction state:
+  `%LOCALAPPDATA%\DefenseClaw\InstallerState`;
+- crash-cleaned payload extraction:
+  `%LOCALAPPDATA%\DefenseClaw\InstallerTemp`;
 - operator state: `%USERPROFILE%\.defenseclaw`.
 
 The application tree is transactionally replaced. The maintenance cache is a
@@ -128,16 +133,56 @@ Windows mutex. A concurrent invocation exits with code 1618 before reading or
 mutating product state, including when the same user has sessions on multiple
 desktops.
 
+Immediately before an install or uninstall mutation, setup recovers any prior
+interrupted transaction while it still owns that mutex. A private, current-user
+owned Windows-DACL journal advances atomically and with write-through ordering
+through `intent`, `committed`, `converged`, and `complete`. The journal contains
+a random operation identity; every destructive application/cache path is
+derived from Windows Known Folders. It also records the explicitly selected
+Codex and Claude configuration homes and the observed user PATH. Recovery
+rejects an altered destructive path, an unrelated install-state identity, an
+untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
+configuration symlinks remain supported by the connector's target-aware writer.
+A durable `complete` tombstone is atomically replaced by the next operation;
+markers are not unlinked in an order that could resurrect a stale intent after
+power loss.
+
+Before `committed`, setup mutates only transaction-owned application and
+maintenance-cache paths and may stop owned services. An interrupted install can
+therefore restore the exact old trees and services without overwriting a PATH,
+Run-key, or Apps-registration edit made by another process. An interrupted
+uninstall restores its exact transaction-ID-bearing trash tree. Setup never
+treats a state-less directory at the fixed install path as transaction-owned.
+
+The forward-commit boundary is crossed before packaged migrations, connector
+configuration, PATH, Apps registration, gateway auto-start, or hook teardown.
+Those changes are replayed idempotently toward the requested target after a
+crash; old binaries are never restored against already-migrated configuration.
+The journal records the source/target versions and effective `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR`, and convergence reruns migrations/configuration, validates
+the installed and maintenance executables, requires atomic durable connector
+writes, flushes mutated Registry keys, and verifies selected services before
+advancing to `converged`. Backup,
+trash, user-data, and installer-cache cleanup happens only afterwards. When an
+uninstaller is running from its own cache, it leaves the `converged` tombstone
+until a later setup verifies that asynchronous self-deletion succeeded. Unsafe
+or incomplete recovery keeps the journal and returns 1603 for a bounded retry.
+
 Before mutation, setup validates gateway and watchdog PID records against the
-live executable path and process creation identity. It stops the watchdog and
-gateway, probes installed executables, DLLs, and Python extensions for file
-locks, and returns the fatal-install exit code 1603 without publishing a partial tree when files
-remain in use.
+live executable path and process creation identity. It asks the gateway through
+its authenticated loopback API to drain and close audit, telemetry, stores, and
+sidecars, and signals the watchdog through its user-private named event. It
+waits on the exact process handles and uses bounded force termination only as a
+legacy/unhealthy fallback. Stop and status never report success while either
+owned process remains live. The transaction-owned whole-tree rename is the
+authoritative file-lock check; a sharing violation returns fatal-install code
+1603 and rolls back without publishing a partial tree.
 
 The new tree is validated with both CLI and gateway version commands. Repair
-and upgrade preserve connector/mode state and never rerun connector setup over
-an existing roster. A fresh explicit connector selection may initialize only
-when no prior application or user-data tree exists.
+and upgrade preserve connector/mode state, then idempotently reconcile the
+recorded connector so interrupted or drifted setup can converge without adding
+duplicate registrations. A fresh explicit connector selection initializes the
+chosen integration during the same committed transaction.
 
 On upgrade, the CLI uses the installer-owned cosign binary (never an
 environment-selected verifier) to verify the signed checksums and the upgrade
