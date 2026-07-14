@@ -107,6 +107,9 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 	// round-trip — it invokes emitEgress in-process with source="go"
 	// directly — so unconditional override here is safe.
 	payload.Source = "ts"
+	// resolved_ip is reserved for the Go httptrace observer. The TS endpoint
+	// cannot attest which peer net/http actually selected.
+	payload.ResolvedIP = ""
 	// Validate the branch/decision enums server-side so a malformed
 	// TS client can't push garbage into gateway.jsonl.
 	if !validEgressBranch(payload.Branch) || !validEgressDecision(payload.Decision) {

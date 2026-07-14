@@ -1313,7 +1313,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
-	resp, err := providerHTTPClient.Do(upstreamReq)
+	resp, err := doProviderRequest(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -2393,21 +2393,23 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
 		return true
 	}
-	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
-		!passthroughAllowPrivateForTest {
-		emitEgress(r.Context(), gatewaylog.EgressPayload{
-			TargetHost:   host,
-			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
-			Decision:     "block",
-			Reason:       "private-ip",
-			Source:       "go",
-		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-		return true
+	if host := u.Hostname(); host != "" {
+		if isPrivateHost(host) &&
+			!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+			!passthroughAllowPrivateForTest {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   host,
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "chat",
+				Decision:     "block",
+				Reason:       "private-ip",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+			return true
+		}
 	}
 	return false
 }
@@ -5294,7 +5296,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
-	resp, err := providerHTTPClient.Do(upReq)
+	resp, err := doProviderRequest(upReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
