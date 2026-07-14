@@ -29,7 +29,7 @@ jobs:
   windows-go:
     name: Windows x64 Go suite
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -69,6 +69,17 @@ jobs:
           )
           $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
           Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
+      - name: Stress native single-flight and executable lifecycle contracts
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=10', '-run', '^TestRunScan_SingleFlight$', './internal/inventory'
+          ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-inventory-singleflight-stress.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
