@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -55,6 +56,8 @@ const (
 	defaultHookRequestTimeout = 10 * time.Second
 	hookResponseGrace         = time.Second
 )
+
+var errInvalidHookRequest = errors.New("invalid hook request")
 
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
@@ -102,6 +105,11 @@ type Options struct {
 	// HTTPClient lets tests inject a stub transport. When nil a client with a
 	// 2s connect timeout and a connector/event-specific total budget is used.
 	HTTPClient *http.Client
+	// GatewayRecovery is installed only by the protected native Windows hook
+	// launcher. After an exact connection-refused result, it may start and wait
+	// for the installer-owned gateway. Run invokes it at most once and retries
+	// the original authenticated hook request once within the same deadline.
+	GatewayRecovery func(context.Context, error) error
 	// Now is injectable for deterministic failure-log timestamps in tests.
 	Now func() time.Time
 }
@@ -110,6 +118,7 @@ type Options struct {
 // (0 = allow / no-op, 2 = block / fail-closed). It never returns other codes
 // so callers can pass the result straight to os.Exit.
 func Run(ctx context.Context, opts Options) int {
+	startedAt := time.Now()
 	opts = withDefaults(opts)
 
 	sp, ok := specFor(opts.Connector)
@@ -154,7 +163,14 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	opts.Event = resolveHookEvent(opts.Event, payload)
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = defaultHTTPClient(hookRequestTimeout(opts.Connector, opts.Event))
+		requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
+		if requestTimeout <= 0 {
+			return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
+		}
+		opts.HTTPClient = defaultHTTPClient(requestTimeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
 	}
 
 	token := opts.Token
@@ -226,24 +242,20 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
 func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
-	url := "http://" + opts.APIAddr + sp.endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return failResponse(opts, sp, failMode, "invalid request: "+err.Error())
+	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
+	if errors.Is(err, errInvalidHookRequest) {
+		return failResponse(opts, sp, failMode, err.Error())
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if err != nil && opts.GatewayRecovery != nil && connectionRefused(err) {
+		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
+			// The initial request proved no listener was present. Recovery verifies
+			// and starts the exact installer-owned gateway, including authenticated
+			// readiness, before this single retry.
+			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		} else {
+			return failUnreachable(opts, sp, failMode, "gateway cold start failed")
+		}
 	}
-	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
-		req.Header.Set("traceparent", v)
-	}
-	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
-		req.Header.Set("tracestate", v)
-	}
-
-	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
 		return failUnreachable(opts, sp, failMode, "gateway unreachable")
 	}
@@ -259,6 +271,33 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	return sp.decide(opts, body)
+}
+
+func sendHookRequest(
+	ctx context.Context,
+	opts Options,
+	sp spec,
+	payload []byte,
+	token string,
+) (*http.Response, error) {
+	url := "http://" + opts.APIAddr + sp.endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errInvalidHookRequest, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
+		req.Header.Set("traceparent", v)
+	}
+	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
+		req.Header.Set("tracestate", v)
+	}
+
+	return opts.HTTPClient.Do(req)
 }
 
 // decide shapes the connector-native stdout + exit code from a 2xx gateway

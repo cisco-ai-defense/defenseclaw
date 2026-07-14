@@ -1638,6 +1638,7 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	// transaction recovery and re-enables a data-preserving reinstall.
 	if err := publishStableHookRuntime(
 		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-hook.exe"),
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
 		transaction.DataRoot,
 		transaction.ID,
 	); err != nil {

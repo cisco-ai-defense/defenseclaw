@@ -25,8 +25,8 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-func publishStableHookRuntime(source, dataRoot, transactionID string) error {
-	return hookruntime.Publish(source, dataRoot, transactionID)
+func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
+	return hookruntime.Publish(source, gatewayPath, dataRoot, transactionID)
 }
 
 func disableStableHookRuntime(transactionID string) error {

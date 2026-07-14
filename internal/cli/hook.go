@@ -230,6 +230,9 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 			os.Getenv("OTEL_TRACESTATE"),
 		),
 	}
+	if trustedNativeState {
+		opts.GatewayRecovery = trustedNativeGatewayRecovery()
+	}
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {

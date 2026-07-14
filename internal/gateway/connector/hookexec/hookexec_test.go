@@ -22,11 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,12 +36,13 @@ import (
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
 // transport error) and capturing the outbound request for assertions.
 type stubRT struct {
-	status   int
-	body     string
-	err      error
-	gotReq   *http.Request
-	gotBody  []byte
-	requests int
+	status    int
+	body      string
+	err       error
+	gotReq    *http.Request
+	gotBody   []byte
+	requests  int
+	onRequest func(*stubRT, *http.Request) (*http.Response, error)
 }
 
 func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,6 +51,9 @@ func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		s.gotBody, _ = io.ReadAll(req.Body)
 	}
 	s.gotReq = req
+	if s.onRequest != nil {
+		return s.onRequest(s, req)
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -67,6 +73,16 @@ type runResult struct {
 
 // run executes a hook against a stub gateway with a temp Home + .token file.
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
+	return runWithContext(t, context.Background(), connector, rt, mutate)
+}
+
+func runWithContext(
+	t *testing.T,
+	ctx context.Context,
+	connector string,
+	rt *stubRT,
+	mutate func(*Options),
+) runResult {
 	t.Helper()
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")
@@ -94,7 +110,7 @@ func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runR
 	if mutate != nil {
 		mutate(&opts)
 	}
-	code := Run(context.Background(), opts)
+	code := Run(ctx, opts)
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code, rt: rt}
 }
 
@@ -452,6 +468,132 @@ func TestUnreachable(t *testing.T) {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
 	})
+}
+
+func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
+	rt := &stubRT{}
+	rt.onRequest = func(state *stubRT, _ *http.Request) (*http.Response, error) {
+		if state.requests == 1 {
+			return nil, syscall.ECONNREFUSED
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"action":"allow"}`)),
+			Header:     make(http.Header),
+		}, nil
+	}
+	recoveries := 0
+	r := run(t, "codex", rt, func(opts *Options) {
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 0 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	recoveries := 0
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestForeignOrResponsiveListenerNeverTriggersColdStart(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+	}{
+		{name: "foreign-auth", status: http.StatusUnauthorized},
+		{name: "responsive-server-error", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rt := &stubRT{status: test.status, body: "foreign"}
+			recoveries := 0
+			r := run(t, "codex", rt, func(opts *Options) {
+				opts.GatewayRecovery = func(context.Context, error) error {
+					recoveries++
+					return nil
+				}
+			})
+			if r.code != 0 || recoveries != 0 || rt.requests != 1 {
+				t.Fatalf("foreign listener result code=%d recoveries=%d requests=%d", r.code, recoveries, rt.requests)
+			}
+		})
+	}
+}
+
+func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			return errors.New("foreign process owns gateway state")
+		}
+	})
+	if r.code != 2 || rt.requests != 1 {
+		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	r := runWithContext(t, ctx, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
+	}
+	if r.code != 2 {
+		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
+	}
+}
+
+func TestDefaultTransportColdStartReceivesRegisteredHookDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining time.Duration
+	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+		opts.Event = "MessageDisplay"
+		opts.APIAddr = addr
+		opts.HTTPClient = nil
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("cold-start context has no registered hook deadline")
+			}
+			remaining = time.Until(deadline)
+			return errors.New("test stops before gateway start")
+		}
+	})
+	if r.code != 0 {
+		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
+	}
+	if remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s, want within registered request budget", remaining)
+	}
 }
 
 // --- Response-layer failure (4xx / bad JSON): honors FAIL_MODE ---

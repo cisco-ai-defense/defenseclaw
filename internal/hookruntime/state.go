@@ -8,6 +8,7 @@
 package hookruntime
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,20 +19,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
-	SchemaVersion = 1
-	LauncherName  = "defenseclaw-hook.exe"
-	StateName     = "hook-runtime-state.json"
+	LegacySchemaVersion = 1
+	SchemaVersion       = 2
+	LauncherName        = "defenseclaw-hook.exe"
+	GatewayName         = "defenseclaw-gateway.exe"
+	StateName           = "hook-runtime-state.json"
 
 	StatusPublishing = "publishing"
 	StatusActive     = "active"
 	StatusDisabled   = "disabled"
 
-	maxStateBytes = 64 << 10
+	maxStateBytes            = 64 << 10
+	stateMutationLockTimeout = 2 * time.Minute
 )
 
 // Paths are derived from the current user's LocalAppData Known Folder on
@@ -52,22 +57,43 @@ type State struct {
 	LauncherPath   string `json:"launcher_path"`
 	LauncherSHA256 string `json:"launcher_sha256"`
 	DataRoot       string `json:"data_root,omitempty"`
+	GatewayPath    string `json:"gateway_path,omitempty"`
+	GatewaySHA256  string `json:"gateway_sha256,omitempty"`
 	TransactionID  string `json:"transaction_id"`
 }
 
 func (state State) Active() bool { return state.Status == StatusActive }
+
+// ColdStartCapable distinguishes version-2 installer state, which binds an
+// exact gateway executable, from legacy active state. Legacy state remains a
+// valid hook configuration across upgrade, but it can only contact an already
+// running gateway and never gains authority to start a path it did not record.
+func (state State) ColdStartCapable() bool {
+	if !state.Active() || state.SchemaVersion != SchemaVersion ||
+		!filepath.IsAbs(state.DataRoot) || filepath.Clean(state.DataRoot) != state.DataRoot ||
+		!filepath.IsAbs(state.GatewayPath) || filepath.Clean(state.GatewayPath) != state.GatewayPath ||
+		!strings.EqualFold(filepath.Base(state.GatewayPath), GatewayName) || len(state.GatewaySHA256) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(state.GatewaySHA256)
+	return err == nil
+}
 
 // Publish atomically refreshes the stable launcher and activates it for the
 // committed native-setup transaction. The publishing state is made visible
 // before the executable changes, so a hook process can observe either a fully
 // verified old generation, an intentional no-op, or the fully verified new
 // generation -- never a new executable paired with stale activation data.
-func Publish(source, dataRoot, transactionID string) error {
+func Publish(source, gatewayPath, dataRoot, transactionID string) error {
 	paths, err := CurrentUserPaths()
 	if err != nil {
 		return err
 	}
-	return publishAt(paths, source, dataRoot, transactionID)
+	ctx, cancel := context.WithTimeout(context.Background(), stateMutationLockTimeout)
+	defer cancel()
+	return WithGatewayStartLock(ctx, func() error {
+		return publishAt(paths, source, gatewayPath, dataRoot, transactionID)
+	})
 }
 
 // Disable leaves the stable launcher in place for already-running Codex and
@@ -79,14 +105,18 @@ func Disable(transactionID string) error {
 	if err != nil {
 		return err
 	}
-	return disableAt(paths, transactionID)
+	ctx, cancel := context.WithTimeout(context.Background(), stateMutationLockTimeout)
+	defer cancel()
+	return WithGatewayStartLock(ctx, func() error {
+		return disableAt(paths, transactionID)
+	})
 }
 
 // Validate checks the serialized state contract without consulting mutable
 // process environment. File ownership and DACL validation are performed by
 // ReadTrustedForExecutable before a launcher consumes the result.
 func (state State) Validate(paths Paths) error {
-	if state.SchemaVersion != SchemaVersion {
+	if state.SchemaVersion != LegacySchemaVersion && state.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported hook runtime state schema %d", state.SchemaVersion)
 	}
 	switch state.Status {
@@ -109,10 +139,32 @@ func (state State) Validate(paths Paths) error {
 	if _, err := hex.DecodeString(state.TransactionID); err != nil {
 		return errors.New("hook runtime state has an invalid transaction identity")
 	}
-	if state.Status == StatusActive {
+	if state.Status == StatusActive || state.Status == StatusPublishing {
 		if !filepath.IsAbs(state.DataRoot) || filepath.Clean(state.DataRoot) != state.DataRoot {
-			return errors.New("active hook runtime state has an invalid data root")
+			return errors.New("enabled hook runtime state has an invalid data root")
 		}
+	}
+	if state.SchemaVersion == LegacySchemaVersion {
+		if state.GatewayPath != "" || state.GatewaySHA256 != "" {
+			return errors.New("legacy hook runtime state unexpectedly records a gateway identity")
+		}
+		return nil
+	}
+	if state.Status == StatusDisabled {
+		if state.DataRoot != "" || state.GatewayPath != "" || state.GatewaySHA256 != "" {
+			return errors.New("disabled hook runtime state retains active gateway data")
+		}
+		return nil
+	}
+	if !filepath.IsAbs(state.GatewayPath) || filepath.Clean(state.GatewayPath) != state.GatewayPath ||
+		!strings.EqualFold(filepath.Base(state.GatewayPath), GatewayName) {
+		return errors.New("hook runtime state has an invalid gateway path")
+	}
+	if len(state.GatewaySHA256) != 64 {
+		return errors.New("hook runtime state has an invalid gateway digest")
+	}
+	if _, err := hex.DecodeString(state.GatewaySHA256); err != nil {
+		return errors.New("hook runtime state has an invalid gateway digest")
 	}
 	return nil
 }
@@ -180,7 +232,7 @@ func readTrustedAt(paths Paths, executable string) (state State, recognized bool
 	return state, true, nil
 }
 
-func publishAt(paths Paths, source, dataRoot, transactionID string) error {
+func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string) error {
 	if err := validatePaths(paths); err != nil {
 		return err
 	}
@@ -190,6 +242,25 @@ func publishAt(paths Paths, source, dataRoot, transactionID string) error {
 	dataRoot = filepath.Clean(dataRoot)
 	if !filepath.IsAbs(dataRoot) {
 		return errors.New("stable hook runtime requires an absolute data root")
+	}
+	gatewayPath = filepath.Clean(gatewayPath)
+	if !filepath.IsAbs(gatewayPath) || !strings.EqualFold(filepath.Base(gatewayPath), GatewayName) {
+		return errors.New("stable hook runtime requires an absolute installed gateway path")
+	}
+	// The native installer is the writer for this per-user executable. Give the
+	// gateway the same current-user/SYSTEM DACL as other protected runtime state
+	// before recording its identity, then require that protection on every cold
+	// start. This prevents a project or another local principal from replacing
+	// the image selected by the hook launcher.
+	if err := safefile.ProtectFile(gatewayPath); err != nil {
+		return fmt.Errorf("protect installed gateway for hook recovery: %w", err)
+	}
+	if err := safefile.ValidatePrivateFile(gatewayPath); err != nil {
+		return fmt.Errorf("validate installed gateway for hook recovery: %w", err)
+	}
+	gatewayDigest, err := fileSHA256(gatewayPath)
+	if err != nil {
+		return fmt.Errorf("hash installed gateway for hook recovery: %w", err)
 	}
 	info, err := os.Lstat(source)
 	if err != nil {
@@ -218,6 +289,8 @@ func publishAt(paths Paths, source, dataRoot, transactionID string) error {
 		LauncherPath:   filepath.Clean(paths.Launcher),
 		LauncherSHA256: digest,
 		DataRoot:       dataRoot,
+		GatewayPath:    gatewayPath,
+		GatewaySHA256:  gatewayDigest,
 		TransactionID:  transactionID,
 	}
 	if err := writeState(paths, state); err != nil {
@@ -242,7 +315,8 @@ func publishAt(paths Paths, source, dataRoot, transactionID string) error {
 	}
 	verified, recognized, err := readTrustedAt(paths, paths.Launcher)
 	if err != nil || !recognized || !verified.Active() || verified.TransactionID != transactionID ||
-		!samePath(verified.DataRoot, dataRoot) {
+		!samePath(verified.DataRoot, dataRoot) || !samePath(verified.GatewayPath, gatewayPath) ||
+		!strings.EqualFold(verified.GatewaySHA256, gatewayDigest) {
 		if err == nil {
 			err = errors.New("active state did not round-trip")
 		}
