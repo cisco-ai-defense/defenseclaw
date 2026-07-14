@@ -117,6 +117,8 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"CMD-WGET-POST":   CapNetworkFetch,
 	"CMD-PIPE-CURL":   CapNetworkFetch,
 	"CMD-PIPE-WGET":   CapNetworkFetch,
+	"CMD-ARCHIVE-EXFIL":     CapNetworkFetch,
+	"CMD-WORKSPACE-ARCHIVE": CapWriteFS,
 	"SRC-FETCH":       CapNetworkFetch,
 	"SRC-NET-SERVER":  CapNetworkFetch,
 	"SRC-HTTP-SERVER": CapNetworkFetch,

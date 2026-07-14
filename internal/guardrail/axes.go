@@ -242,6 +242,7 @@ var ruleAxes = map[string][]DataAxis{
 	// These exact entries are consulted before the JUDGE-* prefix
 	// fallbacks in AxesForRuleID, so they override them.
 	"JUDGE-EXFIL-CHANNEL":     {AxisEgressExternal},
+	"JUDGE-EXFIL-REPO":      {AxisSensitiveAccess, AxisEgressExternal},
 	"JUDGE-TOOL-INJ-EXFIL":    {AxisSensitiveAccess, AxisEgressExternal},
 	"JUDGE-TOOL-INJ-DESTRUCT": {}, // destructive = separate flow, not trifecta
 
@@ -252,6 +253,8 @@ var ruleAxes = map[string][]DataAxis{
 	"CMD-WGET-POST":   {AxisEgressExternal},
 	"CMD-PIPE-CURL":   {AxisEgressExternal},
 	"CMD-PIPE-WGET":   {AxisEgressExternal},
+	"CMD-ARCHIVE-EXFIL":      {AxisSensitiveAccess, AxisEgressExternal},
+	"CMD-WORKSPACE-ARCHIVE":  {AxisSensitiveAccess},
 	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
 
 	// Cloud metadata C2 endpoints read instance credentials (sensitive)
@@ -301,6 +304,7 @@ var judgeAxes = map[string][]DataAxis{
 	// Exfil judge — one category per axis.
 	"exfil.sensitive file access": {AxisSensitiveAccess},
 	"exfil.exfiltration channel":  {AxisEgressExternal},
+	"exfil.repository archive exfiltration": {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Tool-injection judge.
 	"tool-injection.instruction manipulation": {AxisIngressUntrusted},

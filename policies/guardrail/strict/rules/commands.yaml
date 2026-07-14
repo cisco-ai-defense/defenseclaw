@@ -158,6 +158,18 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [network, exfiltration]
+  - id: CMD-WORKSPACE-ARCHIVE
+    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+\S+\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b))'
+    title: "Workspace-scoped archive creation"
+    severity: MEDIUM
+    confidence: 0.65
+    tags: [archive, correlation]
+  - id: CMD-ARCHIVE-EXFIL
+    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+\S+\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b)).*(?:&&?|\|\||;).*(?:\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@)|\bwget\b\s+.*--post-(?:data|file)|\bscp\b\s+\S+.*[:@]|\brsync\b\s+\S+.*:)'
+    title: "Workspace archive-then-upload chain"
+    severity: HIGH
+    confidence: 0.88
+    tags: [network, exfiltration, archive]
   - id: CMD-SOCAT-EXEC
     pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"

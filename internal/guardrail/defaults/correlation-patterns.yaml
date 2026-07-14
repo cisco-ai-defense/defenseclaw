@@ -59,3 +59,20 @@ patterns:
       - tool_capability_class: exec_shell
         min_severity: HIGH
       - axis: sensitive_access
+
+  - id: REPO-ARCHIVE-EXFIL
+    description: |
+      Workspace-scoped archive followed by an explicit file upload in
+      the same session. Catches split archive/upload steps without
+      flagging routine build artifacts or standalone transfer commands.
+    window_events: 15
+    severity_on_match: CRITICAL
+    ordered: true
+    all_of:
+      - with_rule_match:
+          - CMD-WORKSPACE-ARCHIVE
+        min_severity: MEDIUM
+      - with_rule_match:
+          - CMD-CURL-UPLOAD
+          - CMD-WGET-POST
+        min_severity: HIGH

@@ -101,6 +101,9 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
 		// Command rules that open an egress channel
 		"CMD-CURL-UPLOAD": {AxisEgressExternal},
+		"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
+		"CMD-ARCHIVE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+		"JUDGE-EXFIL-REPO": {AxisSensitiveAccess, AxisEgressExternal},
 		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
@@ -166,8 +169,9 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
 		"CMD-CURL-UPLOAD": CapNetworkFetch,
+		"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
+		"CMD-WORKSPACE-ARCHIVE": CapWriteFS,
 		"SRC-FETCH":       CapNetworkFetch,
-		// Filesystem write
 		"SRC-FS-WRITE": CapWriteFS,
 		// No capability for a bare secret / injection finding
 		"SEC-AWS-KEY":    CapUnknown,
@@ -189,6 +193,7 @@ func TestAxesForJudgeCategory(t *testing.T) {
 		{"injection", "Instruction Manipulation", []DataAxis{AxisIngressUntrusted}},
 		{"exfil", "Sensitive File Access", []DataAxis{AxisSensitiveAccess}},
 		{"exfil", "Exfiltration Channel", []DataAxis{AxisEgressExternal}},
+		{"exfil", "Repository Archive Exfiltration", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 		{"tool-injection", "Data Exfiltration", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 		{"pii", "Social Security Number", []DataAxis{AxisSensitiveAccess}},
 	}
