@@ -205,25 +205,72 @@ otel:
 		t.Fatal(err)
 	}
 	foreignConfigOpen = false
+	stopEventsBeforeRestart := countGatewayStopEvents(t, home)
 	restartOutput, restartExit = runGatewayExecutablePowerShell(t, binary, home, "restart")
 	if restartExit != 0 {
-		t.Fatalf("rolled-back managed restart LASTEXITCODE = %d, want 0; output:\n%s", restartExit, restartOutput)
+		t.Fatalf("rolled-back managed restart LASTEXITCODE = %d, want 0; output:\n%s\ngateway.log tail:\n%s", restartExit, restartOutput, executableTestLogTail(home))
 	}
 	running, restartedPID := d.IsRunning()
 	if !running || restartedPID == managedPID || !d.HasManagedProcessIdentity(restartedPID) {
 		t.Fatalf("managed restart identity = (running=%v, old=%d, new=%d, strong=%v)", running, managedPID, restartedPID, d.HasManagedProcessIdentity(restartedPID))
 	}
 	assertExecutableTestListenerOwner(t, port, restartedPID)
+	if got := countGatewayStopEvents(t, home); got <= stopEventsBeforeRestart {
+		t.Fatalf("graceful restart did not persist a gateway stop lifecycle event: before=%d after=%d", stopEventsBeforeRestart, got)
+	}
 
 	statusOutput, statusExit = runGatewayExecutablePowerShell(t, binary, home, "status")
 	if statusExit != 0 {
 		t.Fatalf("status LASTEXITCODE = %d for managed gateway, want 0; output:\n%s", statusExit, statusOutput)
 	}
-	if err := d.Stop(defaultStopTimeout); err != nil {
-		t.Fatalf("stop recovered managed gateway: %v", err)
+	stopEventsBeforeFinalStop := countGatewayStopEvents(t, home)
+	stopOutput, stopExit := runGatewayExecutablePowerShell(t, binary, home, "stop")
+	if stopExit != 0 || !strings.Contains(stopOutput, "OK") {
+		t.Fatalf("graceful stop LASTEXITCODE = %d; output:\n%s", stopExit, stopOutput)
+	}
+	if running, stoppedPID := d.IsRunning(); running {
+		t.Fatalf("gateway still running after successful stop as PID %d", stoppedPID)
+	}
+	if _, err := daemon.ListenerOwnerPID("127.0.0.1", port); !errors.Is(err, daemon.ErrNoListener) {
+		t.Fatalf("listener remains after graceful stop: %v", err)
+	}
+	if got := countGatewayStopEvents(t, home); got <= stopEventsBeforeFinalStop {
+		t.Fatalf("graceful stop did not persist a gateway stop lifecycle event: before=%d after=%d", stopEventsBeforeFinalStop, got)
 	}
 
 	testExecutableStartingDeadline(t, binary)
+}
+
+func executableTestLogTail(home string) string {
+	data, err := os.ReadFile(filepath.Join(home, daemon.LogFileName))
+	if err != nil {
+		return err.Error()
+	}
+	const maxTail = 16 << 10
+	if len(data) > maxTail {
+		data = data[len(data)-maxTail:]
+	}
+	return string(data)
+}
+
+func countGatewayStopEvents(t *testing.T, home string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, "gateway.jsonl"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, `"event_type":"lifecycle"`) &&
+			strings.Contains(line, `"subsystem":"gateway"`) &&
+			strings.Contains(line, `"transition":"stop"`) {
+			count++
+		}
+	}
+	return count
 }
 
 func testExecutableStartingDeadline(t *testing.T, binary string) {

@@ -19,6 +19,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -521,5 +522,75 @@ func TestRemovePIDFileIfStartedPreservesStrongReplacementAfterLegacyRead(t *test
 	}
 	if got.StartIdentity != replacement.StartIdentity {
 		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
+	}
+}
+
+func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER"
+	if marker := os.Getenv(helperEnv); marker != "" {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(marker); err == nil {
+				os.Exit(0)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		os.Exit(2)
+	}
+
+	dataDir := t.TempDir()
+	marker := filepath.Join(dataDir, "graceful-stop.requested")
+	cmd := exec.Command(os.Args[0], "-test.run=TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID")
+	cmd.Env = append(os.Environ(), helperEnv+"="+marker)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitCh:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	identity, err := processStartIdentity(cmd.Process.Pid)
+	if err != nil || identity == "" {
+		t.Fatalf("capture helper identity: identity=%q err=%v", identity, err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(dataDir)
+	if err := d.writePIDInfo(cmd.Process.Pid, executable, identity); err != nil {
+		t.Fatal(err)
+	}
+	callbackPID := 0
+	if err := d.StopGracefully(5*time.Second, func(pid int) error {
+		callbackPID = pid
+		return os.WriteFile(marker, []byte("stop"), 0o600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if callbackPID != cmd.Process.Pid {
+		t.Fatalf("graceful callback PID = %d, want %d", callbackPID, cmd.Process.Pid)
+	}
+	if _, err := os.Stat(d.PIDFile()); !os.IsNotExist(err) {
+		t.Fatalf("PID file remains after confirmed exit: %v", err)
+	}
+	select {
+	case waitErr := <-waitCh:
+		reaped = true
+		if waitErr != nil {
+			t.Fatalf("helper exit: %v", waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("helper process was not reaped")
 	}
 }

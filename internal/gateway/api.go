@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,16 +60,22 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health      *SidecarHealth
-	client      *Client
-	store       *audit.Store
-	logger      *audit.Logger
-	addr        string
-	scannerCfg  *config.Config
-	otel        *telemetry.Provider
-	hilt        *HILTApprovalManager
-	notifier    *notifier.Dispatcher
-	aiDiscovery *inventory.ContinuousDiscoveryService
+	health *SidecarHealth
+	client *Client
+	store  *audit.Store
+	logger *audit.Logger
+
+	// shutdownRequester cancels the owning Sidecar run context after an
+	// authenticated, loopback-only management request has proven the expected
+	// process and data-home identity. shutdownOnce keeps retries idempotent.
+	shutdownRequester func()
+	shutdownOnce      sync.Once
+	addr              string
+	scannerCfg        *config.Config
+	otel              *telemetry.Provider
+	hilt              *HILTApprovalManager
+	notifier          *notifier.Dispatcher
+	aiDiscovery       *inventory.ContinuousDiscoveryService
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -703,6 +710,16 @@ func (a *APIServer) SetConfigRuntime(reload func(context.Context, string) error,
 	a.configSnapshot = snapshot
 }
 
+// SetShutdownRequester wires the local management shutdown endpoint to the
+// owning Sidecar. The callback must be non-blocking; Sidecar supplies its
+// context cancel function so every subsystem gets its normal drain path.
+func (a *APIServer) SetShutdownRequester(request func()) {
+	if a == nil {
+		return
+	}
+	a.shutdownRequester = request
+}
+
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 	if a == nil {
 		return nil
@@ -760,6 +777,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
+	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
@@ -1096,6 +1114,79 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, status)
+}
+
+type gatewayShutdownRequest struct {
+	PID     int    `json:"pid"`
+	DataDir string `json:"data_dir"`
+}
+
+// handleShutdown is the authenticated control plane used by the detached
+// Windows gateway (and, for parity, other daemon platforms). A signal cannot
+// reach a DETACHED_PROCESS reliably, so the CLI proves both the target PID and
+// configured data home over the already-authenticated loopback API, then this
+// handler cancels the Sidecar run context. That preserves normal subsystem,
+// audit, SQLite, webhook, and telemetry drains before process exit.
+func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !connector.IsLoopback(r) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	if a.shutdownRequester == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "graceful shutdown is unavailable"})
+		return
+	}
+
+	var request gatewayShutdownRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body must contain one JSON object"})
+		return
+	}
+	if request.PID != os.Getpid() || !sameRuntimeDataDir(request.DataDir, a.configDataDir()) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": "gateway runtime identity mismatch"})
+		return
+	}
+
+	requested := false
+	a.shutdownOnce.Do(func() {
+		requested = true
+	})
+	status := "already_requested"
+	if requested {
+		status = "accepted"
+	}
+	a.writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+	if requested {
+		// Start cancellation only after the response has been written. The
+		// HTTP server's graceful Shutdown waits for this handler to return,
+		// ensuring the caller receives the acknowledgement before teardown.
+		go a.shutdownRequester()
+	}
+}
+
+func sameRuntimeDataDir(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
 }
 
 // connectorModeSummary returns the per-connector runtime summary for the

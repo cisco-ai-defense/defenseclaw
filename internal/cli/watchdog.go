@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -222,6 +223,11 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	// platform-specific (flock on unix, LockFileEx on Windows).
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+	controlName, controlTriggered, closeControl, controlErr := watchdogCreateControl()
+	if controlErr != nil {
+		return fmt.Errorf("watchdog: create shutdown control: %w", controlErr)
+	}
+	defer closeControl()
 	exe, exeErr := os.Executable()
 	if exeErr != nil {
 		exe = ""
@@ -231,6 +237,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		Executable:    exe,
 		StartTime:     time.Now().Unix(),
 		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
+		ControlName:   controlName,
 	})
 	if err != nil {
 		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
@@ -240,8 +247,19 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		_ = os.Remove(pidPath)
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
-	defer stop()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
+	defer stopSignals()
+	ctx, cancel := context.WithCancel(signalCtx)
+	defer cancel()
+	if controlTriggered != nil {
+		go func() {
+			select {
+			case <-controlTriggered:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	// The watchdog subcommand overrides rootCmd.PersistentPreRunE (see the
 	// empty stub on watchdogCmd) so the shared otelProvider is never
@@ -487,9 +505,16 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	// free, any old PID file content is by definition stale (a live
 	// watchdog holds the lock for its whole lifetime) so we drop it
 	// before spawning the new child.
-	if locked, info := watchdogIsLocked(pidPath); locked {
+	locked, info, lockErr := watchdogIsLocked(pidPath)
+	if lockErr != nil {
+		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	}
+	if locked {
 		Warn(fmt.Sprintf("Watchdog is already running (PID %d)", info.PID))
 		return nil
+	}
+	if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+		return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to start a duplicate", liveInfo.PID)
 	}
 	// Stale or absent: clear the file so the child gets a clean canvas
 	// and a name-only attacker cannot leave a fake PID for stop to signal.
@@ -547,9 +572,16 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	info, err := readWatchdogPIDInfo(pidPath)
-	if err != nil {
+	locked, info, lockErr := watchdogIsLocked(pidPath)
+	if lockErr != nil {
+		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	}
+	if !locked {
+		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to report a successful stop", liveInfo.PID)
+		}
 		fmt.Println(Dim("Watchdog is not running"))
+		_ = os.Remove(pidPath)
 		return nil
 	}
 
@@ -571,33 +603,38 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 		_ = os.Remove(pidPath)
 		return nil
 	}
+	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
 	fmt.Printf("Stopping watchdog (PID %d)... ", info.PID)
-	if err := watchdogTerminate(proc); err != nil {
-		fmt.Println(Dim("already stopped"))
-		_ = os.Remove(pidPath)
-		return nil
+	if err := watchdogTerminate(info, proc); err != nil {
+		if !verifyWatchdogProcess(info) {
+			removeWatchdogPIDIfOwned(pidPath, info)
+			fmt.Println(Dim("already stopped"))
+			return nil
+		}
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return fmt.Errorf("watchdog: request stop: %w", err)
 	}
 
-	// Wait briefly for graceful exit.
-	done := make(chan struct{})
-	go func() {
-		_, _ = proc.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+	if !watchdogWaitForExit(proc, info, 5*time.Second) {
 		// Re-verify the fingerprint immediately before force-kill so a
 		// fast-restart-and-PID-reuse window cannot be exploited to kill
 		// the new occupant of the recycled PID.
-		if verifyWatchdogProcess(info) {
-			_ = watchdogKill(proc)
+		if !verifyWatchdogProcess(info) {
+			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			return errors.New("watchdog: process identity changed before force stop")
+		}
+		if err := watchdogKill(proc); err != nil && verifyWatchdogProcess(info) {
+			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			return fmt.Errorf("watchdog: force stop: %w", err)
+		}
+		if !watchdogWaitForExit(proc, info, 2*time.Second) {
+			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			return errors.New("watchdog: process did not exit after force stop")
 		}
 	}
 
-	_ = os.Remove(pidPath)
+	removeWatchdogPIDIfOwned(pidPath, info)
 	fmt.Println(Style("OK", "fg=green", "bold"))
 	return nil
 }
@@ -609,8 +646,14 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	cfg, cfgErr := config.Load()
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
-	info, err := readWatchdogPIDInfo(pidPath)
-	if err != nil {
+	locked, info, lockErr := watchdogIsLocked(pidPath)
+	if lockErr != nil {
+		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	}
+	if !locked {
+		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; status is indeterminate", liveInfo.PID)
+		}
 		if enabled {
 			Warn("Watchdog: enabled but not running")
 			Subhead("Start with: defenseclaw-gateway watchdog start")
@@ -618,6 +661,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 			fmt.Println(Dim("Watchdog: disabled"))
 			Subhead("Enable in config: gateway.watchdog.enabled = true")
 		}
+		_ = os.Remove(pidPath)
 		return nil
 	}
 
@@ -648,6 +692,37 @@ type watchdogPIDInfo struct {
 	Executable    string `json:"executable,omitempty"`
 	StartTime     int64  `json:"start_time,omitempty"`
 	StartIdentity string `json:"start_identity,omitempty"`
+	ControlName   string `json:"control_name,omitempty"`
+}
+
+func removeWatchdogPIDIfOwned(path string, stopped watchdogPIDInfo) {
+	current, err := readWatchdogPIDInfo(path)
+	if err != nil || current.PID != stopped.PID {
+		return
+	}
+	if stopped.StartIdentity != "" && current.StartIdentity != stopped.StartIdentity {
+		return
+	}
+	if stopped.ControlName != "" && current.ControlName != stopped.ControlName {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+func watchdogUnlockedLiveProcess(path string) (bool, watchdogPIDInfo) {
+	info, err := readWatchdogPIDInfo(path)
+	if err != nil {
+		return false, watchdogPIDInfo{}
+	}
+	// An unlocked legacy PID record proves only that some process currently
+	// owns the numeric PID. Treating that as the watchdog would let an
+	// unrelated recycled PID block lifecycle operations indefinitely. Only
+	// preserve an unlocked record when the platform can strongly bind its
+	// fingerprint to the original process.
+	if !watchdogHasStrongProcessIdentity(info) {
+		return false, info
+	}
+	return verifyWatchdogProcess(info), info
 }
 
 // writeWatchdogPIDInfo truncates f and writes info as JSON, flushing to

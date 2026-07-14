@@ -1007,6 +1007,21 @@ func (s *Sidecar) requestProcessRestart() {
 	}
 }
 
+// requestProcessShutdown cancels the complete Sidecar run context. It is kept
+// separate from requestProcessRestart at the API boundary so a local graceful
+// stop cannot accidentally acquire restart-helper semantics later.
+func (s *Sidecar) requestProcessShutdown() {
+	if s == nil {
+		return
+	}
+	s.runCancelMu.Lock()
+	cancel := s.runCancel
+	s.runCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func configReloadMode(cfg *config.Config) string {
 	if cfg == nil {
 		return "hot"
@@ -3771,6 +3786,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 	}
