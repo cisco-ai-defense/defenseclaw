@@ -8,6 +8,8 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -54,3 +56,25 @@ func waitForProcessExit(_ uint32, _ time.Duration) error    { return errors.New(
 func removeDirectoryAfterExit(_ string, _ int) error        { return errors.New("Windows-only operation") }
 func publishStableHookRuntime(_, _, _ string) error         { return errors.New("Windows-only operation") }
 func disableStableHookRuntime(_ string) error               { return errors.New("Windows-only operation") }
+
+// These pure helpers keep the transaction package cross-compilable for the
+// repository-wide Linux/macOS test lanes. Production setup is Windows-only,
+// but common transaction validation still references the Windows PATH shape.
+func prependUserPathEntry(current, commandDir string) (string, bool) {
+	reusedSeparator := strings.HasPrefix(current, ";")
+	separator := ";"
+	if current == "" || reusedSeparator {
+		separator = ""
+	}
+	return commandDir + separator + current, reusedSeparator
+}
+
+func pathContains(entries []string, needle string) bool {
+	needle = filepath.Clean(strings.Trim(needle, ` "`))
+	for _, entry := range entries {
+		if strings.EqualFold(filepath.Clean(strings.Trim(entry, ` "`)), needle) {
+			return true
+		}
+	}
+	return false
+}
