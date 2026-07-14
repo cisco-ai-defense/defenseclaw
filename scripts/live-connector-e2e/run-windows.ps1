@@ -8,10 +8,12 @@ param(
     [string]$WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$StateRoot = (Join-Path $env:TEMP 'defenseclaw-windows-e2e'),
     [string]$HomeRoot = '',
+    [string]$NativeDataRoot = '',
     [string]$ResultsPath = '',
     [string]$ArtifactPath = '',
     [ValidateRange(1, 1800)][int]$CommandTimeoutSeconds = 180,
     [ValidateSet('run', 'capture', 'cleanup')][string]$Operation = 'run',
+    [switch]$AllowNativeDataRoot,
     [switch]$NoRun
 )
 
@@ -877,7 +879,23 @@ if (-not $NoRun) {
     $script:ToolRoot = Join-Path $StateRoot 'tools'
     $script:CommandIndex = 0; $script:AgentVersion = 'unversioned'
     $env:USERPROFILE = $HomeRoot; $env:HOME = $env:USERPROFILE
-    $env:DEFENSECLAW_HOME = if ($useHomeDataRoot) { Join-Path $HomeRoot '.defenseclaw' } else { Join-Path $StateRoot 'defenseclaw' }
+    $env:DEFENSECLAW_HOME = if (-not [string]::IsNullOrWhiteSpace($NativeDataRoot)) {
+        if ($Layer -ne 'contract' -or -not $AllowNativeDataRoot) {
+            throw 'NativeDataRoot is restricted to an explicitly authorized packaged contract run'
+        }
+        $nativeDataRoot = [IO.Path]::GetFullPath($NativeDataRoot).TrimEnd('\')
+        $expectedNativeDataRoot = [IO.Path]::GetFullPath((Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        ) '.defenseclaw')).TrimEnd('\')
+        if (-not [string]::Equals($nativeDataRoot, $expectedNativeDataRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'NativeDataRoot must be the current Windows user Known-Folder data root'
+        }
+        $nativeDataRoot
+    } elseif ($useHomeDataRoot) {
+        Join-Path $HomeRoot '.defenseclaw'
+    } else {
+        Join-Path $StateRoot 'defenseclaw'
+    }
     Protect-TestDirectory $env:USERPROFILE
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'

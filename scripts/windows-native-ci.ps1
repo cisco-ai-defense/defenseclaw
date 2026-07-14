@@ -2200,7 +2200,8 @@ function Invoke-Contract {
         $env:PATH = "$managedPython;$managedBin;$env:PATH"
         $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
         & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
-            -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
+            -StateRoot $contractRoot -HomeRoot $contractHome -NativeDataRoot $dataRoot `
+            -AllowNativeDataRoot -ResultsPath (Join-Path $root 'results.jsonl') `
             -ArtifactPath (Join-Path $root 'contract-diagnostics')
 
         foreach ($defaultHome in @($defaultCodexHome, $defaultClaudeHome)) {

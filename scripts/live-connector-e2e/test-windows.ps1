@@ -506,6 +506,11 @@ try {
         $contractFunction -match 'Assert-UserPathRegistrySnapshot' -and
         $contractFunction -match 'restore the original user PATH exactly') `
         'native Setup connector contract proves uninstall restores exact PATH registry existence, type, and value'
+    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
+        $nativeHarnessText -match '-AllowNativeDataRoot' -and
+        $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
+        $harnessText -match 'NativeDataRoot must be the current Windows user Known-Folder data root') `
+        'packaged connector contract binds Doctor and hooks to the installed native data root'
     $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
     $stateProcessesFunction = [regex]::Match(
         $nativeHarnessText,
