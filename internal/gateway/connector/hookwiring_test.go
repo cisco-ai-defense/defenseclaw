@@ -270,6 +270,9 @@ func TestPackagedWindowsHookBinaryUsesVerifiedNativeInstallState(t *testing.T) {
 	if got := packagedWindowsHookBinaryAtRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
 		t.Fatalf("packagedWindowsHookBinaryAtRoot() = %q, want %q", got, hook)
 	}
+	if got := packagedWindowsHookBinaryForRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
+		t.Fatalf("packagedWindowsHookBinaryForRoot() = %q, want exact installed sibling %q", got, hook)
+	}
 	if got := packagedWindowsHookBinary(gateway); got != "" {
 		t.Fatalf("arbitrary self-consistent install root selected production hook binary %q", got)
 	}

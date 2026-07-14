@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -37,14 +36,6 @@ func canonicalNativeWindowsInstallRoot() string {
 		return ""
 	}
 	return filepath.Join(localAppData, "Programs", "DefenseClaw")
-}
-
-func canonicalNativeWindowsHookBinary() string {
-	paths, err := hookruntime.CurrentUserPaths()
-	if err != nil {
-		return ""
-	}
-	return paths.Launcher
 }
 
 func nativeWindowsPathHasNoReparsePoints(path string) bool {

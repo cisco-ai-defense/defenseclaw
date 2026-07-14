@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf16"
 )
 
@@ -86,6 +87,8 @@ const nativeHookFlag = "hook --connector "
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
 const nativeWindowsInstallStateMaxBytes = 128 * 1024
+const nativeWindowsLayoutValidationAttempts = 50
+const nativeWindowsLayoutValidationRetryDelay = 10 * time.Millisecond
 
 // windowsSafePATHCommandPrefix is retained only to recognize and remove hook
 // registrations written by older installers. Current native setup writes a
@@ -197,19 +200,47 @@ func packagedWindowsHookBinary(executable string) string {
 	if strings.TrimSpace(expectedRoot) == "" {
 		return ""
 	}
-	physicalHook := packagedWindowsHookBinaryAtRoot(executable, expectedRoot)
-	if physicalHook == "" {
-		physicalHook = packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot)
+	return packagedWindowsHookBinaryForRoot(executable, expectedRoot)
+}
+
+// packagedWindowsHookBinaryForRoot resolves the launcher command for a native
+// packaged gateway whose fixed installation root has already been established
+// from the Windows Known Folder API. A live installation always registers the
+// exact signed sibling in <InstallRoot>\bin; it must not fall back to a
+// synthetic USERPROFILE, a stale PATH entry, or the legacy ~/.local/bin
+// layout.
+//
+// During uninstall the gateway runs briefly from the installer's verified
+// transaction trash tree. Return the original logical sibling path in that
+// case so connector teardown still recognizes the byte-identical command that
+// setup registered before the tree was moved.
+func packagedWindowsHookBinaryForRoot(executable, expectedRoot string) string {
+	if physicalHook := packagedWindowsRunningHookBinaryAtLayout(executable, expectedRoot, expectedRoot); physicalHook != "" {
+		return physicalHook
 	}
-	if physicalHook == "" {
+	if physicalRoot := packagedWindowsUninstallPhysicalRoot(executable, expectedRoot); physicalRoot != "" &&
+		packagedWindowsRunningHookBinaryAtLayout(executable, physicalRoot, expectedRoot) != "" {
+		return filepath.Join(expectedRoot, "bin", windowsHookBinaryName)
+	}
+	return ""
+}
+
+func packagedWindowsRunningHookBinaryAtLayout(executable, physicalRoot, declaredRoot string) string {
+	expectedGateway := filepath.Join(physicalRoot, "bin", windowsGatewayBinaryName)
+	if !sameWindowsInstallPath(executable, expectedGateway) {
+		// Source builds and foreign layouts must retain the legacy behavior
+		// without paying a native-package validation retry budget.
 		return ""
 	}
-	// Native setup publishes this exact signed launcher outside InstallRoot
-	// before connector configuration. Returning the Known-Folder-derived path
-	// keeps Codex/Claude commands stable across install-tree replacement and
-	// uninstall; it also prevents a project or stale process PATH from selecting
-	// a different executable.
-	return canonicalNativeWindowsHookBinary()
+	for attempt := 0; attempt < nativeWindowsLayoutValidationAttempts; attempt++ {
+		if hook := packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot, true); hook != "" {
+			return hook
+		}
+		if attempt+1 < nativeWindowsLayoutValidationAttempts {
+			time.Sleep(nativeWindowsLayoutValidationRetryDelay)
+		}
+	}
+	return ""
 }
 
 // packagedWindowsHookBinaryAtRoot verifies a packaged gateway and returns its
@@ -218,7 +249,7 @@ func packagedWindowsHookBinary(executable string) string {
 // it as an argument here keeps arbitrary fixture roots available to tests
 // without weakening the production trust boundary.
 func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
-	return packagedWindowsHookBinaryAtLayout(executable, expectedRoot, expectedRoot)
+	return packagedWindowsHookBinaryAtLayout(executable, expectedRoot, expectedRoot, false)
 }
 
 // packagedWindowsHookBinaryAtUninstallRoot recognizes the exact random trash
@@ -229,6 +260,14 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 // sibling is accepted. This lets teardown recognize the stable hook command
 // without trusting an environment variable or arbitrary relocated checkout.
 func packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot string) string {
+	physicalRoot := packagedWindowsUninstallPhysicalRoot(executable, expectedRoot)
+	if physicalRoot == "" {
+		return ""
+	}
+	return packagedWindowsHookBinaryAtLayout(executable, physicalRoot, expectedRoot, false)
+}
+
+func packagedWindowsUninstallPhysicalRoot(executable, expectedRoot string) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return ""
@@ -245,10 +284,10 @@ func packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot string) s
 	if !strings.HasPrefix(physicalBase, prefix) || !validNativeWindowsTransactionID(strings.TrimPrefix(physicalBase, prefix)) {
 		return ""
 	}
-	return packagedWindowsHookBinaryAtLayout(executable, physicalRoot, expectedRoot)
+	return physicalRoot
 }
 
-func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot string) string {
+func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot string, runningImage bool) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return ""
@@ -260,8 +299,20 @@ func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot st
 	commandDir := filepath.Join(physicalRoot, "bin")
 	expectedGateway := filepath.Join(commandDir, windowsGatewayBinaryName)
 	hookBinary := filepath.Join(commandDir, windowsHookBinaryName)
-	if !sameWindowsInstallPath(executable, expectedGateway) ||
-		!stableNativeWindowsPE(executable) || !stableNativeWindowsPE(hookBinary) {
+	var gatewayTrusted bool
+	if runningImage {
+		// Production passes os.Executable for the image Windows has already
+		// loaded. Reopening that live image to sample its PE header can lose a
+		// transient race with endpoint scanners and incorrectly send native setup
+		// into the legacy ~/.local/bin fallback. Exact canonical placement, a
+		// regular non-reparse image, and the installer state below are sufficient
+		// to bind the running process; the not-yet-loaded hook sibling retains the
+		// full stable PE validation.
+		gatewayTrusted = nativeWindowsRunningImagePath(executable)
+	} else {
+		gatewayTrusted = stableNativeWindowsPE(executable)
+	}
+	if !sameWindowsInstallPath(executable, expectedGateway) || !gatewayTrusted || !stableNativeWindowsPE(hookBinary) {
 		return ""
 	}
 
@@ -288,6 +339,14 @@ func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot st
 		}
 	}
 	return hookBinary
+}
+
+func nativeWindowsRunningImagePath(path string) bool {
+	if !nativeWindowsPathHasNoReparsePoints(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
 }
 
 func validNativeWindowsTransactionID(value string) bool {
