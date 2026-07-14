@@ -375,11 +375,19 @@ verify_checksums_sigstore() {
         return 0
     fi
 
+    local escaped_release_version certificate_identity
+    # Releases may be produced either by pushing the exact X.Y.Z tag or by
+    # dispatching the release workflow from main.  Bind verification to that
+    # workflow and those two refs; another workflow in this repository must
+    # never be able to authenticate a release manifest.
+    escaped_release_version="$(printf '%s' "${RELEASE_VERSION}" | sed 's/\./\\./g')"
+    certificate_identity="^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/release\\.yaml@refs/(tags/${escaped_release_version}|heads/main)$"
+
     local cosign_output
     if ! cosign_output="$(cosign verify-blob \
         --certificate "${CHECKSUMS_CERT_FILE}" \
         --signature "${CHECKSUMS_SIG_FILE}" \
-        --certificate-identity-regexp "^https://github.com/${REPO}/.+" \
+        --certificate-identity-regexp "${certificate_identity}" \
         --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
         "${CHECKSUMS_FILE}" 2>&1)"; then
         err "checksums.txt Sigstore signature verification failed."
