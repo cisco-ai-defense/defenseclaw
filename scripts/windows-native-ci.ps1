@@ -27,6 +27,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
 
+$setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
+if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
+    if (-not (Test-Path -LiteralPath $setupStandardUserLauncherSource -PathType Leaf)) {
+        throw "Windows Setup standard-user launcher source is missing: $setupStandardUserLauncherSource"
+    }
+    Add-Type -Path $setupStandardUserLauncherSource
+}
+
 function Get-RedactionValues {
     $names = @(
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
@@ -594,6 +602,166 @@ function Invoke-WindowsNativeProcess {
         return $result
     } finally {
         $process.Dispose()
+    }
+}
+
+function Invoke-WindowsSetupStandardUserProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [int[]]$AllowedExitCodes = @(0),
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 600,
+        [string]$LogPath = '',
+        [string]$WorkingDirectory = ''
+    )
+    if ($FilePath.IndexOf([char]0) -ge 0 -or $WorkingDirectory.IndexOf([char]0) -ge 0 -or
+        @($ArgumentList | Where-Object { $null -eq $_ -or $_.IndexOf([char]0) -ge 0 }).Count -ne 0) {
+        throw 'standard-user Setup launcher rejects NUL in its executable, working directory, or arguments'
+    }
+    $application = [IO.Path]::GetFullPath($FilePath)
+    if (-not (Test-Path -LiteralPath $application -PathType Leaf) -or
+        [IO.Path]::GetExtension($application) -cne '.exe') {
+        throw "standard-user Setup launcher requires an existing .exe: $application"
+    }
+    $working = if ($WorkingDirectory) {
+        [IO.Path]::GetFullPath($WorkingDirectory)
+    } else {
+        [IO.Path]::GetFullPath((Split-Path -Parent $application))
+    }
+
+    if (-not [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
+        $result = Invoke-WindowsNativeProcess -FilePath $application -ArgumentList $ArgumentList `
+            -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds $TimeoutSeconds `
+            -LogPath $LogPath -WorkingDirectory $working
+        $result | Add-Member -NotePropertyName LaunchContext -NotePropertyValue 'inherited-standard'
+        return $result
+    }
+
+    $environment = @(
+        [Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
+            ForEach-Object { '{0}={1}' -f [string]$_.Key, [string]$_.Value }
+    )
+    $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestricted(
+        $application,
+        [string[]]$ArgumentList,
+        $working,
+        [string[]]$environment
+    )
+    $timedOut = $false
+    $cleanupFailure = $null
+    try {
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(30000)) {
+                throw 'restricted Setup process tree did not exit within 30 seconds after timeout termination'
+            }
+        }
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        $result = [pscustomobject]@{
+            ExitCode = $exitCode
+            StdOut = ''
+            StdErr = ''
+            TimedOut = $timedOut
+            ProcessId = $process.Id
+            LaunchContext = 'restricted-lua'
+        }
+    } catch {
+        $cleanupFailure = $_
+    } finally {
+        try {
+            if (-not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(30000)) {
+                    throw 'restricted Setup process tree did not exit within 30 seconds during exception cleanup'
+                }
+            }
+        } catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = $_
+            } else {
+                $cleanupFailure = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new(
+                        "$($cleanupFailure.Exception.Message); cleanup failed: $($_.Exception.Message)",
+                        $cleanupFailure.Exception
+                    ),
+                    'RestrictedSetupCleanupFailed',
+                    [Management.Automation.ErrorCategory]::OperationStopped,
+                    $application
+                )
+            }
+        }
+        $process.Dispose()
+    }
+    if ($null -ne $cleanupFailure) { throw $cleanupFailure }
+
+    $summary = [ordered]@{
+        launch_context = $result.LaunchContext
+        process_id = $result.ProcessId
+        exit_code = $result.ExitCode
+        timed_out = $result.TimedOut
+        timeout_seconds = $TimeoutSeconds
+        executable = $application
+        arguments = @($ArgumentList)
+    } | ConvertTo-Json -Depth 4
+    $summary = Protect-WindowsNativeText $summary
+    Write-Host $summary
+    if ($LogPath) { Write-BoundedText -Path $LogPath -Text $summary }
+    if ($result.ExitCode -notin $AllowedExitCodes) {
+        $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $($result.ExitCode)" }
+        throw "$application $reason under verified restricted LUA token"
+    }
+    return $result
+}
+
+function Test-WindowsSetupStandardUserLauncher([string]$Root) {
+    $scriptPath = Join-Path $Root 'standard-user-launch-smoke.ps1'
+    $outputPath = Join-Path $Root 'standard-user-launch-smoke.json'
+    $logPath = Join-Path $Root 'standard-user-launch-smoke.log'
+    $scriptBody = @'
+param([Parameter(Mandatory)][string]$Argument)
+$payload = [ordered]@{
+    argument = $Argument
+    environment = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE')
+}
+[IO.File]::WriteAllText(
+    [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT'),
+    ($payload | ConvertTo-Json -Compress),
+    [Text.UTF8Encoding]::new($false)
+)
+'@
+    [IO.File]::WriteAllText($scriptPath, $scriptBody, [Text.UTF8Encoding]::new($false))
+    $expectedArgument = 'Setup → quote " and trailing slash \'
+    $expectedEnvironment = 'environment → Ω quote " trailing \'
+    $previousOutput = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT')
+    $previousUnicode = [Environment]::GetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE')
+    try {
+        $env:DC_SETUP_LAUNCH_OUTPUT = $outputPath
+        $env:DC_SETUP_LAUNCH_UNICODE = $expectedEnvironment
+        $powershell = (Get-Process -Id $PID).Path
+        $result = Invoke-WindowsSetupStandardUserProcess $powershell @(
+            '-NoProfile', '-File', $scriptPath, '-Argument', $expectedArgument
+        ) -TimeoutSeconds 30 -LogPath $logPath -WorkingDirectory $Root
+    } finally {
+        [Environment]::SetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT', $previousOutput, 'Process')
+        [Environment]::SetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE', $previousUnicode, 'Process')
+    }
+    if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+        throw 'standard-user Setup launcher smoke child did not produce its output'
+    }
+    $observed = Get-Content -LiteralPath $outputPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$observed.argument -cne $expectedArgument -or
+        [string]$observed.environment -cne $expectedEnvironment) {
+        throw 'standard-user Setup launcher did not preserve Unicode argv/environment bytes'
+    }
+    $expectedContext = if ([DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
+        'restricted-lua'
+    } else {
+        'inherited-standard'
+    }
+    if ([string]$result.LaunchContext -cne $expectedContext) {
+        throw "standard-user Setup launcher context was $($result.LaunchContext), expected $expectedContext"
     }
 }
 
@@ -2116,7 +2284,7 @@ function Invoke-WizardConfigureLaterAcceptance(
     Assert-NoDefenseClawRegistration $ConnectorConfigPaths
     Assert-NoGatewayAutoStart
 
-    Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+    Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
         -TimeoutSeconds 600 -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "Configure later uninstall left install root behind: $InstallRoot"
@@ -2188,7 +2356,7 @@ function Invoke-WizardConnectorAcceptance(
     $preserved = Join-Path $DataRoot "wizard-$ConnectorName-preservation.txt"
     Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
     $stateFingerprint = $beforeState | ConvertTo-Json -Compress -Depth 8
-    Invoke-WindowsNativeProcess $Setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
+    Invoke-WindowsSetupStandardUserProcess $Setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
         -TimeoutSeconds 1200 -LogPath (Join-Path $Logs "wizard-$ConnectorName-repair.log") | Out-Null
 
     $afterState = Get-PackagedConnectorState $python `
@@ -2221,7 +2389,7 @@ function Invoke-WizardConnectorAcceptance(
 
     # The setup uninstaller must stop services and clean connector wiring
     # itself. Pre-teardown here previously hid dangling hooks in production.
-    Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+    Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
         -TimeoutSeconds 600 -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "wizard $ConnectorName uninstall left install root behind: $InstallRoot"
@@ -2333,7 +2501,7 @@ function Invoke-SetupAcceptance {
             $env:PATH = $processPathBefore
         }
 
-        Invoke-WindowsNativeProcess $setup @(
+        Invoke-WindowsSetupStandardUserProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-install.log') | Out-Null
@@ -2428,11 +2596,11 @@ function Invoke-SetupAcceptance {
         $targetVersion = [string]$installedState.version
         $installedState.version = '99.0.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
-        Invoke-WindowsNativeProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
+        Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
         $installedState.version = '0.0.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
-        Invoke-WindowsNativeProcess $setup @(
+        Invoke-WindowsSetupStandardUserProcess $setup @(
             '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
             'FROMVERSION=0.0.0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
@@ -2448,7 +2616,7 @@ function Invoke-SetupAcceptance {
             [IO.FileShare]::None
         )
         try {
-            Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
+            Invoke-WindowsSetupStandardUserProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
                 -AllowedExitCodes @(1603) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
         } finally {
             $lockStream.Dispose()
@@ -2465,7 +2633,7 @@ function Invoke-SetupAcceptance {
         $preserved = Join-Path $dataRoot 'installer-preservation.txt'
         Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
 
-        Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
+        Invoke-WindowsSetupStandardUserProcess $setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
             -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-repair.log') | Out-Null
         $repairedRosterResult = Invoke-Installed $python @('-I', '-c', $rosterProbe) -Timeout 120 `
             -Log (Join-Path $logs 'setup-connector-roster-after-repair.log')
@@ -2488,7 +2656,7 @@ function Invoke-SetupAcceptance {
             throw 'setup repair did not preserve user data'
         }
 
-        Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet') `
+        Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
@@ -2498,7 +2666,7 @@ function Invoke-SetupAcceptance {
         Assert-UserPathRegistrySnapshot $userPathBefore `
             'setup uninstall did not restore the original user PATH exactly'
 
-        Invoke-WindowsNativeProcess $setup @(
+        Invoke-WindowsSetupStandardUserProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-reinstall.log') | Out-Null
@@ -2509,7 +2677,7 @@ function Invoke-SetupAcceptance {
         # Exercise the exact Apps & Features self-delete path. The cached
         # executable cannot remove its own directory until its process exits,
         # so the transaction-bound deferred helper must finish the deletion.
-        Invoke-WindowsNativeProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+        Invoke-WindowsSetupStandardUserProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
@@ -2539,7 +2707,7 @@ function Invoke-SetupAcceptance {
         }
         if (Test-Path -LiteralPath $installRoot) {
             try {
-                Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+                Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
                     -AllowedExitCodes @(0, 1603) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
             } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
         }
@@ -2609,7 +2777,7 @@ function Invoke-Contract {
         # The connector contract consumes the same offline native Setup
         # artifact shipped to users. The legacy install.ps1/uv/wheel
         # materializer is intentionally absent from this release gate.
-        Invoke-WindowsNativeProcess $setup @(
+        Invoke-WindowsSetupStandardUserProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $root 'setup-contract-install.log') | Out-Null
@@ -2692,7 +2860,7 @@ function Invoke-Contract {
         }
         try {
             if ($installed -or (Test-Path -LiteralPath $installRoot)) {
-                Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+                Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
                     -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
             }
         } catch {
@@ -2903,6 +3071,8 @@ function Invoke-SelfTest {
         Stop-Process -Id $unrelated.Id -Force -ErrorAction SilentlyContinue
         $unrelated.Dispose()
     }
+
+    Test-WindowsSetupStandardUserLauncher $root
 
     $junctionTarget = Join-Path $root 'junction-target'
     $cleanupFixture = Join-Path $root 'cleanup-fixture'
