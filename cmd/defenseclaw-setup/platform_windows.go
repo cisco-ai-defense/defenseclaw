@@ -129,11 +129,11 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 }
 
 func defaultInstallRoot() (string, error) {
-	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	programs, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_UserProgramFiles)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(local, "Programs", "DefenseClaw"), nil
+	return filepath.Join(programs, "DefenseClaw"), nil
 }
 
 func defaultDataRoot() (string, error) {
