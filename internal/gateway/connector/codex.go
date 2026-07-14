@@ -499,8 +499,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
-	home := userHomeDir()
-	codexDir := filepath.Join(home, ".codex")
+	codexDir := codexHomeDir()
 
 	targets := map[string][]string{
 		"skill":  {filepath.Join(codexDir, "skills"), filepath.Join(cwd, ".codex", "skills")},

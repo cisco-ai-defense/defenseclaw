@@ -2865,6 +2865,17 @@ func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
 	if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
 		t.Fatalf("CODEX_HOME config has no hooks table: %s", raw)
 	}
+
+	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	for component, expected := range map[string]string{
+		"skill":  filepath.Join(codexHome, "skills"),
+		"plugin": filepath.Join(codexHome, "plugins"),
+		"mcp":    configPath,
+	} {
+		if !slices.Contains(targets[component], expected) {
+			t.Errorf("ComponentTargets(%q) = %v, missing CODEX_HOME path %q", component, targets[component], expected)
+		}
+	}
 }
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
