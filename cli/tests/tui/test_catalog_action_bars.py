@@ -188,6 +188,37 @@ async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(pane
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("panel", CATALOG_PANELS)
+async def test_catalog_sync_keeps_focused_empty_filter_authoritative(panel: str) -> None:
+    """A repaint before Input.Changed must not undo a focused clear."""
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel(panel)
+        await pilot.pause()
+        app.workers.cancel_all()
+        await pilot.pause()
+        model = app.catalog_models[panel]
+        inp = app.query_one(f"#{panel}-filter", Input)
+        inp.focus()
+        inp.value = "needle"
+        await pilot.pause()
+        assert model.filter_text == "needle"
+
+        # Simulate Textual changing the widget before its Input.Changed event
+        # reaches the model while a failed/slow loader triggers a repaint.
+        model.loaded = False
+        inp.value = ""
+        app._sync_catalog_controls(panel)  # noqa: SLF001
+        assert model.filter_text == ""
+        assert inp.value == ""
+        await pilot.pause()
+        assert model.filter_text == ""
+        assert inp.value == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("panel", CATALOG_PANELS)
 async def test_catalog_clear_filter_button_disabled_when_no_filter(panel: str) -> None:
     """The ``Clear`` button is greyed when there's no filter to clear so
     the bar honestly advertises "nothing to clear" instead of swallowing

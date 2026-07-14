@@ -4386,7 +4386,7 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            if not model.loaded and filter_input.has_focus and filter_input.value:
+            if not model.loaded and filter_input.has_focus:
                 # Initial catalog auto-loads can complete a repaint between
                 # Input.value changing and Textual delivering Input.Changed.
                 # Preserve fresh text only while this exact widget owns input
