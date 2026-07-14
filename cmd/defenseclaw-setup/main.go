@@ -156,10 +156,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if opts.Action == "help" {
-		printUsage()
-		return
-	}
 	if runtime.GOARCH != "amd64" {
 		fmt.Fprintln(os.Stderr, "DefenseClawSetup-x64.exe supports only Windows x64 (amd64)")
 		os.Exit(1)
@@ -172,6 +168,7 @@ func main() {
 		// stderr stream; a windowsgui process still receives redirected standard
 		// handles when its parent explicitly provides them.
 		fmt.Fprintf(os.Stderr, "DefenseClaw setup failed: %v\n", err)
+		showSetupLaunchContextFailure(err, opts.Quiet)
 		if code != 0 {
 			os.Exit(code)
 		}
@@ -180,11 +177,28 @@ func main() {
 	os.Exit(code)
 }
 
+var acquireSetupOperationLock = acquireSetupLock
+
 func run(opts options) (int, error) {
+	// Help is intentionally available in every context: it is read-only and lets
+	// an administrator or deployment service discover the supported per-user
+	// invocation without starting an installation transaction.
+	if opts.Action == "help" {
+		printUsage()
+		return 0, nil
+	}
+	// INS-32: this read-only token/session/desktop gate must remain the first
+	// operation for every state-changing action. The setup mutex, known-folder
+	// resolution, registry, and filesystem transaction code below are all
+	// intentionally unreachable from an elevated, service, session-zero, or
+	// otherwise non-interactive launch.
+	if err := requireCurrentUserInteractiveSetup(); err != nil {
+		return retryRequiredCode, err
+	}
 	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
 		return retryRequiredCode, err
 	}
-	releaseSetupLock, err := acquireSetupLock()
+	releaseSetupLock, err := acquireSetupOperationLock()
 	if err != nil {
 		return installAlreadyRunningCode, err
 	}

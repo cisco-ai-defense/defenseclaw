@@ -304,6 +304,13 @@ if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
+$setupManifest = Join-Path $repoRoot 'cmd\defenseclaw-setup\setup.manifest'
+$setupManifestTool = Join-Path $repoRoot 'scripts\set-windows-application-manifest.ps1'
+foreach ($requiredSetupInput in @($setupManifest, $setupManifestTool)) {
+    if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
+        throw "Required setup manifest input is missing: $requiredSetupInput"
+    }
+}
 
 if ($DistributionFlavor -eq 'managed-enterprise') {
     throw @'
@@ -613,6 +620,16 @@ try {
     Invoke-CheckedProcess "go" @(
         "build", "-ldflags", "-s -w -H=windowsgui", "-o", $setupPath, "./cmd/defenseclaw-setup"
     )
+    # An explicit asInvoker manifest disables Windows installer-detection
+    # auto-elevation for the setup-named executable. The helper uses inbox
+    # Win32 resource APIs and verifies RT_MANIFEST/1 byte-for-byte before the
+    # executable is eligible for Authenticode signing.
+    & $setupManifestTool -Executable $setupPath -Manifest $setupManifest
+} catch {
+    # Never leave a setup-named executable without the explicit asInvoker
+    # resource in an otherwise valid-looking output directory.
+    Remove-Item -LiteralPath $setupPath -Force -ErrorAction SilentlyContinue
+    throw
 } finally {
     Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
 }
@@ -643,6 +660,8 @@ $provenance = [ordered]@{
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
         yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
         yara_compat_wheel_sha256 = $yaraCompatSha256
+        setup_manifest = 'cmd/defenseclaw-setup/setup.manifest'
+        setup_manifest_sha256 = Get-FileHashHex $setupManifest
     }
     toolchain = $manifest.toolchain
 }
