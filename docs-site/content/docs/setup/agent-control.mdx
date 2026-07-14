@@ -531,6 +531,14 @@ Agent Control block. UUID routing values use Galileo's `projectid` and
 enabled. `agent_control` and `otel` are alternative SDK sinks for one watcher,
 so choose Monitor or OTLP for that process.
 
+On the wire, the Agent Control SDK represents each native control execution as
+an OTEL span named `agent_control.control_execution`. Its attributes carry the
+control ID and name, deny action, match result, confidence, evaluator, matched
+DefenseClaw rule IDs, correlation IDs, and content at the selected redaction
+level. Galileo ingest recognizes that native signature and classifies the
+record as span type `CONTROL`; `defenseclaw.blocked_prompt` is a separate
+DefenseClaw application span and must not be used as ControlSpan evidence.
+
 <Callout type="info" title="ControlSpan rendering depends on enterprise ingest support">
 A successful SDK/exporter acknowledgement proves that DefenseClaw delivered the span. Showing it as a typed ControlSpan in Galileo additionally requires an ingest release that recognizes Agent Control's native span schema; older enterprise images may omit it or classify it as a generic workflow span.
 </Callout>
