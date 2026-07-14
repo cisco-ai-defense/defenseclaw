@@ -303,7 +303,7 @@ otel:
 		t.Fatalf("STARTING deadline LASTEXITCODE = 0, want nonzero; output:\n%s", startOutput)
 	}
 	if !strings.Contains(startOutput, "FAILED") || !strings.Contains(startOutput, "remained STARTING") || strings.Contains(startOutput, "OK (PID") {
-		t.Fatalf("STARTING deadline did not render terminal failure:\n%s", startOutput)
+		t.Fatalf("STARTING deadline did not render terminal failure:\n%s\ngateway.log tail:\n%s", startOutput, executableTestLogTail(home))
 	}
 	d := daemon.New(home)
 	if running, pid := d.IsRunning(); running {
