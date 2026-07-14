@@ -15,7 +15,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
-const consoleEntryPointScript = `import importlib.metadata as m, sys; name=sys.argv[1]; sys.argv=[name, *sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+const (
+	moduleEntryPointScript  = `import os,runpy,sys; cwd=sys.argv[1]; sys.argv=["defenseclaw",*sys.argv[2:]]; os.chdir(cwd) if cwd else None; runpy.run_module("defenseclaw.main",run_name="__main__")`
+	consoleEntryPointScript = `import importlib.metadata as m,os,sys; name=sys.argv[1]; cwd=sys.argv[2]; sys.argv=[name,*sys.argv[3:]]; os.chdir(cwd) if cwd else None; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+)
 
 func main() {
 	if runtime.GOOS != "windows" {
@@ -41,7 +44,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	argv, err := launcherArgs(filepath.Base(self), os.Args[1:])
+	logicalCWD, processCWD, err := launcherWorkingDirectories(installRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: resolve working directory: %v\n", err)
+		os.Exit(1)
+	}
+	argv, err := launcherArgs(filepath.Base(self), logicalCWD, os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", err)
 		os.Exit(1)
@@ -51,9 +59,7 @@ func main() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = launcherEnv(binDir, filepath.Dir(python), installRoot, installState, packaged)
-	if cwd, err := os.Getwd(); err == nil {
-		cmd.Dir = cwd
-	}
+	cmd.Dir = processCWD
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -64,10 +70,10 @@ func main() {
 	}
 }
 
-func launcherArgs(executable string, userArgs []string) ([]string, error) {
+func launcherArgs(executable, workingDirectory string, userArgs []string) ([]string, error) {
 	name := strings.ToLower(strings.TrimSuffix(executable, filepath.Ext(executable)))
 	if name == "defenseclaw" {
-		return append([]string{"-I", "-m", "defenseclaw.main"}, userArgs...), nil
+		return append([]string{"-I", "-c", moduleEntryPointScript, workingDirectory}, userArgs...), nil
 	}
 	entryPoints := map[string]string{
 		"skill-scanner":             "skill-scanner",
@@ -78,7 +84,7 @@ func launcherArgs(executable string, userArgs []string) ([]string, error) {
 	if !ok {
 		return nil, errors.New("unrecognized managed launcher name")
 	}
-	return append([]string{"-I", "-c", consoleEntryPointScript, entryPoint}, userArgs...), nil
+	return append([]string{"-I", "-c", consoleEntryPointScript, entryPoint, workingDirectory}, userArgs...), nil
 }
 
 func launcherEnv(binDir, pythonDir, installRoot string, state nativeinstallstate.State, packaged bool) []string {

@@ -19,12 +19,12 @@ func TestLauncherArgs(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{name: "cli", exe: "defenseclaw.exe", args: []string{"status"}, want: []string{"-I", "-m", "defenseclaw.main", "status"}},
-		{name: "scanner", exe: "skill-scanner.exe", args: []string{"scan", "fixture"}, want: []string{"-I", "-c", consoleEntryPointScript, "skill-scanner", "scan", "fixture"}},
+		{name: "cli", exe: "defenseclaw.exe", args: []string{"status"}, want: []string{"-I", "-c", moduleEntryPointScript, `C:\repo`, "status"}},
+		{name: "scanner", exe: "skill-scanner.exe", args: []string{"scan", "fixture"}, want: []string{"-I", "-c", consoleEntryPointScript, "skill-scanner", `C:\repo`, "scan", "fixture"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := launcherArgs(test.exe, test.args)
+			got, err := launcherArgs(test.exe, `C:\repo`, test.args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -36,7 +36,7 @@ func TestLauncherArgs(t *testing.T) {
 }
 
 func TestLauncherArgsRejectsUnknownName(t *testing.T) {
-	if _, err := launcherArgs("renamed.exe", nil); err == nil {
+	if _, err := launcherArgs("renamed.exe", `C:\repo`, nil); err == nil {
 		t.Fatal("launcherArgs() accepted an unknown launcher name")
 	}
 }
