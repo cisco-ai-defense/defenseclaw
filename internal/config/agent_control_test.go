@@ -107,6 +107,10 @@ func TestAgentControlConfigValidate(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	cfg.TargetType = "log_stream"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("log_stream target type should be valid: %v", err)
+	}
 	tests := map[string]func(*AgentControlConfig){
 		"bad deployment":        func(c *AgentControlConfig) { c.Deployment = "other" },
 		"missing server URL":    func(c *AgentControlConfig) { c.ServerURL = "" },

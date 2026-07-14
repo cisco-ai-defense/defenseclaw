@@ -298,7 +298,11 @@ type Event struct {
 	TurnID    string `json:"turn_id,omitempty"`
 	// TraceID mirrors the OTel span's trace id for cross-sink
 	// correlation. Optional — unset events are still valid.
-	TraceID   string    `json:"trace_id,omitempty"`
+	TraceID string `json:"trace_id,omitempty"`
+	// SpanID identifies the OTel span that emitted this event. Async
+	// integrations use it as the parent of derived spans so they remain
+	// attached to the originating gateway trace.
+	SpanID    string    `json:"span_id,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	Direction Direction `json:"direction,omitempty"`

@@ -340,6 +340,111 @@ func TestFinalizeAgentHook_EmitsFinalCorrelatedDecision(t *testing.T) {
 	}
 }
 
+func TestFinalizeAgentHook_DecisionUsesExportedHookAnchorTrace(t *testing.T) {
+	events := withCapturedEvents(t)
+	api, exporter := newHookLLMSpanTestAPI(t)
+	const filteredRequestTraceID = "11111111111111111111111111111111"
+	ctx := ContextWithTraceID(t.Context(), filteredRequestTraceID)
+	codexReq := codexHookRequest{
+		HookEventName: "PreToolUse",
+		SessionID:     "session-anchor",
+		TurnID:        "turn-anchor",
+		ToolName:      "shell",
+		ToolUseID:     "tool-anchor",
+		ToolInput:     map[string]interface{}{"cmd": "pwd"},
+		AgentID:       "agent-anchor",
+		AgentType:     "codex",
+	}
+	api.emitCodexHookLLMEvent(ctx, codexReq, nil, nil)
+
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		AgentID:       "agent-anchor",
+		AgentName:     "Codex",
+		AgentType:     "codex",
+		HookEventName: "PreToolUse",
+		SessionID:     "session-anchor",
+		TurnID:        "turn-anchor",
+		ToolName:      "shell",
+		Payload: map[string]interface{}{
+			"tool_use_id": "tool-anchor",
+			"tool_input":  map[string]interface{}{"cmd": "pwd"},
+		},
+	}
+	ctx = enrichAgentHookContext(ctx, req)
+	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
+		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
+		Reason: "policy denied command", EvaluationID: "eval-anchor", RuleIDs: []string{"TOOL.BLOCK"},
+	}, nil, []byte(`{"hook":"payload"}`), 5*time.Millisecond, false, nil)
+
+	var decision *gatewaylog.Event
+	for i := range *events {
+		if (*events)[i].EventType == gatewaylog.EventHookDecision {
+			decision = &(*events)[i]
+			break
+		}
+	}
+	if decision == nil {
+		t.Fatalf("hook decision was not emitted: %+v", *events)
+	}
+	anchor := spanByOperation(t, exporter.GetSpans(), "invoke_agent")
+	if decision.TraceID == filteredRequestTraceID {
+		t.Fatalf("decision retained filtered HTTP request trace %q", decision.TraceID)
+	}
+	if decision.TraceID != anchor.SpanContext.TraceID().String() {
+		t.Fatalf("decision trace=%q want exported anchor trace=%q", decision.TraceID, anchor.SpanContext.TraceID())
+	}
+	if decision.SpanID != anchor.SpanContext.SpanID().String() {
+		t.Fatalf("decision parent=%q want exported anchor span=%q", decision.SpanID, anchor.SpanContext.SpanID())
+	}
+}
+
+func TestFinalizeAgentHook_PromptDecisionReusesActualPromptAnchor(t *testing.T) {
+	events := withCapturedEvents(t)
+	api, exporter := newHookLLMSpanTestAPI(t)
+	ctx := ContextWithTraceID(t.Context(), "22222222222222222222222222222222")
+	codexReq := codexHookRequest{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "session-prompt-anchor",
+		TurnID:        "turn-prompt-anchor",
+		Prompt:        "Explain observability briefly.",
+		AgentType:     "codex",
+	}
+	api.emitCodexHookLLMEvent(ctx, codexReq, nil, []byte(`{"hook_event_name":"UserPromptSubmit"}`))
+
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		AgentType:     "codex",
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "session-prompt-anchor",
+		TurnID:        "turn-prompt-anchor",
+	}
+	ctx = enrichAgentHookContext(ctx, req)
+	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
+		Action: "allow", RawAction: "allow", Severity: "INFO", Mode: "action",
+	}, nil, []byte(`{"hook":"payload"}`), 2*time.Millisecond, false, nil)
+
+	var decision *gatewaylog.Event
+	for i := range *events {
+		if (*events)[i].EventType == gatewaylog.EventHookDecision {
+			decision = &(*events)[i]
+			break
+		}
+	}
+	if decision == nil {
+		t.Fatalf("prompt hook decision was not emitted: %+v", *events)
+	}
+	anchor := spanByOperation(t, exporter.GetSpans(), "invoke_agent")
+	if decision.TraceID != anchor.SpanContext.TraceID().String() ||
+		decision.SpanID != anchor.SpanContext.SpanID().String() {
+		t.Fatalf(
+			"prompt decision trace/span=%s/%s want actual prompt anchor=%s/%s",
+			decision.TraceID, decision.SpanID,
+			anchor.SpanContext.TraceID(), anchor.SpanContext.SpanID(),
+		)
+	}
+}
+
 // TestHookOutputFor_AllConnectors_AllActions is the contract test
 // that locks the JSON shape every hook script downstream parses.
 // Each row pins:

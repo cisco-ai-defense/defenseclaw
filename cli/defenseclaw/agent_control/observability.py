@@ -32,10 +32,21 @@ MAX_RULE_IDS = 8
 MAX_CONTENT_CACHE_ENTRIES = 1024
 MAX_FORWARDED_CONTENT_CHARS = 64 * 1024
 _HEX_TRACE_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+_HEX_SPAN_ID = re.compile(r"^[0-9a-fA-F]{16}$")
 
 
 class EventSDK(Protocol):
     def write_events(self, events: Sequence[Any]) -> Any: ...
+
+
+class CoordinatedTraceWriter(Protocol):
+    def write_trace(
+        self,
+        *,
+        source: dict[str, Any],
+        content: dict[str, Any] | None,
+        controls: Sequence[Any],
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -100,7 +111,7 @@ def build_rule_control_index(controls: list[dict[str, Any]]) -> dict[str, tuple[
 
 
 class EnforcementEventBridge:
-    """Tail final block verdicts and enqueue correlated SDK control events."""
+    """Tail enforced decisions and enqueue correlated SDK control events."""
 
     def __init__(
         self,
@@ -111,6 +122,7 @@ class EnforcementEventBridge:
         state: SyncState,
         include_content: bool = True,
         event_factory: Callable[..., Any] | None = None,
+        trace_writer: CoordinatedTraceWriter | None = None,
     ) -> None:
         self.event_log_path = event_log_path
         self.agent_name = agent_name
@@ -118,6 +130,7 @@ class EnforcementEventBridge:
         self.state = state
         self.include_content = include_content
         self.event_factory = event_factory or _agent_control_event
+        self.trace_writer = trace_writer
         self._controls_by_rule: dict[str, tuple[RuleControl, ...]] = {}
         self._content_by_request: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 
@@ -196,18 +209,33 @@ class EnforcementEventBridge:
                         continue
 
                     events, relevant = self._events_for_source(source)
+                    coordinated = self.trace_writer is not None and _is_final_prompt_decision(source)
+                    relevant = relevant or coordinated
                     if relevant:
                         self.state.observability_last_observed_at = _safe_timestamp(source.get("ts")) or utc_now()
-                    if relevant and not events:
+                    if relevant and not events and not coordinated:
                         self.state.observability_unmapped_records += 1
-                    if events and not self._enqueue(events):
-                        self.state.observability_dropped_events += len(events)
-                        self.state.observability_status = "degraded"
-                        self.state.observability_last_error = "Agent Control SDK observability sink rejected an event"
-                        return True
+                    if coordinated:
+                        content_key = _content_key(source)
+                        content = self._content_by_request.get(content_key) if content_key is not None else None
+                        if not self._write_coordinated_trace(source, content, events):
+                            self.state.observability_dropped_events += max(1, len(events))
+                            self.state.observability_status = "degraded"
+                            self.state.observability_last_error = "coordinated OTEL trace export failed"
+                            return True
+                        self.state.observability_last_sent_at = utc_now()
+                    else:
+                        if events and not self._enqueue(events):
+                            self.state.observability_dropped_events += len(events)
+                            self.state.observability_status = "degraded"
+                            self.state.observability_last_error = (
+                                "Agent Control SDK observability sink rejected an event"
+                            )
+                            return True
                     if events:
                         self.state.observability_sent_events += len(events)
-                        self.state.observability_last_sent_at = utc_now()
+                        if not coordinated:
+                            self.state.observability_last_sent_at = utc_now()
                     if relevant:
                         self._forget_content(source)
                     self.state.observability_log_offset = next_offset
@@ -245,12 +273,11 @@ class EnforcementEventBridge:
         if source.get("event_type") == "llm_prompt":
             self._remember_prompt(source)
             return [], False
-        if source.get("event_type") != "verdict":
+        source_event_type = source.get("event_type")
+        decision = _decision_payload(source)
+        if decision is None:
             return [], False
-        verdict = source.get("verdict")
-        if not isinstance(verdict, dict) or verdict.get("stage") != "final" or verdict.get("action") != "block":
-            return [], False
-        raw_rule_ids = verdict.get("rule_ids")
+        raw_rule_ids = decision.get("rule_ids")
         rule_id_candidates = raw_rule_ids[:MAX_RULE_IDS] if isinstance(raw_rule_ids, list) else []
         rule_ids = list(
             dict.fromkeys(
@@ -263,8 +290,8 @@ class EnforcementEventBridge:
         # ``<rule-id>:<title>`` but did not yet populate Verdict.RuleIDs.  Only
         # accept a prefix that is already in the effective control index; do
         # not parse the free-form/redacted reason field.
-        if not rule_ids:
-            categories = verdict.get("categories")
+        if not rule_ids and source_event_type == "verdict":
+            categories = decision.get("categories")
             if isinstance(categories, list):
                 for category in categories[:MAX_RULE_IDS]:
                     if not isinstance(category, str):
@@ -282,8 +309,7 @@ class EnforcementEventBridge:
         trace_id = _trace_id(source)
         timestamp = _safe_timestamp(source.get("ts")) or utc_now()
         request_fingerprint = _source_fingerprint(source)
-        applies_to = "tool_call" if source.get("direction") == "tool_call" or source.get("tool_name") else "llm_call"
-        check_stage = "post" if source.get("direction") == "completion" else "pre"
+        applies_to, check_stage = _control_target(source, decision)
         content_key = _content_key(source)
         content = self._content_by_request.get(content_key) if content_key is not None else None
         events: list[Any] = []
@@ -291,27 +317,36 @@ class EnforcementEventBridge:
             control = controls[control_id]
             matched_rule_ids = matched_by_control[control_id]
             confidence = max(control.confidences[rule_id] for rule_id in matched_rule_ids)
-            span_id = hashlib.sha256(f"{request_fingerprint}:{control_id}".encode()).hexdigest()[:16]
+            span_id = _parent_span_id(source, request_fingerprint, control_id)
+            evaluation_id = decision.get("evaluation_id")
+            execution_key = (
+                f"evaluation:{evaluation_id}"
+                if isinstance(evaluation_id, str) and evaluation_id
+                else f"source:{request_fingerprint}"
+            )
             execution_id = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, f"defenseclaw:agent-control:{request_fingerprint}:{control_id}")
+                uuid.uuid5(uuid.NAMESPACE_URL, f"defenseclaw:agent-control:{execution_key}:{control_id}")
             )
             metadata = {
                 "source": "defenseclaw.gateway",
-                "source_event_type": "verdict",
+                "source_event_type": source_event_type,
                 "source_action": "block",
-                "source_stage": "final",
+                "source_stage": "final" if source_event_type == "verdict" else str(decision.get("event") or ""),
                 "severity": str(source.get("severity") or ""),
                 "direction": str(source.get("direction") or ""),
                 "rule_ids": matched_rule_ids,
             }
             for key in ("request_id", "evaluation_id", "connector", "policy_id"):
-                value = verdict.get(key) if key == "evaluation_id" else source.get(key)
+                value = decision.get(key) if key == "evaluation_id" else source.get(key)
                 if isinstance(value, str) and value:
                     metadata[key] = value
+            if source_event_type == "hook_decision":
+                metadata["hook_event"] = str(decision.get("event") or "")
+                metadata["enforced"] = True
             if self.include_content:
                 if content:
                     metadata["blocked_input"] = content
-                reason = verdict.get("reason")
+                reason = decision.get("reason")
                 if isinstance(reason, str) and reason:
                     metadata["verdict_reason"] = _bounded_content(reason)[0]
                 metadata["content_unredacted"] = not _contains_redaction_marker(metadata)
@@ -329,7 +364,7 @@ class EnforcementEventBridge:
                     matched=True,
                     confidence=confidence,
                     timestamp=timestamp,
-                    execution_duration_ms=_nonnegative_number(verdict.get("latency_ms")),
+                    execution_duration_ms=_nonnegative_number(decision.get("latency_ms")),
                     evaluator_name=RULE_PACK_EVALUATOR,
                     selector_path="*",
                     metadata=metadata,
@@ -380,6 +415,20 @@ class EnforcementEventBridge:
         dropped = getattr(result, "dropped", len(events) - accepted if isinstance(accepted, int) else len(events))
         return accepted == len(events) and dropped == 0
 
+    def _write_coordinated_trace(
+        self,
+        source: dict[str, Any],
+        content: dict[str, Any] | None,
+        events: list[Any],
+    ) -> bool:
+        if self.trace_writer is None:
+            return False
+        try:
+            return self.trace_writer.write_trace(source=source, content=content, controls=events)
+        except Exception as exc:
+            logger.warning("Coordinated Agent Control OTEL export failed (%s)", type(exc).__name__)
+            return False
+
     def _set_waiting_for_log(self) -> bool:
         changed = (
             self.state.observability_status != "waiting_for_log" or self.state.observability_last_error is not None
@@ -404,13 +453,58 @@ def _agent_control_event(**values: Any) -> Any:
 
 
 def _source_fingerprint(source: dict[str, Any]) -> str:
+    decision = _decision_payload(source) or {}
     components = [
         str(source.get("run_id") or ""),
         str(source.get("request_id") or ""),
         str(source.get("ts") or ""),
-        str((source.get("verdict") or {}).get("evaluation_id") or ""),
+        str(decision.get("evaluation_id") or ""),
     ]
     return hashlib.sha256("\x1f".join(components).encode("utf-8")).hexdigest()
+
+
+def _decision_payload(source: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = source.get("event_type")
+    if event_type == "verdict":
+        decision = source.get("verdict")
+        if isinstance(decision, dict) and decision.get("stage") == "final" and decision.get("action") == "block":
+            return decision
+        return None
+    if event_type == "hook_decision":
+        decision = source.get("hook_decision")
+        if isinstance(decision, dict) and decision.get("action") == "block" and decision.get("enforced") is True:
+            return decision
+    return None
+
+
+def _is_final_prompt_decision(source: Any) -> bool:
+    if not isinstance(source, dict) or source.get("event_type") != "hook_decision":
+        return False
+    decision = source.get("hook_decision")
+    if not isinstance(decision, dict):
+        return False
+    return str(decision.get("event") or "").lower() == "userpromptsubmit" and str(
+        decision.get("action") or ""
+    ).lower() in {"allow", "ask", "block"}
+
+
+def _control_target(source: dict[str, Any], decision: dict[str, Any]) -> tuple[str, str]:
+    hook_event = str(decision.get("event") or "").lower()
+    if hook_event in {"pretooluse", "posttooluse"} or source.get("direction") == "tool_call" or source.get("tool_name"):
+        return "tool_call", "post" if hook_event == "posttooluse" else "pre"
+    if hook_event == "stop" or source.get("direction") == "completion":
+        return "llm_call", "post"
+    return "llm_call", "pre"
+
+
+def _parent_span_id(source: dict[str, Any], source_fingerprint: str, control_id: int) -> str:
+    candidate = source.get("span_id")
+    if isinstance(candidate, str) and _HEX_SPAN_ID.fullmatch(candidate):
+        return candidate.lower()
+    # Compatibility for v7 event logs written before span_id was added. This
+    # preserves the SDK's required shape, though only new records can attach
+    # the derived ControlSpan to a real gateway span.
+    return hashlib.sha256(f"{source_fingerprint}:{control_id}".encode()).hexdigest()[:16]
 
 
 def _content_key(source: dict[str, Any]) -> tuple[str, str] | None:
