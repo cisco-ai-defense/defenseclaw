@@ -516,6 +516,7 @@ var providerHTTPClient = &http.Client{
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	},
+	CheckRedirect: netguard.BlockRedirects,
 }
 
 // privateUpstreamPeerObserver records the concrete remote peer selected by
