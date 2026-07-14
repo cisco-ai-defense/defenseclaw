@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -499,5 +500,53 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 func TestHighWord(t *testing.T) {
 	if got := highWord(0x12345678); got != 0x1234 {
 		t.Fatalf("highWord = %#x, want %#x", got, 0x1234)
+	}
+}
+
+func TestWizardCompletionMessageUsesPrivateApplicationRange(t *testing.T) {
+	if wmDone < wmApp || wmDone == dmGetDefID || wmDone == dmSetDefID {
+		t.Fatalf("wmDone=%#x overlaps dialog-manager messages", wmDone)
+	}
+	if idPrimary != 1 || idCancel != 2 {
+		t.Fatalf("standard dialog command IDs changed: primary=%d cancel=%d", idPrimary, idCancel)
+	}
+}
+
+func TestWizardFailureDescriptionIncludesRecoveryAndPrivateLog(t *testing.T) {
+	detail := wizardFailureDescription(
+		retryRequiredCode,
+		errors.New("files are locked"),
+		`C:\Users\tester\AppData\Local\DefenseClaw\InstallerState\setup.log`,
+		nil,
+	)
+	for _, want := range []string{"Exit code: 1603", "durable setup journal", "files are locked", "run Setup again", "setup.log"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("failure detail %q does not contain %q", detail, want)
+		}
+	}
+}
+
+func TestWizardFailureDescriptionDistinguishesConnectorResidue(t *testing.T) {
+	detail := wizardFailureDescription(
+		retryRequiredCode,
+		errors.New("DefenseClaw core installation completed, but connector reconciliation remains pending"),
+		"",
+		errors.New("log unavailable"),
+	)
+	for _, want := range []string{"core product transaction completed", "connector reconciliation", "log unavailable"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("connector residue detail %q does not contain %q", detail, want)
+		}
+	}
+}
+
+func TestTerminalPowerShellParamsRunsExactInstalledLauncher(t *testing.T) {
+	launcher := `C:\Users\O'Brien\AppData\Local\Programs\DefenseClaw\bin\defenseclaw.exe`
+	params := terminalPowerShellParams(launcher)
+	if !strings.Contains(params, `O''Brien`) || !strings.Contains(params, "& '") {
+		t.Fatalf("PowerShell parameters do not safely invoke the exact launcher: %q", params)
+	}
+	if strings.Contains(params, "defenseclaw init") {
+		t.Fatalf("terminal launch unexpectedly starts initialization: %q", params)
 	}
 }
