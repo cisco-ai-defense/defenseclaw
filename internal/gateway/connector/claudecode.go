@@ -81,8 +81,8 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	hookScript := filepath.Join(hookDir, "claude-code-hook.sh")
 	settingsDir := filepath.Dir(claudeCodeSettingsPath())
-	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
-		return fmt.Errorf("create Claude Code configuration directory %s: %w", settingsDir, err)
+	if err := ensureClaudeCodeConfigDir(settingsDir); err != nil {
+		return fmt.Errorf("prepare Claude Code configuration directory %s: %w", settingsDir, err)
 	}
 	// Hooks register unconditionally — they post to
 	// /api/v1/claudecode/hook (or the equivalent route) and are the
