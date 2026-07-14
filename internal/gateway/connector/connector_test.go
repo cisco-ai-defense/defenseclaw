@@ -7635,6 +7635,18 @@ func TestConnectorState_CorruptedFile(t *testing.T) {
 
 func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	CodexConfigPathOverride = filepath.Join(codexHome, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
+	// Model connector switching after the user's Codex home was removed. The
+	// teardown lock must safely recreate its parent rather than failing before
+	// the Claude connector can be selected.
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatalf("create removed Codex home fixture: %v", err)
+	}
+	if err := os.RemoveAll(codexHome); err != nil {
+		t.Fatalf("remove Codex home fixture: %v", err)
+	}
 
 	if err := SaveActiveConnector(dir, "codex"); err != nil {
 		t.Fatalf("save: %v", err)

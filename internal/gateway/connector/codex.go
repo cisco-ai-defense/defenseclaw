@@ -823,7 +823,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	// carry env-var bindings that resolve to provider API keys at
 	// runtime. atomicWriteFile uses CreateTemp + Rename + Chmod so a
 	// crash mid-write leaves the previous config in place. See S0.11.
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+	if err := ensureCodexConfigDir(filepath.Dir(configPath)); err != nil {
 		return fmt.Errorf("create Codex config directory: %w", err)
 	}
 	if err := withFileLock(configPath, func() error {
@@ -1427,6 +1427,14 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	}
 
 	configPath := codexConfigPath()
+	// Teardown is also used while switching connectors and after a user has
+	// removed ~/.codex. The lock file lives beside config.toml, so recreate and
+	// validate that parent before attempting to open the lock. On Windows this
+	// fails closed for ACL or reparse-point substitution instead of following an
+	// attacker-controlled directory.
+	if err := ensureCodexConfigDir(filepath.Dir(configPath)); err != nil {
+		return fmt.Errorf("prepare Codex config directory for restore: %w", err)
+	}
 	managedBackup, err := loadManagedFileBackupForTransform(
 		opts.DataDir,
 		c.Name(),

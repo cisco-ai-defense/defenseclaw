@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -25,9 +26,24 @@ _SHARED_HOOK_SCRIPTS = (
 
 
 @pytest.fixture(autouse=True)
-def _clear_global_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_global_fail_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # _runtime_cfg models the connector process environment directly. Preserve
+    # and restore those values explicitly so its temporary CODEX_HOME and
+    # CLAUDE_CONFIG_DIR never leak into a later module after tmp_path cleanup.
+    connector_home_before = {
+        name: os.environ.get(name)
+        for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
+    }
     monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
     monkeypatch.setattr("defenseclaw.fail_mode._windows_registration_freshness", lambda *_args: None)
+    try:
+        yield
+    finally:
+        for name, value in connector_home_before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _runtime_cfg(tmp_path: Path, modes: dict[str, str]) -> tuple[SimpleNamespace, Path]:
