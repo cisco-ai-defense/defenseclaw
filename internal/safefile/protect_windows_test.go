@@ -176,6 +176,74 @@ func TestProtectDirectoryWindowsRejectsNestedJunction(t *testing.T) {
 	}
 }
 
+func TestCreatePrivateDirectoryWindowsReportsCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "created-private")
+	created, err := CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory: %v", err)
+	}
+	if !created {
+		t.Fatal("CreatePrivateDirectory did not report creating a missing target")
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatalf("inspect created directory DACL: %v", err)
+	}
+	if !safe {
+		t.Fatal("created directory does not have a private DACL")
+	}
+
+	created, err = CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory existing target: %v", err)
+	}
+	if created {
+		t.Fatal("CreatePrivateDirectory reported creating an existing target")
+	}
+}
+
+func TestCreatePrivateDirectoryWindowsPreservesExistingACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operator-owned")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(everyone, windows.GENERIC_WRITE),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantMask := windowsAllowMaskForSID(t, path, everyone)
+
+	created, err := CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory existing target: %v", err)
+	}
+	if created {
+		t.Fatal("CreatePrivateDirectory reported creating an existing target")
+	}
+	if got := windowsAllowMaskForSID(t, path, everyone); got != wantMask {
+		t.Fatalf("existing Everyone mask = 0x%x, want preserved 0x%x", uint32(got), uint32(wantMask))
+	}
+}
+
 func TestCreateExclusiveWindowsRejectsParentJunction(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")

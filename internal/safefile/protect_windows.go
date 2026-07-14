@@ -137,11 +137,34 @@ func rejectReparseChain(path string) error {
 	}
 }
 
+// CreatePrivateDirectory creates path and any missing parents with the private
+// Windows DACL, returning true only when this call created path itself. If path
+// already exists (including a concurrent creator winning the race), its ACL is
+// left untouched so callers can validate rather than rewrite operator state.
+func CreatePrivateDirectory(path string) (bool, error) {
+	if path == "" {
+		return false, fmt.Errorf("safefile: empty directory path")
+	}
+	if err := rejectReparseChain(path); err != nil {
+		return false, err
+	}
+	created, err := makePrivateDirectoriesCreationAware(path, false)
+	if err != nil {
+		return false, fmt.Errorf("safefile: mkdir %s: %w", path, err)
+	}
+	return created, nil
+}
+
 func makePrivateDirectories(path string) error {
+	_, err := makePrivateDirectoriesCreationAware(path, true)
+	return err
+}
+
+func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting bool) (bool, error) {
 	missing := make([]string, 0, 2)
 	current, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for {
 		_, statErr := os.Lstat(current)
@@ -149,7 +172,7 @@ func makePrivateDirectories(path string) error {
 			break
 		}
 		if !os.IsNotExist(statErr) {
-			return statErr
+			return false, statErr
 		}
 		missing = append(missing, current)
 		parent := filepath.Dir(current)
@@ -159,42 +182,54 @@ func makePrivateDirectories(path string) error {
 		current = parent
 	}
 	if len(missing) == 0 {
-		return nil
+		return false, nil
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return fmt.Errorf("safefile: current token user: %w", err)
+		return false, fmt.Errorf("safefile: current token user: %w", err)
 	}
 	if user == nil || user.User.Sid == nil {
-		return fmt.Errorf("safefile: current token user is unavailable")
+		return false, fmt.Errorf("safefile: current token user is unavailable")
 	}
 	descriptor, err := windows.SecurityDescriptorFromString(
 		fmt.Sprintf("O:%sD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", user.User.Sid),
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	attributes := windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
+	targetCreated := false
 	for index := len(missing) - 1; index >= 0; index-- {
 		directory := missing[index]
 		ptr, err := windows.UTF16PtrFromString(directory)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if err := windows.CreateDirectory(ptr, &attributes); err != nil && err != windows.ERROR_ALREADY_EXISTS {
-			return err
+		createErr := windows.CreateDirectory(ptr, &attributes)
+		created := createErr == nil
+		if createErr != nil && createErr != windows.ERROR_ALREADY_EXISTS {
+			return false, createErr
+		}
+		if index == 0 {
+			targetCreated = created
+		}
+		if !created && !protectConcurrentExisting {
+			// A concurrent creator changed the path topology after the
+			// initial walk. Leave its ACL untouched and stop before using
+			// that directory as an ancestor for any further creation.
+			return false, nil
 		}
 		if err := rejectReparsePath(directory); err != nil {
-			return err
+			return false, err
 		}
 		if err := protectDirectory(directory); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return targetCreated, nil
 }
 
 func setPrivateDACL(path string, inherit bool) error {

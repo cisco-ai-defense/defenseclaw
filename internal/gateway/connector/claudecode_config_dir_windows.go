@@ -20,7 +20,6 @@ package connector
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -31,22 +30,16 @@ import (
 // and reparse-point contract used for scoped token storage and fail closed when
 // another principal could replace settings.json.
 func ensureClaudeCodeConfigDir(path string) error {
-	_, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if err := hookAPIValidateDirectory(path); err != nil {
-			return fmt.Errorf("validate existing Claude Code configuration directory: %w", err)
-		}
-		return nil
-	case !os.IsNotExist(err):
-		return err
-	}
-
-	if err := safefile.ProtectDirectory(path); err != nil {
-		return fmt.Errorf("protect new Claude Code configuration directory: %w", err)
+	created, err := safefile.CreatePrivateDirectory(path)
+	if err != nil {
+		return fmt.Errorf("create private Claude Code configuration directory: %w", err)
 	}
 	if err := hookAPIValidateDirectory(path); err != nil {
-		return fmt.Errorf("validate new Claude Code configuration directory: %w", err)
+		state := "existing"
+		if created {
+			state = "new"
+		}
+		return fmt.Errorf("validate %s Claude Code configuration directory: %w", state, err)
 	}
 	return nil
 }
