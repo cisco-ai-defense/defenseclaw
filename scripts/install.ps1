@@ -80,6 +80,11 @@ try {
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 $Repo = "cisco-ai-defense/defenseclaw"
+$CosignVersion = "2.6.2"
+$CosignName = "cosign-windows-amd64.exe"
+$CosignSha256 = "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE"
+$CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignName"
+$SigstoreOIDCIssuer = "https://token.actions.githubusercontent.com"
 $DefenseClawHome = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DefenseClawHome ".venv"
 # Binaries go to %USERPROFILE%\.local\bin to match scripts/install.sh and
@@ -717,36 +722,111 @@ function Get-Artifact {
     return $Name
 }
 
-# Verify a downloaded file against the release checksums.txt. Skipped for -Local
-# installs (the operator built the artifacts themselves). Returns nothing; dies
-# on mismatch so a corrupted or tampered download never gets installed.
+# Establish the release root of trust before downloading any installable remote
+# artifact. checksums.txt is useful only after its Sigstore identity is proven;
+# warning-and-continuing here would turn a network or release failure into an
+# unverified installation. Local mode is intentionally exempt because the
+# operator supplied the build directory directly.
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Initialize-ReleaseVerification {
+    param([Parameter(Mandatory = $true)][string]$StageRoot)
+
+    if ($Local) { return }
+    $checksums = Join-Path $StageRoot "checksums.txt"
+    $signature = Join-Path $StageRoot "checksums.txt.sig"
+    $certificate = Join-Path $StageRoot "checksums.txt.pem"
+    $cosign = Join-Path $StageRoot $CosignName
+    $releaseBase = "https://github.com/$Repo/releases/download/$script:ReleaseVersion"
+
+    foreach ($download in @(
+        @{ Url = "$releaseBase/checksums.txt"; Path = $checksums; Label = "checksum manifest" },
+        @{ Url = "$releaseBase/checksums.txt.sig"; Path = $signature; Label = "checksum signature" },
+        @{ Url = "$releaseBase/checksums.txt.pem"; Path = $certificate; Label = "checksum certificate" },
+        @{ Url = $CosignUrl; Path = $cosign; Label = "pinned Sigstore verifier" }
+    )) {
+        try {
+            Invoke-WebRequest -Uri $download.Url -OutFile $download.Path -UseBasicParsing
+        } catch {
+            Die "Could not download required $($download.Label) from $($download.Url): $($_.Exception.Message)"
+        }
+        Test-StagedReleaseFile -Path $download.Path -Label $download.Label
+    }
+
+    $cosignHash = Get-Sha256Hex -Path $cosign
+    if (-not [string]::Equals($cosignHash, $CosignSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Die "Pinned Sigstore verifier hash mismatch: expected $CosignSha256, got $cosignHash"
+    }
+
+    $escapedVersion = [Regex]::Escape($script:ReleaseVersion)
+    $identity = "^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/(tags/$escapedVersion|heads/main)$"
+    $verifyOutput = @(& $cosign verify-blob `
+        --certificate $certificate `
+        --signature $signature `
+        --certificate-identity-regexp $identity `
+        --certificate-oidc-issuer $SigstoreOIDCIssuer `
+        $checksums 2>&1)
+    $verifyExit = $LASTEXITCODE
+    if ($verifyExit -ne 0) {
+        $detail = ($verifyOutput -join " ").Trim()
+        Die "Release checksum signature verification failed (exit $verifyExit): $detail"
+    }
+    # Recheck after execution so a concurrent same-user swap of the verifier is
+    # detected before its output becomes authoritative.
+    $cosignHashAfter = Get-Sha256Hex -Path $cosign
+    if (-not [string]::Equals($cosignHashAfter, $CosignSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Die "Pinned Sigstore verifier changed during verification"
+    }
+    $script:ChecksumsFile = $checksums
+    Write-Ok "Release checksum signature verified (Sigstore)"
+}
+
+# Verify a downloaded file against the authenticated release checksums.txt.
+# Skipped only for explicit -Local installs. Missing, duplicate, malformed, or
+# mismatched entries are fatal so every remote artifact has one identity.
 function Test-Checksum {
     param([string]$File, [string]$FileName)
     if ($Local) { return }
     if (-not $script:ChecksumsFile) {
-        $tmp = [System.IO.Path]::GetTempFileName()
-        try {
-            Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$script:ReleaseVersion/checksums.txt" `
-                -OutFile $tmp -UseBasicParsing
-            $script:ChecksumsFile = $tmp
-        } catch {
-            Write-Warn2 "Could not download checksums.txt - skipping verification"
-            return
-        }
+        Die "Release verification was not initialized before artifact download"
     }
-    $expected = $null
+    $matches = @()
     foreach ($line in Get-Content $script:ChecksumsFile) {
         $parts = $line -split '\s+', 2
-        if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $FileName) {
-            $expected = $parts[0].Trim().ToLower()
-            break
+        if ($parts.Count -eq 2) {
+            $listedName = $parts[1].Trim()
+            if ($listedName -eq $FileName -or $listedName -eq "./$FileName") {
+                $matches += $parts[0].Trim().ToLowerInvariant()
+            }
         }
     }
-    if (-not $expected) {
-        Write-Warn2 "No checksum entry for $FileName - skipping verification"
-        return
+    if ($matches.Count -ne 1) {
+        Die "Authenticated checksums.txt contains $($matches.Count) entries for $FileName; expected exactly one"
     }
-    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    $expected = $matches[0]
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        Die "Authenticated checksums.txt contains an invalid SHA-256 for $FileName"
+    }
+    $actual = (Get-Sha256Hex -Path $File).ToLowerInvariant()
     if ($expected -ne $actual) {
         Die "Checksum mismatch for ${FileName}: expected $expected, got $actual"
     }
@@ -869,6 +949,7 @@ function Stage-ReleaseArtifacts {
     $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("dc-release-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $stageRoot -ErrorAction Stop | Out-Null
     try {
+        Initialize-ReleaseVerification -StageRoot $stageRoot
         $gateway = Join-Path $stageRoot "defenseclaw-gateway.exe"
         $hook = Join-Path $stageRoot "defenseclaw-hook.exe"
         if ($Local) {

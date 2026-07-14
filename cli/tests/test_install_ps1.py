@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import textwrap
 import zipfile
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,90 @@ def test_windows_installer_requires_and_installs_no_console_hook_launcher() -> N
     assert 'Join-Path $tmp "defenseclaw-hook.exe"' in text
     assert 'Die "defenseclaw-hook.exe missing from archive"' in text
     assert 'Join-Path $InstallDir "defenseclaw-hook.exe"' in text
+
+
+def test_remote_install_fails_closed_on_exact_sigstore_release_identity() -> None:
+    text = INSTALL_PS1.read_text()
+    verification = text.split("function Initialize-ReleaseVerification", 1)[1].split(
+        "function Test-Checksum", 1
+    )[0]
+    checksum = text.split("function Test-Checksum", 1)[1].split(
+        "# ── Install: gateway binary", 1
+    )[0]
+    staging = text.split("function Stage-ReleaseArtifacts", 1)[1].split(
+        "function Assert-ManagedInstallFile", 1
+    )[0]
+
+    for asset in ("checksums.txt", "checksums.txt.sig", "checksums.txt.pem"):
+        assert asset in verification
+    assert "$CosignSha256" in verification
+    assert "certificate-identity-regexp" in verification
+    assert "certificate-oidc-issuer" in verification
+    assert r"cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml" in verification
+    assert "refs/(tags/$escapedVersion|heads/main)" in verification
+    assert "Write-Warn2" not in verification
+    assert "skipping verification" not in checksum.lower()
+    assert "$matches.Count -ne 1" in checksum
+    assert "invalid SHA-256" in checksum
+    assert staging.index("Initialize-ReleaseVerification") < staging.index("Get-Artifact")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+@pytest.mark.parametrize(
+    ("manifest_rows", "expected_success", "expected_error"),
+    (
+        ("valid", True, ""),
+        ("missing", False, "expected exactly one"),
+        ("duplicate", False, "expected exactly one"),
+        ("malformed", False, "invalid SHA-256"),
+        ("mismatch", False, "Checksum mismatch"),
+    ),
+)
+def test_authenticated_checksum_contract_is_strict(
+    tmp_path: Path,
+    manifest_rows: str,
+    expected_success: bool,
+    expected_error: str,
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"trusted artifact fixture")
+    digest = sha256(artifact.read_bytes()).hexdigest()
+    rows = {
+        "valid": f"{digest}  artifact.bin\n",
+        "missing": f"{digest}  another.bin\n",
+        "duplicate": f"{digest}  artifact.bin\n{digest}  ./artifact.bin\n",
+        "malformed": "not-a-sha256  artifact.bin\n",
+        "mismatch": f"{'0' * 64}  artifact.bin\n",
+    }[manifest_rows]
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(rows, encoding="ascii")
+
+    command = (
+        _extract_powershell_function("Die")
+        + _extract_powershell_function("Get-Sha256Hex")
+        + _extract_powershell_function("Test-Checksum")
+        + rf"""
+$Local = ''
+$script:ChecksumsFile = '{_ps_quote(checksums)}'
+Test-Checksum -File '{_ps_quote(artifact)}' -FileName 'artifact.bin'
+"""
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if expected_success:
+        assert completed.returncode == 0, completed.stderr
+    else:
+        assert completed.returncode != 0
+        assert expected_error in completed.stderr
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows command resolution")
