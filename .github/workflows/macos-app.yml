@@ -1,0 +1,207 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: macOS App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - "scripts/build-macos-app-release.sh"
+      - "scripts/check-macos-upstream.py"
+      - "scripts/export-uv-overrides.py"
+      - "scripts/generate-upgrade-manifest.py"
+      - "scripts/macos_license_headers.py"
+      - "scripts/release_candidate.py"
+      - "scripts/source_release_identity.py"
+      - "scripts/stamp-version.sh"
+      - "scripts/test-upgrade-release.sh"
+      - "scripts/update-macos-app.sh"
+      - "scripts/verify-macos-app-release.sh"
+      - "release/source-install-identity.json"
+      - "release/upgrade-baselines.json"
+      - "Makefile"
+      - "pyproject.toml"
+      - "cli/**"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "extensions/defenseclaw/**"
+      - ".github/workflows/macos-app.yml"
+  pull_request:
+    paths:
+      - "macos/**"
+      - "scripts/build-macos-app-release.sh"
+      - "scripts/check-macos-upstream.py"
+      - "scripts/export-uv-overrides.py"
+      - "scripts/generate-upgrade-manifest.py"
+      - "scripts/macos_license_headers.py"
+      - "scripts/release_candidate.py"
+      - "scripts/source_release_identity.py"
+      - "scripts/stamp-version.sh"
+      - "scripts/test-upgrade-release.sh"
+      - "scripts/update-macos-app.sh"
+      - "scripts/verify-macos-app-release.sh"
+      - "release/source-install-identity.json"
+      - "release/upgrade-baselines.json"
+      - "Makefile"
+      - "pyproject.toml"
+      - "cli/**"
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "extensions/defenseclaw/**"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  license-headers:
+    name: Cisco License Headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - run: make macos-app-license-check
+
+  build-and-test:
+    name: Build and Test (arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: false
+      - name: Test connector onboarding
+        run: macos/DefenseClawMac/script/test_connector_onboarding.sh
+      - name: Prepare reviewed runtime candidate fixture
+        env:
+          GOCACHE: ${{ runner.temp }}/defenseclaw-macos-app-go-build-cache
+          GOMODCACHE: ${{ runner.temp }}/defenseclaw-macos-app-go-module-cache
+          UV_CACHE_DIR: ${{ runner.temp }}/defenseclaw-macos-app-uv-cache
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          prepare_log="$RUNNER_TEMP/defenseclaw-macos-runtime-fixture.log"
+          scripts/test-upgrade-release.sh \
+            --target-version "$version" \
+            --prepare-only \
+            --platform darwin/arm64 \
+            | tee "$prepare_log"
+          candidate_root="$(
+            sed -n 's/^OK: Prepared candidate release root: //p' "$prepare_log"
+          )"
+          [[ -n "$candidate_root" && -d "$candidate_root/$version" ]]
+          [[ "$(grep -c '^OK: Prepared candidate release root: ' "$prepare_log")" == "1" ]]
+          [[ ! -e dist ]]
+          ditto "$candidate_root/$version" dist
+          python3 scripts/release_candidate.py verify-runtime \
+            --release-dir dist \
+            --version "$version"
+          python3 scripts/release_candidate.py extract-gateway \
+            --release-dir dist \
+            --output build/macos-app/runtime-input/defenseclaw \
+            --version "$version" \
+            --os darwin \
+            --arch arm64
+          python3 - "$candidate_root" <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import sys
+
+          candidate_root_input = Path(sys.argv[1])
+          workdir_input = candidate_root_input.parent
+          if not candidate_root_input.is_absolute():
+              raise SystemExit("candidate release root must be absolute")
+          if candidate_root_input.is_symlink() or workdir_input.is_symlink():
+              raise SystemExit("candidate release root and workdir must not be symlinks")
+          try:
+              candidate_root = candidate_root_input.resolve(strict=True)
+          except OSError as exc:
+              raise SystemExit(f"candidate release root cannot be resolved: {exc}") from exc
+          if candidate_root_input != candidate_root or not candidate_root.is_dir():
+              raise SystemExit("candidate release root must be a canonical directory")
+
+          workdir = candidate_root.parent
+          if candidate_root != workdir / "candidate-release":
+              raise SystemExit("candidate release root has an unexpected shape")
+          workdir_prefix = "defenseclaw-upgrade-smoke."
+          workdir_suffix = workdir.name.removeprefix(workdir_prefix)
+          if (
+              not workdir.name.startswith(workdir_prefix)
+              or not workdir_suffix
+              or not workdir_suffix.isalnum()
+          ):
+              raise SystemExit("candidate workdir has an unexpected name")
+
+          trusted_root_inputs = [("TMPDIR", os.environ.get("TMPDIR") or "/tmp")]
+          if os.environ.get("RUNNER_TEMP"):
+              trusted_root_inputs.append(("RUNNER_TEMP", os.environ["RUNNER_TEMP"]))
+          trusted_roots: set[Path] = set()
+          for variable, raw_root in trusted_root_inputs:
+              root_input = Path(raw_root)
+              if not root_input.is_absolute():
+                  raise SystemExit(f"{variable} must be absolute")
+              try:
+                  root = root_input.resolve(strict=True)
+              except OSError as exc:
+                  raise SystemExit(f"{variable} cannot be resolved: {exc}") from exc
+              if not root.is_dir() or root == Path(root.anchor):
+                  raise SystemExit(f"{variable} is not a trusted temp directory")
+              trusted_roots.add(root)
+          if workdir.parent not in trusted_roots:
+              raise SystemExit("candidate workdir is outside the trusted temp roots")
+
+          shutil.rmtree(workdir)
+          PY
+          go clean -cache -modcache
+          uv cache clean
+          echo "MACOS_CI_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "MACOS_GATEWAY_INPUT=$GITHUB_WORKSPACE/build/macos-app/runtime-input/defenseclaw" \
+            >> "$GITHUB_ENV"
+      - name: Build unified ad-hoc release artifact
+        run: scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: DefenseClawMac-ci-macos-arm64-unverified
+          path: |
+            dist/DefenseClawMac-*-macos-arm64-unverified.dmg
+            dist/DefenseClawMac-*-macos-arm64-unverified.zip
+          if-no-files-found: error

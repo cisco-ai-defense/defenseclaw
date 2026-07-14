@@ -124,8 +124,9 @@ func EventWriter() *gatewaylog.Writer {
 
 // SetAgentControlEventWriter installs the private, local-only event writer
 // consumed by the Agent Control synchronizer. Unlike EventWriter, this writer
-// intentionally receives the original event before sink redaction. It must
-// never have OTel, webhook, Splunk, stderr, or audit fanout attached.
+// normally receives exact content, but a managed-enterprise force-redact
+// directive still wins. It must never have OTel, webhook, Splunk, stderr, or
+// audit fanout attached.
 func SetAgentControlEventWriter(w *gatewaylog.Writer) {
 	gatewayEventsMu.Lock()
 	defer gatewayEventsMu.Unlock()
@@ -258,15 +259,26 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		return
 	}
 	stampEventCorrelation(&e, ctx)
-	// Agent Control's private spool exists only when the operator globally
-	// disables redaction and also enables Monitor content. Otherwise Agent
-	// Control tails the standard copy-on-write redacted event stream.
-	if agentControlWriter != nil {
+	// Resolve the cloud-controlled per-inspection redaction directive
+	// (managed_enterprise only) once and apply it to every field below.
+	// An explicit directive stamped on the event wins over the
+	// ctx-carried one so async re-emits keep their decision; we also
+	// stamp it back so the audit-mirror path (sanitizeGatewayLogEvent)
+	// can honor the same decision without the request ctx.
+	policy := sinkPolicyFor(ctx, e.RedactionEnabled)
+	if e.RedactionEnabled == nil {
+		e.RedactionEnabled = redactionDecisionFromContext(ctx)
+	}
+	// The private spool is created only for an operator's global redaction
+	// opt-out. Preserve its exact-content contract unless managed enterprise
+	// explicitly forces redaction for this inspection.
+	agentControlNeedsRedaction := agentControlWriter != nil && policy == redaction.SinkPolicyRedact
+	if agentControlWriter != nil && !agentControlNeedsRedaction {
 		agentControlWriter.EmitContext(ctx, e)
 	}
 	if v := e.Verdict; v != nil {
 		cp := *v
-		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		e.Verdict = &cp
 	}
 	if j := e.Judge; j != nil {
@@ -276,50 +288,55 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		// redacted form. ParseError is short caller-owned
 		// metadata but we redact it too in case a parser
 		// embeds a snippet of the offending body.
-		cp.RawResponse = redaction.ForSinkString(cp.RawResponse)
-		cp.ParseError = redaction.ForSinkString(cp.ParseError)
+		cp.RawResponse = redaction.StringForSink(cp.RawResponse, policy)
+		cp.ParseError = redaction.StringForSink(cp.ParseError, policy)
 		e.Judge = &cp
 	}
 	if er := e.Error; er != nil {
 		cp := *er
-		cp.Message = redaction.ForSinkString(cp.Message)
-		cp.Cause = redaction.ForSinkString(cp.Cause)
+		cp.Message = redaction.StringForSink(cp.Message, policy)
+		cp.Cause = redaction.StringForSink(cp.Cause, policy)
 		e.Error = &cp
 	}
 	if p := e.LLMPrompt; p != nil {
 		cp := *p
 		if cp.Prompt != "" {
-			cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+			cp.Prompt = redaction.MessageContentForSink(cp.Prompt, policy)
 		}
 		if cp.RawRequestBody != "" {
-			cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+			cp.RawRequestBody = redaction.MessageContentForSink(cp.RawRequestBody, policy)
 		}
 		e.LLMPrompt = &cp
 	}
 	if r := e.LLMResponse; r != nil {
 		cp := *r
 		if cp.Response != "" {
-			cp.Response = redaction.ForSinkMessageContent(cp.Response)
+			cp.Response = redaction.MessageContentForSink(cp.Response, policy)
 		}
 		if cp.RawResponseBody != "" {
-			cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+			cp.RawResponseBody = redaction.MessageContentForSink(cp.RawResponseBody, policy)
 		}
 		e.LLMResponse = &cp
 	}
 	if t := e.Tool; t != nil {
 		cp := *t
 		if cp.ToolInput != "" {
-			cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+			cp.ToolInput = redaction.MessageContentForSink(cp.ToolInput, policy)
 		}
 		if cp.ToolOutput != "" {
-			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+			cp.ToolOutput = redaction.MessageContentForSink(cp.ToolOutput, policy)
 		}
 		e.Tool = &cp
 	}
 	if h := e.HookDecision; h != nil {
 		cp := *h
-		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		e.HookDecision = &cp
+	}
+	// A cloud force-redact directive overrides the local exact-content opt-out
+	// and writes only the already-redacted copy to the private spool.
+	if agentControlNeedsRedaction {
+		agentControlWriter.EmitContext(ctx, e)
 	}
 	if w != nil {
 		w.EmitContext(ctx, e)

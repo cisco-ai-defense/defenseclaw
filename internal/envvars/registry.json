@@ -7,6 +7,7 @@
     "telemetry": "OTel / observability config. Override values normally set in config.yaml.",
     "runtime_path": "Path / binary overrides for installation and runtime layout.",
     "hook_internal": "Set by hook scripts and the daemon launcher. Do not override manually.",
+    "upgrade_internal": "Set only by trusted upgrade controllers during fresh-process and staged bridge handoffs. Do not override manually.",
     "credential": "Auth materials (API keys, tokens, passwords). Should reference env vars, not contain raw values in code.",
     "discovery": "Probe / discovery tuning.",
     "splunk_bridge": "Splunk-bridge bundle (bundles/splunk_local_bridge). Not consumed by the Go gateway.",
@@ -130,6 +131,176 @@
       ],
       "since": "0.5.0",
       "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
+      "category": "upgrade_internal",
+      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_MUTATION_TOKEN",
+      "category": "upgrade_internal",
+      "purpose": "Carries the authenticated 32-character lowercase-hex upgrade attempt identifier into migration writers so attempt-owned temporary files can be named and cleaned without touching unrelated files.",
+      "default": "unset (writers use their ordinary temporary-file names)",
+      "accepted_values": ["32-character lowercase hexadecimal attempt identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/upgrade.sh", "description": "Passes the phase-one recovery plan identifier to the isolated migration process"},
+        {"location": "cli/defenseclaw/config.py", "description": "Tags atomic config-write temporary files as owned by the current upgrade attempt"},
+        {"location": "cli/defenseclaw/migrations.py", "description": "Tags atomic migration-write temporary files as owned by the current upgrade attempt"},
+        {"location": "cli/defenseclaw/migration_state.py", "description": "Tags atomic migration-state temporary files as owned by the current upgrade attempt"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_TEST_MODE",
+      "category": "test_fixture",
+      "purpose": "Explicitly enables the loopback-only unpublished release endpoint used by upgrade protocol release-candidate tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Gates the fresh-controller candidate release endpoint override"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH",
+      "category": "test_fixture",
+      "purpose": "Injects a process-kill cut point while replaying the POSIX phase-one gateway publication journal so crash recovery is tested at each ownership boundary.",
+      "default": "unset",
+      "accepted_values": ["after-gateway-displace", "after-gateway-publish", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/upgrade.sh", "description": "Kills the isolated journal-recovery helper at the selected publication cut point"},
+        {"location": "cli/tests/test_upgrade_bridge_phase1_rollback.py", "description": "Drives deterministic crash-and-replay coverage for both recovery cut points"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PHASE1_ROLLBACK_CRASH",
+      "category": "test_fixture",
+      "purpose": "Injects a process-kill cut point after POSIX phase-one state restoration but before controller artifact restoration so durable mixed-progress recovery is tested.",
+      "default": "unset",
+      "accepted_values": ["after-state-restore", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/upgrade.sh", "description": "Kills the same-session rollback controller after exact source state is durable"},
+        {"location": "cli/tests/test_upgrade_bridge_phase1_rollback.py", "description": "Proves the next fresh recovery process accepts source root metadata and completes artifact restoration"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PHASE1_ACTIVE_SEAL_CRASH",
+      "category": "test_fixture",
+      "purpose": "Injects a process kill after the authenticated POSIX phase-one active manifest is durable but before its digest is committed to the outer recovery journal.",
+      "default": "unset",
+      "accepted_values": ["after-active-manifest", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/upgrade.sh", "description": "Kills the seal helper and parent controller at the orphan-manifest recovery boundary"},
+        {"location": "cli/tests/test_upgrade_bridge_phase1_rollback.py", "description": "Proves an authenticated orphan active manifest remains usable for fresh-process rollback"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PHASE1_MIGRATION_CRASH",
+      "category": "test_fixture",
+      "purpose": "Injects a process kill after the POSIX bridge migration has changed canonical config but before an active-state manifest can be sealed.",
+      "default": "unset",
+      "accepted_values": ["after-config", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_upgrade_bridge_phase1_rollback.py", "description": "Kills the fixture migration between canonical mutations"},
+        {"location": "scripts/upgrade.sh", "description": "The bridge journal arms state-mutation recovery before fixture-controlled migration execution"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PHASE1_POST_HEALTH_CRASH",
+      "category": "test_fixture",
+      "purpose": "Injects a process kill after the POSIX bridge gateway passes health but before phase-one journal closure.",
+      "default": "unset",
+      "accepted_values": ["after-health", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/upgrade.sh", "description": "Kills the bridge controller at the live-gateway post-health recovery boundary"},
+        {"location": "cli/tests/test_upgrade_bridge_phase1_rollback.py", "description": "Proves fresh recovery stops the live bridge using the bound split DataDir and config path"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
+      "category": "test_fixture",
+      "purpose": "Carries a numeric-loopback HTTP release asset base URL across the fresh-controller handoff for unpublished candidate testing.",
+      "default": "unset",
+      "accepted_values": ["http://<numeric-loopback>:<port>[/path]", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Overrides the GitHub release download base only when upgrade test mode is explicitly enabled"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_STAGED_UPGRADE",
+      "category": "upgrade_internal",
+      "purpose": "Marks a trusted resolver-to-controller staged hard-cut handoff before rollback artifacts are accepted.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Requires the staged handoff marker before consuming resolver-supplied rollback artifacts"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver sets the marker for the fresh installed controller"},
+        {"location": "scripts/upgrade.ps1", "description": "Windows release resolver sets the marker for the fresh installed controller"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_STAGED_BRIDGE_VERSION",
+      "category": "upgrade_internal",
+      "purpose": "Carries the authenticated bridge version across a staged hard-cut handoff; the fresh controller requires it to equal the installed source version.",
+      "default": "unset",
+      "accepted_values": ["canonical X.Y.Z version", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Matches staged rollback artifacts to the installed bridge version"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver supplies the verified bridge version"},
+        {"location": "scripts/upgrade.ps1", "description": "Windows release resolver supplies the verified bridge version"}
+      ],
+      "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR",
+      "category": "upgrade_internal",
+      "purpose": "Carries the private directory of authenticated bridge rollback artifacts into the fresh hard-cut controller.",
+      "default": "unset",
+      "accepted_values": ["absolute owner-only directory (0700 on POSIX; protected owner-only DACL on Windows)", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Revalidates and retains resolver-supplied rollback artifacts before installed state changes"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver supplies the retained artifact directory"},
+        {"location": "scripts/upgrade.ps1", "description": "Windows release resolver supplies the retained artifact directory"}
+      ],
+      "since": "0.8.4"
     },
     {
       "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
@@ -664,6 +835,20 @@
       "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
+      "name": "DEFENSECLAW_IPC_SOCKET",
+      "category": "runtime_path",
+      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server. Test rigs and out-of-tree clients use this to point at a scratch socket without editing config.yaml.",
+      "default": "unset (resolver picks per-mode default: <dirname(data_dir)>/ipc/defenseclaw_ipc.sock for managed_enterprise, otherwise <data_dir>/ipc/defenseclaw_ipc.sock)",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"}
+      ],
+      "since": "0.8.4",
+      "security_note": "Local-only socket path override — the resolved path is created with mode 0666 (managed_enterprise) or 0600 (unmanaged); managed_enterprise refuses to boot when the resolved mode is world-writable and managed.allowed_uids is empty."
+    },
+    {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
       "category": "runtime_path",
       "purpose": "Systemd template override naming the connector reconciled by an enterprise hook guardian instance.",
@@ -1153,6 +1338,17 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Webhook setup default"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
+      "category": "credential",
+      "purpose": "Short-lived secret transport for 'defenseclaw setup observability add'. The macOS app sets this in the child process environment so provider tokens are not exposed in command-line arguments; the CLI persists the value under the preset-specific token environment variable.",
+      "default": "unset",
+      "accepted_values": ["provider-token", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_observability.py:132", "description": "Click reads the setup token from the child process environment instead of argv"}],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_WEBHOOK_SECRET",

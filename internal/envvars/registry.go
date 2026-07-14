@@ -34,28 +34,30 @@ import (
 // Category identifiers. Must match the keys of `$categories` in
 // registry.json and the constants in cli/defenseclaw/envvars.py.
 const (
-	CategorySecurityOptOut = "security_opt_out"
-	CategoryDebug          = "debug"
-	CategoryTelemetry      = "telemetry"
-	CategoryRuntimePath    = "runtime_path"
-	CategoryHookInternal   = "hook_internal"
-	CategoryCredential     = "credential"
-	CategoryDiscovery      = "discovery"
-	CategorySplunkBridge   = "splunk_bridge"
-	CategoryTestFixture    = "test_fixture"
+	CategorySecurityOptOut  = "security_opt_out"
+	CategoryDebug           = "debug"
+	CategoryTelemetry       = "telemetry"
+	CategoryRuntimePath     = "runtime_path"
+	CategoryHookInternal    = "hook_internal"
+	CategoryUpgradeInternal = "upgrade_internal"
+	CategoryCredential      = "credential"
+	CategoryDiscovery       = "discovery"
+	CategorySplunkBridge    = "splunk_bridge"
+	CategoryTestFixture     = "test_fixture"
 )
 
 // AllowedCategories is the set of valid category strings.
 var AllowedCategories = map[string]struct{}{
-	CategorySecurityOptOut: {},
-	CategoryDebug:          {},
-	CategoryTelemetry:      {},
-	CategoryRuntimePath:    {},
-	CategoryHookInternal:   {},
-	CategoryCredential:     {},
-	CategoryDiscovery:      {},
-	CategorySplunkBridge:   {},
-	CategoryTestFixture:    {},
+	CategorySecurityOptOut:  {},
+	CategoryDebug:           {},
+	CategoryTelemetry:       {},
+	CategoryRuntimePath:     {},
+	CategoryHookInternal:    {},
+	CategoryUpgradeInternal: {},
+	CategoryCredential:      {},
+	CategoryDiscovery:       {},
+	CategorySplunkBridge:    {},
+	CategoryTestFixture:     {},
 }
 
 // SecurityImpact levels.

@@ -90,30 +90,41 @@ def test_flat_otel_migration_is_previewable_applied_once_and_idempotent() -> Non
     assert repeated.yaml_changes == []
 
 
-def test_flat_otel_migration_advances_only_explicit_v6_schema_stamp() -> None:
-    _, tmp = _make_tmp_ctx()
-    cfg_path = os.path.join(tmp, "config.yaml")
-    with open(cfg_path, "w") as handle:
-        handle.write(
-            "config_version: 6\n"
-            "otel:\n"
-            "  enabled: true\n"
-            "  endpoint: 127.0.0.1:4317\n"
-        )
+def test_flat_otel_migration_advances_explicit_v5_and_v6_schema_stamps() -> None:
+    for source_version in (5, 6):
+        _, tmp = _make_tmp_ctx()
+        cfg_path = os.path.join(tmp, "config.yaml")
+        with open(cfg_path, "w") as handle:
+            handle.write(
+                f"config_version: {source_version}\n"
+                "otel:\n"
+                "  enabled: true\n"
+                "  endpoint: 127.0.0.1:4317\n"
+            )
 
-    migrate_flat_otel(tmp, dry_run=False)
-    assert _read_yaml(tmp)["config_version"] == 7
+        migrate_flat_otel(tmp, dry_run=False)
+        assert _read_yaml(tmp)["config_version"] == 7
 
-    # A missing stamp may represent any historical schema. Preserve it so the
-    # Go loader still runs unrelated pre-v6 compatibility migrations.
-    with open(cfg_path, "w") as handle:
-        handle.write(
-            "otel:\n"
-            "  enabled: true\n"
-            "  endpoint: 127.0.0.1:4317\n"
-        )
-    migrate_flat_otel(tmp, dry_run=False)
-    assert "config_version" not in _read_yaml(tmp)
+
+def test_flat_otel_migration_preserves_missing_and_pre_v5_schema_stamps() -> None:
+    for source_version in (None, 4):
+        _, tmp = _make_tmp_ctx()
+        cfg_path = os.path.join(tmp, "config.yaml")
+        stamp = "" if source_version is None else f"config_version: {source_version}\n"
+        with open(cfg_path, "w") as handle:
+            handle.write(
+                stamp
+                + "otel:\n"
+                "  enabled: true\n"
+                "  endpoint: 127.0.0.1:4317\n"
+            )
+
+        migrate_flat_otel(tmp, dry_run=False)
+        migrated = _read_yaml(tmp)
+        if source_version is None:
+            assert "config_version" not in migrated
+        else:
+            assert migrated["config_version"] == source_version
 
 
 def test_flat_otel_global_endpoint_enables_all_signals() -> None:
@@ -886,6 +897,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("DEFENSECLAW_HOME", None)
+        os.environ.pop("DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN", None)
 
     def _invoke(self, args: list[str]):
         return self.runner.invoke(observability_cmd, args, obj=self.app, catch_exceptions=False)
@@ -927,6 +939,56 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertEqual(updated.exit_code, 0, updated.output)
         self.assertIn("UPDATE otel:datadog", updated.output)
         self.assertIn("overwriting existing OTel destination", updated.output)
+
+    def test_add_datadog_accepts_secret_from_environment(self) -> None:
+        secret = "environment-only-dd-key"
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": secret},
+            clear=False,
+        ):
+            result = self._invoke(
+                [
+                    "add",
+                    "datadog",
+                    "--non-interactive",
+                    "--site",
+                    "us5",
+                    "--signals",
+                    "traces,metrics",
+                ]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn(secret, result.output)
+        self.assertIn("Using token from DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN.", result.output)
+        self.assertEqual(_read_dotenv(self.tmp).get("DD_API_KEY"), secret)
+
+    def test_explicit_token_takes_precedence_over_environment(self) -> None:
+        environment_secret = "environment-dd-key"
+        explicit_secret = "explicit-dd-key"
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": environment_secret},
+            clear=False,
+        ):
+            result = self._invoke(
+                [
+                    "add",
+                    "datadog",
+                    "--non-interactive",
+                    "--token",
+                    explicit_secret,
+                    "--site",
+                    "us5",
+                    "--signals",
+                    "traces",
+                ]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        dotenv = _read_dotenv(self.tmp)
+        self.assertEqual(dotenv.get("DD_API_KEY"), explicit_secret)
+        self.assertNotIn(environment_secret, result.output)
+        self.assertNotIn(explicit_secret, result.output)
 
     def test_list_identifies_target_kind_and_signals(self) -> None:
         result = self._invoke(

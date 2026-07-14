@@ -102,6 +102,36 @@ func TestValidator_AcceptsValidVerdict(t *testing.T) {
 	}
 }
 
+func TestValidator_LocalModelMetadataContract(t *testing.T) {
+	v := newRepoValidator(t)
+	base := Event{
+		Timestamp: time.Now().UTC(), EventType: EventAIDiscovery,
+		Severity: SeverityInfo, SchemaVersion: 7,
+		AIDiscovery: &AIDiscoveryPayload{
+			ScanID: "scan-model", Category: "local_model", State: "new",
+			Model: &AIDiscoveryModel{ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf"},
+		},
+	}
+	if err := v.Validate(base); err != nil {
+		t.Fatalf("valid local model event rejected: %v", err)
+	}
+
+	redacted := base
+	redacted.AIDiscovery = &AIDiscoveryPayload{ScanID: "scan-redacted", Category: "local_model", State: "new"}
+	if err := v.Validate(redacted); err != nil {
+		t.Fatalf("redacted local model event without model block rejected: %v", err)
+	}
+
+	invalid := base
+	invalid.AIDiscovery = &AIDiscoveryPayload{
+		ScanID: "scan-invalid", Category: "local_model", State: "new",
+		Model: &AIDiscoveryModel{ID: "Qwen3-0.6B-GGUF"},
+	}
+	if err := v.Validate(invalid); err == nil {
+		t.Fatal("local model event without a valid status was accepted")
+	}
+}
+
 func TestValidator_AcceptsHookDecision(t *testing.T) {
 	v := newRepoValidator(t)
 	e := Event{
@@ -467,6 +497,38 @@ func TestWriter_StrictMode_ValidEventPassesThrough(t *testing.T) {
 	}
 	if w.SchemaViolationsCount() != 0 {
 		t.Fatalf("unexpected schema violation on valid event: %d", w.SchemaViolationsCount())
+	}
+}
+
+// TestValidator_PreviousPhaseUnknownRejected_EmptyAllowed locks in the
+// agent_previous_phase contract that a past bug violated: the enum permits the
+// real phases or null, but NOT the "unknown" sentinel. llm_event_emit once
+// defaulted the first (predecessor-less) phase to "unknown", which made
+// gatewaylog reject and DROP the whole lifecycle/llm_prompt event — so it never
+// reached the audit or OTEL / Cisco AI Defense sinks. The fix leaves it empty
+// (=> null via omitempty); this test guards both directions.
+func TestValidator_PreviousPhaseUnknownRejected_EmptyAllowed(t *testing.T) {
+	v := newRepoValidator(t)
+	base := func() Event {
+		return Event{
+			EventType:     EventLifecycle,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Lifecycle:     &LifecyclePayload{Subsystem: "gateway", Transition: "start"},
+			AgentPhase:    "planning",
+		}
+	}
+
+	ok := base()
+	ok.AgentPreviousPhase = "" // omitted => null => valid (no predecessor)
+	if err := v.Validate(ok); err != nil {
+		t.Fatalf("empty agent_previous_phase must be valid: %v", err)
+	}
+
+	bad := base()
+	bad.AgentPreviousPhase = "unknown"
+	if err := v.Validate(bad); err == nil {
+		t.Fatal(`agent_previous_phase="unknown" must be rejected by the schema`)
 	}
 }
 

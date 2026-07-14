@@ -590,6 +590,12 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 // variable-like constructions). This defeats path obfuscation tricks
 // like /etc/sha""dow, /etc/sha\dow, ${P}/shadow, and /etc/shad?w.
 func ScanAllRules(text string, toolName string) []RuleFinding {
+	// managed_enterprise: local regex detection is disabled — Cisco AI
+	// Defense is authoritative. Return no findings so any residual call
+	// site (router lane, misc callers) cannot produce a local block.
+	if ManagedEnterpriseActive() {
+		return nil
+	}
 	ruleCategoriesMu.RLock()
 	cats := allRuleCategories
 	ruleCategoriesMu.RUnlock()
@@ -603,6 +609,11 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 // connector that never resolved a pack — it falls back to the process-global
 // allRuleCategories, so the single-connector path is byte-for-byte unchanged.
 func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
+	// managed_enterprise: local regex detection is disabled — Cisco AI
+	// Defense is authoritative. See ScanAllRules.
+	if ManagedEnterpriseActive() {
+		return nil
+	}
 	connector = strings.TrimSpace(connector)
 	ruleCategoriesMu.RLock()
 	cats := allRuleCategories

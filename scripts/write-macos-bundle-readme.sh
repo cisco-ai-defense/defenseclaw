@@ -20,7 +20,7 @@ ships in this folder.
 
 | Path                            | Purpose                                             |
 | ------------------------------- | --------------------------------------------------- |
-| \`defenseclaw-gateway\`           | Prebuilt gateway binary (installed root:wheel 0755) |
+| \`defenseclaw\`                   | Prebuilt gateway binary (installed root:wheel 0755) |
 | \`install.sh\`                    | Orchestrator: config, LaunchDaemon, per-user hooks  |
 | \`uninstall.sh\`                  | Bootout daemon + scrub agent hook configs           |
 | \`com.cisco.secureclient.defenseclaw.plist\` | LaunchDaemon plist                                  |

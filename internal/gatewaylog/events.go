@@ -164,6 +164,25 @@ const (
 	// deltas. It is metadata-only: no raw paths, commands, prompt text,
 	// file contents, or secret values.
 	EventAIDiscovery EventType = "ai_discovery"
+
+	// EventConnectorInventory reports the endpoint's roster of configured
+	// DefenseClaw connectors (built-in + plugin) as a discovery event.
+	// Metadata-only: connector names, source, and inspection/subprocess
+	// posture. Emitted in managed_enterprise for AI Defense endpoint
+	// inventory; AI Defense dispatches on the event_type.
+	EventConnectorInventory EventType = "connector_inventory"
+
+	// EventMCPInventory reports the MCP servers configured for the
+	// endpoint's active connector(s). Metadata-only: server name,
+	// transport, command basename, and URL host — never args, env, or
+	// headers (those can carry secrets).
+	EventMCPInventory EventType = "mcp_inventory"
+
+	// EventAgentInventory reports the endpoint's installed coding-agent
+	// roster, emitted at agent-discovery ingest time from the validated
+	// (already sanitized: basenames + path hashes, never raw paths)
+	// discovery report.
+	EventAgentInventory EventType = "agent_inventory"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -391,6 +410,17 @@ type Event struct {
 	//     events have nothing to authenticate).
 	PayloadHMAC string `json:"payload_hmac,omitempty"`
 
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive (Cisco AI Defense is_redaction_enabled) from
+	// the inspection that produced this event down to the async /
+	// mirror sinks that don't share the originating request context
+	// (e.g. the audit-mirror path). Tri-state: nil = no directive
+	// (honor local config), true = force redact, false = store raw.
+	// In-process control metadata only — never serialized on the wire
+	// (json:"-"); the redaction decision it drives has already been
+	// applied to the payload strings by the time any sink sees them.
+	RedactionEnabled *bool `json:"-"`
+
 	// Type-specific payloads — exactly one is populated.
 	Verdict      *VerdictPayload      `json:"verdict,omitempty"`
 	Judge        *JudgePayload        `json:"judge,omitempty"`
@@ -406,6 +436,10 @@ type Event struct {
 	Tool         *ToolPayload         `json:"tool_invocation,omitempty"`
 	HookDecision *HookDecisionPayload `json:"hook_decision,omitempty"`
 	AIDiscovery  *AIDiscoveryPayload  `json:"ai_discovery,omitempty"`
+
+	ConnectorInventory *ConnectorInventoryPayload `json:"connector_inventory,omitempty"`
+	MCPInventory       *MCPInventoryPayload       `json:"mcp_inventory,omitempty"`
+	AgentInventory     *AgentInventoryPayload     `json:"agent_inventory,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -446,6 +480,12 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.HookDecision)
 	case e.AIDiscovery != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
+	case e.ConnectorInventory != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.ConnectorInventory)
+	case e.MCPInventory != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.MCPInventory)
+	case e.AgentInventory != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.AgentInventory)
 	}
 }
 
@@ -784,7 +824,7 @@ type ToolPayload struct {
 //     populated -- they carry no raw paths or unhashed values, only
 //     sha256:* digests and category/vendor/product strings drawn from
 //     the operator-curated catalog.
-//   - The "extended" set (Component, Runtime, Detector, IdentityScore,
+//   - The "extended" set (Component, Model, Runtime, Detector, IdentityScore,
 //     PresenceScore, IdentityFactors, PresenceFactors, Evidence,
 //     RawPaths) is populated *only* when the gateway sees
 //     `privacy.disable_redaction = true`. RawPath inside each
@@ -814,6 +854,7 @@ type AIDiscoveryPayload struct {
 	// payload must check the same flag.
 	Detector        string                `json:"detector,omitempty"`
 	Component       *AIDiscoveryComponent `json:"component,omitempty"`
+	Model           *AIDiscoveryModel     `json:"model,omitempty"`
 	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
 	LastActiveAt    string                `json:"last_active_at,omitempty"`
 	IdentityScore   float64               `json:"identity_score,omitempty"`
@@ -834,6 +875,22 @@ type AIDiscoveryComponent struct {
 	Name      string `json:"name,omitempty"`
 	Version   string `json:"version,omitempty"`
 	Framework string `json:"framework,omitempty"`
+}
+
+// AIDiscoveryModel mirrors inventory.LocalModelInfo. It is part of the
+// privacy-gated extended payload because model IDs can contain user-chosen or
+// private repository names. Local `/api/v1/ai-usage` responses still carry the
+// model block regardless of outbound sink redaction.
+type AIDiscoveryModel struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Format    string `json:"format,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Recipe    string `json:"recipe,omitempty"`
+	Modality  string `json:"modality,omitempty"`
+	Device    string `json:"device,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Pinned    bool   `json:"pinned,omitempty"`
 }
 
 // AIDiscoveryRuntime mirrors inventory.ProcessRuntime.
@@ -872,4 +929,80 @@ type AIDiscoveryEvidence struct {
 	RawPath       string  `json:"raw_path,omitempty"`
 	Quality       float64 `json:"quality,omitempty"`
 	MatchKind     string  `json:"match_kind,omitempty"`
+}
+
+// ConnectorInventoryPayload is the endpoint's roster of configured
+// DefenseClaw connectors, shipped to AI Defense as a discovery event
+// (event_type=connector_inventory). Metadata-only — connector names,
+// human descriptions, source (built-in vs plugin), and the inspection /
+// subprocess posture. No user content. DeviceID / Hostname anchor the
+// inventory to a specific endpoint; they duplicate the resource-level
+// defenseclaw.device.id / host.name attributes so consumers that key on
+// the log body (not the resource) still get the anchor.
+type ConnectorInventoryPayload struct {
+	DeviceID   string                   `json:"device_id,omitempty"`
+	Hostname   string                   `json:"hostname,omitempty"`
+	Count      int                      `json:"count"`
+	Connectors []ConnectorInventoryItem `json:"connectors"`
+}
+
+// ConnectorInventoryItem is one connector row in a ConnectorInventoryPayload.
+type ConnectorInventoryItem struct {
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	Source             string `json:"source,omitempty"` // built-in | plugin
+	ToolInspectionMode string `json:"tool_inspection_mode,omitempty"`
+	SubprocessPolicy   string `json:"subprocess_policy,omitempty"`
+}
+
+// MCPInventoryPayload lists the MCP servers configured for the endpoint's
+// active connector(s), shipped as a discovery event
+// (event_type=mcp_inventory). Deliberately redaction-safe: only the
+// server name, transport, command BASENAME, and URL HOST are carried —
+// full command paths, args, env, headers, and OAuth blocks are omitted
+// because they can embed local paths or secrets.
+type MCPInventoryPayload struct {
+	DeviceID string             `json:"device_id,omitempty"`
+	Hostname string             `json:"hostname,omitempty"`
+	Count    int                `json:"count"`
+	Servers  []MCPInventoryItem `json:"servers"`
+}
+
+// MCPInventoryItem is one MCP-server row in an MCPInventoryPayload.
+type MCPInventoryItem struct {
+	Name         string `json:"name"`
+	Transport    string `json:"transport,omitempty"`
+	Command      string `json:"command,omitempty"`  // basename only, never args/path
+	URLHost      string `json:"url_host,omitempty"` // host only, never path/query
+	AuthProvider string `json:"auth_provider_type,omitempty"`
+	Disabled     bool   `json:"disabled,omitempty"`
+}
+
+// AgentInventoryPayload is the endpoint's installed coding-agent roster,
+// emitted at agent-discovery ingest time (event_type=agent_inventory)
+// from the already-validated agentDiscoveryReport. The report is
+// sanitized before it reaches this payload: basenames + sha256 path
+// hashes only, never raw filesystem paths.
+type AgentInventoryPayload struct {
+	DeviceID  string               `json:"device_id,omitempty"`
+	Hostname  string               `json:"hostname,omitempty"`
+	Source    string               `json:"source,omitempty"`
+	ScannedAt string               `json:"scanned_at,omitempty"`
+	Count     int                  `json:"count"`
+	Installed int                  `json:"installed"`
+	Agents    []AgentInventoryItem `json:"agents"`
+}
+
+// AgentInventoryItem is one coding-agent row in an AgentInventoryPayload.
+type AgentInventoryItem struct {
+	Name               string `json:"name"`
+	Installed          bool   `json:"installed"`
+	HasConfig          bool   `json:"has_config"`
+	ConfigBasename     string `json:"config_basename,omitempty"`
+	ConfigPathHash     string `json:"config_path_hash,omitempty"`
+	HasBinary          bool   `json:"has_binary"`
+	BinaryBasename     string `json:"binary_basename,omitempty"`
+	BinaryPathHash     string `json:"binary_path_hash,omitempty"`
+	Version            string `json:"version,omitempty"`
+	VersionProbeStatus string `json:"version_probe_status,omitempty"`
 }

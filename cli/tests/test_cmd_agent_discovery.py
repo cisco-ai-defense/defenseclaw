@@ -631,6 +631,13 @@ class DiscoveryHelperTests(unittest.TestCase):
 class DiscoveryEnableFlagsTests(unittest.TestCase):
     """Coverage for the new scriptable flags on ``discovery enable``."""
 
+    def test_network_domains_help_discloses_loopback_model_metadata_probes(self):
+        result = CliRunner().invoke(cmd_agent.discovery_enable, ["--help"])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("vetted loopback", result.output)
+        self.assertIn("model metadata APIs", result.output)
+
     def test_persists_advanced_flags(self):
         runner = CliRunner()
         app = _make_ctx(enabled=False)
@@ -762,6 +769,7 @@ class DiscoverySetupTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("No changes", result.output)
+        self.assertIn("vetted loopback model metadata APIs", result.output)
         # No save/restart when nothing actually changed.
         app.cfg.save.assert_not_called()
         restart_mock.assert_not_called()

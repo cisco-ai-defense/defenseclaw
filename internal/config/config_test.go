@@ -1126,6 +1126,52 @@ func TestOTelConfigValidateNamedDestinations(t *testing.T) {
 	}
 }
 
+func TestOTelDestinationWaivedForManagedAIDLogSink(t *testing.T) {
+	// managed_enterprise + cisco_ai_defense.endpoint auto-provisions the Cisco
+	// AI Defense log sink, which is a valid consumer of otel.enabled even with
+	// zero user destinations — so the "needs a destination" rule is waived.
+	managedWithSink := &Config{
+		DeploymentMode: "managed_enterprise",
+		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
+		OTel:           OTelConfig{Enabled: true},
+	}
+	if !managedWithSink.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = false, want true for managed_enterprise + endpoint")
+	}
+	if err := managedWithSink.OTel.validateNamedDestinations(managedWithSink.HasManagedAIDLogSink()); err != nil {
+		t.Fatalf("managed AID sink should waive the destination requirement, got: %v", err)
+	}
+
+	// Without the managed sink (no endpoint), the waiver does not apply.
+	noEndpoint := &Config{
+		DeploymentMode: "managed_enterprise",
+		OTel:           OTelConfig{Enabled: true},
+	}
+	if noEndpoint.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = true with no endpoint, want false")
+	}
+	if err := noEndpoint.OTel.validateNamedDestinations(noEndpoint.HasManagedAIDLogSink()); err == nil ||
+		!strings.Contains(err.Error(), "at least one named destination") {
+		t.Fatalf("without the managed sink the destination rule must still apply, got: %v", err)
+	}
+
+	// Not managed_enterprise: waiver does not apply even with an endpoint set.
+	unmanaged := &Config{
+		DeploymentMode: "unmanaged_byod",
+		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
+		OTel:           OTelConfig{Enabled: true},
+	}
+	if unmanaged.HasManagedAIDLogSink() {
+		t.Fatalf("HasManagedAIDLogSink() = true outside managed_enterprise, want false")
+	}
+	// Close the loop: without the waiver, otel.enabled + zero destinations must
+	// still fail even though an endpoint is configured.
+	if err := unmanaged.OTel.validateNamedDestinations(unmanaged.HasManagedAIDLogSink()); err == nil ||
+		!strings.Contains(err.Error(), "at least one named destination") {
+		t.Fatalf("unmanaged + endpoint should still require a destination, got: %v", err)
+	}
+}
+
 func TestLoadMigratesFlatSignalsWithNamedDestinations(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	data := []byte(`otel:

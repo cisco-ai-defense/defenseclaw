@@ -343,7 +343,11 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	if d == nil || d.closing() {
 		return
 	}
-	event.Details = redaction.ForSinkReason(event.Details)
+	// Honor the cloud-controlled per-inspection redaction directive
+	// stamped on the event (this last-mile path runs detached from the
+	// request context). nil yields SinkPolicyDefault, keeping the
+	// historical idempotent ForSinkReason behavior.
+	event.Details = redaction.ReasonForSink(event.Details, redaction.SinkPolicyForDirective(event.RedactionEnabled))
 	if event.ID == "" {
 		event.ID = uuid.New().String()
 	}

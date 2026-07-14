@@ -446,6 +446,50 @@ func TestEmitEvent_AgentControlSpoolPreservesGlobalRedactionOptOut(t *testing.T)
 	}
 }
 
+func TestEmitEvent_AgentControlSpoolHonorsManagedForceRedact(t *testing.T) {
+	redaction.SetDisableAll(true)
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() {
+		redaction.SetDisableAll(false)
+		SetManagedEnterpriseActive(false)
+	})
+
+	var agentControlEvent gatewaylog.Event
+	rawWriter, err := gatewaylog.New(gatewaylog.Config{
+		JSONLPath: filepath.Join(t.TempDir(), "gateway-events-unredacted.jsonl"),
+		Pretty:    io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawWriter.WithFanout(func(event gatewaylog.Event) { agentControlEvent = event })
+	previousRaw := AgentControlEventWriter()
+	SetAgentControlEventWriter(rawWriter)
+	t.Cleanup(func() {
+		SetAgentControlEventWriter(previousRaw)
+		_ = rawWriter.Close()
+	})
+
+	prompt := "managed enterprise requires this prompt to be redacted"
+	forceRedact := true
+	emitEvent(withRedactionDecision(t.Context(), &forceRedact), gatewaylog.Event{
+		EventType:        gatewaylog.EventLLMPrompt,
+		RequestID:        "request-managed-force-redact",
+		RedactionEnabled: &forceRedact,
+		LLMPrompt: &gatewaylog.LLMPromptPayload{
+			Prompt: prompt,
+		},
+	})
+
+	if agentControlEvent.LLMPrompt == nil {
+		t.Fatal("Agent Control event missing prompt payload")
+	}
+	if agentControlEvent.LLMPrompt.Prompt == prompt ||
+		!strings.Contains(agentControlEvent.LLMPrompt.Prompt, "<redacted") {
+		t.Fatalf("managed force-redact leaked raw Agent Control content: %+v", agentControlEvent.LLMPrompt)
+	}
+}
+
 func TestCategoriesOf(t *testing.T) {
 	tests := []struct {
 		name string

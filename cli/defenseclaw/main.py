@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import os
 import sys
 
 import click
@@ -55,6 +56,7 @@ from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
 from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
+from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 SKIP_LOAD_COMMANDS = {
     "agent", "init", "migrations", "quickstart", "sandbox", "tui",
@@ -101,13 +103,28 @@ def cli(ctx: click.Context) -> None:
     app = ctx.obj
 
     invoked = ctx.invoked_subcommand
+    if invoked == "upgrade" and not _is_help_invocation(ctx):
+        recovery_home = os.path.abspath(
+            os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+        )
+        recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
+        recovery_journals = tuple(
+            os.path.join(recovery_root, name)
+            for name in ("phase-one-active.json", "phase-two-active.json")
+        )
+        if any(os.path.lexists(path) for path in recovery_journals):
+            click.echo(
+                "Interrupted staged-upgrade recovery requires the release-owned resolver. "
+                "Use the target-tag command below without --version/-Version; "
+                "no recovery mutation was attempted.\n"
+                + authenticated_resolver_instructions(__version__),
+                err=True,
+            )
+            raise SystemExit(1)
     if invoked in SKIP_LOAD_COMMANDS or _is_help_invocation(ctx):
         return
 
     from defenseclaw import config as cfg_mod
-    from defenseclaw.db import Store
-    from defenseclaw.logger import Logger
-
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
@@ -116,6 +133,15 @@ def cli(ctx: click.Context) -> None:
             err=True,
         )
         raise SystemExit(1)
+
+    # The upgrade controller owns its authenticated preflight, receipts, and
+    # rollback transaction. Do not initialize generic audit state before that
+    # preflight: a refused direct upgrade must not create or alter audit.db.
+    if invoked == "upgrade":
+        return
+
+    from defenseclaw.db import Store
+    from defenseclaw.logger import Logger
 
     # Fast-fail on config errors before any command runs, so operators
     # see a clear diagnostic instead of a deep stack trace. Skipped for

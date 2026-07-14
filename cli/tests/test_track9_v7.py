@@ -142,7 +142,18 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
 
         schema_path = ROOT / "schemas" / "scan-result.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        go_paths = subprocess.run(
+            ["go", "env", "-json", "GOCACHE", "GOMODCACHE"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        go_cache = json.loads(go_paths.stdout)
         with tempfile.TemporaryDirectory() as tmp:
+            isolated_home = Path(tmp) / "home"
+            (isolated_home / ".defenseclaw").mkdir(parents=True)
             p = Path(tmp) / "x.go"
             p.write_text('package x\nvar _ = "x"\n', encoding="utf-8")
             proc = subprocess.run(
@@ -158,12 +169,16 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
-                timeout=120,
-                env={**os.environ, "HOME": tmp},
+                timeout=180,
+                env={
+                    **os.environ,
+                    "HOME": str(isolated_home),
+                    "GOCACHE": go_cache["GOCACHE"],
+                    "GOMODCACHE": go_cache["GOMODCACHE"],
+                },
                 check=False,
             )
-            if proc.returncode != 0:
-                self.skipTest(f"go scan failed: {proc.stderr}")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
             doc = json.loads(proc.stdout)
             jsonschema.validate(instance=doc, schema=schema)
 

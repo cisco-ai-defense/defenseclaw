@@ -133,3 +133,14 @@ security_report/
 # Manual run artifacts (manual-*/, plan outputs) from local harness runs.
 # Scratch only, not project source.
 outputs/
+
+# Protoc-gen-* tool binaries used by `make proto` (pinned locally so
+# regeneration does not depend on the operator's global GOPATH/bin).
+.tools/
+
+# UDS sockets created by the local IPC server or its e2e tests.
+*.sock
+
+# Locally built mock AI Defense ingest server (scripts/build-managed-bundle.sh
+# / manual testing). Compiled artifact — never commit.
+/mock-aid-ingest

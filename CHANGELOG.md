@@ -30,6 +30,11 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **AI Discovery inventories Lemonade and local model artifacts**: the built-in
+  catalog now recognizes Lemonade Server, bounded loopback metadata reads show
+  installed/loaded models, and independent filesystem discovery covers GGUF,
+  MLX/safetensors, ONNX, Core ML, TFLite, Q4NX, Hugging Face caches, Ollama
+  stores, and contextual PyTorch model files without opening model binaries.
 - **Antigravity local surfaces now match the PR #365 contract**:
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at

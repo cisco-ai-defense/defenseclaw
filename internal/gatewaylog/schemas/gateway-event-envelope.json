@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "hook_decision", "ai_discovery"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "hook_decision", "ai_discovery", "connector_inventory", "mcp_inventory", "agent_inventory"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -84,23 +84,29 @@
     "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
     "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
     "hook_decision":   { "$ref": "#/$defs/HookDecisionPayload" },
-    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" }
+    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" },
+    "connector_inventory": { "$ref": "#/$defs/ConnectorInventoryPayload" },
+    "mcp_inventory":       { "$ref": "#/$defs/MCPInventoryPayload" },
+    "agent_inventory":     { "$ref": "#/$defs/AgentInventoryPayload" }
   },
   "oneOf": [
-    { "required": ["verdict"] },
-    { "required": ["judge"] },
-    { "required": ["lifecycle"] },
-    { "required": ["error"] },
-    { "required": ["diagnostic"] },
-    { "required": ["scan"] },
-    { "required": ["scan_finding"] },
-    { "required": ["activity"] },
-    { "required": ["egress"] },
-    { "required": ["llm_prompt"] },
-    { "required": ["llm_response"] },
-    { "required": ["tool_invocation"] },
-    { "required": ["hook_decision"] },
-    { "required": ["ai_discovery"] }
+    { "properties": { "event_type": { "const": "verdict" } },         "required": ["event_type", "verdict"] },
+    { "properties": { "event_type": { "const": "judge" } },           "required": ["event_type", "judge"] },
+    { "properties": { "event_type": { "const": "lifecycle" } },       "required": ["event_type", "lifecycle"] },
+    { "properties": { "event_type": { "const": "error" } },           "required": ["event_type", "error"] },
+    { "properties": { "event_type": { "const": "diagnostic" } },      "required": ["event_type", "diagnostic"] },
+    { "properties": { "event_type": { "const": "scan" } },            "required": ["event_type", "scan"] },
+    { "properties": { "event_type": { "const": "scan_finding" } },    "required": ["event_type", "scan_finding"] },
+    { "properties": { "event_type": { "const": "activity" } },        "required": ["event_type", "activity"] },
+    { "properties": { "event_type": { "const": "egress" } },          "required": ["event_type", "egress"] },
+    { "properties": { "event_type": { "const": "llm_prompt" } },      "required": ["event_type", "llm_prompt"] },
+    { "properties": { "event_type": { "const": "llm_response" } },    "required": ["event_type", "llm_response"] },
+    { "properties": { "event_type": { "const": "tool_invocation" } }, "required": ["event_type", "tool_invocation"] },
+    { "properties": { "event_type": { "const": "hook_decision" } },   "required": ["event_type", "hook_decision"] },
+    { "properties": { "event_type": { "const": "ai_discovery" } },    "required": ["event_type", "ai_discovery"] },
+    { "properties": { "event_type": { "const": "connector_inventory" } }, "required": ["event_type", "connector_inventory"] },
+    { "properties": { "event_type": { "const": "mcp_inventory" } },       "required": ["event_type", "mcp_inventory"] },
+    { "properties": { "event_type": { "const": "agent_inventory" } },     "required": ["event_type", "agent_inventory"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -242,11 +248,11 @@
       "properties": {
         "scan_id":        { "type": "string", "maxLength": 128 },
         "signal_id":      { "type": "string", "maxLength": 128 },
-        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint"] },
+        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint", "local_model"] },
         "vendor":         { "type": ["string", "null"], "maxLength": 128 },
         "product":        { "type": ["string", "null"], "maxLength": 128 },
         "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "state":          { "type": "string", "enum": ["new", "changed", "gone"] },
+        "state":          { "type": "string", "enum": ["new", "seen", "changed", "gone"] },
         "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
         "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^(sha256|hmac-sha256):[0-9a-f]{64}$" }, "maxItems": 16 },
         "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
@@ -261,6 +267,21 @@
             "name":      { "type": ["string", "null"], "maxLength": 256 },
             "version":   { "type": ["string", "null"], "maxLength": 64 },
             "framework": { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "model":          { "type": ["object", "null"],
+          "description": "local model metadata; populated only when privacy.disable_redaction=true",
+          "required": ["id", "status"],
+          "properties": {
+            "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
+            "status":     { "type": "string", "enum": ["installed", "loaded"] },
+            "format":     { "type": ["string", "null"], "maxLength": 64 },
+            "provider":   { "type": ["string", "null"], "maxLength": 96 },
+            "recipe":     { "type": ["string", "null"], "maxLength": 128 },
+            "modality":   { "type": ["string", "null"], "maxLength": 64 },
+            "device":     { "type": ["string", "null"], "maxLength": 128 },
+            "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "pinned":     { "type": ["boolean", "null"] }
           }
         },
         "runtime":        { "type": ["object", "null"],
@@ -330,6 +351,90 @@
           "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" },
         "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "match_kind":    { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] }
+      }
+    },
+    "ConnectorInventoryPayload": {
+      "type": "object",
+      "required": ["count", "connectors"],
+      "description": "Endpoint roster of configured DefenseClaw connectors. Metadata-only.",
+      "properties": {
+        "device_id": { "type": ["string", "null"], "maxLength": 128 },
+        "hostname":  { "type": ["string", "null"], "maxLength": 256 },
+        "count":     { "type": "integer", "minimum": 0 },
+        "connectors": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name":                 { "type": "string", "maxLength": 128 },
+              "description":          { "type": ["string", "null"], "maxLength": 512 },
+              "source":               { "type": ["string", "null"], "enum": [null, "built-in", "plugin"] },
+              "tool_inspection_mode": { "type": ["string", "null"], "maxLength": 64 },
+              "subprocess_policy":    { "type": ["string", "null"], "maxLength": 64 }
+            }
+          }
+        }
+      }
+    },
+    "MCPInventoryPayload": {
+      "type": "object",
+      "required": ["count", "servers"],
+      "description": "MCP servers configured for the endpoint's active connector(s). Redaction-safe: command basename + URL host only; never args/env/headers.",
+      "properties": {
+        "device_id": { "type": ["string", "null"], "maxLength": 128 },
+        "hostname":  { "type": ["string", "null"], "maxLength": 256 },
+        "count":     { "type": "integer", "minimum": 0 },
+        "servers": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name":               { "type": "string", "maxLength": 256 },
+              "transport":          { "type": ["string", "null"], "maxLength": 64 },
+              "command":            { "type": ["string", "null"], "maxLength": 256, "pattern": "^[^/\\\\]*$" },
+              "url_host":           { "type": ["string", "null"], "maxLength": 256, "pattern": "^[^\\s/@?#\\\\]*$" },
+              "auth_provider_type": { "type": ["string", "null"], "maxLength": 64 },
+              "disabled":           { "type": ["boolean", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "AgentInventoryPayload": {
+      "type": "object",
+      "required": ["count", "installed", "agents"],
+      "description": "Endpoint roster of installed coding agents. Sanitized: basenames + sha256 path hashes only, never raw paths.",
+      "properties": {
+        "device_id":  { "type": ["string", "null"], "maxLength": 128 },
+        "hostname":   { "type": ["string", "null"], "maxLength": 256 },
+        "source":     { "type": ["string", "null"], "maxLength": 64 },
+        "scanned_at": { "type": ["string", "null"], "format": "date-time", "maxLength": 64 },
+        "count":      { "type": "integer", "minimum": 0 },
+        "installed":  { "type": "integer", "minimum": 0 },
+        "agents": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name":                 { "type": "string", "maxLength": 128 },
+              "installed":            { "type": ["boolean", "null"] },
+              "has_config":           { "type": ["boolean", "null"] },
+              "config_basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
+              "config_path_hash":     { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
+              "has_binary":           { "type": ["boolean", "null"] },
+              "binary_basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
+              "binary_path_hash":     { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
+              "version":              { "type": ["string", "null"], "maxLength": 200 },
+              "version_probe_status": { "type": ["string", "null"], "maxLength": 64 }
+            }
+          }
+        }
       }
     }
   }

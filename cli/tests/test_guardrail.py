@@ -1029,6 +1029,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "",  # no judge
                 "",  # no advanced options
                 "",  # apply review
+                "",  # Click 8.4 confirmation terminator
             ]
         )
         result = self.runner.invoke(
@@ -1595,11 +1596,12 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "",          # hook fail-mode (default = open)
             "y",         # human approval — INLINE PROMPT (mode == action)
             "MEDIUM",    # approval min severity
+            "",          # local regex policy source
             "",          # local scanner
-            "2",         # LLM role for proxy-backed connector: judge AND agent
             "n",         # no LLM judge
             "n",         # decline advanced options — HILT is no longer there
             "",
+            "",          # Click 8.4 confirmation terminator
         ])
         result = self.runner.invoke(
             setup,
@@ -1640,7 +1642,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "n",      # human approval (inline) — declined
             "",       # local regex policy source
             "",       # local scanner
-            "2",      # LLM role for proxy-backed connector: judge AND agent
             "n",      # no LLM judge
             "y",      # configure advanced options
             "",       # default port
@@ -1650,6 +1651,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "y",      # disable redaction
             "y",      # acknowledge raw-content warning
             "",
+            "",       # Click 8.4 confirmation terminator
         ])
         result = self.runner.invoke(
             setup,
@@ -1692,13 +1694,14 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "",      # observe mode (default)
             "",      # hook fail-mode (default = open)
             # NO HILT prompt here — observe mode skips it entirely.
+            "",      # local regex policy source
             "",      # local scanner
-            "2",     # LLM role for proxy-backed connector: judge AND agent
             "n",     # no LLM judge
             "y",     # configure advanced options
             "",      # default port
             "n",     # keep redaction on
             "",
+            "",      # Click 8.4 confirmation terminator
         ])
         result = self.runner.invoke(
             setup,

@@ -511,37 +511,51 @@ defenseclaw setup guardrail --disable
 
 ## Upgrade
 
+Installed users must first authenticate the resolver release asset with the
+commands in [CLI Reference — upgrade](CLI.md#upgrade). The path below is the
+equivalent entry point from a checkout of the current release:
+
 ```
-defenseclaw upgrade [--yes] [--version VERSION]
-  1. Back up ~/.defenseclaw/ and openclaw.json to timestamped directory
-  2. Stop defenseclaw-gateway
-  3. Download and replace gateway binary from GitHub release tarball
-  4. Download and replace Python CLI from GitHub release wheel
-  5. Run version-specific migrations (e.g. v0.3.0: remove legacy provider entries)
-  6. Start defenseclaw-gateway and restart OpenClaw gateway
+./scripts/upgrade.sh [--yes]
 ```
+
+1. Detect the installed version and verify the signed release contract.
+2. Select a manifest-required bridge from the published baseline matrix.
+3. Back up managed state before stopping services.
+4. Install and health-check the bridge, then re-exec its fresh controller.
+5. Install the target, run release-owned migrations, and restart services.
+6. Report success only after version-bound health checks pass; otherwise roll back.
 
 Migrations are keyed to the release they ship with and run automatically when
 upgrading across version boundaries. The migration framework lives in
 `cli/defenseclaw/migrations.py`.
 
+> **The built-in command is not the cross-bridge entry point.**
+> A published `0.8.3`-or-older `defenseclaw upgrade` cannot acquire the newer
+> two-process resolver logic retroactively. It refuses the hard cut before
+> mutation. Some frozen controllers then print an obsolete raw-network shell
+> hint; do not execute it. Use the authenticated current release-owned shell or
+> PowerShell resolver bootstrap in the CLI reference. Explicit target versions
+> never hide a required bridge.
+>
 > **Plugin installs are release-specific and not part of upgrade.**
 > The OpenClaw plugin is installed by `install.sh` as part of the release
 > that ships it (0.3.0+). Running `upgrade` does not touch the plugin.
 
-The shell-based upgrade script (`scripts/upgrade.sh`) accepts the same flags:
+Use the current release-owned resolver in latest mode so a required bridge is
+selected and handed off to a fresh controller:
 
 ```bash
-# Upgrade to the latest release
+# From a checkout of the current release
 ./scripts/upgrade.sh
 
-# Upgrade to a specific release
-./scripts/upgrade.sh --version 0.3.0
-VERSION=0.3.0 ./scripts/upgrade.sh
-
-# Non-interactive
+# From that checkout, non-interactive
 ./scripts/upgrade.sh --yes
 ```
+
+Sources outside the published-baseline matrix have no inferred in-place hop.
+Remain on the current version and contact support for a tested, state-aware
+recovery plan.
 
 See [CLI Reference — upgrade](CLI.md#upgrade) for full options.
 

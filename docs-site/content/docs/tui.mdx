@@ -45,9 +45,15 @@ Switch panels with the number/letter key shown, or cycle with `Tab` /
 | `8` | Logs | Live gateway logs with filter presets |
 | `9` | Audit | Audit trail |
 | `A` | Activity | Live output from commands you run |
-| `V` | AI Discovery | Discovered AI usage |
+| `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `R` | Registries | Configured registries |
 | `0` | Setup | Connector and gateway setup |
+
+The Overview panel's **AI Agents** metric intentionally excludes `local_model`
+rows so a large model cache cannot hide agent activity. Open **AI Discovery**
+with `V` for the full model inventory; model rows add Model, Model status, and
+Format columns, with recipe, modality, device, byte size, and pinned state in
+the detail view when the source reports them.
 
 ## Handy keys
 

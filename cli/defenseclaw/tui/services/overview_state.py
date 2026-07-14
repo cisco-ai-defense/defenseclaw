@@ -615,19 +615,24 @@ class OverviewPanelModel:
             )
 
         summary = self.ai_usage.summary
-        parts = [f"{summary.active_signals} active"]
-        if summary.new_signals:
-            parts.append(f"{summary.new_signals} new")
-        if summary.changed_signals:
-            parts.append(f"{summary.changed_signals} changed")
-        if summary.gone_signals:
-            parts.append(f"{summary.gone_signals} gone")
+        agent_signals = tuple(signal for signal in self.ai_usage.signals if signal.category != "local_model")
+        active_agents = sum(signal.state.strip().lower() != "gone" for signal in agent_signals)
+        new_agents = sum(signal.state.strip().lower() == "new" for signal in agent_signals)
+        changed_agents = sum(signal.state.strip().lower() == "changed" for signal in agent_signals)
+        gone_agents = sum(signal.state.strip().lower() == "gone" for signal in agent_signals)
+        parts = [f"{active_agents} active"]
+        if new_agents:
+            parts.append(f"{new_agents} new")
+        if changed_agents:
+            parts.append(f"{changed_agents} changed")
+        if gone_agents:
+            parts.append(f"{gone_agents} gone")
         if summary.scanned_at:
             parts.append(f"scanned {format_scan_age(summary.scanned_at, now=now)}")
         if summary.privacy_mode:
             parts.append(f"mode {summary.privacy_mode}")
 
-        if not self.ai_usage.signals:
+        if not agent_signals:
             return OverviewAIDiscoveryBoxState(
                 "empty",
                 "no AI agents detected yet - try: defenseclaw agent discover",
@@ -635,7 +640,7 @@ class OverviewPanelModel:
             )
 
         rows = unique_ai_discovery_signals_for_overview(
-            self.ai_usage_sorted or sort_ai_discovery_signals_for_overview(self.ai_usage.signals)
+            sort_ai_discovery_signals_for_overview(agent_signals)
         )
         overflow = max(len(rows) - MAX_AI_DISCOVERY_OVERVIEW_ROWS, 0)
         rendered = tuple(
@@ -1336,7 +1341,7 @@ def format_scanner_overrides_summary(
 
 
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
-    def rank(signal: AIUsageSignal) -> tuple[int, float, float, str]:
+    def rank(signal: AIUsageSignal) -> tuple[int, int, float, float, str]:
         state_rank = {
             "new": 0,
             "changed": 1,
@@ -1344,8 +1349,9 @@ def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -
             "": 2,
             "gone": 3,
         }.get(signal.state.strip().lower(), 4)
+        model_rank = 0 if signal.model is not None and signal.model.status == "loaded" else 1
         last_seen = signal.last_seen.timestamp() if signal.last_seen is not None else 0.0
-        return (state_rank, -signal.confidence, -last_seen, display_ai_discovery_name(signal).lower())
+        return (state_rank, model_rank, -signal.confidence, -last_seen, display_ai_discovery_name(signal).lower())
 
     return tuple(sorted(signals, key=rank))
 
@@ -1373,6 +1379,9 @@ def _ai_discovery_overview_key(signal: AIUsageSignal) -> tuple[str, str]:
         name = signal.component.name.strip().lower()
         if ecosystem or name:
             return ("component", f"{ecosystem}:{name}")
+    if signal.model is not None and signal.model.id.strip():
+        provider = signal.model.provider.strip().lower() or signal.vendor.strip().lower()
+        return ("model", f"{provider}:{signal.model.id.strip().lower()}")
     name = display_ai_discovery_name(signal).strip().lower()
     vendor = display_ai_discovery_vendor(signal).strip().lower()
     return ("display", f"{vendor}:{name}")
@@ -1391,7 +1400,8 @@ def ai_discovery_state_badge(state: str) -> str:
 
 
 def display_ai_discovery_name(signal: AIUsageSignal) -> str:
-    for candidate in (signal.name, signal.product, signal.signature_id, signal.signal_id):
+    model_name = signal.model.id if signal.model is not None else ""
+    for candidate in (model_name, signal.name, signal.product, signal.signature_id, signal.signal_id):
         if candidate.strip():
             return candidate.strip()
     return "(unknown)"
@@ -1405,6 +1415,11 @@ def display_ai_discovery_vendor(signal: AIUsageSignal) -> str:
     label = " ".join(parts)
     if signal.supported_connector.strip():
         label = f"{label} ({signal.supported_connector.strip()})"
+    if signal.model is not None:
+        details = [signal.model.status.strip(), signal.model.format.strip()]
+        details = [item for item in details if item]
+        if details:
+            label = f"{label} ({', '.join(details)})"
     return label
 
 

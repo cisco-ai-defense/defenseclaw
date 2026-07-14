@@ -150,7 +150,10 @@ func TestHookPhaseSequenceIsOrderedAndDirected(t *testing.T) {
 	planning.LifecycleState = "active"
 	planning.Phase = "planning"
 	planning = api.enrichHookPhase(planning)
-	if planning.Sequence != 1 || planning.PreviousPhase != "unknown" {
+	// First phase has no predecessor: PreviousPhase must be empty so the
+	// gateway-event schema serializes agent_previous_phase as null (the enum
+	// rejects the "unknown" sentinel, which would drop the event).
+	if planning.Sequence != 1 || planning.PreviousPhase != "" {
 		t.Fatalf("first phase = %+v", planning)
 	}
 	tool := base

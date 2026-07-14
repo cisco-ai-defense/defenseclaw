@@ -125,6 +125,31 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
 
+## AI discovery
+
+`agent discover` is the fast, gateway-independent connector inventory. The
+continuous scanner is a separate sidecar surface and is the one that inventories
+local model APIs, known model caches, and standalone model files.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
+| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. |
+| `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
+| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
+| `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
+| `defenseclaw agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE]` | Show the deduplicated package/SDK component rollup and confidence scores. |
+
+```bash
+defenseclaw agent usage --refresh --category local_model --detail
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --state seen
+defenseclaw agent usage --show-gone
+```
+
+See [AI Discovery](/docs/ai-discovery) for supported model servers, standalone
+file formats, lifecycle behavior, and privacy boundaries.
+
 ## Scanning
 
 The Python CLI exposes one scan group per asset family — there is no top-level `scan` group. Code-scanning lives on the Go gateway binary.
@@ -174,12 +199,16 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command verifies release provenance/checksums, backs up managed state, installs both artifacts, runs the release migration manifest, restarts services, and checks gateway health. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. Signed releases still upgrade without local `cosign` by warning and continuing with checksum validation only; `--allow-unverified` is an explicit unsafe override when a release manifest is missing, unsigned, incomplete, or otherwise unverifiable. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw upgrade [--version X] [--yes]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. A coherent installed `0.8.4` bridge supports the `0.8.4 → 0.8.5` hard cut by first acquiring authenticated `0.8.4` rollback artifacts. A `0.8.3`-or-older built-in command safely refuses because it cannot learn the two-process bridge handoff retroactively; some frozen versions then print an obsolete raw-network hint that must not be executed. Use the authenticated current release-owned shell or PowerShell resolver in latest mode for that older path. Release `0.8.4` and later require `cosign`, and `--allow-unverified` cannot bypass that boundary. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
 | `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
 | `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
 
-`0.7.x` clients do not support `--allow-unverified`; upgrade them directly to the latest fixed release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`.
+A source listed for its platform in the published-baseline matrix can upgrade to
+latest through the authenticated current release-owned resolver, which selects
+and health-checks `0.8.4` before starting a fresh bridge controller. Sources
+outside that matrix fail closed with the exact supported path. Never force a
+hard-cut version or rerun a fresh installer over an old installation.
 
 ## Uninstall / disable
 

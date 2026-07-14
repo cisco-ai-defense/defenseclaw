@@ -487,12 +487,14 @@ def _write_yaml(path: str, data: dict[str, Any]) -> None:
 
 
 def _advance_named_otel_config_version(raw: dict[str, Any]) -> None:
-    """Advance only the exact v6 -> v7 schema transition.
+    """Advance explicit v5/v6 configs through the named-OTel v7 transition.
 
     An absent stamp is historically equivalent to a much older config, not
-    necessarily v6. Advancing it directly to v7 would make the Go loader skip
-    unrelated LLM and connector migrations, so those files deliberately keep
-    their original stamp while receiving the named OTel shape.
+    necessarily v5. Advancing it directly to v7 would make the Go loader skip
+    unrelated LLM migrations, so absent and pre-v5 files deliberately keep
+    their original stamp while receiving the named OTel shape. The v5 -> v6
+    transition is a version-stamp-only normalization, so an explicit v5 is
+    safe to persist directly as v7 after the flat OTel conversion succeeds.
     """
     version = raw.get("config_version")
     if isinstance(version, bool):
@@ -501,7 +503,7 @@ def _advance_named_otel_config_version(raw: dict[str, Any]) -> None:
         parsed = int(version)
     except (TypeError, ValueError):
         return
-    if parsed == _NAMED_OTEL_CONFIG_VERSION - 1:
+    if parsed in {_NAMED_OTEL_CONFIG_VERSION - 2, _NAMED_OTEL_CONFIG_VERSION - 1}:
         raw["config_version"] = _NAMED_OTEL_CONFIG_VERSION
 
 

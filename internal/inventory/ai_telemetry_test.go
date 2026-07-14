@@ -185,6 +185,57 @@ func TestBuildAIDiscoveryPayload_RedactedModeNeverShipsConfidence(t *testing.T) 
 	}
 }
 
+func TestBuildAIDiscoveryPayload_ModelMetadataHonorsRedaction(t *testing.T) {
+	savedKey := currentPathHashKey()
+	t.Cleanup(func() { SetPathHashKey(savedKey) })
+	SetPathHashKey([]byte("model-redaction-test-install-key"))
+	sig := AISignal{
+		SignalID:    "publicly-guessable-model-sig",
+		Fingerprint: hashValue("local-model|lemonade|user.Private-Model|model_runtime"),
+		Category:    SignalLocalModel,
+		Vendor:      "Lemonade",
+		Product:     "Lemonade Server",
+		State:       AIStateNew,
+		Basenames: []string{
+			"user.Private-Model.gguf",
+		},
+		PathHashes:    []string{hashPath("/Users/alice/models/user.Private-Model.gguf")},
+		WorkspaceHash: hashPath("/Users/alice/models"),
+		Model: &LocalModelInfo{
+			ID: "user.Private-Model", Status: "loaded", Format: "gguf",
+			Provider: "lemonade", Recipe: "llamacpp", Device: "gpu",
+			SizeBytes: 1234, Pinned: true,
+		},
+	}
+
+	redacted := BuildAIDiscoveryPayload(sig, "scan-1", PayloadOpts{})
+	if redacted.Model != nil {
+		t.Fatalf("redacted payload leaked model metadata: %+v", redacted.Model)
+	}
+	if len(redacted.Basenames) != 0 {
+		t.Fatalf("redacted payload leaked model identity through basename: %+v", redacted.Basenames)
+	}
+	if redacted.SignalID == "" || redacted.SignalID == sig.SignalID || redacted.SignalID == stableSignalID(sig.Fingerprint) || len(redacted.PathHashes) != 0 || redacted.WorkspaceHash != "" {
+		t.Fatalf("redacted payload leaked dictionary-testable model identity: %+v", redacted)
+	}
+	if again := BuildAIDiscoveryPayload(sig, "scan-2", PayloadOpts{}); again.SignalID != redacted.SignalID {
+		t.Fatalf("installation-scoped model pseudonym is unstable: %q != %q", again.SignalID, redacted.SignalID)
+	}
+	extended := BuildAIDiscoveryPayload(sig, "scan-1", PayloadOpts{DisableRedaction: true})
+	if extended.Model == nil || extended.Model.ID != sig.Model.ID || extended.Model.Status != "loaded" {
+		t.Fatalf("extended payload omitted model metadata: %+v", extended.Model)
+	}
+	if extended.Model.SizeBytes != 1234 || !extended.Model.Pinned || extended.Model.Device != "gpu" {
+		t.Fatalf("extended payload changed model metadata: %+v", extended.Model)
+	}
+	if len(extended.Basenames) != 1 || extended.Basenames[0] != sig.Basenames[0] {
+		t.Fatalf("extended payload omitted opted-in model basename: %+v", extended.Basenames)
+	}
+	if extended.SignalID != sig.SignalID || len(extended.PathHashes) != 1 || extended.WorkspaceHash == "" {
+		t.Fatalf("extended payload omitted opted-in model identity fields: %+v", extended)
+	}
+}
+
 // TestBuildAIDiscoveryPayload_ClampsScoreOutOfRange confirms a
 // corrupt engine result (NaN, >1, <0) cannot poison the wire
 // payload's score histogram bucket on the receiver side.

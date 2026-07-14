@@ -769,7 +769,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			r.scanInboundPrompt(envelope.SessionKey, envelope.MessageID, msg.Model, contentStr)
 		}
 
-		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+		// managed_enterprise: multi-turn injection detection is a local
+		// heuristic — disabled so AID stays the sole decision-maker.
+		if !ManagedEnterpriseActive() && msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				r.logStreamAction(envelope.SessionKey, string(audit.ActionGatewayMultiTurnInjection), envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
@@ -1254,7 +1256,11 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// Static block/allow list — checked before any pattern scanning.
 	// Connector-scoped (@C/T) entries resolve before the bare global entry;
 	// the connector is this sidecar's configured connector (see connectorName).
-	if r.policy != nil {
+	//
+	// managed_enterprise: explicit local policy (MCP-server block, static
+	// block/allow) is bypassed — Cisco AI Defense is the sole decision-maker
+	// and the request fails open through this router lane.
+	if !ManagedEnterpriseActive() && r.policy != nil {
 		conn := r.connectorName()
 		// MCP-server runtime block: a blocked MCP server (global or
 		// --connector scoped) denies all of its tools at runtime. Checked
@@ -1369,7 +1375,10 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// LLM judge — runs tool injection detection on arguments asynchronously.
 	// The semaphore bounds concurrent judge executions while queued goroutines
 	// wait for a slot instead of dropping inspection entirely.
-	if r.judge != nil && len(payload.Args) > 0 {
+	//
+	// managed_enterprise: the judge is a local decision-maker — disabled so
+	// AID stays authoritative.
+	if !ManagedEnterpriseActive() && r.judge != nil && len(payload.Args) > 0 {
 		go func(tool, sessionID, toolID string, args json.RawMessage) {
 			r.judgeSem <- struct{}{}
 			defer func() { <-r.judgeSem }()
@@ -1524,7 +1533,10 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	verdict := scanLocalPatterns("completion", payload.Output)
 
 	// Stage 2: LLM judge, if requested and available. Merge into verdict.
-	if stool.JudgeResult {
+	// managed_enterprise: the judge is a local decision-maker — disabled so
+	// AID stays authoritative. Combined with the inert scanLocalPatterns
+	// above, the verdict stays allow and this lane no-ops (fail open).
+	if stool.JudgeResult && !ManagedEnterpriseActive() {
 		if r.judge == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
 				payload.Tool)
@@ -1654,11 +1666,17 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		)
 	}
 
+	// managed_enterprise: local command-danger detection (rule engine +
+	// legacy heuristics) is disabled — AID is the sole decision-maker, so
+	// approval requests fail open through this router lane. ScanAllRules is
+	// already inert in managed; also short-circuit the legacy heuristics so
+	// nothing here can deny.
+	managedAIDOnly := ManagedEnterpriseActive()
 	cmdFindings := ScanAllRules(rawCmd, "shell")
 	argvFindings := ScanAllRules(strings.Join(argv, " "), "shell")
 	allFindings := append(cmdFindings, argvFindings...)
 	dangerousByRules := len(allFindings) > 0 && severityRank[HighestSeverity(allFindings)] >= severityRank["HIGH"]
-	dangerousByLegacy := r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv)
+	dangerousByLegacy := !managedAIDOnly && (r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv))
 	dangerous := dangerousByRules || dangerousByLegacy
 	topFinding := RuleFinding{RuleID: "UNKNOWN", Title: "dangerous command pattern"}
 	for _, f := range allFindings {
