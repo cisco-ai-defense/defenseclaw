@@ -23,7 +23,7 @@ func requireEnterpriseHookInstaller(t *testing.T) {
 	}
 }
 
-func TestInstallRejectsNativeWindowsBeforeSideEffects(t *testing.T) {
+func TestInstallRejectsInvalidNativeWindowsRequestBeforeSideEffects(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows rejection contract")
 	}
@@ -33,8 +33,8 @@ func TestInstallRejectsNativeWindowsBeforeSideEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Install(context.Background(), InstallOptions{UserHome: filepath.Join(scope, "home")})
-	if err == nil || !strings.Contains(err.Error(), "unsupported on Windows") {
-		t.Fatalf("Install error = %v, want unsupported-on-Windows rejection", err)
+	if err == nil {
+		t.Fatal("Install error = nil, want preflight/validation rejection")
 	}
 	if got, readErr := os.ReadFile(sentinel); readErr != nil || string(got) != "unchanged" {
 		t.Fatalf("sentinel changed: data=%q err=%v", got, readErr)

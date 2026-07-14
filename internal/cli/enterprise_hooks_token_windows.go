@@ -1,5 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
 // SPDX-License-Identifier: Apache-2.0
 
 //go:build windows
@@ -8,22 +7,131 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
-func validateEnterpriseHookScopedTokenLocation(_, _ string) error {
-	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until SID and DACL validation is implemented")
+func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
+	path, err := connector.HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	return validateEnterpriseWindowsTokenLocation(dataDir, path, "hook token")
 }
 
-func alignEnterpriseHookScopedTokenOwner(_, _ string) error {
-	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until target-user impersonation is implemented")
+func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
+	path, err := connector.HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseWindowsTokenOwner(dataDir, path, "hook token")
 }
 
-func validateEnterpriseOTLPTokenLocation(_ string, _ connector.OTLPPathTokenScope) error {
-	return fmt.Errorf("enterprise OTLP scoped tokens are unsupported on Windows until SID and DACL validation is implemented")
+func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
+	path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return err
+	}
+	return validateEnterpriseWindowsTokenLocation(dataDir, path, "OTLP token")
 }
 
-func alignEnterpriseOTLPTokenOwner(_ string, _ connector.OTLPPathTokenScope) error {
-	return fmt.Errorf("enterprise OTLP scoped tokens are unsupported on Windows until target-user impersonation is implemented")
+func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathTokenScope) error {
+	path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseWindowsTokenOwner(dataDir, path, "OTLP token")
+}
+
+func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
+	if err := managed.ValidateTrustedRuntimeDir(dataDir, "managed data_dir"); err != nil {
+		return fmt.Errorf("enterprise hooks: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if _, err := os.Lstat(dir); err == nil {
+		if err := managed.ValidateTrustedRuntimeDir(dir, label+" directory"); err != nil {
+			return fmt.Errorf("enterprise hooks: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		if err := managed.ValidateTrustedFilePath(path, label); err != nil {
+			return fmt.Errorf("enterprise hooks: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
+	owner, err := enterpriseWindowsPathOwner(dataDir)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed data_dir owner: %w", err)
+	}
+	if err := setEnterpriseWindowsManagedProtection(filepath.Dir(path), owner, true); err != nil {
+		return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
+	}
+	if err := setEnterpriseWindowsManagedProtection(path, owner, false); err != nil {
+		return fmt.Errorf("enterprise hooks: harden %s: %w", label, err)
+	}
+	return validateEnterpriseWindowsTokenLocation(dataDir, path, label)
+}
+
+func enterpriseWindowsPathOwner(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	owner, _, err := sd.Owner()
+	return owner, err
+}
+
+func setEnterpriseWindowsManagedProtection(path string, owner *windows.SID, directory bool) error {
+	if owner == nil {
+		return fmt.Errorf("managed owner SID is unavailable")
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if directory {
+		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
+	entries := []windows.EXPLICIT_ACCESS{}
+	for _, sid := range []*windows.SID{owner, system, administrators} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
+			Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(sid)},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }

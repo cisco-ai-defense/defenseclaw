@@ -65,9 +65,19 @@ Windows**: they require the local guardrail proxy, which DefenseClaw does not
 host there. They are hidden from the TUI/CLI connector pickers and rejected by
 setup on Windows with a clear error. Use them on macOS or Linux instead.
 
-Sandbox and enterprise hook guardian deployment are currently unsupported on
-Windows. Native user-session notifications are delivered in-process by the
-installed gateway through the Windows notification area. Bundled Local Splunk
+Sandbox remains unsupported on Windows. Elevated enterprise hook deployment
+is supported for Claude Code through its administrator-managed settings tier;
+it installs an owned drop-in under
+`C:\Program Files\ClaudeCode\managed-settings.d` and remains active when
+`allowManagedHooksOnly` is enabled. Its gateway and hook launcher must be
+machine-deployed under an Administrator/System/TrustedInstaller-owned path;
+the user-writable `%LOCALAPPDATA%` install is not accepted as an enterprise
+policy command source. Enterprise Codex deployment is not yet
+supported on native Windows. Managed Claude hook runtime is pinned to
+`%USERPROFILE%\.defenseclaw`; custom `--data-dir`, `DEFENSECLAW_HOME`, and
+`CLAUDE_CONFIG_DIR` redirects do not change that administrator-owned policy
+binding. Native user-session notifications are delivered
+in-process by the installed gateway through the Windows notification area. Bundled Local Splunk
 and the separate local observability stack are
 supported from PowerShell/cmd on native Windows x64 when Docker Desktop runs
 Linux containers through Hyper-V on Windows Pro, Enterprise, or Education.

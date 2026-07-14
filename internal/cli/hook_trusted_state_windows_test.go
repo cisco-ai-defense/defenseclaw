@@ -7,10 +7,34 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func stubEnterpriseManagedRuntimeResolver(t *testing.T, resolve func(string) (string, bool, error)) {
+	t.Helper()
+	previous := enterpriseManagedRuntimeResolver
+	enterpriseManagedRuntimeResolver = resolve
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	nativeEnterpriseHookRuntimeSnapshot.prepared = false
+	nativeEnterpriseHookRuntimeSnapshot.executable = ""
+	nativeEnterpriseHookRuntimeSnapshot.home = ""
+	nativeEnterpriseHookRuntimeSnapshot.registered = false
+	nativeEnterpriseHookRuntimeSnapshot.err = nil
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	t.Cleanup(func() {
+		enterpriseManagedRuntimeResolver = previous
+		nativeEnterpriseHookRuntimeSnapshot.Lock()
+		nativeEnterpriseHookRuntimeSnapshot.prepared = false
+		nativeEnterpriseHookRuntimeSnapshot.executable = ""
+		nativeEnterpriseHookRuntimeSnapshot.home = ""
+		nativeEnterpriseHookRuntimeSnapshot.registered = false
+		nativeEnterpriseHookRuntimeSnapshot.err = nil
+		nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	})
+}
 
 func stageTrustedNativeHookForTest(t *testing.T, failMode string) (string, string) {
 	t.Helper()
@@ -96,6 +120,58 @@ func TestBuildHookOptionsPackagedWindowsAllowsTighteningProjectEnv(t *testing.T)
 	opts := buildHookOptions("claudecode", "PreToolUse", "", "")
 	if opts.Home != trustedHome || opts.FailMode != "closed" || !opts.StrictAvailability || opts.MaxBody != 4096 {
 		t.Fatalf("tightening environment was not honored safely: %+v", opts)
+	}
+}
+
+func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "open")
+	userRuntime := filepath.Join(t.TempDir(), ".defenseclaw")
+	hookDir := filepath.Join(userRuntime, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sidecar, _ := json.Marshal(map[string]interface{}{
+		"version":      2,
+		"gateway_addr": "127.0.0.1:18977",
+		"fail_modes":   map[string]string{"claudecode": "closed"},
+	})
+	if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg"), sidecar, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubEnterpriseManagedRuntimeResolver(t, func(string) (string, bool, error) {
+		return userRuntime, true, nil
+	})
+	if enterpriseManagedHookRuntimeNoop() {
+		t.Fatal("registered enterprise runtime was treated as a no-op")
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
+	if opts.Home != userRuntime || opts.HookDir != hookDir || opts.APIAddr != "127.0.0.1:18977" || opts.FailMode != "closed" {
+		t.Fatalf("enterprise runtime options = %+v", opts)
+	}
+}
+
+func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "open")
+	userRuntime := filepath.Join(t.TempDir(), ".defenseclaw")
+	stubEnterpriseManagedRuntimeResolver(t, func(string) (string, bool, error) {
+		return userRuntime, false, errors.New("tampered managed ownership state")
+	})
+	if enterpriseManagedHookRuntimeNoop() {
+		t.Fatal("invalid enterprise runtime was allowed to no-op")
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+	if opts.Home != userRuntime || opts.FailMode != "closed" || !opts.StrictAvailability {
+		t.Fatalf("invalid managed runtime did not fail closed: %+v", opts)
+	}
+}
+
+func TestEnterpriseManagedHookRuntimeNoopsForUnregisteredSID(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	stubEnterpriseManagedRuntimeResolver(t, func(string) (string, bool, error) {
+		return filepath.Join(t.TempDir(), ".defenseclaw"), false, nil
+	})
+	if !enterpriseManagedHookRuntimeNoop() {
+		t.Fatal("valid unregistered SID did not no-op")
 	}
 }
 

@@ -125,6 +125,13 @@ type SetupOpts struct {
 	// which client Setup validates.
 	AgentExecutable string
 
+	// HookExecutable pins the administrator-owned native hook launcher used by
+	// managed policy deployment. Ordinary per-user setup leaves this empty and
+	// resolves the packaged launcher through the installed-state contract.
+	// Enterprise installers must supply an absolute, independently trusted path
+	// so a privileged policy write never captures the caller's PATH or profile.
+	HookExecutable string
+
 	// HookContractID optionally pins setup/profile resolution to a specific
 	// known contract. A non-empty value that does not match the resolved
 	// contract marks the profile incompatible instead of silently using a
@@ -140,6 +147,15 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+}
+
+// ManagedHookPolicyProvider renders and verifies connector-owned settings for
+// a vendor's administrator policy tier. It is deliberately separate from
+// Setup: user-scoped configuration and machine-managed policy have different
+// ownership, rollback, and precedence contracts.
+type ManagedHookPolicyProvider interface {
+	ManagedHookPolicy(SetupOpts) ([]byte, error)
+	VerifyManagedHookPolicy([]byte, SetupOpts) error
 }
 
 // Connector is the contract every agent framework adapter implements.

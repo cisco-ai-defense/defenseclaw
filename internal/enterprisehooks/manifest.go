@@ -24,6 +24,7 @@ type ManifestTarget struct {
 	UserHome     string `json:"user_home,omitempty" yaml:"user_home,omitempty"`
 	UID          *int   `json:"uid,omitempty" yaml:"uid,omitempty"`
 	GID          *int   `json:"gid,omitempty" yaml:"gid,omitempty"`
+	SID          string `json:"sid,omitempty" yaml:"sid,omitempty"`
 	Connector    string `json:"connector,omitempty" yaml:"connector,omitempty"`
 	DataDir      string `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`

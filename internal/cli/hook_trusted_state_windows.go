@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -28,7 +29,10 @@ const (
 )
 
 // hookExecutableOverride is a test seam for an immutable packaged layout.
-var hookExecutableOverride string
+var (
+	hookExecutableOverride           string
+	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsClaudeManagedHookRuntime
+)
 
 var nativeHookRuntimeSnapshot struct {
 	sync.Mutex
@@ -36,6 +40,15 @@ var nativeHookRuntimeSnapshot struct {
 	executable string
 	state      hookruntime.State
 	recognized bool
+	err        error
+}
+
+var nativeEnterpriseHookRuntimeSnapshot struct {
+	sync.Mutex
+	prepared   bool
+	executable string
+	home       string
+	registered bool
 	err        error
 }
 
@@ -68,8 +81,52 @@ func NativeHookRuntimeNoop() bool {
 	if err != nil {
 		return true
 	}
-	return !state.Active() || !filepath.IsAbs(state.DataRoot) ||
-		!windowsHookPathHasNoReparsePoints(state.DataRoot)
+	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return true
+	}
+	if hookArgsContainEnterpriseManaged(os.Args[1:]) {
+		return enterpriseManagedHookRuntimeNoop()
+	}
+	return false
+}
+
+func hookArgsContainEnterpriseManaged(args []string) bool {
+	for _, arg := range args {
+		if arg == "--enterprise-managed" || arg == "--enterprise-managed=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func enterpriseManagedHookRuntimeNoop() bool {
+	executable := nativeHookExecutable()
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable) {
+		registered := nativeEnterpriseHookRuntimeSnapshot.registered
+		err := nativeEnterpriseHookRuntimeSnapshot.err
+		nativeEnterpriseHookRuntimeSnapshot.Unlock()
+		return err == nil && !registered
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+
+	home, registered, err := enterpriseManagedRuntimeResolver(executable)
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	nativeEnterpriseHookRuntimeSnapshot.prepared = true
+	nativeEnterpriseHookRuntimeSnapshot.executable = executable
+	nativeEnterpriseHookRuntimeSnapshot.home = home
+	nativeEnterpriseHookRuntimeSnapshot.registered = registered
+	nativeEnterpriseHookRuntimeSnapshot.err = err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return err == nil && !registered
+}
+
+func enterpriseManagedHookRuntimeForceClosed() bool {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
+	err := nativeEnterpriseHookRuntimeSnapshot.err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return prepared && err != nil
 }
 
 type nativeHookInstallState struct {
@@ -89,6 +146,13 @@ func trustedNativeHookHome() (string, bool) {
 	executable := nativeHookExecutable()
 	if strings.TrimSpace(executable) == "" {
 		return "", false
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	enterprisePrepared := nativeEnterpriseHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable)
+	enterpriseHome := nativeEnterpriseHookRuntimeSnapshot.home
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if enterprisePrepared {
+		return filepath.Clean(enterpriseHome), true
 	}
 	nativeHookRuntimeSnapshot.Lock()
 	prepared := nativeHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeHookRuntimeSnapshot.executable, executable)

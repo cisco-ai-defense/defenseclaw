@@ -5,5 +5,7 @@
 
 package cli
 
-func trustedNativeHookHome() (string, bool) { return "", false }
-func NativeHookRuntimeNoop() bool           { return false }
+func trustedNativeHookHome() (string, bool)         { return "", false }
+func NativeHookRuntimeNoop() bool                   { return false }
+func enterpriseManagedHookRuntimeNoop() bool        { return false }
+func enterpriseManagedHookRuntimeForceClosed() bool { return false }
