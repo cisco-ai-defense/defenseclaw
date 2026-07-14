@@ -701,8 +701,8 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
 }
 
 func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath, transactionID string, pathEntryOwned, pathSeparatorReused bool, opts options) error {
-	if err := os.Mkdir(staging, 0o755); err != nil {
-		return fmt.Errorf("create exclusive installer staging root: %w", err)
+	if err := createExclusiveStagingRoot(staging); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Join(staging, "bin"), 0o755); err != nil {
 		return err
@@ -782,6 +782,20 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
+	}
+	return nil
+}
+
+func createExclusiveStagingRoot(staging string) error {
+	parent := filepath.Dir(staging)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create installer staging parent: %w", err)
+	}
+	if err := rejectReparseAncestors(parent); err != nil {
+		return fmt.Errorf("validate installer staging parent: %w", err)
+	}
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		return fmt.Errorf("create exclusive installer staging root: %w", err)
 	}
 	return nil
 }
