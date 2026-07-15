@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -31,6 +32,7 @@ const (
 	windowsClaudeManagedPolicyFile = "90-defenseclaw.json"
 	windowsClaudeManagedStateFile  = ".defenseclaw-managed-hooks.state"
 	windowsClaudeManagedStateLimit = 64 << 10
+	windowsManagedPolicyMutexWait  = 30 * time.Second
 )
 
 var (
@@ -47,6 +49,7 @@ var (
 	}
 	windowsManagedPolicyWriter            = writeWindowsManagedFile
 	windowsClaudeManagedPolicyTransaction = withWindowsClaudeManagedPolicyTransaction
+	windowsManagedPolicyWaitForMutex      = windows.WaitForSingleObject
 	windowsEnterpriseProfilePathResolver  = func() (string, error) {
 		return windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT)
 	}
@@ -203,7 +206,7 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;GA;;;BA)")
+	sd, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: build managed policy transaction mutex security: %w", err)
 	}
@@ -211,21 +214,118 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: sd,
 	}
-	mutex, err := windows.CreateMutex(attributes, false, name)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: open managed policy transaction mutex: %w", err)
+	mutex, createErr := windows.CreateMutex(attributes, false, name)
+	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+		if mutex != 0 {
+			_ = windows.CloseHandle(mutex)
+		}
+		return fmt.Errorf("enterprise hooks: open managed policy transaction mutex: %w", createErr)
+	}
+	if mutex == 0 {
+		return fmt.Errorf("enterprise hooks: open managed policy transaction mutex returned an invalid handle")
 	}
 	defer windows.CloseHandle(mutex)
+	if err := validateWindowsManagedPolicyMutex(mutex); err != nil {
+		if errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+			return fmt.Errorf("enterprise hooks: refusing unsafe pre-existing managed policy transaction mutex: %w", err)
+		}
+		return fmt.Errorf("enterprise hooks: validate managed policy transaction mutex: %w", err)
+	}
 	// Windows mutex ownership is bound to the calling OS thread. Keep this
 	// goroutine pinned until ReleaseMutex so the Go scheduler cannot move it.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	wait, err := windows.WaitForSingleObject(mutex, windows.INFINITE)
-	if err != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
-		return fmt.Errorf("enterprise hooks: acquire managed policy transaction mutex: wait=0x%x err=%v", wait, err)
+	if err := waitForWindowsManagedPolicyMutex(mutex); err != nil {
+		return err
 	}
 	defer windows.ReleaseMutex(mutex)
 	return fn()
+}
+
+func validateWindowsManagedPolicyMutex(mutex windows.Handle) error {
+	descriptor, err := windows.GetSecurityInfo(
+		mutex,
+		windows.SE_KERNEL_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect mutex security: %w", err)
+	}
+	return validateWindowsManagedPolicyMutexDescriptor(descriptor)
+}
+
+func validateWindowsManagedPolicyMutexDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
+	if descriptor == nil {
+		return fmt.Errorf("missing mutex security descriptor")
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("inspect mutex owner: %w", err)
+	}
+	if owner == nil || (!owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid)) {
+		return fmt.Errorf("untrusted mutex owner %s", windowsSIDString(owner))
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("inspect mutex DACL control: %w", err)
+	}
+	if control&windows.SE_DACL_PRESENT == 0 || control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("mutex DACL is missing or inheritable")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("inspect mutex DACL: %w", err)
+	}
+	if dacl == nil {
+		return fmt.Errorf("mutex has a null DACL")
+	}
+	var administrators, system bool
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return fmt.Errorf("inspect mutex ACE %d: %w", index, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != windows.NO_INHERITANCE {
+			return fmt.Errorf("mutex ACE %d is not a direct allow ACE", index)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		switch {
+		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
+			administrators = true
+		case sid.IsWellKnown(windows.WinLocalSystemSid):
+			system = true
+		default:
+			return fmt.Errorf("untrusted mutex principal %s", windowsSIDString(sid))
+		}
+		if !windowsManagedPolicyMutexFullControl(ace.Mask) {
+			return fmt.Errorf("mutex principal %s lacks full control", windowsSIDString(sid))
+		}
+	}
+	if !administrators || !system {
+		return fmt.Errorf("mutex DACL must grant full control to Administrators and LocalSystem only")
+	}
+	return nil
+}
+
+func windowsManagedPolicyMutexFullControl(mask windows.ACCESS_MASK) bool {
+	return mask&windows.ACCESS_MASK(windows.GENERIC_ALL) != 0 ||
+		mask&windows.ACCESS_MASK(windows.MUTEX_ALL_ACCESS) == windows.ACCESS_MASK(windows.MUTEX_ALL_ACCESS)
+}
+
+func waitForWindowsManagedPolicyMutex(mutex windows.Handle) error {
+	timeoutMillis := uint32(windowsManagedPolicyMutexWait / time.Millisecond)
+	wait, err := windowsManagedPolicyWaitForMutex(mutex, timeoutMillis)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: acquire managed policy transaction mutex: %w", err)
+	}
+	switch wait {
+	case windows.WAIT_OBJECT_0, windows.WAIT_ABANDONED:
+		return nil
+	case uint32(windows.WAIT_TIMEOUT):
+		return fmt.Errorf("enterprise hooks: timed out after %s acquiring managed policy transaction mutex", windowsManagedPolicyMutexWait)
+	default:
+		return fmt.Errorf("enterprise hooks: acquire managed policy transaction mutex: unexpected wait result 0x%x", wait)
+	}
 }
 
 func installWindowsClaudeManagedPolicy(body []byte, opts connector.SetupOpts, targetSID *windows.SID) (path string, rollback func() error, err error) {

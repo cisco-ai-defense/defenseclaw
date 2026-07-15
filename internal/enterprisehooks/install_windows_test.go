@@ -55,6 +55,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	originalOwner := windowsManagedPolicyOwnerSID
 	originalRuntimeOwner := windowsManagedRuntimeOwnerSID
 	originalRuntimeChildOpen := windowsManagedRuntimeChildOpen
+	originalRuntimeSnapshot := windowsManagedRuntimeSnapshot
 	originalDirTrust := windowsManagedPolicyDirTrustCheck
 	originalFileTrust := windowsManagedPolicyFileTrustCheck
 	originalWriter := windowsManagedPolicyWriter
@@ -123,6 +124,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 		windowsManagedPolicyOwnerSID = originalOwner
 		windowsManagedRuntimeOwnerSID = originalRuntimeOwner
 		windowsManagedRuntimeChildOpen = originalRuntimeChildOpen
+		windowsManagedRuntimeSnapshot = originalRuntimeSnapshot
 		windowsManagedPolicyDirTrustCheck = originalDirTrust
 		windowsManagedPolicyFileTrustCheck = originalFileTrust
 		windowsManagedPolicyWriter = originalWriter
@@ -538,6 +540,103 @@ func TestInstallWindowsClaudeManagedPolicyRejectsOversizedPayloadBeforeWrite(t *
 	}
 	if writes != 0 {
 		t.Fatalf("managed policy writes = %d, want zero", writes)
+	}
+}
+
+func TestInstallWindowsClaudeSurfacesSnapshotAndRuntimeSecurityRollbackFailures(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	originalOpen := windowsManagedRuntimeChildOpen
+	windowsManagedRuntimeChildOpen = func(parent *os.File, name string, target *windows.SID) (windowsManagedRuntimeDirectory, error) {
+		directory, err := originalOpen(parent, name, target)
+		if err == nil && name == "hooks" {
+			// Make the rollback identity check fail after both directories have
+			// already been created and hardened.
+			directory.identity.FileIndexLow++
+		}
+		return directory, err
+	}
+	snapshotErr := errors.New("injected runtime snapshot failure")
+	windowsManagedRuntimeSnapshot = func(*windowsManagedRuntimeDirectories, string, []string) ([]windowsRuntimeFileSnapshot, error) {
+		return nil, snapshotErr
+	}
+
+	_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
+	if !errors.Is(err, snapshotErr) {
+		t.Fatalf("Install error = %v, want snapshot failure", err)
+	}
+	if !strings.Contains(err.Error(), "runtime security rollback failed") {
+		t.Fatalf("Install error = %v, want runtime security rollback failure", err)
+	}
+}
+
+func TestValidateWindowsManagedPolicyMutexDescriptor(t *testing.T) {
+	tests := []struct {
+		name    string
+		sddl    string
+		wantErr string
+	}{
+		{
+			name: "administrator owned",
+			sddl: "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)",
+		},
+		{
+			name: "system owned",
+			sddl: "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
+		},
+		{
+			name:    "untrusted owner",
+			sddl:    "O:WDG:WDD:P(A;;GA;;;SY)(A;;GA;;;BA)",
+			wantErr: "untrusted mutex owner",
+		},
+		{
+			name:    "inheritable dacl",
+			sddl:    "O:BAG:BAD:(A;;GA;;;SY)(A;;GA;;;BA)",
+			wantErr: "missing or inheritable",
+		},
+		{
+			name:    "untrusted waiter",
+			sddl:    "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;WD)",
+			wantErr: "untrusted mutex principal",
+		},
+		{
+			name:    "missing system principal",
+			sddl:    "O:BAG:BAD:P(A;;GA;;;BA)",
+			wantErr: "Administrators and LocalSystem",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			descriptor, err := windows.SecurityDescriptorFromString(test.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateWindowsManagedPolicyMutexDescriptor(descriptor)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("validateWindowsManagedPolicyMutexDescriptor: %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("validateWindowsManagedPolicyMutexDescriptor error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestWaitForWindowsManagedPolicyMutexUsesBoundedTimeout(t *testing.T) {
+	originalWait := windowsManagedPolicyWaitForMutex
+	var gotTimeout uint32
+	windowsManagedPolicyWaitForMutex = func(_ windows.Handle, timeout uint32) (uint32, error) {
+		gotTimeout = timeout
+		return uint32(windows.WAIT_TIMEOUT), nil
+	}
+	t.Cleanup(func() { windowsManagedPolicyWaitForMutex = originalWait })
+
+	err := waitForWindowsManagedPolicyMutex(1)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 30s") {
+		t.Fatalf("waitForWindowsManagedPolicyMutex error = %v, want bounded timeout", err)
+	}
+	wantTimeout := uint32(windowsManagedPolicyMutexWait / time.Millisecond)
+	if gotTimeout != wantTimeout {
+		t.Fatalf("WaitForSingleObject timeout = %d, want %d", gotTimeout, wantTimeout)
 	}
 }
 

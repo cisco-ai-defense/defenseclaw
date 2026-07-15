@@ -34,6 +34,7 @@ var (
 		return windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	}
 	windowsManagedRuntimeChildOpen = openWindowsManagedRuntimeChild
+	windowsManagedRuntimeSnapshot  = snapshotWindowsRuntimeFiles
 )
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -137,9 +138,14 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 	}
 	defer runtimeDirectories.close()
 	runtimePaths := windowsClaudeRuntimePaths(setupOpts, conn)
-	runtimeSnapshot, err := snapshotWindowsRuntimeFiles(runtimeDirectories, dataDir, runtimePaths)
+	runtimeSnapshot, err := windowsManagedRuntimeSnapshot(runtimeDirectories, dataDir, runtimePaths)
 	if err != nil {
-		_ = runtimeDirectories.rollback()
+		if rollbackErr := runtimeDirectories.rollback(); rollbackErr != nil {
+			return InstallResult{}, errors.Join(
+				err,
+				fmt.Errorf("enterprise hooks: runtime security rollback failed: %w", rollbackErr),
+			)
+		}
 		return InstallResult{}, err
 	}
 	defer closeWindowsRuntimeSnapshots(runtimeSnapshot)
