@@ -20,9 +20,26 @@ package processutil
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
+)
+
+const (
+	processTreeHelperEnv      = "DEFENSECLAW_PROCESS_TREE_HELPER"
+	processTreeGrandchildEnv  = "DEFENSECLAW_PROCESS_TREE_GRANDCHILD"
+	processTreePIDFileEnv     = "DEFENSECLAW_PROCESS_TREE_PID_FILE"
+	processTreeMarkerEnv      = "DEFENSECLAW_PROCESS_TREE_MARKER"
+	managedBreakawayHelperEnv = "DEFENSECLAW_MANAGED_BREAKAWAY_HELPER"
+	managedBreakawayChildEnv  = "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD"
 )
 
 func TestCommandContextPreventsConsoleAllocation(t *testing.T) {
@@ -38,5 +55,144 @@ func TestCommandContextPreventsConsoleAllocation(t *testing.T) {
 	}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hidden captured command failed: %v", err)
+	}
+}
+
+func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
+	if os.Getenv(processTreeGrandchildEnv) == "1" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	if os.Getenv(processTreeHelperEnv) == "1" {
+		grandchild := exec.Command(os.Args[0], "-test.run=^TestCombinedOutputTreeKillsGrandchildrenOnCancellation$")
+		grandchild.Env = append(os.Environ(), processTreeGrandchildEnv+"=1")
+		if err := grandchild.Start(); err != nil {
+			os.Exit(21)
+		}
+		if err := os.WriteFile(
+			os.Getenv(processTreePIDFileEnv),
+			[]byte(strconv.Itoa(grandchild.Process.Pid)),
+			0o600,
+		); err != nil {
+			os.Exit(22)
+		}
+		time.Sleep(30 * time.Second)
+		return
+	}
+
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := CommandContext(ctx, os.Args[0], "-test.run=^TestCombinedOutputTreeKillsGrandchildrenOnCancellation$")
+	cmd.Env = append(
+		os.Environ(),
+		processTreeHelperEnv+"=1",
+		processTreePIDFileEnv+"="+pidFile,
+	)
+	done := make(chan error, 1)
+	go func() {
+		_, err := CombinedOutputTree(cmd, false)
+		done <- err
+	}()
+
+	var childPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for childPID == 0 {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if childPID == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("captured helper did not launch its grandchild")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	child, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(childPID))
+	if err != nil {
+		t.Fatalf("open grandchild %d: %v", childPID, err)
+	}
+	defer windows.CloseHandle(child)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled process tree returned success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled process tree did not return promptly")
+	}
+	result, err := windows.WaitForSingleObject(child, 5000)
+	if err != nil {
+		t.Fatalf("wait for cancelled grandchild: %v", err)
+	}
+	if result != windows.WAIT_OBJECT_0 {
+		t.Fatalf("grandchild wait result = %#x, want terminated", result)
+	}
+}
+
+func TestCapturedJobFlagsLimitBreakawayToManagedLaunches(t *testing.T) {
+	ordinary := capturedJobLimitFlags(false)
+	if ordinary&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 {
+		t.Fatal("ordinary captured job is missing KILL_ON_JOB_CLOSE")
+	}
+	if ordinary&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
+		t.Fatal("ordinary captured job unexpectedly allows breakaway")
+	}
+	managed := capturedJobLimitFlags(true)
+	if managed&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 ||
+		managed&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK == 0 {
+		t.Fatalf("managed captured job flags = %#x", managed)
+	}
+}
+
+func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
+	if os.Getenv(managedBreakawayChildEnv) == "1" {
+		time.Sleep(300 * time.Millisecond)
+		_ = os.WriteFile(os.Getenv(processTreeMarkerEnv), []byte("managed"), 0o600)
+		return
+	}
+	if os.Getenv(managedBreakawayHelperEnv) == "1" {
+		child := exec.Command(os.Args[0], "-test.run=^TestCombinedOutputTreeAllowsExplicitManagedBreakaway$")
+		child.Env = append(os.Environ(), managedBreakawayChildEnv+"=1")
+		child.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags: windows.CREATE_BREAKAWAY_FROM_JOB | windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
+			HideWindow:    true,
+		}
+		if err := child.Start(); err != nil {
+			os.Exit(23)
+		}
+		return
+	}
+
+	marker := filepath.Join(t.TempDir(), "managed-breakaway-finished")
+	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestCombinedOutputTreeAllowsExplicitManagedBreakaway$")
+	cmd.Env = append(os.Environ(), managedBreakawayHelperEnv+"=1", processTreeMarkerEnv+"="+marker)
+	if output, err := CombinedOutputTree(cmd, true); err != nil {
+		t.Fatalf("managed launcher failed: %v: %s", err, output)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(marker)
+		if err == nil {
+			if string(data) != "managed" {
+				t.Fatalf("managed marker = %q", data)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("explicitly managed breakaway process did not survive launcher exit")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

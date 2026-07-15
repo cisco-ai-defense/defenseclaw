@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -509,6 +510,19 @@ func TestWizardCompletionMessageUsesPrivateApplicationRange(t *testing.T) {
 	}
 	if idPrimary != 1 || idCancel != 2 {
 		t.Fatalf("standard dialog command IDs changed: primary=%d cancel=%d", idPrimary, idCancel)
+	}
+}
+
+func TestWizardReportsCancellationOnlyAfterSuccessfulRollback(t *testing.T) {
+	cancelled := errors.Join(errSetupCancelled, context.Canceled)
+	if !wizardCancellationCompleted(userExitCode, cancelled) {
+		t.Fatal("completed cancellation was not recognized")
+	}
+	if wizardCancellationCompleted(retryRequiredCode, errors.Join(cancelled, errors.New("rollback remains pending"))) {
+		t.Fatal("pending rollback was reported as a completed cancellation")
+	}
+	if wizardCancellationCompleted(userExitCode, errors.New("unrelated failure")) {
+		t.Fatal("unrelated failure was reported as a completed cancellation")
 	}
 }
 

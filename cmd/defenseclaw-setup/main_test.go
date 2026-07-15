@@ -450,6 +450,90 @@ func TestRunCapturedSetupCommandTimesOut(t *testing.T) {
 	}
 }
 
+func TestRunCapturedSetupCommandHonorsParentCancellation(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	started := time.Now()
+	_, err := runCapturedSetupCommandContext(
+		ctx,
+		10*time.Second,
+		false,
+		append(os.Environ(), helperEnv+"=1"),
+		os.Args[0],
+		"-test.run=^TestRunCapturedSetupCommandHonorsParentCancellation$",
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled setup command error = %v, want context canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("cancelled setup command returned after %s, want a bounded wait", elapsed)
+	}
+}
+
+func TestRunInstallContextRejectsPreCancelledOperationWithoutMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	code, err := runInstallContext(ctx, options{Action: "install", Quiet: true}, "not-used", "not-used")
+	if code != userExitCode || !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("pre-cancelled install = code %d error %v, want %d/setup-cancelled", code, err, userExitCode)
+	}
+}
+
+func TestCancelledSetupRollsBackAndCompletesIntentBeforeReturning(t *testing.T) {
+	transaction := setupTransaction{ID: "cancelled-transaction"}
+	calls := []string{}
+	code, err := rollbackSetupIntentWith(
+		transaction,
+		errors.Join(errSetupCancelled, context.Canceled),
+		func(got setupTransaction) error {
+			if got.ID != transaction.ID {
+				t.Fatalf("rollback transaction ID = %q", got.ID)
+			}
+			calls = append(calls, "rollback")
+			return nil
+		},
+		func(got setupTransaction, phase string) error {
+			if got.ID != transaction.ID || phase != setupPhaseIntent {
+				t.Fatalf("complete transaction = %q/%q", got.ID, phase)
+			}
+			calls = append(calls, "journal-complete")
+			return nil
+		},
+	)
+	if code != userExitCode || !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("cancelled rollback = code %d error %v", code, err)
+	}
+	if got := strings.Join(calls, ","); got != "rollback,journal-complete" {
+		t.Fatalf("cancelled rollback calls = %q", got)
+	}
+}
+
+func TestCancelledSetupKeepsJournalPendingWhenRollbackFails(t *testing.T) {
+	rollbackFailure := errors.New("injected rollback failure")
+	completeCalled := false
+	code, err := rollbackSetupIntentWith(
+		setupTransaction{ID: "pending-transaction"},
+		errors.Join(errSetupCancelled, context.Canceled),
+		func(setupTransaction) error { return rollbackFailure },
+		func(setupTransaction, string) error {
+			completeCalled = true
+			return nil
+		},
+	)
+	if code != retryRequiredCode || !errors.Is(err, rollbackFailure) {
+		t.Fatalf("failed cancellation rollback = code %d error %v", code, err)
+	}
+	if completeCalled {
+		t.Fatal("failed rollback marked the intent journal complete")
+	}
+}
+
 func TestValidPayloadVersion(t *testing.T) {
 	for _, value := range []string{"0.8.0", "1.2.3-rc.1", "1.2.3+windows.x64", "1.2.3-rc.1+build.7"} {
 		if !validPayloadVersion(value) {
