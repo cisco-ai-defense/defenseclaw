@@ -5,10 +5,18 @@
 
 package connector
 
-import "os"
+import (
+	"os"
 
-func atomicFileProtectionMatches(_ string, info os.FileInfo, perm os.FileMode) bool {
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+)
+
+func atomicFileProtectionMatches(_ *os.File, info os.FileInfo, perm os.FileMode) bool {
 	return info.Mode().Perm() == perm.Perm()
 }
 
-func atomicFilePrepareDestination(_ string, _ os.FileMode) error { return nil }
+func atomicFileValidateStagedProtection(_ *os.File, _ os.FileMode) error { return nil }
+
+func atomicFilePublish(source, destination string, _ os.FileInfo, _ os.FileMode) error {
+	return safefile.ReplaceFile(source, destination)
+}

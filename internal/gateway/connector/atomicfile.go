@@ -36,14 +36,33 @@ import (
 // repo and symlink ~/.codex/config.toml or ~/.claude/settings.json; preserving
 // that filesystem shape is part of the teardown contract.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileWithReplace(path, data, perm, safefile.ReplaceFile)
+	return atomicWriteFileWithPublisher(path, data, perm, atomicFilePublish)
 }
 
+// atomicWriteFileWithReplace preserves the injectable replacement seam used by
+// durability-failure tests. Production writes use atomicFilePublish so Windows
+// can bind private-file validation and publication to the staged file handle.
 func atomicWriteFileWithReplace(
 	path string,
 	data []byte,
 	perm os.FileMode,
 	replace func(string, string) error,
+) error {
+	return atomicWriteFileWithPublisher(
+		path, data, perm,
+		func(source, destination string, _ os.FileInfo, _ os.FileMode) error {
+			return replace(source, destination)
+		},
+	)
+}
+
+type atomicFilePublisher func(string, string, os.FileInfo, os.FileMode) error
+
+func atomicWriteFileWithPublisher(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	publish atomicFilePublisher,
 ) error {
 	writePath, err := resolveAtomicWritePath(path)
 	if err != nil {
@@ -73,6 +92,14 @@ func atomicWriteFileWithReplace(
 			os.Remove(tmpPath)
 			return fmt.Errorf("protect temp file: %w", err)
 		}
+		// ProtectFile must address the file opened by CreateTemp. Verify that
+		// exact handle before placing any sensitive bytes into it so a pathname
+		// swap cannot redirect the protection operation to a different file.
+		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("validate protected temp file: %w", err)
+		}
 	}
 
 	if _, err := tmp.Write(data); err != nil {
@@ -90,21 +117,22 @@ func atomicWriteFileWithReplace(
 		os.Remove(tmpPath)
 		return fmt.Errorf("sync temp file: %w", err)
 	}
+	stagedInfo, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("stat temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := atomicFilePrepareDestination(writePath, perm); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("prepare destination protection %s: %w", writePath, err)
-	}
-	if err := replace(tmpPath, writePath); err != nil {
+	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}
-	// The staged file was synced before Windows publishes it with MoveFileEx
-	// (first creation) or ReplaceFileW (metadata-preserving replacement). POSIX
-	// rename additionally needs an explicit parent-directory fsync.
+	// The staged file was synced before publication. POSIX rename additionally
+	// needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {
 		directory, err := os.Open(dir)
 		if err != nil {
@@ -130,7 +158,7 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	defer file.Close()
 
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(path, openedInfo, perm) {
+	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
 		return false
 	}
 	pathInfo, err := os.Lstat(path)
