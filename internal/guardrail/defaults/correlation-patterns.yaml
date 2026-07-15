@@ -67,7 +67,6 @@ patterns:
       archive/upload steps without correlating unrelated later uploads.
     window_events: 15
     severity_on_match: CRITICAL
-    ordered: true
     fingerprint_chain:
       - with_rule_match:
           - CMD-WORKSPACE-ARCHIVE

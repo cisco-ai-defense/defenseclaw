@@ -1,5 +1,17 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 //
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 package gateway
@@ -13,24 +25,23 @@ import (
 const artifactEvidencePrefix = "artifact:"
 
 var (
-	archiveArtifactRe = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+(\S+)\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
+	archiveArtifactRe    = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+(\S+)\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
 	curlUploadArtifactRe = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*(?:--upload-file|-T)\s+(\S+)`)
 	curlDataAtRe         = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*--data\s+@(\S+)`)
 	wgetPostArtifactRe   = regexp.MustCompile(`(?i)\bwget\b[^;&|]*--post-file=(\S+)`)
-	scpArtifactRe        = regexp.MustCompile(`(?i)\bscp\b\s+(\S+)`)
-	rsyncArtifactRe      = regexp.MustCompile(`(?i)\brsync\b[^;&|]*\s(\S+)\s+\S+.*:`)
+	scpArtifactRe        = regexp.MustCompile(`(?i)\bscp\b(?:\s+-[a-zA-Z]+\s+)*\s+(\S+)`)
+	rsyncArtifactRe      = regexp.MustCompile(`(?i)\brsync\b(?:\s+-[^\s]+\s+)*(\S+)\s+\S+.*:`)
 
-	urlHostRe = regexp.MustCompile(`(?i)https?://([^/\s:;|&]+)`)
-	scpHostRe = regexp.MustCompile(`(?i)\bscp\b\s+\S+\s+([^@:\s]+@)?([^:\s/]+)`)
-	s3URIRe   = regexp.MustCompile(`(?i)\bs3://([^/\s]+)`)
+	urlInTextRe = regexp.MustCompile(`(?i)https?://[^\s'"]+`)
+	scpHostRe   = regexp.MustCompile(`(?i)\bscp\b(?:\s+-[a-zA-Z]+\s+)*\s+\S+\s+([^@:\s]+@)?([^:\s/]+)`)
+	s3URIRe     = regexp.MustCompile(`(?i)\bs3://([^/\s]+)`)
 )
 
-// allowedExfilEndpointSubstrings lists known artifact-store hosts and
-// schemes. Uploads targeting these are downgraded from HIGH to MEDIUM
-// on chained archive+upload findings to reduce CI/deploy FPs.
-var allowedExfilEndpointSubstrings = []string{
+// allowedExfilEndpointHosts lists known artifact-store hosts. Matching
+// uses exact host or registrable suffix (host == allowed or
+// host.HasSuffix("."+allowed)) to avoid substring spoofing.
+var allowedExfilEndpointHosts = []string{
 	"s3.amazonaws.com",
-	"amazonaws.com/",
 	"storage.googleapis.com",
 	"blob.core.windows.net",
 	"github.com",
@@ -38,8 +49,6 @@ var allowedExfilEndpointSubstrings = []string{
 	"gitlab.com",
 	"registry.npmjs.org",
 	"registry.yarnpkg.com",
-	"artifactory",
-	"sonatype",
 }
 
 // enrichExfilFinding attaches correlator-friendly artifact evidence and
@@ -60,8 +69,10 @@ func enrichExfilFinding(f RuleFinding, text string) RuleFinding {
 }
 
 func applyUploadEnrichment(f RuleFinding, text string) RuleFinding {
-	if art := extractUploadArtifact(text); art != "" {
-		f.Evidence = artifactEvidencePrefix + art
+	if !strings.HasPrefix(f.Evidence, artifactEvidencePrefix) {
+		if art := extractUploadArtifact(text); art != "" {
+			f.Evidence = artifactEvidencePrefix + art
+		}
 	}
 	if ep := extractExternalEndpoint(text); ep != "" {
 		f.ExternalEndpoint = ep
@@ -110,13 +121,29 @@ func extractExternalEndpoint(text string) string {
 	if m := s3URIRe.FindStringSubmatch(text); len(m) > 1 {
 		return "s3://" + strings.ToLower(m[1])
 	}
-	if m := urlHostRe.FindStringSubmatch(text); len(m) > 1 {
-		return strings.ToLower(m[1])
+	if host := extractHTTPHost(text); host != "" {
+		return host
 	}
 	if m := scpHostRe.FindStringSubmatch(text); len(m) > 2 && m[2] != "" {
 		return strings.ToLower(m[2])
 	}
 	return ""
+}
+
+func extractHTTPHost(text string) string {
+	raw := urlInTextRe.FindString(text)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" {
+		return ""
+	}
+	return strings.ToLower(host)
 }
 
 func isAllowlistedExfilEndpoint(endpoint string) bool {
@@ -127,20 +154,14 @@ func isAllowlistedExfilEndpoint(endpoint string) bool {
 	if strings.HasPrefix(ep, "s3://") {
 		return true
 	}
-	for _, allowed := range allowedExfilEndpointSubstrings {
-		if strings.Contains(ep, allowed) {
+	return hostMatchesAllowlist(ep)
+}
+
+func hostMatchesAllowlist(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, allowed := range allowedExfilEndpointHosts {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
 			return true
-		}
-	}
-	// Parse host from URL-shaped endpoints.
-	if strings.Contains(ep, "://") {
-		if u, err := url.Parse(ep); err == nil && u.Host != "" {
-			ep = strings.ToLower(u.Host)
-			for _, allowed := range allowedExfilEndpointSubstrings {
-				if strings.Contains(ep, allowed) {
-					return true
-				}
-			}
 		}
 	}
 	return false

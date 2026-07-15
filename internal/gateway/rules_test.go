@@ -279,7 +279,7 @@ func TestCommandRules_ArchiveExfilFalsePositives(t *testing.T) {
 			findings := ScanAllRules(tc.input, "shell")
 			for _, f := range findings {
 				switch f.RuleID {
-				case "CMD-WORKSPACE-ARCHIVE", "CMD-ARCHIVE-EXFIL":
+				case "CMD-WORKSPACE-ARCHIVE", "CMD-ARCHIVE-EXFIL", "CMD-ENCODE-EXFIL":
 					t.Errorf("unexpected %s for benign input, findings: %v", f.RuleID, findingIDs(findings))
 				}
 			}
