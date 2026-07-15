@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const maintenanceGatewayTestVersion = "9.9.9"
@@ -117,6 +119,37 @@ func TestPrepareConnectorMaintenanceGatewayExtractsValidatesAndCleansPrivateCopy
 	maintenance.cleanup()
 	if _, err := os.Lstat(tempParent); !os.IsNotExist(err) {
 		t.Fatalf("maintenance payload survived cleanup: %v", err)
+	}
+}
+
+func TestCleanupConnectorMaintenancePayloadRetriesTransientLocks(t *testing.T) {
+	var treeAttempts, parentAttempts int
+	var sleeps []time.Duration
+	cleanupConnectorMaintenancePayloadWith(
+		`C:\\private\\payload`,
+		`C:\\private`,
+		func(_, _ string) error {
+			treeAttempts++
+			if treeAttempts == 1 {
+				return &os.PathError{Op: "remove", Path: "gateway.exe", Err: syscall.Errno(32)}
+			}
+			return nil
+		},
+		func(string) error {
+			parentAttempts++
+			if parentAttempts == 1 {
+				return &os.PathError{Op: "remove", Path: "private", Err: syscall.Errno(5)}
+			}
+			return nil
+		},
+		func(delay time.Duration) { sleeps = append(sleeps, delay) },
+	)
+
+	if treeAttempts != 3 || parentAttempts != 2 {
+		t.Fatalf("cleanup attempts = tree %d, parent %d; want 3, 2", treeAttempts, parentAttempts)
+	}
+	if len(sleeps) != 2 || sleeps[0] != installTreeRenameRetryDelay || sleeps[1] != installTreeRenameRetryDelay {
+		t.Fatalf("cleanup retry delays = %v", sleeps)
 	}
 }
 

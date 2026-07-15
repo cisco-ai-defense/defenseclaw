@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type connectorMaintenanceGateway struct {
@@ -48,8 +49,7 @@ func prepareConnectorMaintenanceGatewayAt(
 		// the next Setup invocation. Never turn successful connector cleanup
 		// back into user-config residue solely because a scanner retained a file
 		// handle after the child process exited.
-		_ = removeTransactionTree(payload.TempRoot, tempParent)
-		_ = os.Remove(tempParent)
+		cleanupConnectorMaintenancePayload(payload.TempRoot, tempParent)
 	}
 	fail := func(cause error) (connectorMaintenanceGateway, error) {
 		cleanup()
@@ -100,6 +100,37 @@ func prepareConnectorMaintenanceGatewayAt(
 		return fail(fmt.Errorf("validate connector maintenance gateway identity: %w", err))
 	}
 	return connectorMaintenanceGateway{path: gatewayPath, cleanup: cleanup}, nil
+}
+
+func cleanupConnectorMaintenancePayload(tempRoot, tempParent string) {
+	cleanupConnectorMaintenancePayloadWith(
+		tempRoot,
+		tempParent,
+		removeTransactionTree,
+		os.Remove,
+		time.Sleep,
+	)
+}
+
+func cleanupConnectorMaintenancePayloadWith(
+	tempRoot, tempParent string,
+	removeTree func(string, string) error,
+	removeParent func(string) error,
+	sleep func(time.Duration),
+) {
+	for attempt := 0; attempt < installTreeRenameMaxAttempts; attempt++ {
+		err := removeTree(tempRoot, tempParent)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			err = removeParent(tempParent)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				return
+			}
+		}
+		if !isTransientInstallTreeRenameError(err) || attempt+1 == installTreeRenameMaxAttempts {
+			return
+		}
+		sleep(installTreeRenameRetryDelay)
+	}
 }
 
 func reconcileRemovedConnectorsWithMaintenance(
