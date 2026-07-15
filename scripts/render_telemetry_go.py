@@ -1062,12 +1062,24 @@ def _structured_object_field_lines(binding: Any, position: int, *, receiver: str
     selector = _identifier(_read(binding, "selector", path), path)
     conversion = _read(binding, "conversion_op", path)
     required = _read(binding, "presence", path) == "required"
+    field_type = _read(binding, "field_type", path)
+    constraints = _read(binding, "constraints", path)
     if conversion == "required_scalar":
-        return [f"{target}[{key}] = {receiver}.{selector}"]
+        if field_type is None or constraints is None:
+            raise GoRenderError(f"{path}: scalar binding has no typed validation contract")
+        return [
+            f"if err := validateFamilyStructuredScalar({receiver}.{selector}, {_typed_symbol(field_type, path)}, {_constraints_literal(constraints, path)}); err != nil {{ return familyFieldValue{{}}, err }}",
+            f"{target}[{key}] = {receiver}.{selector}",
+        ]
     if conversion == "optional_scalar":
+        if field_type is None or constraints is None:
+            raise GoRenderError(f"{path}: optional scalar binding has no typed validation contract")
         return [
             f"generatedValue{position}, generatedPresent{position} := {receiver}.{selector}.Get()",
-            f"if generatedPresent{position} {{ {target}[{key}] = generatedValue{position} }}",
+            f"if generatedPresent{position} {{",
+            f"\tif err := validateFamilyStructuredScalar(generatedValue{position}, {_typed_symbol(field_type, path)}, {_constraints_literal(constraints, path)}); err != nil {{ return familyFieldValue{{}}, err }}",
+            f"\t{target}[{key}] = generatedValue{position}",
+            "}",
         ]
     if conversion == "copied_string_slice":
         if required:
@@ -1163,6 +1175,17 @@ def _render_structured_encoder(structured: Any, path: str) -> list[str]:
         item_type = _read(encoder, "item_type", path)
         if item_type is None:
             raise GoRenderError(f"{path}: array encoder has no item type")
+        limits = _read(encoder, "limits", path)
+        max_items = _read(limits, "max_items", path)
+        if type(max_items) is not int or max_items <= 0:
+            raise GoRenderError(f"{path}: array encoder has no positive item bound")
+        lines.extend(
+            (
+                f"\tif len(input.Items) > {max_items} {{",
+                "\t\treturn familyFieldValue{}, familyBuildFailure(FamilyBuildConstraint)",
+                "\t}",
+            )
+        )
         lines.extend(("\tencoded := make([]any, 0, len(input.Items))", "\tfor _, item := range input.Items {"))
         nested = _read(encoder, "item_encoder_symbol", path)
         if nested is None:

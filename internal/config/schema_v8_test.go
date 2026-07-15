@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
+	"gopkg.in/yaml.v3"
 )
 
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
@@ -65,6 +66,33 @@ managed:
 `)
 	if _, err := ParseV8YAML("managed-v8.yaml", raw); err != nil {
 		t.Fatalf("ParseV8YAML rejected current managed runtime fields: %v", err)
+	}
+}
+
+func TestConfigV8SchemaAcceptsClawRollbackCustodyField(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw
+claw:
+  mode: codex
+  home_dir: /tmp/codex
+  config_file: /tmp/codex/config.toml
+  workspace_dir: ""
+  openclaw_home_original: /tmp/original-openclaw
+`)
+	_, err := ParseCompileObservabilityV8(
+		"claw-custody-v8.yaml",
+		raw,
+		ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"},
+	)
+	if err != nil {
+		t.Fatalf("v8 compiler rejected current claw rollback custody field: %v", err)
+	}
+	var parsed Config
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Claw.OpenClawHomeOriginal != "/tmp/original-openclaw" {
+		t.Fatalf("claw.openclaw_home_original = %q", parsed.Claw.OpenClawHomeOriginal)
 	}
 }
 

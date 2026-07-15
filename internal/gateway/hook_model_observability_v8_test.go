@@ -361,10 +361,10 @@ func TestHookModelV8EmitsGeneratedAgentModelHierarchyAndAllLegacyMetrics(t *test
 	}
 	wantTokenValues := map[string]float64{"input": 321, "output": 45}
 	for _, point := range genericPoints {
-		if point.attributes["gen_ai.agent.name"] != "Child/Agent" ||
-			point.attributes["gen_ai.agent.id"] != "agent-child" ||
-			point.attributes["gen_ai.conversation.id"] != "session-1" {
-			t.Errorf("generic token identity=%v", point.attributes)
+		for _, key := range []string{"gen_ai.agent.name", "gen_ai.agent.id", "gen_ai.conversation.id"} {
+			if _, leaked := point.attributes[key]; leaked {
+				t.Errorf("generic token high-cardinality %q leaked: %v", key, point.attributes)
+			}
 		}
 		kind := point.attributes["gen_ai.token.type"]
 		if point.value != wantTokenValues[kind] {
@@ -373,8 +373,13 @@ func TestHookModelV8EmitsGeneratedAgentModelHierarchyAndAllLegacyMetrics(t *test
 	}
 	agentPoints := hookModelV8MetricPoints(metricRequests, observability.TelemetryInstrumentDefenseClawAgentTokenUsage)
 	for _, point := range agentPoints {
-		if point.attributes["gen_ai.agent.name"] != "child_agent" {
-			t.Errorf("Agent360 normalized name=%q want child_agent", point.attributes["gen_ai.agent.name"])
+		for _, key := range []string{
+			"gen_ai.agent.name", "gen_ai.agent.id", "defenseclaw.agent.root.id",
+			"defenseclaw.agent.parent.id", "defenseclaw.agent.lifecycle.id", "defenseclaw.agent.execution.id",
+		} {
+			if _, leaked := point.attributes[key]; leaked {
+				t.Errorf("agent token high-cardinality %q leaked: %v", key, point.attributes)
+			}
 		}
 	}
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1046,6 +1047,41 @@ func TestCorrelationMigrationIsAdditiveForPreviousReader(t *testing.T) {
 	}
 	if err := store.applyMigration(len(migrations), migrations[len(migrations)-1]); err != nil {
 		t.Fatal(err)
+	}
+	for _, index := range []struct {
+		name   string
+		column string
+	}{
+		{name: "idx_correlation_observations_lifecycle", column: "lifecycle_id"},
+		{name: "idx_correlation_observations_execution", column: "execution_id"},
+	} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
+			WHERE type='index' AND name=?`, index.name).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("correlation anchor index %s count=%d err=%v", index.name, count, err)
+		}
+		rows, err := store.db.Query(`EXPLAIN QUERY PLAN SELECT semantic_event_id
+			FROM correlation_observations WHERE `+index.column+`=?
+			ORDER BY observed_time_unix_nano`, "anchor")
+		if err != nil {
+			t.Fatal(err)
+		}
+		used := false
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			used = used || strings.Contains(detail, index.name)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !used {
+			t.Fatalf("query planner did not use correlation anchor index %s", index.name)
+		}
 	}
 	var schemaAfter, details string
 	if err := store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_events'`).Scan(&schemaAfter); err != nil {

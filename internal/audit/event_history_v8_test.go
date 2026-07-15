@@ -561,8 +561,16 @@ func TestEventHistoryWriterCommitsCorrelationObservationAtomically(t *testing.T)
 			Provenance: observability.Provenance{Producer: "gateway.audit", BinaryVersion: "v8-test",
 				RegistrySchemaVersion: 1, ConfigGeneration: 1,
 				ConfigDigest: stringsOf("a", 64)},
-			Body:         map[string]any{"message": "correlated"},
-			FieldClasses: map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+			Body: map[string]any{
+				"message":                        "correlated",
+				"defenseclaw.agent.lifecycle.id": "lifecycle-exact",
+				"defenseclaw.agent.execution.id": "execution-exact",
+			},
+			FieldClasses: map[string]observability.FieldClass{
+				"/message":                        observability.FieldClassContent,
+				"/defenseclaw.agent.lifecycle.id": observability.FieldClassIdentifier,
+				"/defenseclaw.agent.execution.id": observability.FieldClassIdentifier,
+			},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -584,12 +592,28 @@ func TestEventHistoryWriterCommitsCorrelationObservationAtomically(t *testing.T)
 	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(projection_hash) FROM audit_events WHERE id=?`, record.RecordID()).Scan(&auditRows, &projectionHash); err != nil {
 		t.Fatal(err)
 	}
-	var observedHash string
-	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(projection_hash) FROM correlation_observations WHERE record_id=?`, record.RecordID()).Scan(&observationRows, &observedHash); err != nil {
+	var observedHash, observedLifecycleID, observedExecutionID string
+	if err := store.db.QueryRow(`SELECT COUNT(*), MAX(projection_hash), MAX(lifecycle_id), MAX(execution_id)
+		FROM correlation_observations WHERE record_id=?`, record.RecordID()).Scan(
+		&observationRows, &observedHash, &observedLifecycleID, &observedExecutionID,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if auditRows != 1 || observationRows != 1 || observedHash != projectionHash {
-		t.Fatalf("audit=%d observation=%d hashes=%q/%q", auditRows, observationRows, projectionHash, observedHash)
+	if auditRows != 1 || observationRows != 1 || observedHash != projectionHash ||
+		observedLifecycleID != "lifecycle-exact" || observedExecutionID != "execution-exact" {
+		t.Fatalf("audit=%d observation=%d hashes=%q/%q lifecycle/execution=%q/%q",
+			auditRows, observationRows, projectionHash, observedHash, observedLifecycleID, observedExecutionID)
+	}
+	for _, anchor := range []CorrelationAnchor{
+		{LifecycleID: "lifecycle-exact"},
+		{ExecutionID: "execution-exact"},
+	} {
+		graph, queryErr := repo.QueryGraph(t.Context(), CorrelationGraphQuery{
+			Anchor: anchor, Page: CorrelationPageRequest{Limit: 10},
+		})
+		if queryErr != nil || len(graph.Events) != 1 || graph.Events[0].SemanticEventID != event.SemanticEventID {
+			t.Fatalf("anchor=%+v graph=%+v err=%v", anchor, graph, queryErr)
+		}
 	}
 
 	legacy := buildRecord("atomic-correlation-legacy-trace", event.SemanticEventID, "trace-123", "span-123")
@@ -622,6 +646,29 @@ func TestEventHistoryWriterCommitsCorrelationObservationAtomically(t *testing.T)
 	}
 	if auditRows != 0 {
 		t.Fatal("failed correlation observation left a partially committed audit row")
+	}
+}
+
+func TestExactLogLifecycleAndExecutionAttributesRejectAliasesAndInvalidValues(t *testing.T) {
+	maximumIdentifier := stringsOf("a", maxCanonicalLogCorrelationIdentifierBytes)
+	lifecycleID, executionID := exactLogLifecycleAndExecutionAttributes(map[string]any{
+		"attributes": map[string]any{
+			"defenseclaw.agent.lifecycle.id": maximumIdentifier,
+			"defenseclaw.agent.execution.id": "execution:1",
+		},
+	})
+	if lifecycleID != maximumIdentifier || executionID != "execution:1" {
+		t.Fatalf("exact lifecycle/execution=%q/%q", lifecycleID, executionID)
+	}
+
+	lifecycleID, executionID = exactLogLifecycleAndExecutionAttributes(map[string]any{
+		"lifecycle_id":                   "alias-lifecycle",
+		"execution_id":                   "alias-execution",
+		"defenseclaw.agent.lifecycle.id": stringsOf("a", maxCanonicalLogCorrelationIdentifierBytes+1),
+		"defenseclaw.agent.execution.id": " execution-with-space",
+	})
+	if lifecycleID != "" || executionID != "" {
+		t.Fatalf("unsafe lifecycle/execution accepted=%q/%q", lifecycleID, executionID)
 	}
 }
 

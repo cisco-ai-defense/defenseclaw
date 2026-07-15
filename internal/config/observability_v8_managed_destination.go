@@ -11,6 +11,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strconv"
 	"strings"
@@ -31,6 +33,20 @@ const (
 	ObservabilityV8ManagedAIDIngestPath = "/api/v1/defenseclaw/events/ingest"
 
 	observabilityV8ManagedAIDRedactionProfile = "sensitive"
+	// ObservabilityV8ManagedAgentInventoryAction is the release-owned routing
+	// identity for the sanitized coding-agent inventory. The generated managed
+	// plan reserves it so the inventory remains locally durable and is exported
+	// only through the CMID-authenticated AI Defense destination.
+	ObservabilityV8ManagedAgentInventoryAction observability.ProducerKey = "managed_agent_inventory"
+	// ObservabilityV8ManagedConnectorInventoryAction and
+	// ObservabilityV8ManagedMCPInventoryAction reserve the other sanitized
+	// endpoint-inventory collections to the same managed-only optional route.
+	ObservabilityV8ManagedConnectorInventoryAction observability.ProducerKey = "managed_connector_inventory"
+	ObservabilityV8ManagedMCPInventoryAction       observability.ProducerKey = "managed_mcp_inventory"
+	// ObservabilityV8LocalInventoryDiagnosticAction carries incomplete,
+	// overflowed, or otherwise non-authoritative scans to local SQLite only.
+	// It can never be projected as a managed inventory snapshot.
+	ObservabilityV8LocalInventoryDiagnosticAction observability.ProducerKey = "local_inventory_diagnostic"
 )
 
 // ObservabilityV8ManagedAIDOptions are release-owned inputs, not source
@@ -38,6 +54,10 @@ const (
 type ObservabilityV8ManagedAIDOptions struct {
 	DeploymentMode string
 	Endpoint       string
+	// SourceContentHash is sha256 over the exact accepted config source bytes.
+	// It is a runtime-generation binding, not a user-configurable destination
+	// field and not the masked observability plan digest.
+	SourceContentHash string
 }
 
 // WithObservabilityV8ManagedAIDDestination returns an immutable successor plan
@@ -61,16 +81,24 @@ func WithObservabilityV8ManagedAIDDestination(
 	if !ok {
 		return nil, &observabilityV8ManagedAIDPlanError{}
 	}
+	if options.SourceContentHash != "" && !validObservabilityV8SourceContentHash(options.SourceContentHash) {
+		return nil, &observabilityV8ManagedAIDPlanError{}
+	}
 	effective := cloneObservabilityV8EffectivePlan(plan.effective)
 	endpoint := origin + ObservabilityV8ManagedAIDIngestPath
-	for _, destination := range effective.Destinations {
+	for index, destination := range effective.Destinations {
 		if destination.Name == ObservabilityV8ManagedAIDDestinationName {
 			// A generated destination is idempotent. Any other occurrence is a
 			// compiler invariant violation and must not be silently replaced.
 			if destination.Generated && validObservabilityV8ManagedAIDIdentity(destination) &&
 				destination.Transport.Endpoint == endpoint &&
 				observabilityV8ManagedAIDRequiredLogsCollected(effective) {
-				return plan, nil
+				if options.SourceContentHash == "" ||
+					destination.managedAIDSourceContentHash == options.SourceContentHash {
+					return plan, nil
+				}
+				effective.Destinations[index].managedAIDSourceContentHash = options.SourceContentHash
+				return newObservabilityV8Plan(effective)
 			}
 			return nil, &observabilityV8ManagedAIDPlanError{}
 		}
@@ -81,6 +109,7 @@ func WithObservabilityV8ManagedAIDDestination(
 	if !forceObservabilityV8ManagedAIDRequiredLogCollection(&effective) {
 		return nil, &observabilityV8ManagedAIDPlanError{}
 	}
+	reserveObservabilityV8ManagedInventory(&effective)
 
 	profiles := make(map[observability.Bucket]string, len(effective.Buckets))
 	buckets := make([]observability.Bucket, 0, len(effective.Buckets))
@@ -102,15 +131,39 @@ func WithObservabilityV8ManagedAIDDestination(
 		ReloadApplicability: ObservabilityV8EffectiveDestinationReload{
 			Policy: ObservabilityV8RestartRequired, Transport: ObservabilityV8LiveReloadable,
 		},
-		Routes: []ObservabilityV8EffectiveRoute{{
-			Index: 0, Name: "all-collected-logs", Generated: true,
-			Signals: []observability.Signal{observability.SignalLogs},
-			Selector: ObservabilityV8EffectiveSelector{
-				Buckets: buckets, BucketWildcard: true,
+		Routes: []ObservabilityV8EffectiveRoute{
+			{
+				Index: 0, Name: "drop-local-inventory-diagnostics", Generated: true,
+				Signals: []observability.Signal{observability.SignalLogs},
+				Selector: ObservabilityV8EffectiveSelector{
+					Buckets: []observability.Bucket{observability.BucketAIDiscovery},
+					Actions: []observability.ProducerKey{ObservabilityV8LocalInventoryDiagnosticAction},
+				},
+				Action: ObservabilityV8RouteDrop,
 			},
-			Action:                   ObservabilityV8RouteSend,
-			RedactionProfileByBucket: profiles,
-		}},
+			{
+				Index: 1, Name: "drop-managed-inventory-components", Generated: true,
+				Signals: []observability.Signal{observability.SignalLogs},
+				Selector: ObservabilityV8EffectiveSelector{
+					Buckets: []observability.Bucket{observability.BucketAIDiscovery},
+					Actions: []observability.ProducerKey{
+						ObservabilityV8ManagedAgentInventoryAction,
+						ObservabilityV8ManagedConnectorInventoryAction,
+						ObservabilityV8ManagedMCPInventoryAction,
+					},
+					EventNames: []observability.EventName{"ai_component.observed"},
+				},
+				Action: ObservabilityV8RouteDrop,
+			},
+			{
+				Index: 2, Name: "all-collected-logs", Generated: true,
+				Signals: []observability.Signal{observability.SignalLogs},
+				Selector: ObservabilityV8EffectiveSelector{
+					Buckets: buckets, BucketWildcard: true,
+				},
+				Action:                   ObservabilityV8RouteSend,
+				RedactionProfileByBucket: profiles,
+			}},
 		Transport: ObservabilityV8TransportPlan{
 			Endpoint: endpoint, Protocol: "http/json", Method: "POST",
 			LoggerName: "defenseclaw", TimeoutMS: observabilityV8DefaultTimeoutMS,
@@ -124,6 +177,7 @@ func WithObservabilityV8ManagedAIDDestination(
 				ScheduledDelayMS:    observabilityV8DefaultBatchDelayMS,
 			},
 		},
+		managedAIDSourceContentHash: options.SourceContentHash,
 	}
 	effective.Destinations = append(effective.Destinations, destination)
 	base := "observability.destinations." + ObservabilityV8ManagedAIDDestinationName
@@ -137,6 +191,78 @@ func WithObservabilityV8ManagedAIDDestination(
 		ObservabilityV8Provenance{Path: base + ".reload_applicability", Origin: "reload-contract", Detail: "policy=restart_required,transport=live_reloadable"},
 	)
 	return newObservabilityV8Plan(effective)
+}
+
+// ObservabilityV8SourceContentHash returns the exact legacy-compatible source
+// fingerprint used by a generated managed destination. It deliberately hashes
+// raw bytes rather than canonicalized YAML so any accepted source change is
+// reflected in the managed event provenance.
+func ObservabilityV8SourceContentHash(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func validObservabilityV8SourceContentHash(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ObservabilityV8ManagedAIDSourceContentHash exposes only the hidden binding
+// on the release-owned generated destination. Display JSON and plan digests do
+// not reveal or substitute it.
+func ObservabilityV8ManagedAIDSourceContentHash(
+	destination ObservabilityV8EffectiveDestination,
+) (string, bool) {
+	value := destination.managedAIDSourceContentHash
+	return value, destination.Generated && validObservabilityV8ManagedAIDIdentity(destination) &&
+		validObservabilityV8SourceContentHash(value)
+}
+
+// reserveObservabilityV8ManagedInventory prepends a release-owned drop route
+// to every operator-configured log destination. The required local SQLite
+// destination is deliberately excluded so inventory remains durable; the
+// managed destination is appended only after this pass and is therefore the
+// sole optional exporter allowed to receive these actions.
+func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectivePlan) {
+	if effective == nil {
+		return
+	}
+	for destinationIndex := range effective.Destinations {
+		destination := &effective.Destinations[destinationIndex]
+		if destination.Kind == ObservabilityV8DestinationLocalSQLite ||
+			destination.Name == ObservabilityV8ManagedAIDDestinationName ||
+			!destination.Capabilities.Supports(observability.SignalLogs) ||
+			!observabilityV8SignalsContain(destination.SelectedSignals, observability.SignalLogs) {
+			continue
+		}
+		for routeIndex := range destination.Routes {
+			destination.Routes[routeIndex].Index = routeIndex + 1
+		}
+		destination.Routes = append([]ObservabilityV8EffectiveRoute{{
+			Index: 0, Name: "drop-managed-endpoint-inventory", Generated: true,
+			Signals: []observability.Signal{observability.SignalLogs},
+			Selector: ObservabilityV8EffectiveSelector{
+				Buckets: []observability.Bucket{observability.BucketAIDiscovery},
+				Actions: []observability.ProducerKey{
+					ObservabilityV8ManagedAgentInventoryAction,
+					ObservabilityV8ManagedConnectorInventoryAction,
+					ObservabilityV8ManagedMCPInventoryAction,
+					ObservabilityV8LocalInventoryDiagnosticAction,
+				},
+			},
+			Action: ObservabilityV8RouteDrop,
+		}}, destination.Routes...)
+	}
 }
 
 // observabilityV8ManagedAIDOrigin accepts only the release-owned base origin.

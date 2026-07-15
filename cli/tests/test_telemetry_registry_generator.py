@@ -490,6 +490,20 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
         )
     operations = domains["operations.yaml"]
     canonical_operations = yaml.safe_load((ROOT / "schemas/telemetry/v8/operations.yaml").read_text(encoding="utf-8"))
+    for attribute_id in (
+        "defenseclaw.inventory.connector.identifiers",
+        "defenseclaw.inventory.connector.metadata",
+        "defenseclaw.inventory.connector.content",
+        "defenseclaw.inventory.mcp.identifiers",
+        "defenseclaw.inventory.mcp.metadata",
+        "defenseclaw.inventory.agent.identifiers",
+        "defenseclaw.inventory.agent.metadata",
+    ):
+        operations["attributes"].append(
+            copy.deepcopy(
+                next(item for item in canonical_operations["attributes"] if item["id"] == attribute_id)
+            )
+        )
     operations["attribute_extensions"].append(
         copy.deepcopy(
             next(item for item in canonical_operations["attribute_extensions"] if item["ref"] == "service.version")
@@ -566,13 +580,8 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
     inventory = yaml.safe_load(
         (ROOT / "docs/design/observability-v8/current-state-inventory.yaml").read_text(encoding="utf-8")
     )
-    registry = yaml.safe_load((ROOT / "schemas/telemetry/v8/registry.yaml").read_text(encoding="utf-8"))
-    exception_families = {
-        item["family"] for item in registry["metric_compatibility_profiles"][0]["high_cardinality_families"]
-    }
     metric_items = inventory["classes"]["emitted_metrics"]["items"]
     for instrument_name, contract in metric_items.items():
-        high_cardinality = instrument_name in exception_families
         metric: dict[str, Any] = {
             "instrument_name": instrument_name,
             "instrument_type": contract["type"],
@@ -581,8 +590,7 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
             "description": "Generated metric fixture.",
             "temporality": "delta",
         }
-        if not high_cardinality:
-            metric["empty_labels_reason"] = "Fixture producer emits no instrument labels."
+        metric["empty_labels_reason"] = "Fixture producer emits no instrument labels."
         group: dict[str, Any] = {
             "id": f"metric.{instrument_name}",
             "type": "metric",
@@ -594,8 +602,9 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
                 "family_schema_version": 1,
             },
         }
-        if high_cardinality:
-            group["attributes"] = [{"ref": "defenseclaw.test.high", "requirement_level": "required"}]
+        if instrument_name in {"gen_ai.client.token.usage", "gen_ai.client.operation.duration"}:
+            group["attributes"] = [{"ref": "defenseclaw.test.name", "requirement_level": "required"}]
+            metric.pop("empty_labels_reason")
         operations["groups"].append(group)
     for producer, section, source in (
         ("gateway_event", "gateway_event_types", "gateway"),
@@ -1037,7 +1046,7 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
     fixture_projection_plans = copy.deepcopy(canonical_inbound["source_projection_plans"])
     fixture_projection_plans[0]["field_rules"] = [
         {
-            "target": "defenseclaw.test.high",
+            "target": "defenseclaw.test.name",
             "disposition": "project",
             "requirement": "required",
             "normalization": "genai-operation-label-v1",
@@ -1046,7 +1055,7 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
     ]
     fixture_projection_plans[1]["field_rules"] = [
         {
-            "target": "defenseclaw.test.high",
+            "target": "defenseclaw.test.name",
             "disposition": "project",
             "requirement": "required",
             "normalization": "genai-provider-label-v1",
@@ -1101,18 +1110,15 @@ def _fixture_root(tmp_path: Path) -> Path:
     inventory_target.parent.mkdir(parents=True)
     inventory = yaml.safe_load(inventory_source.read_text(encoding="utf-8"))
     registry_source = yaml.safe_load((ROOT / "schemas/telemetry/v8/registry.yaml").read_text(encoding="utf-8"))
-    exception_families = {
-        item["family"] for item in registry_source["metric_compatibility_profiles"][0]["high_cardinality_families"]
-    }
     for instrument_name, contract in inventory["classes"]["emitted_metrics"]["items"].items():
-        high_cardinality = instrument_name in exception_families
-        contract["labels"] = ["defenseclaw.test.high"] if high_cardinality else []
+        contract["labels"] = []
         contract["callsites"] = ["internal/telemetry/metrics.go:1"]
         contract["dropped_by_current_global_v8_gate"] = []
-        if high_cardinality:
-            contract.pop("empty_labels_reason", None)
-        else:
-            contract["empty_labels_reason"] = "Fixture producer emits no instrument labels."
+        contract["empty_labels_reason"] = "Fixture producer emits no instrument labels."
+    for instrument_name in ("gen_ai.client.token.usage", "gen_ai.client.operation.duration"):
+        contract = inventory["classes"]["emitted_metrics"]["items"][instrument_name]
+        contract["labels"] = ["defenseclaw.test.name"]
+        contract.pop("empty_labels_reason")
     fixture_selection = inventory["classes"]["v7_exporter_selection"]
     fixture_selection["collection"] = {
         "always": {
@@ -1214,8 +1220,6 @@ def _fixture_root(tmp_path: Path) -> Path:
         {"schema_version": 1, "dependencies": lock_dependencies},
     )
     metric_profile = copy.deepcopy(registry_source["metric_compatibility_profiles"])
-    for item in metric_profile[0]["high_cardinality_families"]:
-        item["labels"] = ["defenseclaw.test.high"]
     _write_yaml(
         telemetry / "registry.yaml",
         {
@@ -2096,7 +2100,7 @@ def test_upstream_attribute_extension_is_required_exactly_once(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("field_class", "cardinality", "expected"),
     [
-        ("metadata", "high", "high-cardinality coverage mismatch"),
+        ("metadata", "high", "high-cardinality label attribute defenseclaw.test.name is forbidden"),
         ("content", "bounded", "unsafe label attribute defenseclaw.test.name"),
         ("credential", "low", "unsafe label attribute defenseclaw.test.name"),
     ],
@@ -8623,22 +8627,18 @@ def test_inbound_metric_source_projection_contract_is_closed_and_complete(
     )
     token, duration = inbound.source_projection_plans
     assert tuple(rule["target"] for rule in token["field_rules"]) == (
-        "gen_ai.agent.id",
-        "gen_ai.agent.name",
-        "gen_ai.conversation.id",
         "gen_ai.operation.name",
         "gen_ai.provider.name",
         "gen_ai.request.model",
         "gen_ai.token.type",
     )
-    assert token["field_rules"][0] == {"target": "gen_ai.agent.id", "disposition": "omit"}
-    assert token["field_rules"][4]["source_groups"] == (
+    assert token["field_rules"][1]["source_groups"] == (
         {"placement": "metric_point_attribute", "keys": ("gen_ai.provider.name",)},
         {"placement": "authenticated_source", "keys": ("$authenticated_source",)},
         {"placement": "resource_attribute", "keys": ("service.name",)},
     )
-    assert token["field_rules"][5]["requirement"] == "required"
-    assert token["field_rules"][5]["source_groups"][-1] == {"placement": "fixed", "keys": ("unknown",)}
+    assert token["field_rules"][2]["requirement"] == "required"
+    assert token["field_rules"][2]["source_groups"][-1] == {"placement": "fixed", "keys": ("unknown",)}
     assert tuple(item["id"] for item in token["cumulative_series"]["components"]) == (
         "authenticated_source",
         "resource_service_name",
@@ -8658,7 +8658,7 @@ def test_inbound_metric_source_projection_contract_is_closed_and_complete(
         "normalization": "unsigned-epoch-nanos-v1",
     }
     assert duration["cumulative_series"] is None
-    assert duration["field_rules"][2]["source_groups"] == (
+    assert duration["field_rules"][0]["source_groups"] == (
         {"placement": "metric_point_attribute", "keys": ("gen_ai.operation.name",)},
         {"placement": "fixed", "keys": ("chat",)},
     )

@@ -251,22 +251,21 @@ def test_go_inbound_plan_preserves_generated_pr412_projection_and_series_contrac
     )
     token = projections["genai-token-metric-v1"]
     assert tuple(field.target for field in token.field_rules) == (
-        "gen_ai.agent.id",
-        "gen_ai.agent.name",
-        "gen_ai.conversation.id",
         "gen_ai.operation.name",
         "gen_ai.provider.name",
         "gen_ai.request.model",
         "gen_ai.token.type",
     )
-    assert token.field_rules[0].disposition == "omit"
-    assert tuple(group.placement for group in token.field_rules[4].source_groups) == (
+    assert all(field.disposition == "project" for field in token.field_rules)
+    assert tuple(group.placement for group in token.field_rules[0].source_groups) == ("fixed",)
+    assert token.field_rules[0].source_groups[0].keys == ("chat",)
+    assert tuple(group.placement for group in token.field_rules[1].source_groups) == (
         "metric_point_attribute",
         "authenticated_source",
         "resource_attribute",
     )
-    assert token.field_rules[5].requirement == "required"
-    assert token.field_rules[5].source_groups[-1].keys == ("unknown",)
+    assert token.field_rules[2].requirement == "required"
+    assert token.field_rules[2].source_groups[-1].keys == ("unknown",)
     series = token.cumulative_series
     assert series is not None
     assert series.framing == "length-prefixed-presence-v1"

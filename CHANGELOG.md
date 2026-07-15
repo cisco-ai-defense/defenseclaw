@@ -32,13 +32,16 @@ deleted.
 - Preserves the full root-agent/subagent/turn/workflow/model/tool lifecycle and
   the `local-observability-v1` Agent360/dashboard contract while expanding the
   generated `galileo-rich-v2` trace projection.
-- `defenseclaw upgrade` automatically backs up, converts, validates, and
-  atomically activates supported v7 configuration. It preserves narrower v7
-  signal/routing/redaction behavior, promotes inline observability secrets to
-  locked environment references, refreshes owned local-dashboard assets without
-  resetting volumes, and rolls back a failed required conversion. No separate
-  migration apply command is required; the v8 gateway does not rewrite v7 config
-  at startup or run both formats in parallel.
+- One authenticated target-release resolver command automatically stages supported
+  POSIX v7 installations through the published `0.8.4` protocol-2 bridge, re-execs
+  under a fresh bridge controller, then backs up, converts, validates, and atomically
+  activates v8. It preserves narrower v7 signal/routing/redaction behavior, promotes
+  inline observability secrets to locked environment references, refreshes owned
+  local-dashboard assets without resetting volumes, and restores healthy `0.8.4`
+  state after a failed conversion, start, or health check. No separate migration
+  apply command is required; the v8 gateway does not rewrite v7 config at startup or
+  run both formats in parallel. Windows refuses before mutation because no Windows
+  `0.8.4` bridge was published.
 
 Breaking change: fresh-v8 telemetry is unredacted by default, and legacy
 `otel`, `audit_sinks`, `privacy.disable_redaction`, and associated ambient OTel

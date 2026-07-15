@@ -50,8 +50,12 @@ def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> Non
 
     variables = {item["name"]: item for item in dashboard["templating"]["list"]}
     assert {"connector", "agent", "scope_label", "lifecycle", "execution", "trace"} <= variables.keys()
-    assert "defenseclaw_agent_last_seen_seconds" in variables["agent"]["definition"]
+    assert variables["agent"]["datasource"]["uid"] == "defenseclaw-loki"
+    assert '{service_name="defenseclaw"}' in variables["agent"]["definition"]
+    assert "body_$scope_label" in variables["agent"]["definition"]
     assert "$scope_label" in variables["agent"]["definition"]
+    assert variables["lifecycle"]["datasource"]["uid"] == "defenseclaw-loki"
+    assert variables["execution"]["datasource"]["uid"] == "defenseclaw-loki"
     assert variables["lifecycle"]["label"] == "Lifecycle (drilldown)"
     assert variables["execution"]["label"] == "Execution (drilldown)"
     variable_order = [item["name"] for item in dashboard["templating"]["list"]]
@@ -69,8 +73,9 @@ def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> Non
         "defenseclaw_agent_execution_id",
     ):
         assert correlation_field in serialized
-    assert "defenseclaw_agent_token_usage_total" in serialized
-    assert "defenseclaw_agent_reported_cost_USD" in serialized
+    assert "body_gen_ai_usage_input_tokens" in serialized
+    assert "body_gen_ai_usage_output_tokens" in serialized
+    assert "body_defenseclaw_agent_reported_cost_usd" in serialized
     # Application metrics have exactly one local transport (remote write), so
     # dashboard authors do not need transport-label de-duplication boilerplate.
     assert "max without (job, instance, service, exported_job)" not in serialized
@@ -215,6 +220,14 @@ def test_agent360_separates_logical_summaries_from_raw_correlation_evidence() ->
                 continue
             expression = target.get("expr", "")
             for forbidden_metric_label in (
+                "$scope_label",
+                "gen_ai_agent_id",
+                "gen_ai_agent_name",
+                "defenseclaw_agent_root_id",
+                "defenseclaw_agent_parent_id",
+                "defenseclaw_agent_lifecycle_id",
+                "defenseclaw_agent_execution_id",
+                "defenseclaw_session_root_id",
                 "semantic_event_id",
                 "logical_event_id",
                 "request_id",
@@ -603,16 +616,17 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
 def test_agent360_has_continuous_phase_timeline_and_directed_flow() -> None:
     dashboard = _dashboard(AGENT360)
     timeline = _panel_by_title(dashboard, "Execution phase timeline")
-    assert timeline["datasource"]["uid"] == "defenseclaw-prometheus"
-    assert "defenseclaw_agent_phase_current_ratio" in timeline["targets"][0]["expr"]
+    assert timeline["datasource"]["uid"] == "defenseclaw-loki"
+    assert "last_over_time" in timeline["targets"][0]["expr"]
+    assert "unwrap body_defenseclaw_agent_phase_code" in timeline["targets"][0]["expr"]
     mappings = timeline["fieldConfig"]["defaults"]["mappings"][0]["options"]
     assert mappings["2"]["text"] == "Planning"
     assert mappings["3"]["text"] == "Model"
     assert mappings["4"]["text"] == "Tool"
     assert mappings["9"]["text"] == "Completed"
     timeline_query = timeline["targets"][0]["expr"]
-    assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' in timeline_query
-    assert 'defenseclaw_agent_execution_id=~"$execution"' in timeline_query
+    assert 'body_defenseclaw_agent_lifecycle_id=~"$lifecycle"' in timeline_query
+    assert 'body_defenseclaw_agent_execution_id=~"$execution"' in timeline_query
 
     sequence = _panel_by_title(
         dashboard, "Ordered lifecycle and work sequence — root to terminal"
@@ -668,42 +682,47 @@ def test_agent360_has_continuous_phase_timeline_and_directed_flow() -> None:
     assert "trace_id={{.correlation_trace_id}}" in sequence_query
     assert "· trace={{.correlation_trace_id}}" not in sequence_query
 
-    flow = _panel_by_title(dashboard, "Execution phase network")
+    flow = _panel_by_title(dashboard, "Connector phase network")
     assert flow["type"] == "nodeGraph"
     edge_query = flow["targets"][0]["expr"]
     assert "defenseclaw_agent_phase_transitions_total" in edge_query
-    assert "increase(defenseclaw_agent_phase_transitions_total" not in edge_query
-    assert "max_over_time(defenseclaw_agent_phase_transitions_total" in edge_query
-    assert "max_over_time(defenseclaw_agent_last_seen_seconds" in edge_query
+    assert "increase(defenseclaw_agent_phase_transitions_total" in edge_query
+    assert "max_over_time(defenseclaw_agent_phase_transitions_total" not in edge_query
+    assert "defenseclaw_agent_last_seen_seconds" not in edge_query
     transition_selector = edge_query.split(
         "defenseclaw_agent_phase_transitions_total", 1
     )[1].split("}", 1)[0]
     assert "defenseclaw_agent_lifecycle_id" not in transition_selector
-    assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' in edge_query
+    assert "defenseclaw_agent_lifecycle_id" not in edge_query
+    assert "defenseclaw_agent_execution_id" not in edge_query
     for edge_field in ('"id"', '"source"', '"target"'):
         assert edge_field in edge_query
     assert "defenseclaw_agent_phase_from" in edge_query
     assert "defenseclaw_agent_phase_to" in edge_query
 
     directed_edges = _panel_by_title(
-        dashboard, "Directed phase edges (source → target)"
+        dashboard, "Connector directed phase edges (source → target)"
     )
     directed_expr = directed_edges["targets"][0]["expr"]
     assert '"direction", " → "' in directed_expr
-    assert "increase(defenseclaw_agent_phase_transitions_total" not in directed_expr
-    assert "max_over_time(defenseclaw_agent_phase_transitions_total" in directed_expr
-    assert "max_over_time(defenseclaw_agent_last_seen_seconds" in directed_expr
+    assert "increase(defenseclaw_agent_phase_transitions_total" in directed_expr
+    assert "max_over_time(defenseclaw_agent_phase_transitions_total" not in directed_expr
+    assert "defenseclaw_agent_last_seen_seconds" not in directed_expr
     transition_selector = directed_expr.split(
         "defenseclaw_agent_phase_transitions_total", 1
     )[1].split("}", 1)[0]
     assert "defenseclaw_agent_lifecycle_id" not in transition_selector
-    assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' in directed_expr
+    assert "defenseclaw_agent_lifecycle_id" not in directed_expr
+    assert "defenseclaw_agent_execution_id" not in directed_expr
     rename = directed_edges["transformations"][1]["options"]["renameByName"]
     assert rename["defenseclaw_agent_phase_from"] == "From"
     assert rename["defenseclaw_agent_phase_to"] == "To"
     assert rename["direction"] == "Direction"
 
-    for title in ("Average observed phase duration", "Slowest operation classes (p95)"):
+    for title in (
+        "Connector average observed phase duration",
+        "Connector slowest operation classes (p95)",
+    ):
         assert _panel_by_title(dashboard, title)["datasource"]["uid"] == "defenseclaw-prometheus"
 
 
@@ -711,11 +730,11 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
     dashboard = _dashboard(AGENT360)
 
     directory = _panel_by_title(dashboard, "Agent Directory — click an Agent ID to drill down")
-    assert directory["targets"][0]["expr"].startswith("1000 * ")
-    assert directory["options"]["sortBy"][0]["displayName"] == "Last Seen"
-    assert any(
+    assert directory["datasource"]["uid"] == "defenseclaw-loki"
+    assert directory["targets"][0]["expr"].startswith("sum by (")
+    assert directory["options"]["sortBy"][0]["displayName"] == "Observations"
+    assert not any(
         override["matcher"].get("options") == "Last Seen"
-        and any(prop.get("value") == "dateTimeFromNow" for prop in override["properties"])
         for override in directory["fieldConfig"]["overrides"]
     )
     agent_id_override = next(
@@ -739,20 +758,25 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
         for prop in root_id_override["properties"]
     )
 
-    last_seen = _panel_by_title(dashboard, "Last seen")
-    assert last_seen["options"]["textMode"] == "value"
-    assert last_seen["options"]["graphMode"] == "none"
+    observations = _panel_by_title(dashboard, "Observations in range")
+    assert observations["datasource"]["uid"] == "defenseclaw-loki"
+    assert observations["options"]["textMode"] == "value"
+    assert observations["options"]["graphMode"] == "none"
 
     model_calls = _panel_by_title(dashboard, "Model calls")
     assert model_calls["datasource"]["uid"] == "defenseclaw-loki"
     assert 'event_name="model.response"' in model_calls["targets"][0]["expr"]
     for title in ("Input tokens", "Output tokens"):
-        assert _panel_by_title(dashboard, title)["options"]["colorMode"] == "none"
+        panel = _panel_by_title(dashboard, title)
+        assert panel["options"]["colorMode"] == "none"
+        assert panel["datasource"]["uid"] == "defenseclaw-loki"
+        assert "logical_event_id" in panel["targets"][0]["expr"]
 
-    executions = _panel_by_title(dashboard, "Executions and last activity")
-    assert executions["targets"][0]["expr"].startswith("1000 * ")
-    assert "topk by (connector, gen_ai_agent_id" in executions["targets"][0]["expr"]
-    assert any(
+    executions = _panel_by_title(dashboard, "Executions and observations")
+    assert executions["datasource"]["uid"] == "defenseclaw-loki"
+    assert executions["targets"][0]["expr"].startswith("sum by (")
+    assert "count_over_time" in executions["targets"][0]["expr"]
+    assert not any(
         override["matcher"].get("options") == "Last Seen"
         for override in executions["fieldConfig"]["overrides"]
     )
@@ -976,17 +1000,17 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     dashboard = _dashboard(AGENT360)
     expected = {
         "Model calls by provider and model": ("count_over_time", "provider", "model"),
-        "Execution-lifetime model p95 (active in range)": ("histogram_quantile", "gen_ai_request_model"),
+        "Connector-wide model p95 (selected range)": ("histogram_quantile", "gen_ai_request_model"),
         "Top tools by calls": ("count_over_time", "tool_name"),
-        "Execution-lifetime tool p95 (active in range)": ("gen_ai_tool_name", "histogram_quantile"),
+        "Connector-wide tool p95 (selected range)": ("gen_ai_tool_name", "histogram_quantile"),
         "Top websites and destinations": ("count_over_time", "destination"),
-        "Reported tokens by model": ("defenseclaw_agent_token_usage_total", "gen_ai_request_model"),
-        "Reported cost over time": ("defenseclaw_agent_reported_cost_USD",),
-        "Reported cost by model": ("defenseclaw_agent_reported_cost_USD", "gen_ai_request_model"),
+        "Reported tokens by model": ("body_gen_ai_usage_input_tokens", "logical_event_id"),
+        "Reported cost over time": ("body_defenseclaw_agent_reported_cost_usd",),
+        "Reported cost by model": ("body_defenseclaw_agent_reported_cost_usd", "model"),
         "Lifecycle event totals": ("count_over_time", "agent_lifecycle_event"),
-        "Span error rate": ('status_code="STATUS_CODE_ERROR"',),
-        "Agent span latency heatmap": ("_bucket", "sum by (le)"),
-        "Active agents over time": ("gen_ai_agent_id",),
+        "Connector span error rate": ('status_code="STATUS_CODE_ERROR"',),
+        "Connector span latency heatmap": ("_bucket", "sum by (le)"),
+        "Active agents over time": ("gen_ai_agent_id", "count_over_time"),
     }
     for title, fragments in expected.items():
         expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
@@ -994,11 +1018,11 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     for title in ("Reported cost", "Reported cost over time", "Reported cost by model"):
         panel = _panel_by_title(dashboard, title)
         assert panel["fieldConfig"]["defaults"]["noValue"] == "Not reported"
-        assert "never infers prices" in panel["description"]
-    assert "time() - 300" in _panel_by_title(
+        assert "infer" in panel["description"].lower()
+    assert "time() - 300" not in _panel_by_title(
         dashboard, "Active agents over time"
     )["targets"][0]["expr"]
-    assert "max by (connector, gen_ai_agent_id)" in _panel_by_title(
+    assert "sum by (connector, gen_ai_agent_id)" in _panel_by_title(
         dashboard, "Active agents over time"
     )["targets"][0]["expr"]
 
@@ -1008,24 +1032,24 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     assert "directed acyclic" in topology["description"].lower()
 
     for title in (
-        "Average observed phase duration",
-        "Slowest operation classes (p95)",
-        "Execution phase network",
-        "Directed phase edges (source → target)",
+        "Connector average observed phase duration",
+        "Connector slowest operation classes (p95)",
+        "Connector phase network",
+        "Connector directed phase edges (source → target)",
     ):
         expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
-        assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' in expression
-        assert 'defenseclaw_agent_execution_id=~"$execution"' in expression
+        assert "defenseclaw_agent_lifecycle_id" not in expression
+        assert "defenseclaw_agent_execution_id" not in expression
 
     assert _panel_by_title(dashboard, "Descendants in selected root tree")
 
     for title in (
-        "Execution-lifetime model p95 (active in range)",
-        "Execution-lifetime tool p95 (active in range)",
+        "Connector-wide model p95 (selected range)",
+        "Connector-wide tool p95 (selected range)",
     ):
         expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
-        assert "max_over_time(defenseclaw_agent_last_seen_seconds" in expression
-        assert "time() - $__range_s" in expression
+        assert "increase(defenseclaw_agent_span_duration_milliseconds_bucket" in expression
+        assert "defenseclaw_agent_last_seen_seconds" not in expression
 
 
 def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
@@ -1058,11 +1082,19 @@ def test_agent360_span_metrics_are_connector_scoped() -> None:
 def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> None:
     config = COLLECTOR.read_text(encoding="utf-8")
     assert "spanmetrics/agent360:" in config
-    assert "defenseclaw.agent.root.id" in config
     assert "defenseclaw.agent.phase" in config
     assert "defenseclaw.agent.phase.code" in config
     assert "- name: connector" in config
     assert "gen_ai.tool.name" in config
+    for forbidden_dimension in (
+        "gen_ai.agent.id",
+        "gen_ai.agent.name",
+        "defenseclaw.agent.root.id",
+        "defenseclaw.agent.parent.id",
+        "defenseclaw.agent.lifecycle.id",
+        "defenseclaw.agent.execution.id",
+    ):
+        assert f"- name: {forbidden_dimension}" not in config
     assert "filter/agent360-canary:" in config
     assert 'span.attributes["defenseclaw.telemetry.canary"] == true' in config
     assert "exporters: [otlp/tempo, forward/agent360, debug]" in config

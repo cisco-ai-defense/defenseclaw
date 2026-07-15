@@ -138,4 +138,5 @@ def test_current_security_producers_have_lossless_authored_contracts() -> None:
         "shape",
         "passthrough",
         "chat",
+        "private-upstream",
     )

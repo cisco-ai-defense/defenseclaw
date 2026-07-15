@@ -118,6 +118,39 @@ def test_already_valid_v8_is_an_exact_noop() -> None:
     assert result.environment_edits == ()
 
 
+def test_private_upstream_allowlist_is_preserved_only_when_explicit() -> None:
+    explicit = _convert(
+        """config_version: 7
+guardrail:
+  enabled: true
+  allow_private_upstreams:
+    - 10.20.30.40
+    - fd12:3456::8
+"""
+    )
+    explicit_guardrail = _document(explicit)["guardrail"]
+    assert explicit_guardrail["allow_private_upstreams"] == ["10.20.30.40", "fd12:3456::8"]
+    load_validate_v8(explicit.candidate)
+
+    absent = _convert("config_version: 7\nguardrail: {enabled: true}\n")
+    absent_guardrail = _document(absent)["guardrail"]
+    assert "allow_private_upstreams" not in absent_guardrail
+
+
+def test_private_upstream_environment_is_runtime_only_and_not_materialized() -> None:
+    result = _convert(
+        "config_version: 7\nguardrail: {enabled: true}\n",
+        {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.20.30.40,fd12:3456::8"},
+    )
+    document = _document(result)
+    assert "allow_private_upstreams" not in document["guardrail"]
+    assert "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS" not in result.candidate.decode()
+    assert "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS" not in {
+        dependency.name for dependency in result.environment_dependencies
+    }
+    assert result.environment_edits == ()
+
+
 def test_v7_loads_packaged_compatibility_and_fails_closed_when_it_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,6 +200,32 @@ def test_no_otel_upgrade_keeps_every_v7_local_log_bucket_collected() -> None:
         for destination_name in ("gateway-jsonl", "gateway-console")
         for route in _destination({"observability": observability}, destination_name)["routes"]
     )
+    load_validate_v8(result.candidate)
+
+
+def test_published_v7_claw_custody_field_survives_v8_validation() -> None:
+    result = _convert(
+        """config_version: 7
+claw:
+  mode: codex
+  home_dir: ~/.codex
+  config_file: ~/.codex/config.toml
+  workspace_dir: ''
+  openclaw_home_original: ''
+otel:
+  enabled: false
+  destinations: []
+"""
+    )
+
+    document = _document(result)
+    assert document["claw"] == {
+        "mode": "codex",
+        "home_dir": "~/.codex",
+        "config_file": "~/.codex/config.toml",
+        "workspace_dir": "",
+        "openclaw_home_original": "",
+    }
     load_validate_v8(result.candidate)
 
 

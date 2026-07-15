@@ -88,13 +88,84 @@ _read_json_version() {
   local py
   py="$(command -v python3 || echo /usr/bin/python3)"
   "${py}" -c '
-import json, sys
+import json, os, re, stat, sys
+
+fd = -1
 try:
-  with open(sys.argv[1]) as f:
-    print(json.load(f).get("version",""))
+  flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+  flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+  fd = os.open(sys.argv[1], flags)
+  info = os.fstat(fd)
+  if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 256 * 1024:
+    raise OSError("unsafe agent package metadata")
+  chunks = []
+  remaining = 256 * 1024 + 1
+  while remaining > 0:
+    chunk = os.read(fd, min(remaining, 64 * 1024))
+    if not chunk:
+      break
+    chunks.append(chunk)
+    remaining -= len(chunk)
+  payload = b"".join(chunks)
+  if len(payload) > 256 * 1024:
+    raise OSError("agent package metadata exceeds its size bound")
+  value = json.loads(payload).get("version", "")
+  if isinstance(value, str) and re.fullmatch(r"[0-9A-Za-z.+_-]{1,128}", value):
+    print(value)
 except Exception:
   pass
+finally:
+  if fd >= 0:
+    os.close(fd)
 ' "${path}" 2>/dev/null
+}
+
+_read_codex_version_as_user() {
+  local user="$1"
+  local py
+  py="$(command -v python3 || echo /usr/bin/python3)"
+  "${py}" -c '
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+
+user = sys.argv[1]
+process = subprocess.Popen(
+    ["/usr/bin/sudo", "-n", "-u", user, "codex", "--version"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+output = bytearray()
+deadline = time.monotonic() + 5.0
+try:
+    while len(output) < 512:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, 5.0)
+        ready, _, _ = select.select([process.stdout], [], [], remaining)
+        if not ready:
+            raise subprocess.TimeoutExpired(process.args, 5.0)
+        chunk = os.read(process.stdout.fileno(), min(512 - len(output), 4096))
+        if not chunk:
+            break
+        output.extend(chunk)
+        if b"\n" in chunk:
+            break
+finally:
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+line = bytes(output).splitlines()[0] if output else b""
+sys.stdout.buffer.write(line)
+' "${user}" 2>/dev/null
 }
 
 discover_agent_version() {
@@ -140,7 +211,7 @@ discover_agent_version() {
       # root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
         local vraw
-        vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
+        vraw="$(_read_codex_version_as_user "${DC_INSTALLER_TARGET_USER}" || true)"
         # Codex prints "codex-cli X.Y.Z"; take just the version token.
         vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
@@ -175,9 +246,10 @@ discover_agent_version() {
 # ---- per-connector userspace prep --------------------------------------
 #
 # Each prepare_* writes the connector's native hook config file under HOME
-# if missing. They do NOT chown — the caller is expected to be running as
-# the target user (the test harness) or as root with a follow-up chown
-# (the real installer). They use install(8)/chmod for parents and writes.
+# if missing. When a target UID/GID is supplied, creation and ownership are
+# applied through already-open directory/file descriptors. This keeps the
+# privileged installer from following a connector directory swapped by the
+# target user between validation and chown.
 
 ensure_safe_userspace_path() {
   local dir="$1"
@@ -194,53 +266,166 @@ ensure_safe_userspace_path() {
   fi
 }
 
+# create_userspace_config_if_missing DIR NAME [UID GID] -> reads initial bytes
+# on stdin.
+#
+# The installer can run as root while DIR belongs to the target user. Anchor
+# the final-component lookup and creation to an already-opened directory file
+# descriptor so replacing DIR or NAME with a symlink cannot redirect a
+# privileged write. Existing regular files are left untouched.
+create_userspace_config_if_missing() {
+  local dir="$1"
+  local name="$2"
+  local uid="${3:-}"
+  local gid="${4:-}"
+  local py
+  py="$(command -v python3 || echo /usr/bin/python3)"
+  "${py}" -c '
+import os
+import re
+import stat
+import sys
+
+directory, name, uid_raw, gid_raw = sys.argv[1:]
+if not name or name in {".", ".."} or os.path.basename(name) != name:
+    raise SystemExit("invalid userspace config filename")
+if bool(uid_raw) != bool(gid_raw):
+    raise SystemExit("userspace config ownership requires both UID and GID")
+if uid_raw:
+    if re.fullmatch(r"[0-9]+", uid_raw) is None or re.fullmatch(r"[0-9]+", gid_raw) is None:
+        raise SystemExit("userspace config UID/GID must be decimal integers")
+    target_uid = int(uid_raw, 10)
+    target_gid = int(gid_raw, 10)
+else:
+    target_uid = None
+    target_gid = None
+
+payload = sys.stdin.buffer.read(64 * 1024 + 1)
+if len(payload) > 64 * 1024:
+    raise SystemExit("userspace config template exceeds its size bound")
+
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+directory_fd = os.open(directory, directory_flags)
+created = False
+file_fd = -1
+file_info = None
+try:
+    opened_directory = os.fstat(directory_fd)
+    if not stat.S_ISDIR(opened_directory.st_mode):
+        raise OSError("userspace config parent is not a directory")
+    try:
+        existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if not stat.S_ISREG(existing.st_mode):
+            raise OSError("userspace config path is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_fd = os.open(name, flags, dir_fd=directory_fd)
+        file_info = os.fstat(file_fd)
+        if not stat.S_ISREG(file_info.st_mode) or not os.path.samestat(existing, file_info):
+            raise OSError("userspace config changed while being opened")
+    else:
+        os.fchmod(directory_fd, 0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        created = True
+        view = memoryview(payload)
+        while view:
+            written = os.write(file_fd, view)
+            if written <= 0:
+                raise OSError("short userspace config write")
+            view = view[written:]
+        os.fchmod(file_fd, 0o600)
+        os.fsync(file_fd)
+        file_info = os.fstat(file_fd)
+        if not stat.S_ISREG(file_info.st_mode) or file_info.st_nlink != 1:
+            raise OSError("created userspace config lost regular-file custody")
+
+    if target_uid is not None:
+        # Refuse to change ownership through a hard link: changing this inode
+        # must affect only the named connector config under our open parent.
+        if file_info.st_nlink != 1:
+            raise OSError("userspace config must have exactly one link before ownership change")
+        os.fchown(file_fd, target_uid, target_gid)
+        os.fchown(directory_fd, target_uid, target_gid)
+        os.fsync(file_fd)
+
+    named_file = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(named_file.st_mode) or not os.path.samestat(
+        os.fstat(file_fd), named_file
+    ):
+        raise OSError("userspace config changed during preparation")
+
+    current_directory = os.lstat(directory)
+    if stat.S_ISLNK(current_directory.st_mode) or not os.path.samestat(
+        opened_directory, current_directory
+    ):
+        raise OSError("userspace config parent changed during creation")
+    os.fsync(directory_fd)
+except BaseException:
+    if created:
+        try:
+            named_file = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if file_fd >= 0 and os.path.samestat(os.fstat(file_fd), named_file):
+                os.unlink(name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+        except OSError:
+            pass
+    raise
+finally:
+    if file_fd >= 0:
+        os.close(file_fd)
+    os.close(directory_fd)
+' "${dir}" "${name}" "${uid}" "${gid}"
+}
+
 prepare_codex_userspace() {
   local home="$1"
+  local uid="${2:-}"
+  local gid="${3:-}"
   local dir="${home}/.codex"
   local cfg="${home}/.codex/config.toml"
   ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
-  if [[ ! -f "${cfg}" ]]; then
-    chmod 0700 "${dir}"
-    cat > "${cfg}" <<'TOML'
+  create_userspace_config_if_missing "${dir}" "config.toml" "${uid}" "${gid}" <<'TOML'
 # Created by DefenseClaw installer so the enterprise hook guardian can
 # repair this file. Edit freely; DefenseClaw only owns [hooks], [otel],
 # and the top-level notify entries.
 TOML
-    chmod 0600 "${cfg}"
-  fi
 }
 
 prepare_claudecode_userspace() {
   local home="$1"
+  local uid="${2:-}"
+  local gid="${3:-}"
   local dir="${home}/.claude"
   local cfg="${home}/.claude/settings.json"
   ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
-  if [[ ! -f "${cfg}" ]]; then
-    chmod 0700 "${dir}"
-    printf '{}\n' > "${cfg}"
-    chmod 0600 "${cfg}"
-  fi
+  printf '{}\n' | create_userspace_config_if_missing "${dir}" "settings.json" "${uid}" "${gid}"
 }
 
 prepare_cursor_userspace() {
   local home="$1"
+  local uid="${2:-}"
+  local gid="${3:-}"
   local dir="${home}/.cursor"
   local cfg="${home}/.cursor/hooks.json"
   ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
-  if [[ ! -f "${cfg}" ]]; then
-    chmod 0700 "${dir}"
-    printf '{"version":1,"hooks":{}}\n' > "${cfg}"
-    chmod 0600 "${cfg}"
-  fi
+  printf '{"version":1,"hooks":{}}\n' | create_userspace_config_if_missing "${dir}" "hooks.json" "${uid}" "${gid}"
 }
 
 prepare_userspace_for() {
   local connector="$1"
   local home="$2"
+  local uid="${3:-}"
+  local gid="${4:-}"
   case "${connector}" in
-    codex)      prepare_codex_userspace      "${home}";;
-    claudecode) prepare_claudecode_userspace "${home}";;
-    cursor)     prepare_cursor_userspace     "${home}";;
+    codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
+    claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
+    cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
   esac
 }
 
@@ -267,11 +452,12 @@ aid_endpoint_for_env() {
 # resolve_aid_endpoint ENV OVERRIDE -> stdout effective endpoint
 #
 # When OVERRIDE is non-empty it wins over ENV: this is the --override-endpoint
-# adhoc-testing seam that lets an operator point the managed daemon at an
-# arbitrary AI Defense host (e.g. a personal preview tenant) without adding a
-# new --env case. The override is validated as a well-formed http(s) URL with
-# no whitespace or double-quote (it is later rendered into a quoted YAML
-# scalar) and any trailing slash is stripped for consistent path joining.
+# validation seam that lets an operator point the managed daemon at another
+# AI Defense origin (e.g. a personal preview tenant) without adding a new
+# --env case. The override uses the same bare-origin boundary as the v8 managed
+# destination: HTTPS, a non-empty host, an optional valid TCP port, and no
+# userinfo, path, query, fragment, whitespace, quote, or backslash. A single
+# trailing slash is accepted and stripped for consistent path joining.
 #
 # Return codes let the caller emit a precise error:
 #   0 - success (endpoint on stdout)
@@ -284,14 +470,68 @@ resolve_aid_endpoint() {
   local env="$1"
   local override="$2"
   if [[ -n "${override}" ]]; then
-    # Require a non-empty URL authority (host) right after "//": the
-    # first authority char must not be a delimiter (/ ? #), so hostless
-    # values like "https:///" or "https://?tenant=x" are rejected. The
-    # whole value must also be free of whitespace, double quotes, and
-    # backslashes — it is rendered into a double-quoted YAML scalar where
-    # a backslash would be an escape sequence and a quote would break out.
-    local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
-    [[ "${override}" =~ ${re} ]] || return 2
+    # Keep this dependency-free and compatible with the Bash 3.2 shipped by
+    # macOS. Validation deliberately happens before root/preflight checks in
+    # install.sh so a rejected endpoint cannot mutate an existing host.
+    [[ ${#override} -le 2048 ]] || return 2
+    [[ "${override}" == https://* ]] || return 2
+    [[ ! "${override}" =~ [[:space:]] ]] || return 2
+    [[ "${override}" != *'"'* && "${override}" != *"'"* && "${override}" != *'\'* ]] || return 2
+
+    local authority="${override#https://}"
+    [[ -n "${authority}" ]] || return 2
+    [[ "${authority}" != *'?'* && "${authority}" != *'#'* && "${authority}" != *'@'* ]] || return 2
+
+    # Only the root slash is accepted. Strip it before validating authority;
+    # any remaining slash is a source-controlled path and must fail closed.
+    if [[ "${authority}" == */ ]]; then
+      authority="${authority%/}"
+    fi
+    [[ -n "${authority}" && "${authority}" != */* ]] || return 2
+
+    local host="" port="" remainder="" colonless="" has_port="false"
+    if [[ "${authority}" == \[* ]]; then
+      # Bracketed host (normally IPv6). Match net/url's origin shape: require
+      # one closing bracket and permit only an optional :port after it.
+      [[ "${authority}" == *']'* ]] || return 2
+      host="${authority#\[}"
+      host="${host%%\]*}"
+      remainder="${authority#*\]}"
+      [[ -n "${host}" ]] || return 2
+      [[ "${host}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 2
+      case "${remainder}" in
+        "") ;;
+        :*) port="${remainder#:}"; has_port="true" ;;
+        *) return 2 ;;
+      esac
+      [[ "${host}" != *'['* && "${host}" != *']'* ]] || return 2
+    else
+      [[ "${authority}" != *'['* && "${authority}" != *']'* ]] || return 2
+      colonless="${authority//:/}"
+      # An unbracketed host can contain at most the one host/port separator.
+      (( ${#authority} - ${#colonless} <= 1 )) || return 2
+      if [[ "${authority}" == *:* ]]; then
+        host="${authority%%:*}"
+        port="${authority#*:}"
+        has_port="true"
+      else
+        host="${authority}"
+      fi
+      [[ -n "${host}" ]] || return 2
+      [[ "${host}" =~ ^[A-Za-z0-9.-]+$ ]] || return 2
+    fi
+
+    if [[ "${has_port}" == "true" ]]; then
+      [[ -n "${port}" && "${port}" =~ ^[0-9]+$ ]] || return 2
+      # Strip leading zeroes before the arithmetic comparison so Bash does
+      # not interpret a value such as 0443 as octal.
+      while [[ ${#port} -gt 1 && "${port}" == 0* ]]; do
+        port="${port#0}"
+      done
+      [[ ${#port} -le 5 ]] || return 2
+      (( port >= 1 && port <= 65535 )) || return 2
+    fi
+
     printf '%s\n' "${override%/}"
     return 0
   fi

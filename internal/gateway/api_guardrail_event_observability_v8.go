@@ -238,12 +238,6 @@ func (facts apiGuardrailEventV8Facts) recordMetrics(
 				}),
 		)
 	}
-	registry := SharedAgentRegistry()
-	agentName, agentID := facts.meta.AgentName, facts.meta.AgentID
-	if registry != nil {
-		agentName = firstNonEmpty(agentName, registry.AgentName())
-		agentID = firstNonEmpty(agentID, registry.AgentID())
-	}
 	appendTokens := func(tokens *int64, tokenType string) {
 		if tokens == nil || *tokens <= 0 {
 			return
@@ -256,13 +250,10 @@ func (facts apiGuardrailEventV8Facts) recordMetrics(
 				}
 				return builder.BuildMetricGenAIClientTokenUsage(observability.MetricGenAIClientTokenUsageInput{
 					Envelope: envelope, Value: float64(*tokens),
-					GenAIOperationName:  observability.Present("chat"),
-					GenAIProviderName:   observability.Present("defenseclaw"),
-					GenAIRequestModel:   model,
-					GenAIAgentName:      optionalJudgeMetricText(agentName),
-					GenAIAgentID:        optionalJudgeMetricText(agentID),
-					GenAIConversationID: optionalJudgeMetricText(facts.meta.SessionID),
-					GenAITokenType:      observability.Present(tokenType),
+					GenAIOperationName: observability.Present("chat"),
+					GenAIProviderName:  observability.Present("defenseclaw"),
+					GenAIRequestModel:  model,
+					GenAITokenType:     observability.Present(tokenType),
 				})
 			}))
 	}

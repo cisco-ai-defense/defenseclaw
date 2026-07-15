@@ -232,9 +232,7 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 	}
 	input := trace.input
 	provider, _ := input.GenAIProviderName.Get()
-	agentID, _ := input.GenAIAgentID.Get()
 	agentName, _ := input.GenAIAgentName.Get()
-	conversationID, _ := input.GenAIConversationID.Get()
 	meta := llmEventMeta{
 		Source: input.Envelope.Connector, RunID: input.Envelope.Correlation.RunID,
 		RequestID: input.Envelope.Correlation.RequestID, SessionID: input.Envelope.Correlation.SessionID,
@@ -251,10 +249,8 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientTokenUsage(observability.MetricGenAIClientTokenUsageInput{
 					Envelope: envelope, Value: float64(count),
-					GenAIAgentID: proxyV8OptionalID(agentID), GenAIAgentName: proxyV8OptionalID(agentName),
-					GenAIConversationID: proxyV8OptionalID(conversationID),
-					GenAIOperationName:  observability.Present("chat"),
-					GenAIProviderName:   proxyV8OptionalText(provider), GenAIRequestModel: observability.Present(input.GenAIRequestModel),
+					GenAIOperationName: observability.Present("chat"),
+					GenAIProviderName:  proxyV8OptionalText(provider), GenAIRequestModel: observability.Present(input.GenAIRequestModel),
 					GenAITokenType: observability.Present(tokenType),
 				})
 			},
@@ -272,7 +268,6 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientOperationDuration(observability.MetricGenAIClientOperationDurationInput{
 					Envelope: envelope, Value: durationSeconds,
-					GenAIAgentID: proxyV8OptionalID(agentID), GenAIAgentName: proxyV8OptionalID(agentName),
 					GenAIOperationName: observability.Present("chat"),
 					GenAIProviderName:  proxyV8OptionalText(provider), GenAIRequestModel: observability.Present(input.GenAIRequestModel),
 				})

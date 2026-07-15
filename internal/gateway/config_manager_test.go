@@ -304,7 +304,7 @@ func TestConfigManagerManagedNoOpUsesEffectiveGeneratedPlan(t *testing.T) {
 			}
 			active, err := config.WithObservabilityV8ManagedAIDDestination(
 				compiled.Plan,
-				sidecarObservabilityV8ManagedOptionsFromConfig(initial),
+				sidecarObservabilityV8ManagedOptionsFromConfig(initial, raw),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -348,6 +348,78 @@ func TestConfigManagerManagedNoOpUsesEffectiveGeneratedPlan(t *testing.T) {
 				t.Fatalf("managed destination=%+v present=%t, want endpoint %q", destination, ok, wantEndpoint)
 			}
 		})
+	}
+}
+
+func TestConfigManagerManagedExactSourceChangePublishesNewGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	makeRaw := func(comment string) []byte {
+		return []byte("# " + comment + "\nconfig_version: 8\ndata_dir: " + dir + `
+observability: {}
+`)
+	}
+	initialRaw := makeRaw("source generation A")
+	changedRaw := makeRaw("source generation B")
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.CiscoAIDefense.Endpoint = "https://aid.example.test"
+	compiled, err := config.ParseCompileObservabilityV8(
+		path, initialRaw, config.ObservabilityV8CompileOptions{DefaultDataDir: dir},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := config.WithObservabilityV8ManagedAIDDestination(
+		compiled.Plan, sidecarObservabilityV8ManagedOptionsFromConfig(initial, initialRaw),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyCalls := 0
+	mgr := newConfigManagerWithSnapshot(
+		path, initial, nil, nil, active.Digest(),
+		func(_ context.Context, _ *config.Config, _ *config.Config, diff ConfigDiff, source configReloadSource) error {
+			applyCalls++
+			if len(diff.Changed) != 1 || diff.Changed[0] != "observability" ||
+				!bytes.Equal(source.raw, changedRaw) {
+				t.Fatalf("exact-source reload diff/source=%+v/%q", diff, source.raw)
+			}
+			return nil
+		},
+	)
+	mgr.bindInitialObservabilityV8Plan(active)
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.CiscoAIDefense.Endpoint = "https://aid.example.test"
+		}
+		return candidate, loadErr
+	}
+	if err := os.WriteFile(path, changedRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "exact_source_change"); err != nil {
+		t.Fatal(err)
+	}
+	if applyCalls != 1 || mgr.gen.Load() != 1 || mgr.v8Plan == nil || mgr.v8Plan.ReloadEquivalent(active) {
+		t.Fatalf("exact-source reload calls/generation/plan=%d/%d/%p", applyCalls, mgr.gen.Load(), mgr.v8Plan)
+	}
+	destination, ok := mgr.v8Plan.RuntimeDestination(config.ObservabilityV8ManagedAIDDestinationName)
+	if !ok {
+		t.Fatal("managed destination missing after exact-source reload")
+	}
+	if got, ok := config.ObservabilityV8ManagedAIDSourceContentHash(destination); !ok ||
+		got != config.ObservabilityV8SourceContentHash(changedRaw) {
+		t.Fatalf("published exact source binding=%q/%t", got, ok)
 	}
 }
 

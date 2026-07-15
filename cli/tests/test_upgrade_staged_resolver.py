@@ -146,9 +146,31 @@ def resolver_env(tmp_path: Path):
         for version in ("0.8.4", "0.8.5"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
-            manifest = json.dumps(_manifest(version), sort_keys=True).encode()
+            manifest_payload = _manifest(version)
+            manifest = json.dumps(manifest_payload, sort_keys=True).encode()
             (release_dir / "upgrade-manifest.json").write_bytes(manifest)
             checksum_rows = [f"{hashlib.sha256(manifest).hexdigest()}  upgrade-manifest.json"]
+            release_artifacts = manifest_payload["release_artifacts"]
+            assert isinstance(release_artifacts, dict)
+            wheel_name = release_artifacts["wheel"]
+            assert isinstance(wheel_name, str)
+            wheel = release_dir / wheel_name
+            wheel.write_bytes(
+                b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+                + bytes(value ^ 0xA5 for value in b"resolver target wheel fixture")
+            )
+            checksum_rows.append(f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}")
+            gateways = release_artifacts["gateways"]
+            assert isinstance(gateways, dict)
+            for platform_gateways in gateways.values():
+                assert isinstance(platform_gateways, dict)
+                for gateway_name in platform_gateways.values():
+                    assert isinstance(gateway_name, str)
+                    gateway = release_dir / gateway_name
+                    gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
+                    checksum_rows.append(
+                        f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}"
+                    )
             if version == "0.8.5":
                 provenance = (
                     json.dumps(

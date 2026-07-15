@@ -15,6 +15,7 @@ package router
 
 import (
 	"fmt"
+	"net/url"
 	"reflect"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -235,8 +236,11 @@ func (metadata Metadata) validate() error {
 }
 
 // RecordBuilder constructs either the ordinary record or, when requested by
-// AdmissionFloor, the producer's minimal mandatory record. It is never invoked
-// for AdmissionDrop.
+// AdmissionFloor, the producer's minimal mandatory record. Evaluate never
+// invokes it for AdmissionDrop. EvaluateManagedLogFallback is the sole narrow
+// exception: after proving ordinary admission was AdmissionDrop and the plan
+// contains the exact release-owned managed-enterprise destination, it invokes
+// the builder once with AdmissionOrdinary for managed-only projection.
 type RecordBuilder func(Admission) (observability.Record, error)
 
 // Delivery identifies one selected destination route. Projection, redaction,
@@ -271,6 +275,28 @@ func (result Result) Record() (observability.Record, bool) {
 // Deliveries returns a copy that callers may mutate safely.
 func (result Result) Deliveries() []Delivery {
 	return append([]Delivery(nil), result.deliveries...)
+}
+
+// ManagedLogFallbackResult is the release-owned, managed-only result for one
+// ordinary collection drop. It deliberately has no Admission value: the
+// ordinary verdict remains AdmissionDrop, local persistence remains disabled,
+// and the enclosed canonical record is authorized only for the one generated
+// managed-enterprise delivery.
+type ManagedLogFallbackResult struct {
+	record    observability.Record
+	hasRecord bool
+	delivery  Delivery
+}
+
+func (result ManagedLogFallbackResult) Record() (observability.Record, bool) {
+	if !result.hasRecord {
+		return observability.Record{}, false
+	}
+	return result.record.Clone(), true
+}
+
+func (result ManagedLogFallbackResult) Delivery() (Delivery, bool) {
+	return result.delivery, result.hasRecord
 }
 
 type collectionKey struct {
@@ -316,6 +342,7 @@ type Evaluator struct {
 	collection       map[collectionKey]bool
 	destinations     []compiledDestination
 	localDestination int
+	managedFallback  int
 	planDigest       string
 }
 
@@ -335,6 +362,7 @@ func New(plan *config.ObservabilityV8Plan) (*Evaluator, error) {
 		collection:       make(map[collectionKey]bool, len(snapshot.Buckets)*len(observability.Signals())),
 		destinations:     make([]compiledDestination, 0, len(snapshot.Destinations)),
 		localDestination: -1,
+		managedFallback:  -1,
 		planDigest:       plan.Digest(),
 	}
 	seenBuckets := make(map[observability.Bucket]struct{}, len(snapshot.Buckets))
@@ -369,6 +397,12 @@ func New(plan *config.ObservabilityV8Plan) (*Evaluator, error) {
 		if err := validateDestinationIndex(destination); err != nil {
 			return nil, err
 		}
+		if source.Name == config.ObservabilityV8ManagedAIDDestinationName {
+			if evaluator.managedFallback >= 0 || !validManagedFallbackDestination(source, destination) {
+				return nil, fmt.Errorf("compiled plan contains an invalid managed-enterprise destination")
+			}
+			evaluator.managedFallback = len(evaluator.destinations)
+		}
 		if source.Kind == config.ObservabilityV8DestinationLocalSQLite {
 			if source.Name != config.ObservabilityV8LocalDestinationName || !source.Generated || !source.Enabled {
 				return nil, fmt.Errorf("compiled plan contains an invalid local SQLite destination")
@@ -387,6 +421,97 @@ func New(plan *config.ObservabilityV8Plan) (*Evaluator, error) {
 		return nil, fmt.Errorf("compiled plan omits the required local SQLite destination")
 	}
 	return evaluator, nil
+}
+
+// validManagedFallbackDestination recognizes only the release-owned plan
+// identity. Source-authored destinations cannot obtain the managed-only
+// collection exception by imitating one field: the reserved name, generated
+// identity, log-only capability, generated all-bucket sensitive route, and
+// release-owned transport shape must all match.
+func validManagedFallbackDestination(
+	source config.ObservabilityV8EffectiveDestination,
+	destination compiledDestination,
+) bool {
+	if source.Name != config.ObservabilityV8ManagedAIDDestinationName ||
+		source.Kind != config.ObservabilityV8DestinationOTLP || !source.Enabled || !source.Generated ||
+		source.PolicyForm != config.ObservabilityV8PolicyImplicitLocal || !source.FirstMatchPerSignal ||
+		len(source.Capabilities.Signals) != 1 || source.Capabilities.Signals[0] != observability.SignalLogs ||
+		len(source.SelectedSignals) != 1 || source.SelectedSignals[0] != observability.SignalLogs ||
+		len(source.Routes) != 3 || len(destination.routes) != 3 ||
+		source.Transport.Protocol != "http/json" || source.Transport.Method != "POST" ||
+		source.Transport.LoggerName != "defenseclaw" ||
+		source.ReloadApplicability.Policy != config.ObservabilityV8RestartRequired ||
+		source.ReloadApplicability.Transport != config.ObservabilityV8LiveReloadable ||
+		len(source.Transport.Headers) != 0 || source.Transport.TokenEnv != "" ||
+		source.Transport.BearerEnv != "" || !validManagedFallbackEndpoint(source.Transport.Endpoint) ||
+		source.Transport.Batch == nil || source.Transport.Batch.MaxQueueSize <= 0 ||
+		source.Transport.Batch.MaxQueueBytes <= 0 || source.Transport.Batch.MaxExportBatchSize <= 0 ||
+		source.Transport.Batch.MaxExportBatchBytes <= 0 || source.Transport.Batch.ScheduledDelayMS <= 0 {
+		return false
+	}
+	diagnosticDrop := source.Routes[0]
+	componentDrop := source.Routes[1]
+	send := source.Routes[2]
+	if !validGeneratedManagedDropRoute(
+		diagnosticDrop,
+		0,
+		"drop-local-inventory-diagnostics",
+		[]observability.ProducerKey{config.ObservabilityV8LocalInventoryDiagnosticAction},
+		nil,
+	) || !validGeneratedManagedDropRoute(
+		componentDrop,
+		1,
+		"drop-managed-inventory-components",
+		[]observability.ProducerKey{
+			config.ObservabilityV8ManagedAgentInventoryAction,
+			config.ObservabilityV8ManagedConnectorInventoryAction,
+			config.ObservabilityV8ManagedMCPInventoryAction,
+		},
+		[]observability.EventName{"ai_component.observed"},
+	) || send.Index != 2 || send.Name != "all-collected-logs" || !send.Generated ||
+		len(send.Signals) != 1 || send.Signals[0] != observability.SignalLogs ||
+		send.Action != config.ObservabilityV8RouteSend || send.IncludesMandatoryFloor ||
+		!send.Selector.BucketWildcard || len(send.Selector.Buckets) != len(observability.Buckets()) ||
+		len(send.Selector.Sources) != 0 || len(send.Selector.Connectors) != 0 ||
+		len(send.Selector.Actions) != 0 || len(send.Selector.EventNames) != 0 ||
+		send.Selector.MinSeverity != "" || !coversCatalog(destination.routes[2].selector.buckets) ||
+		len(send.RedactionProfileByBucket) != len(observability.Buckets()) {
+		return false
+	}
+	for _, bucket := range observability.Buckets() {
+		if send.RedactionProfileByBucket[bucket] != "sensitive" {
+			return false
+		}
+	}
+	return true
+}
+
+func validGeneratedManagedDropRoute(
+	route config.ObservabilityV8EffectiveRoute,
+	index int,
+	name string,
+	actions []observability.ProducerKey,
+	eventNames []observability.EventName,
+) bool {
+	return route.Index == index && route.Name == name && route.Generated &&
+		len(route.Signals) == 1 && route.Signals[0] == observability.SignalLogs &&
+		route.Action == config.ObservabilityV8RouteDrop && !route.IncludesMandatoryFloor &&
+		!route.Selector.BucketWildcard &&
+		reflect.DeepEqual(route.Selector.Buckets, []observability.Bucket{observability.BucketAIDiscovery}) &&
+		len(route.Selector.Sources) == 0 && len(route.Selector.Connectors) == 0 &&
+		reflect.DeepEqual(route.Selector.Actions, actions) &&
+		reflect.DeepEqual(route.Selector.EventNames, eventNames) &&
+		route.Selector.MinSeverity == "" && len(route.RedactionProfileByBucket) == 0
+}
+
+func validManagedFallbackEndpoint(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Opaque == "" &&
+		parsed.Host != "" && parsed.Hostname() != "" && parsed.User == nil &&
+		parsed.Path == config.ObservabilityV8ManagedAIDIngestPath &&
+		parsed.EscapedPath() == config.ObservabilityV8ManagedAIDIngestPath &&
+		parsed.RawPath == "" && parsed.RawQuery == "" && !parsed.ForceQuery &&
+		parsed.Fragment == "" && parsed.RawFragment == ""
 }
 
 // PlanDigest identifies the immutable compiled plan captured by this evaluator.
@@ -577,6 +702,49 @@ func (evaluator *Evaluator) Evaluate(metadata Metadata, builder RecordBuilder) (
 	result.hasRecord = true
 	result.deliveries = evaluator.route(metadata, admission)
 	return result, nil
+}
+
+// EvaluateManagedLogFallback is the only release-owned exception to ordinary
+// collection-before-construction. It first proves that ordinary evaluation is
+// AdmissionDrop, then proves that the active immutable plan contains and
+// selects the exact generated managed-enterprise log destination. Only then is
+// the ordinary canonical record built once and validated. The result carries
+// no local or operator-authored delivery and cannot apply to mandatory-floor,
+// trace, or metric admission.
+func (evaluator *Evaluator) EvaluateManagedLogFallback(
+	metadata Metadata,
+	builder RecordBuilder,
+) (ManagedLogFallbackResult, error) {
+	admission, err := evaluator.Admit(metadata)
+	if err != nil {
+		return ManagedLogFallbackResult{}, err
+	}
+	if admission != AdmissionDrop || metadata.identity.Signal != observability.SignalLogs ||
+		metadata.source == observability.SourceOTelReceiver ||
+		evaluator.managedFallback < 0 || evaluator.managedFallback >= len(evaluator.destinations) {
+		return ManagedLogFallbackResult{}, nil
+	}
+	destination := evaluator.destinations[evaluator.managedFallback]
+	deliveries := routeDestination(destination, metadata, false)
+	if len(deliveries) != 1 ||
+		deliveries[0].DestinationName != config.ObservabilityV8ManagedAIDDestinationName ||
+		deliveries[0].DestinationKind != config.ObservabilityV8DestinationOTLP ||
+		deliveries[0].MandatoryFloor || deliveries[0].RedactionProfile != "sensitive" {
+		return ManagedLogFallbackResult{}, nil
+	}
+	if builder == nil {
+		return ManagedLogFallbackResult{}, fmt.Errorf("record builder is required for managed-only fallback")
+	}
+	record, err := builder(AdmissionOrdinary)
+	if err != nil {
+		return ManagedLogFallbackResult{}, err
+	}
+	if err := verifyBuiltRecord(metadata, AdmissionOrdinary, record); err != nil {
+		return ManagedLogFallbackResult{}, err
+	}
+	return ManagedLogFallbackResult{
+		record: record.Clone(), hasRecord: true, delivery: deliveries[0],
+	}, nil
 }
 
 func verifyBuiltRecord(metadata Metadata, admission Admission, record observability.Record) error {

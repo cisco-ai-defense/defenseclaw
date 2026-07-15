@@ -744,18 +744,6 @@ func recordGeneratedModelMetricsV8ForProducer(
 	connector := telemetry.NormalizeMetricTextLabel(meta.Source)
 	provider := telemetry.NormalizeGenAIProviderLabel(observation.provider)
 	model := telemetry.NormalizeModelLabel(observation.reportedModel)
-	agentID := telemetry.NormalizeMetricIdentityLabel(observation.agentID)
-	agentName := telemetry.NormalizeMetricTextLabel(observation.agentName)
-	rootAgentID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.RootAgentID, observation.agentID))
-	lifecycleID := telemetry.NormalizeMetricIdentityLabel(meta.LifecycleID)
-	executionID := telemetry.NormalizeMetricIdentityLabel(meta.ExecutionID)
-	agentIDField := hookModelV8OptionalID(agentID)
-	rootAgentIDField := hookModelV8OptionalID(rootAgentID)
-	lifecycleIDField := hookModelV8OptionalID(lifecycleID)
-	executionIDField := hookModelV8OptionalID(executionID)
-	genericAgentID := hookModelV8OptionalID(observation.agentID)
-	genericAgentName := hookModelV8OptionalID(observation.agentName)
-	genericConversationID := hookModelV8OptionalID(observation.sessionID)
 	items := make([]observabilityruntime.GeneratedMetricBatchItem, 0, 5)
 	appendTokens := func(tokenType string, tokens int64) {
 		if tokens <= 0 {
@@ -767,15 +755,10 @@ func recordGeneratedModelMetricsV8ForProducer(
 				func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 					return builder.BuildMetricDefenseClawAgentTokenUsage(observability.MetricDefenseClawAgentTokenUsageInput{
 						Envelope: envelope, Value: tokens,
-						DefenseClawConnectorSource:  observability.Present(connector),
-						DefenseClawAgentExecutionID: executionIDField,
-						DefenseClawAgentLifecycleID: lifecycleIDField,
-						DefenseClawAgentRootID:      rootAgentIDField,
-						GenAIAgentID:                agentIDField,
-						GenAIAgentName:              observability.Present(agentName),
-						GenAIProviderName:           observability.Present(provider),
-						GenAIRequestModel:           observability.Present(model),
-						GenAITokenType:              observability.Present(tokenType),
+						DefenseClawConnectorSource: observability.Present(connector),
+						GenAIProviderName:          observability.Present(provider),
+						GenAIRequestModel:          observability.Present(model),
+						GenAITokenType:             observability.Present(tokenType),
 					})
 				}),
 			newHookV8MetricBatchItemForProducer(ctx, observation.finishedAt, meta, producer,
@@ -783,13 +766,10 @@ func recordGeneratedModelMetricsV8ForProducer(
 				func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 					return builder.BuildMetricGenAIClientTokenUsage(observability.MetricGenAIClientTokenUsageInput{
 						Envelope: envelope, Value: float64(tokens),
-						GenAIAgentID:        genericAgentID,
-						GenAIAgentName:      genericAgentName,
-						GenAIConversationID: genericConversationID,
-						GenAIOperationName:  observability.Present("chat"),
-						GenAIProviderName:   observability.Present(provider),
-						GenAIRequestModel:   observability.Present(model),
-						GenAITokenType:      observability.Present(tokenType),
+						GenAIOperationName: observability.Present("chat"),
+						GenAIProviderName:  observability.Present(provider),
+						GenAIRequestModel:  observability.Present(model),
+						GenAITokenType:     observability.Present(tokenType),
 					})
 				}),
 		)
@@ -803,8 +783,6 @@ func recordGeneratedModelMetricsV8ForProducer(
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientOperationDuration(observability.MetricGenAIClientOperationDurationInput{
 					Envelope: envelope, Value: durationSeconds,
-					GenAIAgentID:       genericAgentID,
-					GenAIAgentName:     genericAgentName,
 					GenAIOperationName: observability.Present("chat"),
 					GenAIProviderName:  observability.Present(provider),
 					GenAIRequestModel:  observability.Present(model),

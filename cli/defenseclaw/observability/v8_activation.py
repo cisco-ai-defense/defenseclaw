@@ -692,6 +692,30 @@ def _trusted_owner_pairs(environment: Mapping[str, str]) -> frozenset[tuple[int,
     return frozenset(trusted)
 
 
+def _trusted_private_owner(
+    uid: int | None,
+    gid: int | None,
+    mode: int,
+    trusted: frozenset[tuple[int, int]],
+) -> bool:
+    """Accept a trusted UID with an inherited group only for private objects.
+
+    macOS inherits a new path's group from its parent directory. A caller-owned
+    custom data directory under ``/private/tmp`` can therefore be ``uid:wheel``
+    even when the process's primary group is ``staff``. The owner UID still has
+    exclusive authority when all group/other mode bits are clear. Preserve the
+    stricter exact-pair rule for every non-private object so a changed group can
+    never gain read, traverse, or write access through this compatibility path.
+    """
+
+    if uid is None or gid is None:
+        return False
+    if (uid, gid) in trusted:
+        return True
+    trusted_uids = {owner_uid for owner_uid, _owner_gid in trusted}
+    return uid in trusted_uids and stat.S_IMODE(mode) & 0o077 == 0
+
+
 def _assert_leaf_owner(snapshot: _FileSnapshot, trusted: frozenset[tuple[int, int]]) -> None:
     if not snapshot.existed:
         return
@@ -708,9 +732,14 @@ def _assert_leaf_owner(snapshot: _FileSnapshot, trusted: frozenset[tuple[int, in
         except windows_acl.WindowsAclError:
             raise V8ActivationError("leaf_acl_unsafe", "validate_leaf_owner", target_path=snapshot.path) from None
         return
-    if snapshot.uid is None or snapshot.gid is None or (snapshot.uid, snapshot.gid) not in trusted:
+    if snapshot.mode is None or not _trusted_private_owner(
+        snapshot.uid,
+        snapshot.gid,
+        snapshot.mode,
+        trusted,
+    ):
         raise V8ActivationError("leaf_owner_untrusted", "validate_leaf_owner", target_path=snapshot.path)
-    if snapshot.mode is None or snapshot.mode & 0o022:
+    if snapshot.mode & 0o022:
         raise V8ActivationError(
             "leaf_permissions_unsafe",
             "validate_leaf_owner",
@@ -862,7 +891,12 @@ def _new_environment_metadata(
     allowed = set(_trusted_owner_pairs(environment))
     data_info = os.lstat(data_dir)
     data_owner = (getattr(data_info, "st_uid", None), getattr(data_info, "st_gid", None))
-    if data_owner[0] is None or data_owner[1] is None or data_owner not in allowed:
+    if not _trusted_private_owner(
+        getattr(data_info, "st_uid", None),
+        getattr(data_info, "st_gid", None),
+        stat.S_IMODE(data_info.st_mode),
+        frozenset(allowed),
+    ):
         raise V8ActivationError("leaf_owner_untrusted", "new_environment_owner", target_path=snapshot.path)
     owner = (int(data_owner[0]), int(data_owner[1]))
     return _FileSnapshot(
@@ -1647,8 +1681,12 @@ def _tighten_existing_backup_root(
         root_info = os.fstat(root_descriptor)
         if not stat.S_ISDIR(root_info.st_mode):
             raise OSError(errno.ENOTDIR, "backup root is not a directory")
-        owner = (getattr(root_info, "st_uid", None), getattr(root_info, "st_gid", None))
-        if owner[0] is None or owner[1] is None or owner not in trusted_owners:
+        if not _trusted_private_owner(
+            getattr(root_info, "st_uid", None),
+            getattr(root_info, "st_gid", None),
+            stat.S_IMODE(root_info.st_mode),
+            trusted_owners,
+        ):
             raise OSError(errno.EPERM, "backup root owner is not trusted")
         # _assert_secure_parent_chain has already rejected group/other write
         # access. Narrowing the remaining read/execute bits is monotonic.

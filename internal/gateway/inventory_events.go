@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -40,6 +41,9 @@ const (
 	endpointConnectorInventorySource = "endpoint_connector_inventory"
 	endpointMCPInventorySource       = "endpoint_mcp_inventory"
 	endpointInventoryDetector        = "endpoint_inventory"
+	managedAgentInventoryDetector    = "managed_agent_inventory"
+	maxManagedConnectorInventory     = 128
+	maxManagedMCPInventory           = 256
 )
 
 var (
@@ -48,6 +52,9 @@ var (
 	)
 	endpointInventoryExecutableBasenamePattern = regexp.MustCompile(
 		`^[A-Za-z0-9][A-Za-z0-9._+@-]*$`,
+	)
+	endpointInventoryVersionPattern = regexp.MustCompile(
+		`^[A-Za-z0-9][A-Za-z0-9 .,_+@():-]*$`,
 	)
 )
 
@@ -71,6 +78,31 @@ type endpointInventoryComponent struct {
 	mcpURLHost                  string
 	mcpAuthProviderType         string
 	mcpDisabled                 *bool
+	agentConnector              string
+	agentInstalled              *bool
+	agentHasConfig              *bool
+	agentConfigBasename         string
+	agentConfigPathHash         string
+	agentHasBinary              *bool
+	agentBinaryBasename         string
+	agentBinaryPathHash         string
+	agentVersion                string
+	agentProbeStatus            string
+	agentScannedAt              string
+}
+
+// endpointInventoryCarrier is an atomic, typed snapshot split into parallel
+// privacy-homogeneous sections. The central redaction engine can therefore
+// apply identifier, metadata, and content policy without flattening mixed
+// classes or requiring mutable aggregation at the destination adapter.
+type endpointInventoryCarrier struct {
+	connectorIdentifiers observability.Optional[observability.TelemetryStructuredDefenseClawInventoryConnectorIdentifiers]
+	connectorMetadata    observability.Optional[observability.TelemetryStructuredDefenseClawInventoryConnectorMetadata]
+	connectorContent     observability.Optional[observability.TelemetryStructuredDefenseClawInventoryConnectorContent]
+	mcpIdentifiers       observability.Optional[observability.TelemetryStructuredDefenseClawInventoryMcpIdentifiers]
+	mcpMetadata          observability.Optional[observability.TelemetryStructuredDefenseClawInventoryMcpMetadata]
+	agentIdentifiers     observability.Optional[observability.TelemetryStructuredDefenseClawInventoryAgentIdentifiers]
+	agentMetadata        observability.Optional[observability.TelemetryStructuredDefenseClawInventoryAgentMetadata]
 }
 
 // EmitEndpointInventory publishes complete connector and MCP snapshots through
@@ -104,11 +136,13 @@ func emitEndpointInventory(
 		endpointConnectorInventorySource,
 		connectorComponents,
 		connectorPartial || connectorDiscoveryPartial,
+		config.ObservabilityV8ManagedConnectorInventoryAction,
 	)
 
 	mcpComponents, partial := endpointMCPComponents(cfg)
 	if err := emitEndpointInventorySnapshot(
 		ctx, emitter, endpointMCPInventorySource, mcpComponents, partial,
+		config.ObservabilityV8ManagedMCPInventoryAction,
 	); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -220,31 +254,167 @@ func emitEndpointInventorySnapshot(
 	source string,
 	components []endpointInventoryComponent,
 	partial bool,
+	action observability.ProducerKey,
+) error {
+	return emitInventorySnapshot(
+		ctx, emitter, source, "", components, partial,
+		observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
+	)
+}
+
+func emitInventorySnapshot(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	source, scannedAt string,
+	components []endpointInventoryComponent,
+	partial bool,
+	recordSource observability.Source,
+	managedAction observability.ProducerKey,
+	phase, detector string,
 ) error {
 	scanID := "inventory-" + uuid.NewString()
+	components = append([]endpointInventoryComponent(nil), components...)
+	sort.SliceStable(components, func(left, right int) bool {
+		if components[left].itemName != components[right].itemName {
+			return components[left].itemName < components[right].itemName
+		}
+		return components[left].id < components[right].id
+	})
 	active := 0
 	for _, component := range components {
 		if component.active {
 			active++
 		}
 	}
+	limit := managedInventoryLimit(managedAction)
+	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
+	action := managedAction
+	if partial || limit == 0 || len(components) > limit || !carrierOK {
+		partial = true
+		carrier = endpointInventoryCarrier{}
+		action = config.ObservabilityV8LocalInventoryDiagnosticAction
+	}
 	firstErr := emitEndpointInventorySummary(
-		ctx, emitter, source, scanID, len(components), active, partial,
+		ctx, emitter, source, scanID, scannedAt, len(components), active, partial,
+		recordSource, action, phase, carrier,
 	)
 	for _, component := range components {
-		if err := emitEndpointInventoryComponent(ctx, emitter, source, scanID, component); err != nil && firstErr == nil {
+		if err := emitEndpointInventoryComponent(
+			ctx, emitter, source, scanID, component,
+			recordSource, action, phase, detector,
+		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
+func managedInventoryLimit(action observability.ProducerKey) int {
+	switch action {
+	case config.ObservabilityV8ManagedConnectorInventoryAction:
+		return maxManagedConnectorInventory
+	case config.ObservabilityV8ManagedMCPInventoryAction:
+		return maxManagedMCPInventory
+	case config.ObservabilityV8ManagedAgentInventoryAction:
+		return 64
+	default:
+		return 0
+	}
+}
+
+func endpointInventoryCarrierFor(
+	action observability.ProducerKey,
+	components []endpointInventoryComponent,
+) (endpointInventoryCarrier, bool) {
+	switch action {
+	case config.ObservabilityV8ManagedConnectorInventoryAction:
+		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryConnectorIdentifier, 0, len(components))
+		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryConnectorMetadataItem, 0, len(components))
+		content := make([]observability.TelemetryStructuredDefenseClawInventoryConnectorContentItem, 0, len(components))
+		for _, component := range components {
+			if component.componentType != "supported_connector" ||
+				component.connectorSource == "" || component.connectorToolInspectionMode == "" ||
+				component.connectorSubprocessPolicy == "" {
+				return endpointInventoryCarrier{}, false
+			}
+			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryConnectorIdentifier{
+				Name: component.itemName,
+			})
+			metadata = append(metadata, observability.TelemetryStructuredDefenseClawInventoryConnectorMetadataItem{
+				Source: component.connectorSource, ToolInspectionMode: component.connectorToolInspectionMode,
+				SubprocessPolicy: component.connectorSubprocessPolicy,
+			})
+			content = append(content, observability.TelemetryStructuredDefenseClawInventoryConnectorContentItem{
+				Description: aiDiscoveryV8OptionalText(component.itemDescription),
+			})
+		}
+		return endpointInventoryCarrier{
+			connectorIdentifiers: observability.Present(observability.TelemetryStructuredDefenseClawInventoryConnectorIdentifiers{Items: identifiers}),
+			connectorMetadata:    observability.Present(observability.TelemetryStructuredDefenseClawInventoryConnectorMetadata{Items: metadata}),
+			connectorContent:     observability.Present(observability.TelemetryStructuredDefenseClawInventoryConnectorContent{Items: content}),
+		}, true
+	case config.ObservabilityV8ManagedMCPInventoryAction:
+		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier, 0, len(components))
+		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem, 0, len(components))
+		for _, component := range components {
+			if component.componentType != "mcp_server" || component.mcpDisabled == nil {
+				return endpointInventoryCarrier{}, false
+			}
+			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier{
+				Name: component.itemName, URLHost: aiDiscoveryV8OptionalText(component.mcpURLHost),
+			})
+			metadata = append(metadata, observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem{
+				Transport:        aiDiscoveryV8OptionalText(component.mcpTransport),
+				CommandBasename:  aiDiscoveryV8OptionalText(component.mcpCommandBasename),
+				AuthProviderType: aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
+				Disabled:         *component.mcpDisabled,
+			})
+		}
+		return endpointInventoryCarrier{
+			mcpIdentifiers: observability.Present(observability.TelemetryStructuredDefenseClawInventoryMcpIdentifiers{Items: identifiers}),
+			mcpMetadata:    observability.Present(observability.TelemetryStructuredDefenseClawInventoryMcpMetadata{Items: metadata}),
+		}, true
+	case config.ObservabilityV8ManagedAgentInventoryAction:
+		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryAgentIdentifier, 0, len(components))
+		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryAgentMetadataItem, 0, len(components))
+		for _, component := range components {
+			if component.componentType != "coding_agent" || component.agentConnector == "" ||
+				component.agentInstalled == nil || component.agentHasConfig == nil ||
+				component.agentHasBinary == nil || component.agentProbeStatus == "" {
+				return endpointInventoryCarrier{}, false
+			}
+			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryAgentIdentifier{
+				Name:           component.agentConnector,
+				ConfigPathHash: aiDiscoveryV8OptionalText(component.agentConfigPathHash),
+				BinaryPathHash: aiDiscoveryV8OptionalText(component.agentBinaryPathHash),
+			})
+			metadata = append(metadata, observability.TelemetryStructuredDefenseClawInventoryAgentMetadataItem{
+				Installed: *component.agentInstalled, HasConfig: *component.agentHasConfig,
+				ConfigBasename: aiDiscoveryV8OptionalText(component.agentConfigBasename),
+				HasBinary:      *component.agentHasBinary,
+				BinaryBasename: aiDiscoveryV8OptionalText(component.agentBinaryBasename),
+				Version:        aiDiscoveryV8OptionalText(component.agentVersion), ProbeStatus: component.agentProbeStatus,
+			})
+		}
+		return endpointInventoryCarrier{
+			agentIdentifiers: observability.Present(observability.TelemetryStructuredDefenseClawInventoryAgentIdentifiers{Items: identifiers}),
+			agentMetadata:    observability.Present(observability.TelemetryStructuredDefenseClawInventoryAgentMetadata{Items: metadata}),
+		}, true
+	default:
+		return endpointInventoryCarrier{}, false
+	}
+}
+
 func emitEndpointInventorySummary(
 	ctx context.Context,
 	emitter sidecarRuntimeEmitter,
-	source, scanID string,
+	source, scanID, scannedAt string,
 	total, active int,
 	partial bool,
+	recordSource observability.Source,
+	action observability.ProducerKey,
+	phase string,
+	carrier endpointInventoryCarrier,
 ) error {
 	severity := "INFO"
 	canonicalSeverity := observability.SeverityInfo
@@ -266,9 +436,9 @@ func emitEndpointInventorySummary(
 		observability.ClassificationContext{
 			Bucket: observability.BucketAIDiscovery, EventName: "ai.discovery.completed", RawSeverity: severity,
 		},
-		observability.SourceSystem,
+		recordSource,
 		"",
-		observability.ProducerKey("ai_discovery"),
+		action,
 	)
 	if err != nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -285,22 +455,30 @@ func emitEndpointInventorySummary(
 			return observability.Record{}, buildErr
 		}
 		return builder.BuildLogAIDiscoveryCompleted(observability.LogAIDiscoveryCompletedInput{
-			Envelope: aiDiscoveryV8EmitEnvelope(ctx, snapshot, "endpoint_inventory"),
+			Envelope: endpointInventoryEmitEnvelope(ctx, snapshot, recordSource, action, phase),
 			Severity: observability.Present(canonicalSeverity), LogLevel: observability.Present(logLevel),
-			Outcome:                                outcome,
-			DefenseClawAIDiscoveryScanID:           scanID,
-			DefenseClawAIDiscoverySource:           source,
-			DefenseClawAIDiscoveryPrivacyMode:      "enhanced",
-			DefenseClawAIDiscoveryResult:           result,
-			DefenseClawAIDiscoveryDurationMs:       0,
-			DefenseClawAIDiscoverySignalsTotal:     int64(total),
-			DefenseClawAIDiscoveryActiveSignals:    int64(active),
-			DefenseClawAIDiscoveryNewSignals:       0,
-			DefenseClawAIDiscoveryChangedSignals:   0,
-			DefenseClawAIDiscoveryGoneSignals:      0,
-			DefenseClawAIDiscoveryFilesScanned:     0,
-			DefenseClawAIDiscoveryDedupeSuppressed: 0,
-			DefenseClawAIDiscoveryErrors:           errorsTotal,
+			Outcome:                                  outcome,
+			DefenseClawAIDiscoveryScanID:             scanID,
+			DefenseClawAIDiscoverySource:             source,
+			DefenseClawAIDiscoveryPrivacyMode:        "enhanced",
+			DefenseClawAIDiscoveryResult:             result,
+			DefenseClawAIDiscoveryDurationMs:         0,
+			DefenseClawAIDiscoverySignalsTotal:       int64(total),
+			DefenseClawAIDiscoveryActiveSignals:      int64(active),
+			DefenseClawAIDiscoveryNewSignals:         0,
+			DefenseClawAIDiscoveryChangedSignals:     0,
+			DefenseClawAIDiscoveryGoneSignals:        0,
+			DefenseClawAIDiscoveryFilesScanned:       0,
+			DefenseClawAIDiscoveryDedupeSuppressed:   0,
+			DefenseClawAIDiscoveryErrors:             errorsTotal,
+			DefenseClawAgentDiscoveryScannedAt:       aiDiscoveryV8OptionalText(scannedAt),
+			DefenseClawInventoryConnectorIdentifiers: carrier.connectorIdentifiers,
+			DefenseClawInventoryConnectorMetadata:    carrier.connectorMetadata,
+			DefenseClawInventoryConnectorContent:     carrier.connectorContent,
+			DefenseClawInventoryMcpIdentifiers:       carrier.mcpIdentifiers,
+			DefenseClawInventoryMcpMetadata:          carrier.mcpMetadata,
+			DefenseClawInventoryAgentIdentifiers:     carrier.agentIdentifiers,
+			DefenseClawInventoryAgentMetadata:        carrier.agentMetadata,
 		})
 	})
 	return err
@@ -311,6 +489,9 @@ func emitEndpointInventoryComponent(
 	emitter sidecarRuntimeEmitter,
 	source, scanID string,
 	component endpointInventoryComponent,
+	recordSource observability.Source,
+	action observability.ProducerKey,
+	phase, detector string,
 ) error {
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
@@ -318,9 +499,9 @@ func emitEndpointInventoryComponent(
 		observability.ClassificationContext{
 			Bucket: observability.BucketAIDiscovery, EventName: "ai_component.observed", RawSeverity: "INFO",
 		},
-		observability.SourceSystem,
+		recordSource,
 		"",
-		observability.ProducerKey("ai_discovery"),
+		action,
 	)
 	if err != nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -337,12 +518,12 @@ func emitEndpointInventoryComponent(
 			return observability.Record{}, buildErr
 		}
 		return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
-			Envelope:                                        aiDiscoveryV8EmitEnvelope(ctx, snapshot, "endpoint_inventory"),
+			Envelope:                                        endpointInventoryEmitEnvelope(ctx, snapshot, recordSource, action, phase),
 			Severity:                                        observability.Present(observability.SeverityInfo),
 			LogLevel:                                        observability.Present(observability.LogLevelInfo),
 			DefenseClawAIComponentID:                        component.id,
 			DefenseClawAIComponentType:                      component.componentType,
-			DefenseClawAIDiscoveryDetector:                  observability.Present(endpointInventoryDetector),
+			DefenseClawAIDiscoveryDetector:                  observability.Present(detector),
 			DefenseClawAIDiscoverySignal:                    observability.Present(component.signal),
 			DefenseClawAIDiscoveryScanID:                    observability.Present(scanID),
 			DefenseClawAIDiscoverySignalID:                  observability.Present(component.id),
@@ -358,9 +539,86 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryMcpURLHost:                  aiDiscoveryV8OptionalText(component.mcpURLHost),
 			DefenseClawInventoryMcpAuthProviderType:         aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 			DefenseClawInventoryMcpDisabled:                 inventoryOptionalBool(component.mcpDisabled),
+			DefenseClawAgentDiscoveryConnector:              aiDiscoveryV8OptionalText(component.agentConnector),
+			DefenseClawAgentDiscoveryInstalled:              inventoryOptionalBool(component.agentInstalled),
+			DefenseClawAgentDiscoveryHasConfig:              inventoryOptionalBool(component.agentHasConfig),
+			DefenseClawAgentDiscoveryConfigBasename:         aiDiscoveryV8OptionalText(component.agentConfigBasename),
+			DefenseClawAgentDiscoveryConfigPathHash:         aiDiscoveryV8OptionalText(component.agentConfigPathHash),
+			DefenseClawAgentDiscoveryHasBinary:              inventoryOptionalBool(component.agentHasBinary),
+			DefenseClawAgentDiscoveryBinaryBasename:         aiDiscoveryV8OptionalText(component.agentBinaryBasename),
+			DefenseClawAgentDiscoveryBinaryPathHash:         aiDiscoveryV8OptionalText(component.agentBinaryPathHash),
+			DefenseClawAgentDiscoveryVersion:                aiDiscoveryV8OptionalText(component.agentVersion),
+			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
+			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 		})
 	})
 	return err
+}
+
+// emitManagedAgentInventory publishes a validated coding-agent snapshot into
+// the force-enabled ai.discovery family. The release-owned action is reserved
+// by the managed plan: SQLite remains authoritative locally and only the
+// CMID-authenticated AI Defense destination receives optional export work.
+func (a *APIServer) emitManagedAgentInventory(
+	ctx context.Context,
+	report *agentDiscoveryReport,
+	installed int,
+	partial bool,
+) error {
+	if a == nil || report == nil || ctx == nil || !ManagedEnterpriseActive() {
+		return nil
+	}
+	emitter := a.observabilityV8RuntimeEmitter()
+	if emitter == nil {
+		return nil
+	}
+	source := discoverySourceOrUnknown(report.Source)
+	recordSource := agentDiscoverySource(source)
+	action := config.ObservabilityV8ManagedAgentInventoryAction
+	names := make([]string, 0, len(report.Agents))
+	for name := range report.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	components := make([]endpointInventoryComponent, 0, len(names))
+	for _, name := range names {
+		signal := report.Agents[name]
+		installedValue := signal.Installed
+		hasConfig := signal.HasConfig
+		hasBinary := signal.HasBinary
+		components = append(components, endpointInventoryComponent{
+			id: endpointInventoryComponentID("agent", name), componentType: "coding_agent",
+			signal: "coding_agent_inventory", product: name, active: signal.Installed,
+			itemName: name, agentConnector: name, agentInstalled: &installedValue,
+			agentHasConfig: &hasConfig, agentConfigBasename: signal.ConfigBasename,
+			agentConfigPathHash: signal.ConfigPathHash, agentHasBinary: &hasBinary,
+			agentBinaryBasename: signal.BinaryBasename, agentBinaryPathHash: signal.BinaryPathHash,
+			agentVersion:     signal.Version,
+			agentProbeStatus: normalizeDiscoveryProbeStatus(signal.VersionProbeStatus),
+			agentScannedAt:   report.ScannedAt,
+		})
+	}
+	// installed was computed from this already-validated report by the caller;
+	// the carrier builder independently retains each exact Boolean and the
+	// compatibility projector verifies the aggregate before export.
+	_ = installed
+	return emitInventorySnapshot(
+		ctx, emitter, source, report.ScannedAt, components, partial,
+		recordSource, action, "agent_inventory", managedAgentInventoryDetector,
+	)
+}
+
+func endpointInventoryEmitEnvelope(
+	ctx context.Context,
+	snapshot observabilityruntime.EmitContext,
+	source observability.Source,
+	action observability.ProducerKey,
+	phase string,
+) observability.FamilyEnvelopeInput {
+	envelope := aiDiscoveryV8EmitEnvelope(ctx, snapshot, phase)
+	envelope.Source = source
+	envelope.Action = string(action)
+	return envelope
 }
 
 func endpointInventoryComponentID(kind, identity string) string {

@@ -1262,7 +1262,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
-	resp, err := doProviderRequest(upstreamReq)
+	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -5019,7 +5019,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
-	resp, err := doProviderRequest(upReq)
+	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return

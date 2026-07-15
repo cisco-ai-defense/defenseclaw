@@ -262,6 +262,7 @@ func TestFactoryManagedAIDIsGeneratedOnlyAndAuthUnavailabilityDoesNotRejectGener
 	}
 	plan, err := config.WithObservabilityV8ManagedAIDDestination(base, config.ObservabilityV8ManagedAIDOptions{
 		DeploymentMode: "managed_enterprise", Endpoint: "https://8.8.8.8",
+		SourceContentHash: strings.Repeat("a", 64),
 	})
 	if err != nil {
 		t.Fatal(err)

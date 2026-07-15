@@ -4474,12 +4474,19 @@ func TestHandleGuardrailEvent_GeneratedMetricsRecorded(t *testing.T) {
 	}
 	wantTokens := map[string]float64{"input": 250, "output": 120}
 	for _, metric := range tokens {
-		tokenType, _ := metric.Attributes()["gen_ai.token.type"].(string)
+		attributes := metric.Attributes()
+		tokenType, _ := attributes["gen_ai.token.type"].(string)
 		value, ok := metric.Value().Double()
 		if !ok || value != wantTokens[tokenType] ||
-			metric.Attributes()["gen_ai.agent.name"] != "openclaw" ||
-			metric.Attributes()["gen_ai.agent.id"] == "" {
-			t.Fatalf("token metric value/attributes=%v/%v", metric.Value(), metric.Attributes())
+			attributes["gen_ai.provider.name"] != "defenseclaw" ||
+			attributes["gen_ai.operation.name"] != "chat" ||
+			attributes["gen_ai.request.model"] != "gpt-4" {
+			t.Fatalf("token metric value/attributes=%v/%v", metric.Value(), attributes)
+		}
+		for _, key := range []string{"gen_ai.agent.id", "gen_ai.agent.name", "gen_ai.conversation.id"} {
+			if _, leaked := attributes[key]; leaked {
+				t.Fatalf("high-cardinality %q leaked into token attributes=%v", key, attributes)
+			}
 		}
 	}
 	for _, metric := range metrics {

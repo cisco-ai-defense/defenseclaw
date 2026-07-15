@@ -5,14 +5,16 @@
 For a normal locally managed installation, the complete operator workflow is:
 
 ```text
-defenseclaw upgrade
+bash defenseclaw-upgrade.sh --yes
 ```
 
-`defenseclaw upgrade` resolves a manifest-declared staged transaction. When the
-installed controller predates the safe v8 migration protocol, the release-owned
-resolver first installs the `0.8.4` controller bridge, verifies it in a fresh
-process, and then hands the requested `0.8.5` hard cut to that controller. The
-existing confirmation prompt, or the existing `--yes` option, is sufficient.
+After the resolver asset and signed checksum manifest are authenticated, the
+target-release `defenseclaw-upgrade.sh` resolves a manifest-declared staged
+transaction in latest mode. When the installed controller predates the safe v8
+migration protocol, the resolver first installs the `0.8.4` controller bridge,
+verifies it in a fresh process, and then hands the requested `0.8.5` hard cut to
+that controller. The existing confirmation prompt, or the existing `--yes`
+option, is sufficient.
 
 The operator does not manually install the bridge, generate or approve a plan,
 run a separate apply command, type a special acknowledgement, or switch
@@ -50,23 +52,27 @@ The bridge and hard cut are separate releases. `0.8.4` requires protocol 1 so
 published `0.8.3` and older tested controllers can reach it, but installs a
 controller that supports protocol 2. `0.8.5` and later require protocol 2 and a
 minimum source of `0.8.4`. These are distinct manifest facts and MUST NOT share a
-single constant. They may be reviewed in one pull request only when that pull
-request has a short linear history containing distinct bridge and hard-cut
-source trees. A reviewed release-source map pins both tree hashes, and the
-release workflow resolves the matching first-parent commits after merge. A
-squash merge, missing tree, duplicate tree match, or off-main source fails
-closed.
+single constant. The published bridge is identified by its immutable release
+tag, source commit/tree, signed checksum manifest, and GitHub asset digests. The
+hard-cut source and policy identities are resolved at release time from the
+current, reviewed `main` commit and its Git tree, so the normal squash merge is
+supported. The release workflow writes those resolved identities into the
+signed release-source map and provenance documents. An off-main source,
+non-tip commit, mutable or mismatched bridge, or source-tree/digest mismatch
+fails closed.
 
 ### 2.1 Required release order and soak
 
-`0.8.4` MUST be published from its pinned bridge source tree and left as the
-latest release before `0.8.5` is cut from the later pinned hard-cut tree. During
-that bridge window, release owners MUST run the published-baseline matrix against
-the immutable `0.8.4` assets, verify macOS/Linux/Windows installation and
-fresh-controller health, and confirm that ordinary `0.8.3` clients can reach the
-bridge. Only after that published evidence is green may `0.8.5` become latest.
-The window also lets ordinary users adopt the bridge through the frozen built-in
-updater before the two-hop resolver becomes necessary.
+`0.8.4` MUST be published and immutable before `0.8.5` is cut. Its published
+runtime is POSIX-only: release owners MUST run the published-baseline matrix
+against its macOS and Linux assets, verify fresh-controller health, and prove
+that the Windows resolver refuses before mutation because no Windows gateway or
+rollback binary was published. Only after that evidence is green may `0.8.5`
+become latest. The authenticated target-release `defenseclaw-upgrade.sh` asset,
+run in latest mode without a version override, is the supported seamless POSIX
+entry point for both pre-bridge sources and hosts already on `0.8.4`. The frozen
+`0.8.4` built-in parser requires a nonempty Windows bridge matrix and therefore
+cannot parse the truthful hard-cut manifest whose Windows matrix is empty.
 
 The `0.8.5` release workflow independently downloads the published `0.8.4`
 assets and reruns the complete bridge-to-target transaction. Missing, mutable,
@@ -113,10 +119,12 @@ pre-bridge source resolves to:
 
 An explicit attempt to install the hard cut from a source below the signed
 minimum fails before backup, stop, or install and states that no changes were
-made. The release-owned shell and PowerShell resolvers may perform the automatic
-two-hop flow. An immutable older built-in controller that cannot resolve the graph
-MUST reject protocol 2 and direct the operator to that release-owned resolver; it
-must not attempt the hard cut itself.
+made. The authenticated target-release shell resolver performs the automatic
+two-hop flow on supported POSIX sources. The PowerShell resolver refuses before
+mutation because the published bridge has no Windows runtime. An immutable
+older built-in controller that cannot resolve the graph MUST reject protocol 2
+and direct the operator to the release-owned resolver; it must not attempt the
+hard cut itself.
 
 ## 3. Upgrade Flow
 
@@ -304,8 +312,9 @@ unconditional restart path or start a v8 gateway against v7 config. Instead:
   is still able to mutate the installation.
 - A rollback failure is a distinct fail-closed terminal state. It never overwrites
   the original failure code or becomes an upgrade-success receipt.
-- After journaled recovery closes, retrying `defenseclaw upgrade` reruns the
-  unapplied migration through the existing cursor semantics.
+- After journaled recovery closes, retrying the same authenticated
+  target-release resolver in latest mode reruns the unapplied migration through
+  the existing cursor semantics.
 
 Package managers and manual artifact paths that cannot execute this transaction
 MUST enforce the signed minimum-source preflight and refuse a bridge skip before
@@ -335,8 +344,8 @@ defenseclaw setup observability migrate-v8 --dry-run
 
 It prints a secret-free diff and warnings but does not modify live configuration.
 It is optional, is not mentioned as a prerequisite in the normal upgrade flow, and
-does not have a second apply/commit protocol. `defenseclaw upgrade` remains the
-normal writer.
+does not have a second apply/commit protocol. The authenticated target-release
+resolver remains the normal hard-cut writer.
 
 If configuration permissions prevent backup or atomic replacement, the upgrade
 fails before mutation with the path and required permission fix. It does not change

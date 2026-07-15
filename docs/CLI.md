@@ -563,14 +563,15 @@ owner-only temporary directory, verify its hard-coded platform SHA-256 before
 execution, use it once, and remove it. They do not install it globally or alter
 `PATH`. Any verifier download, digest, or signature failure occurs before
 service stop or installed mutation. The immutable `0.8.4` built-in controller
-predates this bootstrap, so use the current release-owned resolver on a
-no-Cosign `0.8.4` host.
+also cannot parse the truthful hard-cut manifest because its Windows bridge
+matrix is empty. Use the current target-release POSIX resolver on every
+`0.8.4` host, regardless of whether Cosign is already installed.
 
 **Known recovery paths:**
 
 | Installed version | Recommendation |
 | --- | --- |
-| `0.8.4` | Run the current release-owned POSIX resolver without `--version`; it authenticates a temporary pinned Cosign when needed and privately acquires exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. The frozen built-in command remains usable if Cosign is already on `PATH`. |
+| `0.8.4` | Run the current target-release POSIX resolver without `--version`; it authenticates a temporary pinned Cosign when needed and privately acquires exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. The frozen built-in command cannot parse the truthful hard-cut manifest with `platform_tested_source_versions.windows: []`, even when Cosign is already on `PATH`. |
 | A POSIX source listed for its platform in `release/upgrade-baselines.json` | Run the current release-owned shell resolver without `--version`. It authenticates a temporary verifier if needed and performs `source → 0.8.4 → fresh controller → latest` as one command. |
 | `0.8.0` or `0.8.1` | Use the current release-owned POSIX resolver without `--version`; no system-wide Cosign installation is required. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
 | Any Windows source | The `0.8.4` release contains no Windows gateway/rollback binary, so no Windows hard-cut path is published. The PowerShell resolver fails closed before stopping services. Keep the current installation unchanged. |

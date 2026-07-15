@@ -199,6 +199,18 @@ func (component *localLogComponent) ProcessImported(
 	return component.pipeline.ProcessImported(ctx, metadata, originDestination, suppressAll, builder)
 }
 
+func (component *localLogComponent) ProcessManagedLogFallback(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	if component == nil || component.pipeline == nil || component.store == nil ||
+		!component.active.Load() || component.closed.Load() {
+		return pipeline.LocalLogOutcome{}, &localFactoryError{}
+	}
+	return component.pipeline.ProcessManagedLogFallback(ctx, metadata, builder)
+}
+
 func (component *localLogComponent) StopIntake(context.Context) error {
 	if component == nil {
 		return errors.New("observability local runtime component is unavailable")

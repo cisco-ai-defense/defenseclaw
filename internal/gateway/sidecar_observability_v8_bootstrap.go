@@ -140,7 +140,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
 	if err := applySidecarObservabilityV8ManagedDestination(
-		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(cfg),
+		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(cfg, raw),
 	); err != nil {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, err)
 	}
@@ -202,7 +202,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		)
 	}
 	if managedErr := applySidecarObservabilityV8ManagedDestination(
-		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(candidateConfig),
+		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(candidateConfig, raw),
 	); managedErr != nil {
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, managedErr)
 	}
@@ -839,13 +839,15 @@ func applySidecarObservabilityV8ManagedDestination(
 
 func sidecarObservabilityV8ManagedOptionsFromConfig(
 	cfg *config.Config,
+	raw []byte,
 ) config.ObservabilityV8ManagedAIDOptions {
 	if cfg == nil {
 		return config.ObservabilityV8ManagedAIDOptions{}
 	}
 	return config.ObservabilityV8ManagedAIDOptions{
-		DeploymentMode: cfg.DeploymentMode,
-		Endpoint:       cfg.CiscoAIDefense.Endpoint,
+		DeploymentMode:    cfg.DeploymentMode,
+		Endpoint:          cfg.CiscoAIDefense.Endpoint,
+		SourceContentHash: config.ObservabilityV8SourceContentHash(raw),
 	}
 }
 
@@ -853,13 +855,14 @@ func sidecarObservabilityV8ManagedReloadCandidate(
 	compiled *config.ObservabilityV8CompiledConfig,
 	candidateConfig *config.Config,
 	active *config.ObservabilityV8Plan,
+	raw []byte,
 ) (*config.ObservabilityV8Plan, bool, error) {
-	if compiled == nil || compiled.Plan == nil || candidateConfig == nil || active == nil {
+	if compiled == nil || compiled.Plan == nil || candidateConfig == nil || active == nil || len(raw) == 0 {
 		return nil, false, &sidecarObservabilityV8BootstrapError{code: sidecarObservabilityV8BootstrapCompile}
 	}
 	candidate, err := config.WithObservabilityV8ManagedAIDDestination(
 		compiled.Plan,
-		sidecarObservabilityV8ManagedOptionsFromConfig(candidateConfig),
+		sidecarObservabilityV8ManagedOptionsFromConfig(candidateConfig, raw),
 	)
 	if err != nil {
 		return nil, false, err

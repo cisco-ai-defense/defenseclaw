@@ -26,9 +26,9 @@ reopened during implementation without a spec amendment.
 | D-017 | Use one global retention age for event, evidence, and judge-body history. |
 | D-018 | Default retention to 90 days; `0` retains forever. |
 | D-019 | Use atomic live reload; invalid new configuration leaves old behavior active. |
-| D-020 | `defenseclaw upgrade` automatically performs the one-time supported v7-to-v8 conversion; the gateway has no startup auto-migration or dual-format mode, and the standalone migration CLI is optional. |
+| D-020 | One authenticated target-release resolver command automatically stages supported POSIX v7 installations through the published `0.8.4` protocol-2 bridge and performs the one-time v7-to-v8 conversion under a fresh controller; the gateway has no startup auto-migration or dual-format mode, the standalone migration CLI is optional, and platforms without a published bridge fail before mutation. |
 | D-021 | An enabled destination with no `send` or `routes` receives every catalog bucket unredacted and all signals supported by that destination kind: logs for log-only kinds, metrics for Prometheus, and logs/traces/metrics for general OTLP. |
-| D-022 | Preserve the merged PR #403 full root/subagent lifecycle and traceability model and PR #412 local-dashboard data corrections as the v8 compatibility floor; the ordinary upgrade refreshes mutually compatible DefenseClaw-owned local assets without resetting history volumes or requiring another migration command. |
+| D-022 | Preserve the merged PR #403 full root/subagent lifecycle and traceability model and PR #412 local-dashboard data corrections as the v8 compatibility floor; the staged upgrade refreshes mutually compatible DefenseClaw-owned local assets without resetting history volumes or requiring another migration command. |
 | D-023 | Treat inbound OTLP as a closed registry-generated producer surface: only an exact supported binding may construct a new local canonical record or explicit derived observation; arbitrary decoded leaves are never persisted or re-exported as opaque telemetry. |
 | D-024 | Make the released gateway/sidecar/runtime v8-only after `defenseclaw upgrade`: v7 parsing is confined to the converter, read-only migration preview, historical fixtures, exact backup/rollback, and previous-binary recovery. Live producers, routers, destinations, reload, ordinary config mutation, and startup have no v7 fallback, dual-write, direct legacy OTel/sink path, or runtime compatibility branch. Generated Galileo/local/OpenInference projections and legacy-shaped SQLite read columns are additive v8 consumer projections, not v7 runtime ownership. |
 
@@ -74,10 +74,10 @@ diverges.
 | P-014 | Materialize audience presets into explicit YAML at authoring time rather than resolving mutable audience presets at runtime. | Later preset changes become reviewable config diffs instead of silent policy changes. |
 | P-015 | Reject YAML aliases, merge keys, and duplicate keys in v8 policy files. | Avoids hidden precedence, parser parity problems, alias expansion attacks, and comment-preserving edit ambiguity. |
 | P-016 | Do not allow implicit observability environment variables to override an explicit v8 graph; allow only documented bootstrap values and source-declared secret references. | Keeps `config.yaml` the central reviewable policy and makes effective provenance reliable. |
-| P-017 | The ordinary `defenseclaw upgrade` command automatically detects and migrates supported v7 configuration. | Keeps the operator workflow to one familiar command. |
+| P-017 | The authenticated target-release resolver automatically detects supported POSIX v7 configuration, installs the verified `0.8.4` bridge, re-execs under its fresh controller, and then runs the target v8 migration from one user command. | Keeps the operator workflow to one command while making the mandatory controller boundary explicit and verifiable. |
 | P-018 | The registered migration builds and validates the complete candidate before replacing any source file. | A conversion error never exposes partial v8 YAML. |
-| P-019 | A required conversion failure leaves or restores exact v7 configuration and never starts the v8 gateway against it. | Prevents an invalid config/binary state without inventing a new rollback protocol. |
-| P-020 | Reuse the existing verified release, backup, service stop/start, health-check, and migration-cursor mechanisms, and statically verify the target wheel's migration capability before confirmation or mutation. | A checksum-valid wheel can still expose an incompatible migration protocol or schema; rejecting it before backup, shutdown, or replacement preserves the simple upgrade path without an intermediate bridge release. |
+| P-019 | A required conversion, target-start, or health-check failure restores the exact healthy `0.8.4` CLI, gateway, v7 configuration, cursor, and custodied state and never leaves the v8 gateway running against v7 policy. | Protocol-2 rollback prevents an invalid mixed-version state and preserves the original failure in a durable receipt. |
+| P-020 | Reuse the verified release, backup, service stop/start, health-check, and migration-cursor mechanisms inside a protocol-2 staged transaction; statically verify both bridge and target capabilities before confirmation or mutation, and re-exec under the fresh `0.8.4` controller before entering the hard cut. | A checksum-valid artifact can still expose an incompatible controller or migration protocol; the published bridge and fresh-process handoff make rollback ownership explicit while keeping the operator workflow to one command. |
 | P-021 | Keep v8 SQLite migrations additive and readable by the immediately previous supported release. | Makes ordinary rollback sufficient for this feature. |
 | P-022 | The existing upgrade confirmation or `--yes` is sufficient; the redacted migration summary appears in that prompt. | Avoids a plan file, hash, typed phrase, or second apply operation. |
 | P-023 | The standalone migration CLI is an optional preview/support surface using the exact same library as upgrade. | Prevents preview and automatic conversion from drifting. |
@@ -157,8 +157,8 @@ The following MUST NOT appear incidentally in the v8 observability implementatio
 - Exactly-once remote delivery claims.
 - Automatic blocking VACUUM.
 - Reaping current enforcement state or asset snapshots.
-- Gateway startup or reload automatically rewriting v7 configuration. The normal
-  upgrader performs the one-time migration.
+- Gateway startup or reload automatically rewriting v7 configuration. The staged
+  target-release resolver and migration controller perform the one-time migration.
 - Running old and new observability pipelines in permanent parallel.
 - Configuration includes, scoped policy files, or remote/globbed sources.
 - Mutable runtime audience presets whose meaning can change after upgrade without a

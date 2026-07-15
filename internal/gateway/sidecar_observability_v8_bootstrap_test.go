@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
@@ -253,20 +254,33 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 	current.DeploymentMode = "managed_enterprise"
 	current.CiscoAIDefense.Endpoint = "https://one.example.test"
 	active, err := config.WithObservabilityV8ManagedAIDDestination(
-		compiled.Plan, sidecarObservabilityV8ManagedOptionsFromConfig(current),
+		compiled.Plan, sidecarObservabilityV8ManagedOptionsFromConfig(current, raw),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	candidate, changed, err := sidecarObservabilityV8ManagedReloadCandidate(compiled, current, active)
+	candidate, changed, err := sidecarObservabilityV8ManagedReloadCandidate(compiled, current, active, raw)
 	if err != nil || changed || !candidate.ReloadEquivalent(active) {
 		t.Fatalf("no-op managed candidate changed=%t error=%v", changed, err)
+	}
+	changedRaw := append(append([]byte(nil), raw...), []byte("\n# exact source generation changed\n")...)
+	candidate, changed, err = sidecarObservabilityV8ManagedReloadCandidate(compiled, current, active, changedRaw)
+	if err != nil || !changed || candidate.ReloadEquivalent(active) {
+		t.Fatalf("exact-source transition changed=%t error=%v", changed, err)
+	}
+	changedDestination, ok := candidate.RuntimeDestination(config.ObservabilityV8ManagedAIDDestinationName)
+	if !ok {
+		t.Fatal("exact-source transition lost managed destination")
+	}
+	if got, ok := config.ObservabilityV8ManagedAIDSourceContentHash(changedDestination); !ok ||
+		got != config.ObservabilityV8SourceContentHash(changedRaw) {
+		t.Fatalf("exact-source transition binding=%q/%t", got, ok)
 	}
 
 	nextEndpoint := cloneConfig(current)
 	nextEndpoint.CiscoAIDefense.Endpoint = "https://two.example.test"
-	candidate, changed, err = sidecarObservabilityV8ManagedReloadCandidate(compiled, nextEndpoint, active)
+	candidate, changed, err = sidecarObservabilityV8ManagedReloadCandidate(compiled, nextEndpoint, active, raw)
 	if err != nil || !changed {
 		t.Fatalf("endpoint transition changed=%t error=%v", changed, err)
 	}
@@ -277,7 +291,7 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 
 	nextMode := cloneConfig(current)
 	nextMode.DeploymentMode = "unmanaged_byod"
-	candidate, changed, err = sidecarObservabilityV8ManagedReloadCandidate(compiled, nextMode, active)
+	candidate, changed, err = sidecarObservabilityV8ManagedReloadCandidate(compiled, nextMode, active, raw)
 	if err != nil || !changed {
 		t.Fatalf("mode transition changed=%t error=%v", changed, err)
 	}
@@ -318,10 +332,15 @@ func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *
 		destination.Transport.Endpoint != first.URL+config.ObservabilityV8ManagedAIDIngestPath {
 		t.Fatalf("managed destination=%+v present=%t", destination, ok)
 	}
-	if len(destination.Routes) != 1 {
+	if len(destination.Routes) != 3 || destination.Routes[0].Name != "drop-local-inventory-diagnostics" ||
+		destination.Routes[0].Action != config.ObservabilityV8RouteDrop ||
+		destination.Routes[1].Name != "drop-managed-inventory-components" ||
+		destination.Routes[1].Action != config.ObservabilityV8RouteDrop ||
+		destination.Routes[2].Name != "all-collected-logs" ||
+		destination.Routes[2].Action != config.ObservabilityV8RouteSend {
 		t.Fatalf("managed routes=%+v", destination.Routes)
 	}
-	for bucket, profile := range destination.Routes[0].RedactionProfileByBucket {
+	for bucket, profile := range destination.Routes[2].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			t.Fatalf("managed bucket %q profile=%q", bucket, profile)
 		}
@@ -1040,6 +1059,188 @@ func TestSidecarConfigManagerV8RuntimeFailureRollsBackGraphAndConfig(t *testing.
 		t.Fatalf("rollback graph/sidecar/manager/gen = %d/%q/%q/%d",
 			owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Guardrail.Mode,
 			mgr.Current().Guardrail.Mode, mgr.gen.Load())
+	}
+}
+
+type recordingCloseIdleTransport struct {
+	closeCalls int
+	onClose    func()
+}
+
+func (*recordingCloseIdleTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("recording transport does not send requests")
+}
+
+func (transport *recordingCloseIdleTransport) CloseIdleConnections() {
+	transport.closeCalls++
+	if transport.onClose != nil {
+		transport.onClose()
+	}
+}
+
+func privateUpstreamReloadRaw(dataDir string, retentionDays int, allowed ...string) []byte {
+	var guardrail strings.Builder
+	guardrail.WriteString("guardrail:\n")
+	if len(allowed) == 0 {
+		guardrail.WriteString("  allow_private_upstreams: []\n")
+	} else {
+		guardrail.WriteString("  allow_private_upstreams:\n")
+		for _, ip := range allowed {
+			fmt.Fprintf(&guardrail, "    - %q\n", ip)
+		}
+	}
+	return []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\n%sobservability:\n  local:\n    retention_days: %d\n",
+		dataDir, guardrail.String(), retentionDays,
+	))
+}
+
+func bootstrapPrivateUpstreamReload(
+	t *testing.T,
+	fixture sidecarV8BootstrapFixture,
+	initialRaw []byte,
+) (*ConfigManager, *sidecarOwnedObservabilityV8Runtime) {
+	t.Helper()
+	t.Setenv("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "")
+	if err := os.WriteFile(fixture.configPath, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.sidecar.publishConfig(initial)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, initialRaw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(initial.Guardrail.AllowPrivateUpstreams))
+	t.Cleanup(func() { netguard.SetAllowedPrivateIPs(nil) })
+	mgr := newConfigManagerWithSnapshot(
+		fixture.configPath,
+		initial,
+		nil,
+		nil,
+		fixture.sidecar.observabilityV8ActivePlanDigest(),
+		fixture.sidecar.applyConfigReloadSnapshot,
+	)
+	fixture.sidecar.observabilityV8Mu.Lock()
+	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	fixture.sidecar.observabilityV8Mu.Unlock()
+	return mgr, owner
+}
+
+func installRecordingProviderTransport(t *testing.T) *recordingCloseIdleTransport {
+	t.Helper()
+	transport := &recordingCloseIdleTransport{}
+	originalClient := providerHTTPClient
+	providerHTTPClient = &http.Client{Transport: transport}
+	t.Cleanup(func() { providerHTTPClient = originalClient })
+	return transport
+}
+
+func TestSidecarConfigManagerV8PrivateUpstreamReloadReplacesAfterGraphPublish(t *testing.T) {
+	const oldIP = "10.50.2.100"
+	const newIP = "10.50.2.101"
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	initialRaw := privateUpstreamReloadRaw(fixture.dataDir, 90, oldIP)
+	mgr, owner := bootstrapPrivateUpstreamReload(t, fixture, initialRaw)
+	transport := installRecordingProviderTransport(t)
+	var graphGenerationAtClose uint64
+	var configuredIPsAtClose string
+	transport.onClose = func() {
+		graphGenerationAtClose = owner.runtime.Active().Generation()
+		configuredIPsAtClose = strings.Join(
+			fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams, ",",
+		)
+	}
+
+	nextRaw := privateUpstreamReloadRaw(fixture.dataDir, 30, newIP)
+	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(t.Context(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if owner.runtime.Active().Generation() != 2 ||
+		strings.Join(fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams, ",") != newIP ||
+		netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)) ||
+		!netguard.IsAllowedPrivateIP(net.ParseIP(newIP)) || transport.closeCalls != 1 ||
+		graphGenerationAtClose != 2 || configuredIPsAtClose != newIP {
+		t.Fatalf(
+			"replace generation=%d config=%v old=%t new=%t close=%d close-generation=%d close-config=%q",
+			owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams,
+			netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)),
+			netguard.IsAllowedPrivateIP(net.ParseIP(newIP)), transport.closeCalls,
+			graphGenerationAtClose, configuredIPsAtClose,
+		)
+	}
+}
+
+func TestSidecarConfigManagerV8PrivateUpstreamReloadClearsAfterGraphPublish(t *testing.T) {
+	const oldIP = "10.50.2.100"
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	initialRaw := privateUpstreamReloadRaw(fixture.dataDir, 90, oldIP)
+	mgr, owner := bootstrapPrivateUpstreamReload(t, fixture, initialRaw)
+	transport := installRecordingProviderTransport(t)
+	var graphGenerationAtClose uint64
+	var configuredIPCountAtClose int
+	transport.onClose = func() {
+		graphGenerationAtClose = owner.runtime.Active().Generation()
+		configuredIPCountAtClose = len(fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams)
+	}
+
+	nextRaw := privateUpstreamReloadRaw(fixture.dataDir, 30)
+	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(t.Context(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams) != 0 ||
+		netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)) || transport.closeCalls != 1 ||
+		graphGenerationAtClose != 2 || configuredIPCountAtClose != 0 {
+		t.Fatalf("clear config=%v old=%t close=%d close-generation=%d close-count=%d",
+			fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams,
+			netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)), transport.closeCalls,
+			graphGenerationAtClose, configuredIPCountAtClose)
+	}
+}
+
+func TestSidecarConfigManagerV8PrivateUpstreamReloadFailureIsAtomic(t *testing.T) {
+	const oldIP = "10.50.2.100"
+	const rejectedIP = "10.50.2.102"
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	initialRaw := privateUpstreamReloadRaw(fixture.dataDir, 90, oldIP)
+	mgr, owner := bootstrapPrivateUpstreamReload(t, fixture, initialRaw)
+	transport := installRecordingProviderTransport(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	rejectedRaw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nguardrail:\n  allow_private_upstreams:\n    - %q\nobservability:\n  destinations:\n    - name: occupied\n      kind: prometheus\n      listen: %q\n      path: /metrics\n",
+		fixture.dataDir, rejectedIP, listener.Addr().String(),
+	))
+	if err := os.WriteFile(fixture.configPath, rejectedRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(t.Context(), "test"); err == nil {
+		t.Fatal("occupied Prometheus/private-upstream candidate unexpectedly succeeded")
+	}
+	if owner.runtime.Active().Generation() != 1 ||
+		strings.Join(fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams, ",") != oldIP ||
+		!netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)) ||
+		netguard.IsAllowedPrivateIP(net.ParseIP(rejectedIP)) || transport.closeCalls != 0 {
+		t.Fatalf(
+			"failure atomicity generation=%d config=%v old=%t rejected=%t close=%d",
+			owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Guardrail.AllowPrivateUpstreams,
+			netguard.IsAllowedPrivateIP(net.ParseIP(oldIP)),
+			netguard.IsAllowedPrivateIP(net.ParseIP(rejectedIP)), transport.closeCalls,
+		)
 	}
 }
 

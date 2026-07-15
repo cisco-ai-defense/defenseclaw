@@ -1497,6 +1497,22 @@ attributes:
       max_utf8_bytes: 4096
     notes: Path only; userinfo, query, and fragment are forbidden before telemetry construction
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.network.resolved_ip
+  type: string
+  brief: Canonical remote peer IP observed by the outbound HTTP transport
+  examples:
+  - 10.50.2.100
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+    notes: Present only when the Go transport attests the connected peer; never copied from caller input or used as a metric label
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.network.policy_outcome
   type: string
   brief: Human-readable source policy outcome
@@ -1581,7 +1597,8 @@ attributes:
       - shape
       - passthrough
       - chat
-    notes: Includes the direct chat target guard in addition to the three passthrough branches
+      - private-upstream
+    notes: Includes the direct chat target guard and transport-attested private-upstream branch in addition to the three passthrough branches
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.network.source
   type: string
@@ -1859,6 +1876,8 @@ groups:
   - ref: defenseclaw.network.target_ref
     requirement_level: recommended
   - ref: defenseclaw.network.target_path
+    requirement_level: recommended
+  - ref: defenseclaw.network.resolved_ip
     requirement_level: recommended
   - ref: defenseclaw.network.policy_outcome
     requirement_level: recommended

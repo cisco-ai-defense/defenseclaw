@@ -328,6 +328,152 @@ func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) 
 	}
 }
 
+func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t *testing.T) {
+	installCorrelationHMACForTest()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	server, store := newHookCorrelationServer(t, path)
+	profile := server.hookProfileForConnector("cursor")
+
+	promptPayload := map[string]interface{}{
+		"hook_event_name": "beforeSubmitPrompt", "conversation_id": "cursor-conversation-1",
+		"generation_id": "cursor-generation-1", "prompt": "inspect the repository",
+	}
+	prompt := normalizeAgentHookRequestWithProfile("cursor", promptPayload, profile)
+	_, prompt, err := server.correlateHookOccurrence(t.Context(), profile, prompt,
+		[]byte(`{"conversation_id":"cursor-conversation-1","generation_id":"cursor-generation-1","hook_event_name":"beforeSubmitPrompt","prompt":"inspect the repository"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt.SessionID != "cursor-conversation-1" || prompt.TurnID != "cursor-generation-1" ||
+		prompt.SourceEventID != "" || prompt.CorrelationReceipt != nil {
+		t.Fatalf("cursor prompt identity=%+v", prompt)
+	}
+	if parsed, parseErr := uuid.Parse(prompt.AgentID); parseErr != nil || parsed.Version() != 7 {
+		t.Fatalf("cursor prompt agent=%q err=%v", prompt.AgentID, parseErr)
+	}
+
+	startPayload := map[string]interface{}{
+		"hook_event_name": "preToolUse", "conversation_id": "cursor-conversation-1",
+		"generation_id": "cursor-generation-1", "tool_call_id": "cursor-tool-1",
+		"tool_name": "Read",
+	}
+	start := normalizeAgentHookRequestWithProfile("cursor", startPayload, profile)
+	_, start, err = server.correlateHookOccurrence(t.Context(), profile, start,
+		[]byte(`{"conversation_id":"cursor-conversation-1","generation_id":"cursor-generation-1","hook_event_name":"preToolUse","tool_call_id":"cursor-tool-1","tool_name":"Read"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.SessionID != prompt.SessionID || start.TurnID != prompt.TurnID ||
+		start.AgentID != prompt.AgentID || start.ToolInvocationID != "cursor-tool-1" ||
+		start.CorrelationReceipt != nil {
+		t.Fatalf("cursor tool start=%+v prompt=%+v", start, prompt)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server, reopened := newHookCorrelationServer(t, path)
+	defer reopened.Close() //nolint:errcheck
+	profile = server.hookProfileForConnector("cursor")
+	endPayload := map[string]interface{}{
+		"hook_event_name": "postToolUse", "conversation_id": "cursor-conversation-1",
+		"generation_id": "cursor-generation-1", "tool_call_id": "cursor-tool-1",
+		"tool_name": "Read", "tool_result": "complete",
+	}
+	end := normalizeAgentHookRequestWithProfile("cursor", endPayload, profile)
+	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end,
+		[]byte(`{"conversation_id":"cursor-conversation-1","generation_id":"cursor-generation-1","hook_event_name":"postToolUse","tool_call_id":"cursor-tool-1","tool_name":"Read","tool_result":"complete"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.SessionID != prompt.SessionID || end.TurnID != prompt.TurnID ||
+		end.AgentID != prompt.AgentID || end.ToolInvocationID != start.ToolInvocationID ||
+		end.CorrelationReceipt != nil {
+		t.Fatalf("cursor tool end=%+v start=%+v prompt=%+v", end, start, prompt)
+	}
+	if prompt.SemanticEventID == start.SemanticEventID || start.SemanticEventID == end.SemanticEventID ||
+		start.LogicalEventID == end.LogicalEventID || start.SuppressCorrelationEmit || end.SuppressCorrelationEmit {
+		t.Fatalf("cursor phases collapsed or suppressed: prompt=%s start=%s/%s end=%s/%s",
+			prompt.SemanticEventID, start.SemanticEventID, start.LogicalEventID,
+			end.SemanticEventID, end.LogicalEventID)
+	}
+
+	repo, err := reopened.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
+		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
+		OperationID:         "cursor-tool-1", Type: audit.CorrelationOperationTool,
+		Status: audit.CorrelationOperationCompleted, Limit: 10,
+	})
+	if err != nil || len(operations) != 1 ||
+		operations[0].StartSemanticEventID != audit.SemanticEventID(start.SemanticEventID) ||
+		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) ||
+		operations[0].SessionID != prompt.SessionID || operations[0].TurnID != prompt.TurnID {
+		t.Fatalf("cursor completed operation=%+v err=%v", operations, err)
+	}
+}
+
+func TestModernCursorCrossPhaseHooksWithoutDeliveryIDNeverSuppressEachOther(t *testing.T) {
+	installCorrelationHMACForTest()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	server, store := newHookCorrelationServer(t, path)
+	defer store.Close() //nolint:errcheck
+	profile := server.hookProfileForConnector("cursor")
+
+	inputs := []struct {
+		payload map[string]interface{}
+		raw     string
+	}{
+		{
+			payload: map[string]interface{}{
+				"hook_event_name": "beforeSubmitPrompt", "conversation_id": "cursor-cross-phase",
+				"generation_id": "cursor-cross-phase-generation", "prompt": "hello",
+			},
+			raw: `{"conversation_id":"cursor-cross-phase","generation_id":"cursor-cross-phase-generation","hook_event_name":"beforeSubmitPrompt","prompt":"hello"}`,
+		},
+		{
+			payload: map[string]interface{}{
+				"hook_event_name": "afterAgentResponse", "conversation_id": "cursor-cross-phase",
+				"generation_id": "cursor-cross-phase-generation", "text": "done",
+			},
+			raw: `{"conversation_id":"cursor-cross-phase","generation_id":"cursor-cross-phase-generation","hook_event_name":"afterAgentResponse","text":"done"}`,
+		},
+	}
+	results := make([]agentHookRequest, 0, len(inputs))
+	for _, input := range inputs {
+		req := normalizeAgentHookRequestWithProfile("cursor", input.payload, profile)
+		_, correlated, err := server.correlateHookOccurrence(t.Context(), profile, req, []byte(input.raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if correlated.SourceEventID != "" || correlated.CorrelationReceipt != nil ||
+			correlated.SuppressCorrelationEmit {
+			t.Fatalf("modern cursor phase unexpectedly receipt-controlled: %+v", correlated)
+		}
+		results = append(results, correlated)
+	}
+	if results[0].SessionID != results[1].SessionID || results[0].TurnID != results[1].TurnID ||
+		results[0].AgentID != results[1].AgentID || results[0].SemanticEventID == results[1].SemanticEventID ||
+		results[0].LogicalEventID == results[1].LogicalEventID {
+		t.Fatalf("modern cursor cross-phase correlation=%+v", results)
+	}
+
+	var receipts int
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close() //nolint:errcheck
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_receipts`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 0 {
+		t.Fatalf("modern cursor payloads created %d delivery receipts without a delivery ID", receipts)
+	}
+}
+
 func TestCrossRailMirrorAuthorityIsScopedToLifecycle(t *testing.T) {
 	spec := connector.DefaultCorrelationSpec("codex")
 

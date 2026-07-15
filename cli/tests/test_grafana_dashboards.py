@@ -1654,12 +1654,7 @@ def _golden_backend_responses(
         {
             "metric": {
                 "connector": "codex",
-                "gen_ai_agent_id": agent["agent_id"],
-                "defenseclaw_agent_root_id": agent["root_id"],
-                "defenseclaw_agent_parent_id": agent["parent_id"] or "none",
-                "defenseclaw_session_root_id": agent["root_session_id"],
-                "defenseclaw_agent_lifecycle_id": agent["lifecycle_id"],
-                "defenseclaw_agent_execution_id": agent["execution_id"],
+                "gen_ai_agent_type": str(item["role"]),
             },
             "value": [1, "1"],
         }
@@ -1667,38 +1662,26 @@ def _golden_backend_responses(
         for agent in [_golden_agent(stamp, str(item["role"]), bad_leaf_depth=bad_leaf_depth)]
     ]
     if drift_last_seen_identity:
-        drifted_last_seen = copy.deepcopy(last_seen[0])
-        drifted_last_seen["metric"]["defenseclaw_agent_execution_id"] = "golden-execution-drifted"
-        last_seen.append(drifted_last_seen)
+        last_seen[0]["metric"]["gen_ai_agent_id"] = f"golden-agent-rogue-{stamp}"
     lifecycle_transitions = [
         {
             "metric": {
                 "connector": "codex",
-                "gen_ai_agent_id": record["body"]["gen_ai.agent.id"],
-                "defenseclaw_agent_root_id": record["body"]["defenseclaw.agent.root.id"],
-                "defenseclaw_agent_parent_id": record["body"].get("defenseclaw.agent.parent.id", "none"),
-                "defenseclaw_session_root_id": record["body"]["defenseclaw.session.root.id"],
-                "defenseclaw_agent_lifecycle_id": record["body"]["defenseclaw.agent.lifecycle.id"],
-                "defenseclaw_agent_execution_id": record["body"]["defenseclaw.agent.execution.id"],
                 "defenseclaw_agent_depth": str(record["body"]["defenseclaw.agent.depth"]),
                 "defenseclaw_agent_lifecycle_event": record["event_name"],
                 "defenseclaw_agent_lifecycle_state": record["body"]["defenseclaw.agent.lifecycle.state"],
+                "gen_ai_agent_type": record["body"]["defenseclaw.agent.type"],
             },
             "value": [1, "1"],
         }
         for record in lifecycle_records
     ]
     if drift_lifecycle_identity:
-        drifted_lifecycle = copy.deepcopy(lifecycle_transitions[0])
-        drifted_lifecycle["metric"]["gen_ai_agent_id"] = f"golden-agent-rogue-{stamp}"
-        lifecycle_transitions.append(drifted_lifecycle)
+        lifecycle_transitions[0]["metric"]["gen_ai_agent_id"] = f"golden-agent-rogue-{stamp}"
     transitions = [
         {
             "metric": {
                 "connector": "codex",
-                "gen_ai_agent_id": record["body"]["gen_ai.agent.id"],
-                "defenseclaw_agent_root_id": record["body"]["defenseclaw.agent.root.id"],
-                "defenseclaw_agent_execution_id": record["body"]["defenseclaw.agent.execution.id"],
                 "defenseclaw_agent_phase_from": record["body"]["defenseclaw.agent.phase.previous"],
                 "defenseclaw_agent_phase_to": record["body"]["defenseclaw.agent.phase"],
             },
@@ -1926,6 +1909,15 @@ def _golden_backend_responses(
         if url == "http://127.0.0.1:3100/loki/api/v1/query":
             assert params is not None
             query = params["query"]
+            if "count(sum by (agent_id)" in query:
+                return {
+                    "status": "success",
+                    "data": {
+                        "result": [
+                            {"metric": {}, "value": [1, str(len(_GOLDEN_AGENTS) - 1)]},
+                        ],
+                    },
+                }
             edge_prefix_by_query_marker = {
                 "session_starts_root": "edge:session:",
                 "parent_agent_to_subagent": "edge:spawn:",
@@ -1983,9 +1975,7 @@ def _golden_backend_responses(
         if url.endswith("/api/v1/query"):
             assert params is not None
             query = params["query"]
-            if "count(count by (gen_ai_agent_id)" in query:
-                result = [{"metric": {}, "value": [1, str(len(_GOLDEN_AGENTS) - 1)]}]
-            elif '"source"' in query and "defenseclaw_agent_parent_id" in query:
+            if '"source"' in query and "defenseclaw_agent_parent_id" in query:
                 result = topology_edges
             elif "lifecycle_transitions" in query:
                 result = lifecycle_transitions
@@ -2077,11 +2067,12 @@ def test_live_golden_queries_prometheus_history_over_configured_lookback(
         discovery_queries = [
             query
             for query in prometheus_queries
-            if metric in query and "golden-agent-[a-z]" in query
+            if metric in query and 'connector="codex"' in query
         ]
         assert discovery_queries, metric
         assert discovery_queries[0].startswith(f"max_over_time({metric}")
         assert discovery_queries[0].endswith("[600s])")
+        assert "golden-agent" not in discovery_queries[0]
 
 
 def test_live_golden_scopes_tempo_search_to_selected_run(
@@ -2180,8 +2171,8 @@ def test_live_golden_proves_generic_depth_three_agent_tree(
 @pytest.mark.parametrize(
     ("mutation", "message_fragment"),
     (
-        ("drift_last_seen_identity", "last_seen identity drifted"),
-        ("drift_lifecycle_identity", "unknown golden agent"),
+        ("drift_last_seen_identity", "last_seen leaked high-cardinality identity labels"),
+        ("drift_lifecycle_identity", "lifecycle transition leaked high-cardinality identity labels"),
     ),
 )
 def test_live_golden_rejects_every_positive_metric_identity_drift(
@@ -2220,7 +2211,7 @@ def test_live_golden_executes_authored_agent360_target_semantics(
 
     assert errors == []
     queries = [query for _url, query in observed_requests]
-    assert any("count(count by (gen_ai_agent_id)" in query for query in queries)
+    assert any("count(sum by (agent_id)" in query for query in queries)
     assert any(
         'event_name="correlation.relationship.changed"' in query
         and 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"'
@@ -2235,7 +2226,8 @@ def test_live_golden_executes_authored_agent360_target_semantics(
         for url, query in observed_requests
         if url == "http://127.0.0.1:3100/loki/api/v1/query"
     ]
-    assert len(topology_queries) == 18
+    assert len(topology_queries) == 19
+    assert any("count(sum by (agent_id)" in query for query in topology_queries)
     assert any(
         'event_name="session_start"' in query
         and 'detail__node_type=`root_agent_anchor`' in query
@@ -2820,7 +2812,7 @@ def test_token_counter_queries_preserve_a_new_series_first_sample() -> None:
                 if "$__rate_interval" in expression:
                     assert "/ ($__rate_interval_ms / 1000)" in expression
 
-    assert len(checked) == 18
+    assert len(checked) == 12
 
 
 def test_dashboard_queries_preserve_v8_identity_and_absence_semantics() -> None:
@@ -2847,7 +2839,9 @@ def test_dashboard_queries_preserve_v8_identity_and_absence_semantics() -> None:
 
     cost = _panel(activity, "Reported cumulative cost by model")
     cost_query = cost["targets"][0]["expr"]
-    assert "defenseclaw_agent_reported_cost_USD" in cost_query
+    assert cost["datasource"]["uid"] == "defenseclaw-loki"
+    assert "body_defenseclaw_agent_reported_cost_usd" in cost_query
+    assert "unwrap body_defenseclaw_agent_reported_cost_usd" in cost_query
     assert "gen_ai_client_token_usage" not in cost_query
     assert "vector(0)" not in cost_query
 
@@ -2883,17 +2877,20 @@ def test_activity_session_tree_drilldown_uses_canonical_root_identity() -> None:
     variables = {item["name"]: item for item in activity["templating"]["list"]}
     session = variables["session"]
     assert session["label"] == "Root session"
-    assert "defenseclaw_agent_last_seen_seconds" in session["definition"]
+    assert session["datasource"]["uid"] == "defenseclaw-loki"
+    assert '{service_name="defenseclaw"}' in session["definition"]
     assert 'connector=~"$connector"' in session["definition"]
-    assert "defenseclaw_session_root_id" in session["definition"]
+    assert "body_defenseclaw_session_root_id" in session["definition"]
     assert "gen_ai_client_token_usage_count" not in session["definition"]
 
     token_panel = _panel(activity, "Reported tokens for selected session tree")
-    token_query = token_panel["targets"][0]["expr"]
-    assert "defenseclaw_agent_token_usage_total" in token_query
-    assert "gen_ai_client_token_usage_sum" not in token_query
-    assert 'defenseclaw_session_root_id=~"$session"' in token_query
-    assert "and on (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id)" in token_query
+    assert token_panel["datasource"]["uid"] == "defenseclaw-loki"
+    token_queries = " ".join(target["expr"] for target in token_panel["targets"])
+    assert "body_gen_ai_usage_input_tokens" in token_queries
+    assert "body_gen_ai_usage_output_tokens" in token_queries
+    assert "logical_event_id" in token_queries
+    assert 'body_defenseclaw_session_root_id=~"$session"' in token_queries
+    assert "defenseclaw_agent_token_usage_total" not in token_queries
     rename = token_panel["transformations"][0]["options"]["renameByName"]
     assert rename["kind"] == "direction"
 
@@ -2981,9 +2978,11 @@ def test_activity_session_tree_drilldown_uses_canonical_root_identity() -> None:
     assert "printf" not in detail_query
 
     tokens_by_agent = _panel(activity, "Reported tokens by agent, model & direction")
+    assert tokens_by_agent["datasource"]["type"] == "loki"
     tokens_query = tokens_by_agent["targets"][0]["expr"]
-    assert "connector, gen_ai_agent_id" in tokens_query
-    assert "defenseclaw_agent_root_id" in tokens_query
+    assert "connector, agent_id, agent_name, root_agent_id, model, kind" in tokens_query
+    assert 'agent_id="{{.body_gen_ai_agent_id}}"' in tokens_query
+    assert 'root_agent_id="{{.body_defenseclaw_agent_root_id}}"' in tokens_query
     for column, scope in (
         ("Agent ID", "gen_ai_agent_id"),
         ("Root Agent", "defenseclaw_agent_root_id"),
@@ -3081,8 +3080,11 @@ def test_dashboard_queries_preserve_v8_identity_across_other_dashboards() -> Non
     assert 'body_gen_ai_agent_name=~\\"$connector' not in connector_text
 
     identity = _dashboard("defenseclaw-agent-identity.json")
-    active_identity = _panel(identity, "Active agent.id (5m)")["targets"][0]["expr"]
-    assert "time() - 300" in active_identity
+    active_identity_panel = _panel(identity, "Active agent.id (5m)")
+    assert active_identity_panel["datasource"]["type"] == "loki"
+    active_identity = active_identity_panel["targets"][0]["expr"]
+    assert "count_over_time" in active_identity
+    assert 'gen_ai_agent_id="{{.body_gen_ai_agent_id}}"' in active_identity
     assert "timestamp(defenseclaw_ai_discovery_active_signals" in _panel(
         identity, "AI discovery active signals"
     )["targets"][0]["expr"]

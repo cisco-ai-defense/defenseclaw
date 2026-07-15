@@ -249,6 +249,14 @@ _METADATA_ADDRESSES = frozenset(
         "fd00:ec2::254",
     )
 )
+_PRIVATE_UPSTREAM_METADATA_ADDRESSES = frozenset(
+    ipaddress.ip_address(value)
+    for value in (
+        "169.254.169.254",
+        "169.254.170.2",
+        "fd00:ec2::254",
+    )
+)
 _METADATA_HOSTS = frozenset(
     (
         "metadata.google.internal",
@@ -798,6 +806,7 @@ def _semantic_error(source_name: str, path: str, action: str) -> None:
 
 
 def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
+    _validate_private_upstream_allowlist(document.get("guardrail") or {}, source_name)
     observability = document.get("observability") or {}
     profiles = observability.get("redaction_profiles", {})
     _validate_profiles(profiles, source_name)
@@ -831,6 +840,44 @@ def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
                 )
             route_names.add(route["name"])
         _validate_destination(destination, path, source_name)
+
+
+def _validate_private_upstream_allowlist(guardrail: dict[str, Any], source_name: str) -> None:
+    """Mirror the Go guardrail allowlist's source validation.
+
+    The allowlist permits any otherwise valid address, including RFC 1918,
+    ULA, public, and CGNAT space.  Only address classes that the runtime can
+    never exempt are rejected here.  IPv4-mapped IPv6 values are normalized
+    before classification, matching ``net.IP.To4`` in the Go validator.
+    """
+
+    for index, raw in enumerate(guardrail.get("allow_private_upstreams", [])):
+        path = f"guardrail.allow_private_upstreams[{index}]"
+        value = raw.strip()
+        if not value:
+            # Go deliberately ignores empty entries after trimming. The
+            # runtime config loader removes them before constructing the
+            # effective allowlist.
+            continue
+        if "/" in value:
+            _semantic_error(source_name, path, "specify one literal IP address, not a CIDR")
+        # Go's net.ParseIP does not accept scoped IPv6 literals.
+        if "%" in value:
+            _semantic_error(source_name, path, "use a valid literal IP address without a scope identifier")
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            _semantic_error(source_name, path, "use a valid literal IP address")
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        if address in _PRIVATE_UPSTREAM_METADATA_ADDRESSES:
+            _semantic_error(source_name, path, "do not allowlist a cloud metadata address")
+        if address.is_loopback:
+            _semantic_error(source_name, path, "do not allowlist a loopback address")
+        if address.is_multicast or address.is_unspecified:
+            _semantic_error(source_name, path, "use a unicast, specified upstream address")
+        if address.is_link_local:
+            _semantic_error(source_name, path, "do not allowlist a link-local address")
 
 
 def _validate_profile_references(observability: dict[str, Any], known: set[str], source_name: str) -> None:

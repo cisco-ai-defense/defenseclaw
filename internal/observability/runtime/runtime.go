@@ -162,9 +162,12 @@ func (snapshot EmitContext) InboundLocalInstanceID() (string, bool) {
 	return snapshot.inboundInstanceID, snapshot.inboundInstanceID != ""
 }
 
-// EmitBuilder is invoked at most once and only after collection admits the
-// signal. It receives the same graph generation whose local component persists
-// the resulting record. It is never called for AdmissionDrop.
+// EmitBuilder is invoked at most once. Ordinary routes invoke it only after
+// collection admits the signal. The sole exception is the release-owned
+// managed-enterprise log fallback: after ordinary admission returns
+// AdmissionDrop, it is invoked with AdmissionOrdinary and its record is
+// projected only to the exact generated managed destination, without SQLite or
+// operator fan-out. Every invocation receives the same pinned graph generation.
 type EmitBuilder func(EmitContext, router.Admission) (observability.Record, error)
 
 // LogBatchItem is one independently collected and routed log occurrence in a
@@ -466,7 +469,20 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if processErr != nil {
 		return outcome, processErr
 	}
-	if !outcome.LocalPersisted() {
+	// The managed-enterprise event sink is release-owned and must remain
+	// equivalent to the pre-v8 managed event exporter even when the operator has
+	// disabled ordinary log collection. Imported, local-only, floor, trace, and
+	// metric paths can never enter this exception. The second evaluation is
+	// allocation-lazy and invokes the same builder at most once only when the
+	// exact managed destination is present in this lease generation.
+	if outcome.Admission() == router.AdmissionDrop && !localOnly && !inbound &&
+		originDestination == "" && !suppressAll {
+		outcome, processErr = local.ProcessManagedLogFallback(ctx, metadata, processBuilder)
+		if processErr != nil {
+			return outcome, processErr
+		}
+	}
+	if !outcome.LocalPersisted() && !outcome.ManagedOnly() {
 		return outcome, nil
 	}
 	if localOnly || suppressAll {

@@ -247,20 +247,22 @@ func TestHookLifecycleMetricsUseGeneratedV8BatchWithoutLegacyProvider(t *testing
 		"defenseclaw.connector.source":      "claudecode",
 		"gen_ai.provider.name":              "anthropic",
 		"gen_ai.request.model":              "claude-4",
-		"gen_ai.agent.id":                   "agent-child",
-		"gen_ai.agent.name":                 "child_agent",
 		"defenseclaw.agent.type":            "subagent",
-		"defenseclaw.agent.root.id":         "agent-root",
-		"defenseclaw.agent.parent.id":       "agent-root",
-		"defenseclaw.session.root.id":       "session-root",
-		"defenseclaw.agent.lifecycle.id":    "lifecycle-child",
-		"defenseclaw.agent.execution.id":    "execution-child",
 		"defenseclaw.agent.lifecycle.event": "turn_end",
 		"defenseclaw.agent.lifecycle.state": "completed",
 		"defenseclaw.agent.depth":           json.Number("1"),
 	} {
 		if got := transition[key]; got != want {
 			t.Errorf("transition %s=%#v want %#v", key, got, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"gen_ai.agent.id", "gen_ai.agent.name", "defenseclaw.agent.root.id",
+		"defenseclaw.agent.parent.id", "defenseclaw.session.root.id",
+		"defenseclaw.agent.lifecycle.id", "defenseclaw.agent.execution.id",
+	} {
+		if _, present := transition[forbidden]; present {
+			t.Errorf("transition metric retained high-cardinality identity %s", forbidden)
 		}
 	}
 	localTransition := localByName[observability.TelemetryInstrumentDefenseClawAgentLifecycleTransitions].Attributes()

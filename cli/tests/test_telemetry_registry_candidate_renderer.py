@@ -436,7 +436,7 @@ def test_candidate_enrichment_is_complete_typed_and_recursively_immutable(
         "registry_relative",
     }
     structured_fields = [item for item in index.enriched_fields.values() if item.context == "structured"]
-    assert len(structured_fields) == 47
+    assert len(structured_fields) == 68
     assert all(
         item.path_kind == "registry_relative"
         and item.input_placement == "structured_input"

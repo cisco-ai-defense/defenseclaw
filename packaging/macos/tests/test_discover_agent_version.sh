@@ -93,9 +93,56 @@ t_unknown_connector() {
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 
+t_json_version_rejects_control_syntax() {
+  local root got
+  root="$(mktest_tmp)"
+  cat > "${root}/package.json" <<'JSON'
+{ "name": "untrusted", "version": "1.2.3;$(touch /tmp/not-allowed)" }
+JSON
+  got="$(_read_json_version "${root}/package.json")"
+  assert_eq "${got}" "" "untrusted package version syntax rejected"
+}
+
+t_json_version_rejects_fifo_without_blocking() {
+  local root fifo output pid still_running
+  root="$(mktest_tmp)"
+  fifo="${root}/package.json"
+  output="${root}/output"
+  mkfifo "${fifo}"
+  _read_json_version "${fifo}" >"${output}" &
+  pid=$!
+  still_running=true
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      still_running=false
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${still_running}" == "true" ]]; then
+    kill -9 "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    _fail "FIFO package metadata blocked the privileged version probe"
+    return 1
+  fi
+  wait "${pid}" || true
+  assert_eq "$(cat "${output}")" "" "FIFO package metadata is rejected"
+}
+
+t_json_version_rejects_oversized_metadata() {
+  local root got
+  root="$(mktest_tmp)"
+  dd if=/dev/zero of="${root}/package.json" bs=1024 count=257 2>/dev/null
+  got="$(_read_json_version "${root}/package.json")"
+  assert_eq "${got}" "" "oversized package metadata rejected"
+}
+
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "unknown connector returns empty"   t_unknown_connector
+run_case "package JSON version syntax is bounded" t_json_version_rejects_control_syntax
+run_case "package JSON FIFO is non-blocking" t_json_version_rejects_fifo_without_blocking
+run_case "package JSON size is bounded" t_json_version_rejects_oversized_metadata

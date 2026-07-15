@@ -171,11 +171,12 @@ t_ai_discovery_enabled_for_endpoint_inventory() {
 }
 
 t_resolve_aid_endpoint_precedence() {
-  # resolve_aid_endpoint backs the --override-endpoint adhoc-testing seam.
+  # resolve_aid_endpoint backs the --override-endpoint validation seam.
   # An empty override falls back to the --env-derived host; a non-empty
   # override wins outright, has its trailing slash stripped, and is
-  # validated as an http(s) URL.
-  local out rc
+  # validated with the same HTTPS bare-origin shape as v8's managed
+  # destination compiler.
+  local out rc endpoint
 
   # Fallback to --env when no override.
   out="$(resolve_aid_endpoint prod "")"
@@ -192,35 +193,63 @@ t_resolve_aid_endpoint_precedence() {
   out="$(resolve_aid_endpoint prod "https://host.example.com/")"
   assert_eq "${out}" "https://host.example.com" "trailing slash stripped from override"
 
-  # http:// is allowed (adhoc/local) — the plaintext warning is emitted by
-  # install.sh, not this pure helper.
-  out="$(resolve_aid_endpoint preview "http://localhost:8080")"
-  assert_eq "${out}" "http://localhost:8080" "plaintext http override accepted by resolver"
+  # Accept table: bare HTTPS origins, one optional root slash, and valid
+  # optional ports. These mirror TestManagedAIDDestinationRequiresHTTPSBareOrigin.
+  while IFS='|' read -r endpoint expected; do
+    [[ -n "${endpoint}" ]] || continue
+    out="$(resolve_aid_endpoint prod "${endpoint}")"
+    assert_eq "${out}" "${expected}" "accepted managed origin ${endpoint}"
+  done <<'EOF'
+https://aid.example.test|https://aid.example.test
+https://aid.example.test/|https://aid.example.test
+https://aid.example.test:8443/|https://aid.example.test:8443
+https://aid.example.test:0443|https://aid.example.test:0443
+https://[2001:db8::1]|https://[2001:db8::1]
+https://[2001:db8::1]:443/|https://[2001:db8::1]:443
+EOF
 
-  # Malformed override -> rc 2 (distinct from unknown-env rc 1) so the
-  # caller can attribute the error to the right flag.
-  rc=0; resolve_aid_endpoint prod "not-a-url"        >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override without scheme -> rc 2"
-  rc=0; resolve_aid_endpoint prod "ftp://host"       >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "non-http(s) scheme -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://a b.com"  >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with whitespace -> rc 2"
-  rc=0; resolve_aid_endpoint prod 'https://a".com'   >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with double-quote -> rc 2"
-  rc=0; resolve_aid_endpoint prod 'https://a\.com'   >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with backslash -> rc 2"
-
-  # Hostless overrides must be rejected: without an authority the rendered
-  # cisco_ai_defense.endpoint has no usable host and inspection/export
-  # silently fails at runtime.
-  rc=0; resolve_aid_endpoint prod "https:///"          >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with empty authority -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https:///api"       >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with empty authority + path -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://?tenant=x"  >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with query but no host -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://#frag"      >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with fragment but no host -> rc 2"
+  # Reject table: return rc 2 (distinct from unknown-env rc 1) for every
+  # shape the v8 managed-origin contract rejects. This includes plaintext,
+  # userinfo, non-root paths, query/fragment (even empty), malformed/invalid
+  # ports, hostless origins, whitespace, quotes, and backslash.
+  while IFS= read -r endpoint || [[ -n "${endpoint}" ]]; do
+    rc=0; resolve_aid_endpoint prod "${endpoint}" >/dev/null 2>&1 || rc=$?
+    assert_status "${rc}" 2 "rejected managed origin ${endpoint}"
+  done <<'EOF'
+not-a-url
+ftp://host
+http://aid.example.test
+ http://aid.example.test
+https://user@aid.example.test
+https://user:password@aid.example.test
+https://aid.example.test/operator-path
+https://aid.example.test//
+https://aid.example.test/%2f
+https://aid.example.test?tenant=operator
+https://aid.example.test?
+https://aid.example.test#fragment
+https://aid.example.test#
+https://aid.example.test:0
+https://aid.example.test:65536
+https://aid.example.test:70000
+https://aid.example.test:abc
+https://aid.example.test:
+https://[invalid
+https://
+https:///
+https:///api
+https://?tenant=x
+https://#frag
+https://a b.com
+https://a".com
+https://a'.com
+https://a\.com
+https://a$.example.com
+https://a`id.example.com
+https://aid;example.com
+https://*.example.com
+https://[2001:db8::1%25en0]
+EOF
 
   # No override + unknown env -> rc 1 (delegates to aid_endpoint_for_env).
   rc=0; resolve_aid_endpoint staging "" >/dev/null 2>&1 || rc=$?

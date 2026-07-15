@@ -45,12 +45,14 @@ def test_every_query_dependency_correlates_to_a_current_input() -> None:
         "defenseclaw_agent_span_calls_total",
         "defenseclaw_agent_span_duration_milliseconds_bucket",
     } <= set(dependencies["prometheus_metrics"])
-    assert {
+    assert not {
         "defenseclaw_agent_root_id",
         "defenseclaw_agent_parent_id",
         "defenseclaw_agent_lifecycle_id",
         "defenseclaw_agent_execution_id",
-    } <= set(dependencies["prometheus_labels"])
+        "gen_ai_agent_id",
+        "gen_ai_agent_name",
+    } & set(dependencies["prometheus_labels"])
     assert {
         "event_name",
         "body_defenseclaw_agent_sequence",
@@ -122,6 +124,12 @@ def test_collector_preserves_three_signal_pipeline_and_agent360_dimensions() -> 
     assert not dimensions & {
         "trace_id",
         "span_id",
+        "gen_ai.agent.id",
+        "gen_ai.agent.name",
+        "defenseclaw.agent.root.id",
+        "defenseclaw.agent.parent.id",
+        "defenseclaw.agent.lifecycle.id",
+        "defenseclaw.agent.execution.id",
         "gen_ai.prompt",
         "gen_ai.completion",
         "defenseclaw.tool.arguments",

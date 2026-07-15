@@ -473,7 +473,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 		// repeats this operation defensively; the plan transform is idempotent.
 		if err := applySidecarObservabilityV8ManagedDestination(
 			compiled,
-			sidecarObservabilityV8ManagedOptionsFromConfig(next),
+			sidecarObservabilityV8ManagedOptionsFromConfig(next, before.raw),
 		); err != nil {
 			return nil, configReloadSource{}, fmt.Errorf(
 				"config reload observability v8 managed destination: %w", err,

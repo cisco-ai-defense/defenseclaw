@@ -316,6 +316,20 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION",
+      "category": "upgrade_internal",
+      "purpose": "Binds a staged hard-cut handoff to the authenticated target-controller version that the resolver installed out of place.",
+      "default": "unset",
+      "accepted_values": ["canonical X.Y.Z version", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Requires the fresh target controller to match the resolver-authenticated target version before accepting bridge rollback custody"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver supplies the authenticated target version to the fresh out-of-place controller"}
+      ],
+      "since": "0.8.5"
+    },
+    {
       "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
       "category": "security_opt_out",
       "purpose": "E2E test toggle ONLY. When set, scripts/test-e2e-full-stack.sh prints raw secrets to its diagnostic logs. Never set in production.",

@@ -226,7 +226,7 @@ AGENT360_TOPOLOGY_PANEL = "Lifecycle DAG — prompt → agents → work → outc
 AGENT360_TRACE_PANEL = "Operation and enforcement traces — click a Trace ID"
 AGENT360_APPROVAL_PANEL = "Errors, blocks, approvals, and guardrail decisions"
 AGENT360_CHRONOLOGY_PANEL = "Ordered lifecycle and work sequence — root to terminal"
-AGENT360_PHASE_EDGES_PANEL = "Directed phase edges (source → target)"
+AGENT360_PHASE_EDGES_PANEL = "Connector directed phase edges (source → target)"
 ACTIVITY_CHRONOLOGY_PANEL = "Ordered session-tree lifecycle and work timeline"
 
 
@@ -424,6 +424,26 @@ def static_audit(
                     errors.append(
                         f"{uid}/{section}: {datasource_type} must use {DATASOURCES[datasource_type]!r}",
                     )
+                raw_query = item.get("query", "")
+                variable_query = raw_query.get("query", "") if isinstance(raw_query, dict) else str(raw_query)
+                if datasource_type == "prometheus":
+                    for forbidden_identity in (
+                        "$scope_label",
+                        "gen_ai_agent_id",
+                        "gen_ai_agent_name",
+                        "defenseclaw_agent_root_id",
+                        "defenseclaw_agent_parent_id",
+                        "defenseclaw_agent_lifecycle_id",
+                        "defenseclaw_agent_execution_id",
+                        "defenseclaw_session_root_id",
+                        "defenseclaw_request_id",
+                        "defenseclaw_turn_id",
+                    ):
+                        if forbidden_identity in variable_query:
+                            errors.append(
+                                f"{uid}/{section}: high-cardinality identity {forbidden_identity!r} "
+                                "must use a Loki variable instead of a Prometheus label",
+                            )
 
         for panel in panels(dashboard):
             title = panel.get("title")
@@ -443,6 +463,24 @@ def static_audit(
 
                 expression = target.get("expr", "")
                 legend = target.get("legendFormat", "")
+                if datasource == "prometheus":
+                    for forbidden_identity in (
+                        "$scope_label",
+                        "gen_ai_agent_id",
+                        "gen_ai_agent_name",
+                        "defenseclaw_agent_root_id",
+                        "defenseclaw_agent_parent_id",
+                        "defenseclaw_agent_lifecycle_id",
+                        "defenseclaw_agent_execution_id",
+                        "defenseclaw_session_root_id",
+                        "defenseclaw_request_id",
+                        "defenseclaw_turn_id",
+                    ):
+                        if forbidden_identity in expression:
+                            errors.append(
+                                f"{uid}/{title}: high-cardinality identity {forbidden_identity!r} "
+                                "must use logs, traces, or correlation queries instead of metric labels",
+                            )
                 if re.search(
                     r'\b(?:body_)?gen_ai_agent_name\s*(?:=~|!~|=|!=)\s*'
                     r'"\$(?:connector|\{connector:(?:regex|pipe)\})"',
@@ -1938,88 +1976,94 @@ def _golden_metric_errors(
     agents: dict[str, GoldenAgent],
 ) -> list[str]:
     errors: list[str] = []
-    observed_last_seen: set[str] = set()
-    for series in last_seen:
-        metric = series.get("metric", {})
-        if not isinstance(metric, dict) or not _positive_prometheus_series(series):
-            continue
-        identity = _golden_agent_role_stamp(metric.get("gen_ai_agent_id"))
-        if identity is None or identity[1] != stamp:
-            continue
-        agent_id = str(metric.get("gen_ai_agent_id") or "")
-        agent = agents.get(agent_id)
-        if agent is None:
-            errors.append(f"Prometheus last_seen references unknown golden agent {agent_id}")
-            continue
-        if (
-            metric.get("connector") != "codex"
-            or metric.get("defenseclaw_agent_root_id") != agent.root_id
-            or metric.get("defenseclaw_session_root_id") != agent.root_session_id
-            or metric.get("defenseclaw_agent_lifecycle_id") != agent.lifecycle_id
-            or metric.get("defenseclaw_agent_execution_id") != agent.execution_id
-            or not _prometheus_parent_matches(metric, agent.parent_id)
-        ):
-            errors.append(f"Prometheus last_seen identity drifted for {agent.agent_id}")
-            continue
-        observed_last_seen.add(agent.agent_id)
-    for agent in agents.values():
-        if agent.agent_id not in observed_last_seen:
-            errors.append(f"Prometheus is missing canonical Agent360 last_seen identity for {agent.agent_id}")
+    forbidden_identity_labels = {
+        "gen_ai_agent_id",
+        "gen_ai_agent_name",
+        "defenseclaw_agent_root_id",
+        "defenseclaw_agent_parent_id",
+        "defenseclaw_agent_lifecycle_id",
+        "defenseclaw_agent_execution_id",
+        "defenseclaw_session_root_id",
+        "defenseclaw_request_id",
+        "defenseclaw_turn_id",
+    }
+    for family, series_set in (
+        ("last_seen", last_seen),
+        ("lifecycle transition", lifecycle_transitions),
+        ("phase transition", phase_transitions),
+    ):
+        for series in series_set:
+            metric = series.get("metric", {})
+            if not isinstance(metric, dict):
+                continue
+            leaked = sorted(forbidden_identity_labels.intersection(metric))
+            if leaked:
+                errors.append(
+                    f"Prometheus {family} leaked high-cardinality identity labels: {leaked}",
+                )
 
-    expected_lifecycle: set[tuple[str, str, str]] = set()
-    expected_phases: set[tuple[str, str, str]] = set()
-    for record in _golden_records_for_stamp(records, stamp):
+    selected_records = _golden_records_for_stamp(records, stamp)
+    expected_agent_types = {
+        str(record.get("body", {}).get("defenseclaw.agent.type") or "")
+        for record in selected_records
+        if isinstance(record.get("body"), dict)
+        and record.get("body", {}).get("defenseclaw.agent.type")
+    }
+    observed_agent_types = {
+        str(series.get("metric", {}).get("gen_ai_agent_type") or "")
+        for series in last_seen
+        if isinstance(series.get("metric"), dict)
+        and series.get("metric", {}).get("connector") == "codex"
+        and _positive_prometheus_series(series)
+    }
+    for agent_type in sorted(expected_agent_types - observed_agent_types):
+        errors.append(f"Prometheus is missing aggregate last_seen agent type {agent_type}")
+
+    expected_lifecycle: set[tuple[str, str, str, str]] = set()
+    expected_phases: set[tuple[str, str]] = set()
+    for record in selected_records:
         event_name = record.get("event_name")
         body = record.get("body", {})
         if event_name not in GOLDEN_LIFECYCLE_EVENTS or not isinstance(body, dict):
             continue
-        agent_id = str(body.get("gen_ai.agent.id") or "")
         expected_lifecycle.add(
-            (agent_id, str(event_name), str(body.get("defenseclaw.agent.lifecycle.state") or "")),
+            (
+                str(body.get("defenseclaw.agent.depth", "")),
+                str(event_name),
+                str(body.get("defenseclaw.agent.lifecycle.state") or ""),
+                str(body.get("defenseclaw.agent.type") or ""),
+            ),
         )
         previous = str(body.get("defenseclaw.agent.phase.previous") or "")
         phase = str(body.get("defenseclaw.agent.phase") or "")
         if previous and phase and previous != phase:
-            expected_phases.add((agent_id, previous, phase))
+            expected_phases.add((previous, phase))
 
-    observed_lifecycle: set[tuple[str, str, str]] = set()
+    observed_lifecycle: set[tuple[str, str, str, str]] = set()
     for series in lifecycle_transitions:
         metric = series.get("metric", {})
-        if not isinstance(metric, dict) or not _positive_prometheus_series(series):
-            continue
-        agent = agents.get(str(metric.get("gen_ai_agent_id") or ""))
-        if agent is None:
-            identity = _golden_agent_role_stamp(metric.get("gen_ai_agent_id"))
-            if identity is not None and identity[1] == stamp:
-                errors.append(
-                    "Prometheus lifecycle transition references unknown golden agent "
-                    f"{metric.get('gen_ai_agent_id')}",
-                )
-            continue
         if (
-            metric.get("connector") != "codex"
-            or metric.get("defenseclaw_agent_root_id") != agent.root_id
-            or metric.get("defenseclaw_session_root_id") != agent.root_session_id
-            or metric.get("defenseclaw_agent_lifecycle_id") != agent.lifecycle_id
-            or metric.get("defenseclaw_agent_execution_id") != agent.execution_id
-            or _golden_int(metric.get("defenseclaw_agent_depth")) != agent.depth
-            or not _prometheus_parent_matches(metric, agent.parent_id)
+            not isinstance(metric, dict)
+            or metric.get("connector") != "codex"
+            or not _positive_prometheus_series(series)
         ):
-            errors.append(f"Prometheus lifecycle identity drifted for {agent.agent_id}")
             continue
         observed_lifecycle.add(
             (
-                agent.agent_id,
+                str(metric.get("defenseclaw_agent_depth") or ""),
                 str(metric.get("defenseclaw_agent_lifecycle_event") or ""),
                 str(metric.get("defenseclaw_agent_lifecycle_state") or ""),
+                str(metric.get("gen_ai_agent_type") or ""),
             ),
         )
-    for agent_id, event_name, state in sorted(expected_lifecycle - observed_lifecycle):
-        errors.append(f"Prometheus is missing lifecycle transition {agent_id}: {event_name}/{state}")
+    for depth, event_name, state, agent_type in sorted(expected_lifecycle - observed_lifecycle):
+        errors.append(
+            "Prometheus is missing aggregate lifecycle transition "
+            f"depth={depth} type={agent_type}: {event_name}/{state}",
+        )
 
     observed_phases = {
         (
-            str(series.get("metric", {}).get("gen_ai_agent_id") or ""),
             str(series.get("metric", {}).get("defenseclaw_agent_phase_from") or ""),
             str(series.get("metric", {}).get("defenseclaw_agent_phase_to") or ""),
         )
@@ -2028,8 +2072,8 @@ def _golden_metric_errors(
         and series["metric"].get("connector") == "codex"
         and _positive_prometheus_series(series)
     }
-    for agent_id, phase_from, phase_to in sorted(expected_phases - observed_phases):
-        errors.append(f"Prometheus is missing native phase transition {agent_id}: {phase_from} -> {phase_to}")
+    for phase_from, phase_to in sorted(expected_phases - observed_phases):
+        errors.append(f"Prometheus is missing aggregate phase transition {phase_from} -> {phase_to}")
     return errors
 
 
@@ -2400,7 +2444,7 @@ def _golden_agent360_errors(
         str(_agent360_target(AGENT360_DESCENDANTS_PANEL).get("expr", "")),
         variables,
     )
-    descendants = _prometheus_vector(descendants_query, timeout_seconds=query_timeout_seconds)
+    descendants = _loki_vector(descendants_query, timeout_seconds=query_timeout_seconds)
     descendant_values = [
         float(series["value"][-1])
         for series in descendants
@@ -2646,7 +2690,7 @@ def _golden_agent360_errors(
         )
         for series in phase_transitions
         if isinstance(series.get("metric"), dict)
-        and str(series["metric"].get("gen_ai_agent_id") or "") in agents
+        and series["metric"].get("connector") == "codex"
         and _positive_prometheus_series(series)
     }
     phase_query = interpolate(
@@ -2742,19 +2786,19 @@ def _live_golden_once(
     prometheus_lookback = f"{max(1, int(range_seconds))}s"
     last_seen = _prometheus_vector(
         'max_over_time(defenseclaw_agent_last_seen_seconds{'
-        'gen_ai_agent_id=~"golden-agent-[a-z][a-z0-9-]*-[0-9]+"}'
+        'connector="codex"}'
         f'[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
     lifecycle_transitions = _prometheus_vector(
         'max_over_time(defenseclaw_agent_lifecycle_transitions_total{'
-        'gen_ai_agent_id=~"golden-agent-[a-z][a-z0-9-]*-[0-9]+"}'
+        'connector="codex"}'
         f'[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
     transitions = _prometheus_vector(
         'max_over_time(defenseclaw_agent_phase_transitions_total{'
-        'gen_ai_agent_id=~"golden-agent-[a-z][a-z0-9-]*-[0-9]+"}'
+        'connector="codex"}'
         f'[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
@@ -2764,10 +2808,6 @@ def _live_golden_once(
         timeout_seconds=query_timeout_seconds,
     )
     stamps: set[str] = set()
-    for series in [*last_seen, *lifecycle_transitions, *transitions]:
-        identity = _golden_agent_role_stamp(series.get("metric", {}).get("gen_ai_agent_id"))
-        if identity is not None:
-            stamps.add(identity[1])
     for record in records:
         identity = _golden_agent_role_stamp(record.get("body", {}).get("gen_ai.agent.id"))
         if identity is not None:
@@ -2869,18 +2909,17 @@ def _live_golden_once(
     matching_last_seen = [
         series
         for series in last_seen
-        if (_golden_agent_role_stamp(series.get("metric", {}).get("gen_ai_agent_id")) or ("", ""))[1] == stamp
+        if series.get("metric", {}).get("connector") == "codex" and _positive_prometheus_series(series)
     ]
     matching_transitions = [
         series
         for series in transitions
-        if (_golden_agent_role_stamp(series.get("metric", {}).get("gen_ai_agent_id")) or ("", ""))[1] == stamp
+        if series.get("metric", {}).get("connector") == "codex" and _positive_prometheus_series(series)
     ]
     matching_lifecycle_transitions = [
         series
         for series in lifecycle_transitions
-        if (_golden_agent_role_stamp(series.get("metric", {}).get("gen_ai_agent_id")) or ("", ""))[1]
-        == stamp
+        if series.get("metric", {}).get("connector") == "codex" and _positive_prometheus_series(series)
     ]
     return {
         "stamp": stamp,

@@ -1,13 +1,15 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private child wrapper for phase-two upgrade mutations.
+"""Private supervisor for phase-two upgrade mutations.
 
-The controller passes an already-locked lease descriptor to this process.
-Both this wrapper and the real mutator inherit that descriptor, so abruptly
-terminating only the controller cannot release the lease while the mutation is
-still running.  A later recovery blocks on the same lease before restoring any
-state.
+The controller passes an already-locked lease descriptor to this process.  The
+supervisor retains that descriptor while it synchronously waits for the real
+mutator, so abruptly terminating only the controller cannot release the lease
+while the mutation is still running.  The descriptor is deliberately closed
+across the mutator exec: commands such as ``defenseclaw-gateway start``
+daemonize, and allowing their gateway/watchdog descendants to inherit the lease
+would prevent every later recovery or upgrade from acquiring it.
 """
 
 from __future__ import annotations
@@ -57,12 +59,24 @@ def main(argv: list[str] | None = None) -> int:
 
     child_env = os.environ.copy()
     child_env["DEFENSECLAW_PHASE_TWO_MUTATOR_CHILD"] = "1"
+    # Keep the lease in this synchronous supervisor, never in the mutation
+    # command.  ``pass_fds`` clears FD_CLOEXEC, so passing the descriptor would
+    # let a daemonizing command leak it into long-lived descendants after both
+    # the controller and this supervisor have completed.  Setting the flag
+    # explicitly and closing all non-stdio descriptors at the exec boundary
+    # makes that invariant independent of the descriptor state we inherited.
+    if os.name == "posix":
+        try:
+            os.set_inheritable(lease_fd, False)
+        except OSError:
+            return _fail("lease could not be isolated from the child exec")
     try:
         completed = subprocess.run(
             command,
             env=child_env,
             check=False,
-            pass_fds=(lease_fd,) if os.name == "posix" else (),
+            close_fds=True,
+            pass_fds=(),
         )
     except OSError:
         return _fail("could not launch command")

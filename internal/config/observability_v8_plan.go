@@ -195,6 +195,9 @@ type ObservabilityV8EffectiveDestination struct {
 	ReloadApplicability   ObservabilityV8EffectiveDestinationReload      `json:"reload_applicability"`
 	Routes                []ObservabilityV8EffectiveRoute                `json:"routes"`
 	Transport             ObservabilityV8TransportPlan                   `json:"transport,omitempty"`
+	// managedAIDSourceContentHash is generation-local release metadata. It is
+	// intentionally absent from display/effective JSON and public plan digests.
+	managedAIDSourceContentHash string
 }
 
 type ObservabilityV8Warning struct {
@@ -272,12 +275,33 @@ func newObservabilityV8Plan(effective ObservabilityV8EffectivePlan) (*Observabil
 	if err != nil {
 		return nil, err
 	}
+	reloadBindings := make([]struct {
+		Name        string `json:"name"`
+		ContentHash string `json:"content_hash"`
+	}, 0, len(effective.Destinations))
+	for _, destination := range effective.Destinations {
+		if destination.managedAIDSourceContentHash == "" {
+			continue
+		}
+		reloadBindings = append(reloadBindings, struct {
+			Name        string `json:"name"`
+			ContentHash string `json:"content_hash"`
+		}{Name: destination.Name, ContentHash: destination.managedAIDSourceContentHash})
+	}
+	reloadBindingJSON, err := json.Marshal(reloadBindings)
+	if err != nil {
+		return nil, err
+	}
+	reloadInput := make([]byte, 0, len(reloadJSON)+1+len(reloadBindingJSON))
+	reloadInput = append(reloadInput, reloadJSON...)
+	reloadInput = append(reloadInput, '\n')
+	reloadInput = append(reloadInput, reloadBindingJSON...)
 	return &ObservabilityV8Plan{
 		effective:     cloneObservabilityV8EffectivePlan(effective),
 		display:       cloneObservabilityV8EffectivePlan(display),
 		canonicalJSON: append([]byte(nil), canonical...),
 		digest:        sha256.Sum256(digestJSON),
-		reloadDigest:  sha256.Sum256(reloadJSON),
+		reloadDigest:  sha256.Sum256(reloadInput),
 	}, nil
 }
 

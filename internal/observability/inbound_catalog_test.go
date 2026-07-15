@@ -465,22 +465,18 @@ func TestInboundCatalogGeneratedMetricSourceProjectionAuthority(t *testing.T) {
 	}
 	fields := tokenPlan.FieldRules()
 	wantTargets := []string{
-		"gen_ai.agent.id", "gen_ai.agent.name", "gen_ai.conversation.id", "gen_ai.operation.name",
-		"gen_ai.provider.name", "gen_ai.request.model", "gen_ai.token.type",
+		"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.token.type",
 	}
 	if got := projectionFieldTargets(fields); !reflect.DeepEqual(got, wantTargets) {
 		t.Fatalf("token projection fields = %v, want %v", got, wantTargets)
 	}
-	if fields[0].Disposition() != InboundProjectionOmit || len(fields[0].SourceGroups()) != 0 {
-		t.Fatalf("agent ID disposition = %q/%v", fields[0].Disposition(), fields[0].SourceGroups())
-	}
-	provider := fields[4]
+	provider := fields[1]
 	if got := sourceGroupPlacements(provider.SourceGroups()); !reflect.DeepEqual(got, []InboundSourcePlacement{
 		InboundSourceMetricPointAttribute, InboundSourceAuthenticated, InboundSourceResourceAttribute,
 	}) {
 		t.Fatalf("provider source precedence = %v", got)
 	}
-	model := fields[5]
+	model := fields[2]
 	if model.Requirement() != InboundSourceRequired ||
 		!reflect.DeepEqual(sourceGroupPlacements(model.SourceGroups()), []InboundSourcePlacement{
 			InboundSourceMetricPointAttribute, InboundSourceFixed,
@@ -490,14 +486,6 @@ func TestInboundCatalogGeneratedMetricSourceProjectionAuthority(t *testing.T) {
 	if got, valid := model.Normalizer().Normalize("unknown"); !valid || got != "other" {
 		t.Fatalf("absent-model fallback normalizes to %q/%v, want other/true", got, valid)
 	}
-	conversation := fields[2]
-	if conversation.Requirement() != InboundSourceOptional ||
-		!reflect.DeepEqual(sourceGroupPlacements(conversation.SourceGroups()), []InboundSourcePlacement{
-			InboundSourceMetricPointAttribute, InboundSourceResourceAttribute,
-		}) {
-		t.Fatalf("conversation source projection = %q/%v", conversation.Requirement(), conversation.SourceGroups())
-	}
-
 	series, ok := tokenPlan.CumulativeSeries()
 	if !ok || series.Applicability() != "monotonic-cumulative-sum" ||
 		series.Framing() != "length-prefixed-presence-v1" || series.NormalizationStage() != "before_framing" {
@@ -575,18 +563,18 @@ func TestInboundCatalogGeneratedMetricSourceProjectionAuthority(t *testing.T) {
 		}
 		durationFields := plan.FieldRules()
 		if got := projectionFieldTargets(durationFields); !reflect.DeepEqual(got, []string{
-			"gen_ai.agent.id", "gen_ai.agent.name", "gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+			"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
 		}) {
 			t.Fatalf("duration fields %q = %v", suffix, got)
 		}
-		operationGroups := durationFields[2].SourceGroups()
+		operationGroups := durationFields[0].SourceGroups()
 		if !reflect.DeepEqual(sourceGroupPlacements(operationGroups), []InboundSourcePlacement{
 			InboundSourceMetricPointAttribute, InboundSourceFixed,
 		}) || !reflect.DeepEqual(operationGroups[0].Keys(), []string{"gen_ai.operation.name"}) ||
 			!reflect.DeepEqual(operationGroups[1].Keys(), []string{"chat"}) {
 			t.Fatalf("duration operation precedence %q = %v", suffix, operationGroups)
 		}
-		if got, valid := durationFields[2].Normalizer().Normalize("Embeddings"); !valid || got != "embeddings" {
+		if got, valid := durationFields[0].Normalizer().Normalize("Embeddings"); !valid || got != "embeddings" {
 			t.Fatalf("duration operation normalizer %q = %q/%v", suffix, got, valid)
 		}
 		if _, present := plan.CumulativeSeries(); present {

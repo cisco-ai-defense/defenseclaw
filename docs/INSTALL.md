@@ -746,8 +746,10 @@ changed. Release `0.8.4` and later require Cosign provenance verification;
 existing `cosign`, otherwise it downloads pinned Cosign `2.6.3` into an
 owner-only temporary directory and authenticates its hard-coded platform
 SHA-256 before execution. It does not install Cosign system-wide or modify
-`PATH`. The frozen `0.8.4` built-in controller predates this bootstrap, so a
-no-Cosign `0.8.4` host should use the current release-owned resolver.
+`PATH`. The frozen `0.8.4` built-in controller also cannot parse the truthful
+hard-cut manifest because its Windows bridge matrix is empty. Every `0.8.4`
+host must therefore use the current target-release POSIX resolver, regardless
+of whether Cosign is already installed.
 
 The supported staged path is the authenticated current-release
 `defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
@@ -792,11 +794,12 @@ polling. The release-owned POSIX shell resolver coordinates the initial bridge
 selection. See the [CLI Reference](CLI.md#upgrade) for the
 complete path and flag behavior.
 
-A coherent installed `0.8.4` bridge may start the hard-cut target phase with
-its built-in command after it authenticates and privately acquires the exact
-published `0.8.4` rollback artifacts. A `0.8.3`-or-older frozen controller must
-use the release-owned resolver described below and correctly refuses to skip
-the bridge.
+An installed `0.8.4` bridge must start the hard-cut target phase through the
+authenticated target-release POSIX resolver. Its frozen built-in parser
+requires a nonempty Windows bridge matrix and cannot parse the truthful target
+manifest whose Windows matrix is empty. A `0.8.3`-or-older frozen controller
+also must use the release-owned resolver described below and correctly refuses
+to skip the bridge.
 
 #### 0.3.0 migration: legacy model provider cleanup
 
@@ -826,20 +829,17 @@ If none of these legacy entries exist, the migration is a no-op.
 
 ### Upgrading artifact-backed releases
 
-An installed, coherent `0.8.4` bridge controller can cross the `0.8.5` hard cut
-with its built-in command. Before backup or service stop, it authenticates and
-privately acquires the exact published `0.8.4` wheel and gateway needed for
-rollback. A `0.8.3`-or-older controller cannot learn the two-process bridge
-handoff retroactively, so those hosts must use the authenticated current
-release-owned resolver in latest mode. That resolver carries a
-0.8.3-or-older host through any required bridge and into the latest release as
-one transaction.
+Every supported POSIX source uses the authenticated target-release resolver in
+latest mode to cross the `0.8.5` hard cut. Before backup or service stop, it
+authenticates and privately acquires the exact published `0.8.4` wheel and
+gateway needed for rollback. A host already on `0.8.4` skips the first
+installation hop. A `0.8.3`-or-older host is carried through the required
+bridge and into the latest release as one transaction. Neither frozen built-in
+controller can learn the complete truthful path retroactively.
 
 ```bash
-# A coherent installed 0.8.4 bridge securely self-acquires rollback custody
-defenseclaw upgrade --yes
-
-# For `0.8.3` or older, run an authenticated target-release asset in latest mode
+# For `0.8.4` or any supported older POSIX source, run an authenticated
+# target-release asset in latest mode
 bash defenseclaw-upgrade.sh --yes
 
 # Equivalent resolver entry point from an authenticated current-release checkout
@@ -848,18 +848,17 @@ bash defenseclaw-upgrade.sh --yes
 
 Do not add `--version` to the resolver command. The complete
 Sigstore and SHA-256 bootstrap is in the [CLI Reference](CLI.md#upgrade). The
-coherent bridge controller performs the same authenticated rollback-artifact
-acquisition, backup, migration, restart, and health checks when invoked through
-its built-in command.
+target-release resolver performs authenticated rollback-artifact acquisition,
+backup, migration, restart, and health checks for both already-bridged and
+pre-bridge sources.
 
 Do not replace the managed CLI wheel through `pip`, `uv`, or another package
 manager, and do not copy the wheel or gateway archive over an existing
 installation. Those operations cannot provide bridge selection, durable
 rollback, or version-bound health verification. The local shell and PowerShell
 installers are fresh-install-only and refuse existing managed state before
-dependency setup or artifact replacement. Pre-bridge hosts must use the
-release-owned upgrade resolver; a coherent installed `0.8.4` bridge may use its
-built-in controller as described above.
+dependency setup or artifact replacement. Every supported existing POSIX host,
+including one already on `0.8.4`, must use the target-release upgrade resolver.
 
 For protocol-2 releases, the installable bytes are published only inside
 manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads

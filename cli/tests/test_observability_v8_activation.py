@@ -594,12 +594,11 @@ def test_inheritable_read_acl_cannot_expose_staged_or_backup_secrets(
     assert fixture["config_path"].read_bytes() == fixture["source"]
 
 
-@pytest.mark.parametrize(("target", "identity_field"), [("config", "uid"), ("environment", "gid")])
-def test_untrusted_existing_leaf_owner_is_rejected_before_validation(
+@pytest.mark.parametrize("target", ["config", "environment"])
+def test_untrusted_existing_leaf_uid_is_rejected_before_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     target: str,
-    identity_field: str,
 ) -> None:
     fixture = _fixture(tmp_path)
     target_path = fixture["config_path"] if target == "config" else fixture["environment_path"]
@@ -608,7 +607,7 @@ def test_untrusted_existing_leaf_owner_is_rejected_before_validation(
     def untrusted(path: str, *, required: bool):
         snapshot = original(path, required=required)
         if path == str(target_path):
-            return replace(snapshot, **{identity_field: 2_147_000_001})
+            return replace(snapshot, uid=2_147_000_001)
         return snapshot
 
     monkeypatch.setattr(activation_module, "_snapshot_regular_file", untrusted)
@@ -622,6 +621,44 @@ def test_untrusted_existing_leaf_owner_is_rejected_before_validation(
 
     assert captured.value.code == "leaf_owner_untrusted"
     assert not (fixture["data_dir"] / "backups").exists()
+
+
+def test_inherited_group_is_accepted_only_for_fully_private_trusted_uid() -> None:
+    uid = os.getuid()
+    gid = os.getgid()
+    inherited_gid = gid + 2_147_000_001
+    trusted = frozenset({(uid, gid)})
+
+    assert activation_module._trusted_private_owner(uid, inherited_gid, 0o600, trusted)
+    assert activation_module._trusted_private_owner(uid, inherited_gid, 0o700, trusted)
+    assert not activation_module._trusted_private_owner(uid, inherited_gid, 0o640, trusted)
+    assert not activation_module._trusted_private_owner(uid + 1, inherited_gid, 0o600, trusted)
+
+
+def test_group_readable_leaf_with_inherited_group_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    os.chmod(fixture["config_path"], 0o640)
+    original = activation_module._snapshot_regular_file
+
+    def inherited_group(path: str, *, required: bool):
+        snapshot = original(path, required=required)
+        if path == str(fixture["config_path"]):
+            return replace(snapshot, gid=(snapshot.gid or 0) + 2_147_000_001)
+        return snapshot
+
+    monkeypatch.setattr(activation_module, "_snapshot_regular_file", inherited_group)
+    with pytest.raises(V8ActivationError) as captured:
+        activate_v8_migration(
+            fixture["migration"],
+            validator=lambda _candidate, _environment: pytest.fail("validator must not run"),
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+        )
+
+    assert captured.value.code == "leaf_owner_untrusted"
 
 
 def test_group_writable_config_is_rejected_before_validation(tmp_path: Path) -> None:

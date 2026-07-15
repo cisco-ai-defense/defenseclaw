@@ -75,6 +75,37 @@ func TestTelemetryV8LocksEmbeddedExactly(t *testing.T) {
 	}
 }
 
+func TestGatewayEventSchemasEmbeddedExactly(t *testing.T) {
+	t.Parallel()
+	for _, fixture := range []struct {
+		path string
+		get  func() []byte
+	}{
+		{path: "gateway-event-envelope.json", get: GatewayEventEnvelopeSchema},
+		{path: "scan-event.json", get: GatewayScanEventSchema},
+		{path: "scan-finding-event.json", get: GatewayScanFindingEventSchema},
+		{path: "activity-event.json", get: GatewayActivityEventSchema},
+	} {
+		fixture := fixture
+		t.Run(fixture.path, func(t *testing.T) {
+			t.Parallel()
+
+			want, err := os.ReadFile(fixture.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := fixture.get()
+			if !bytes.Equal(got, want) || !json.Valid(got) {
+				t.Fatalf("embedded %s differs from checked-in valid JSON", fixture.path)
+			}
+			got[0] ^= 0xff
+			if !bytes.Equal(fixture.get(), want) {
+				t.Fatalf("caller mutated embedded %s", fixture.path)
+			}
+		})
+	}
+}
+
 func TestTelemetryV8GeneratedArtifactsEmbeddedExactly(t *testing.T) {
 	t.Parallel()
 	for _, fixture := range []struct {

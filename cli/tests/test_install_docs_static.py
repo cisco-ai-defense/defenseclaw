@@ -1860,7 +1860,7 @@ def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() ->
     assert "cannot perform" in rendered or "cannot learn" in rendered
 
 
-def test_hard_cut_docs_reject_frozen_raw_hint_and_allow_coherent_bridge_controller() -> None:
+def test_hard_cut_docs_require_target_resolver_for_frozen_controllers() -> None:
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(
@@ -1870,9 +1870,9 @@ def test_hard_cut_docs_reject_frozen_raw_hint_and_allow_coherent_bridge_controll
     rendered = "\n".join((cli, install, site, guardrail))
 
     assert "release-owned POSIX shell resolver performs the supported one-command path" in cli
-    assert "installed, coherent `0.8.4` bridge controller" in install
-    assert "supports `0.8.4 → 0.8.5`" in site
-    assert "acquires authenticated rollback custody itself" in site
+    assert "Every supported POSIX source uses the authenticated target-release resolver" in install
+    assert "immutable `0.8.4` command cannot parse the truthful" in site
+    assert "platform_tested_source_versions.windows: []" in site
     assert "bash defenseclaw-upgrade.sh --yes" in install
     assert "bash defenseclaw-upgrade.sh --yes" in site
     assert "PowerShell resolver" in install and "refusal" in install
@@ -1883,6 +1883,8 @@ def test_hard_cut_docs_reject_frozen_raw_hint_and_allow_coherent_bridge_controll
     assert "0.8.3` or older" in install
     assert "`0.8.3` or older" in site
     assert rendered.count("obsolete raw") >= 3
+    assert "frozen built-in command remains usable" not in rendered
+    assert "supports `0.8.4 → 0.8.5`" not in rendered
     assert "curl -fsSL https://raw.githubusercontent.com" not in rendered
     assert "upgrade.sh | bash" not in rendered
 

@@ -35,11 +35,21 @@ Common flags:
 | `--mode {observe\|action}` | `observe` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
+| `--env {prod\|preview}` | `prod` | Select the built-in Cisco AI Defense HTTPS origin |
+| `--override-endpoint URL` | — | Override `--env` with an HTTPS bare origin |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
 
 Full reference: `./install.sh --help`.
+
+`--override-endpoint` accepts only an HTTPS bare origin such as
+`https://aid.example.test` or `https://aid.example.test:8443/`. The optional
+trailing slash is removed. Plaintext HTTP, credentials/userinfo, non-root
+paths, query strings, fragments, whitespace, quotes, backslashes, and invalid
+ports are rejected before the installer performs any config or filesystem
+mutation. This boundary is mandatory because the managed daemon sends its
+CMID bearer credential to that origin.
 
 The installer writes strict `config_version: 8` with local history under
 `observability.local` and `observability.defaults.redaction_profile: sensitive`.

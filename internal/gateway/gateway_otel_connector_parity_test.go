@@ -20,16 +20,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-// TestHandleGuardrailEvent_GeneratedAgentName_PerConnector parametrizes
-// the connector-attribution check over the generated v8 path
-// over the full connector matrix. For every connector, the
-// SharedAgentRegistry-tagged “gen_ai.agent.name“ attribute on the
-// gen_ai.client.token.usage histogram MUST equal the connector
-// name. Without per-connector parity, Splunk cost attribution only
-// covers OpenClaw; switching to claudecode/codex/zeptoclaw at runtime
-// would silently strip the tag and merge spend with the OpenClaw
-// bucket. Plan E1 / item 3.
-func TestHandleGuardrailEvent_GeneratedAgentName_PerConnector(t *testing.T) {
+// TestHandleGuardrailEvent_GeneratedTokenMetricsRemainBounded_PerConnector
+// proves that installing connector-specific shared identity cannot leak that
+// identity into the exported token series. Exact connector and agent identity
+// remains available on canonical logs/traces and in the correlation ledger.
+func TestHandleGuardrailEvent_GeneratedTokenMetricsRemainBounded_PerConnector(t *testing.T) {
 	for _, connectorName := range []string{"openclaw", "zeptoclaw", "claudecode", "codex"} {
 		t.Run(connectorName, func(t *testing.T) {
 			// InstallSharedAgentRegistry is *merge-once*: the first
@@ -80,8 +75,16 @@ func TestHandleGuardrailEvent_GeneratedAgentName_PerConnector(t *testing.T) {
 				t.Fatalf("generated token metrics=%d, want 2", len(tokens))
 			}
 			for _, metric := range tokens {
-				if metric.Attributes()["gen_ai.agent.name"] != connectorName {
+				attributes := metric.Attributes()
+				if attributes["gen_ai.provider.name"] != "defenseclaw" ||
+					attributes["gen_ai.operation.name"] != "chat" ||
+					attributes["gen_ai.request.model"] != "gpt-4" {
 					t.Fatalf("connector=%s: generated token attributes=%v", connectorName, metric.Attributes())
+				}
+				for _, key := range []string{"gen_ai.agent.id", "gen_ai.agent.name", "gen_ai.conversation.id"} {
+					if _, leaked := attributes[key]; leaked {
+						t.Fatalf("connector=%s: high-cardinality %q leaked into token attributes=%v", connectorName, key, attributes)
+					}
 				}
 			}
 		})

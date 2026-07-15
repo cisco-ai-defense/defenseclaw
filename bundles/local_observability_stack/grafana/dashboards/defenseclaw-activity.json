@@ -112,13 +112,13 @@
         "label": "Root session",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
-          "uid": "defenseclaw-prometheus"
+          "type": "loki",
+          "uid": "defenseclaw-loki"
         },
-        "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, defenseclaw_session_root_id)",
+        "definition": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_session_root_id!=\"\", body_defenseclaw_session_root_id)",
         "query": {
-          "query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, defenseclaw_session_root_id)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          "query": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_session_root_id!=\"\", body_defenseclaw_session_root_id)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
         "sort": 1,
@@ -1252,13 +1252,13 @@
     },
     {
       "type": "stat",
-      "title": "Reported token series",
+      "title": "Reported token aggregates",
       "id": 56,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Number of connector/agent/direction token series with reported usage in the selected range. A series first published inside the range is counted once. This measures telemetry coverage, not LLM calls.",
+      "description": "Count of bounded connector/direction token aggregate series; exact identities remain in logs.",
       "gridPos": {
         "x": 18,
         "y": 58,
@@ -1272,7 +1272,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "count(sum by (connector, gen_ai_agent_id, kind) ((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range))) > 0)",
+          "expr": "count(sum by (connector, kind) ((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range))) > 0)",
           "instant": true
         }
       ],
@@ -1406,10 +1406,10 @@
       "title": "Reported cumulative cost by model",
       "id": 23,
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
-      "description": "Latest cumulative USD cost reported upstream, grouped by provider and model. No series means cost was not reported; DefenseClaw does not infer prices.",
+      "description": "Connector-reported cumulative cost from canonical logs, grouped by model without promoting identity to metric labels.",
       "gridPos": {
         "x": 12,
         "y": 42,
@@ -1418,13 +1418,14 @@
       },
       "targets": [
         {
-          "refId": "A",
+          "expr": "sum by (provider, model) (max by (provider, model, agent_id, lifecycle_id) (max_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_agent_reported_cost_present=\"true\" | label_format provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", lifecycle_id=\"{{.body_defenseclaw_agent_lifecycle_id}}\" | unwrap body_defenseclaw_agent_reported_cost_usd [$__interval])))",
+          "queryType": "range",
           "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
+            "type": "loki",
+            "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (gen_ai_provider_name, gen_ai_request_model) (max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, gen_ai_provider_name, gen_ai_request_model) (defenseclaw_agent_reported_cost_USD{connector=~\"$connector\"}))",
-          "legendFormat": "{{gen_ai_provider_name}} / {{gen_ai_request_model}}"
+          "refId": "A",
+          "legendFormat": "{{provider}} / {{model}}"
         }
       ],
       "fieldConfig": {
@@ -1632,10 +1633,10 @@
       "title": "Reported tokens by agent, model & direction",
       "id": 27,
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
-      "description": "Connector-attributed provider-reported token totals by agent, model, and direction. An established series contributes its counter increase; a series first published inside the range contributes its latest cumulative completion value once. Absent rows mean usage was not reported, not zero.",
+      "description": "Connector-reported tokens from canonical model.response logs, deduplicated by logical event and grouped by exact identity.",
       "gridPos": {
         "x": 0,
         "y": 58,
@@ -1644,12 +1645,24 @@
       },
       "targets": [
         {
-          "refId": "A",
+          "expr": "sum by (connector, agent_id, agent_name, root_agent_id, model, kind) (max by (connector, agent_id, agent_name, root_agent_id, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", root_agent_id=\"{{.body_defenseclaw_agent_root_id}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"input\" | unwrap body_gen_ai_usage_input_tokens [$__range])))",
+          "queryType": "instant",
           "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
+            "type": "loki",
+            "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, defenseclaw_agent_root_id, gen_ai_request_model, kind) ((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\"} offset $__range)))",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "sum by (connector, agent_id, agent_name, root_agent_id, model, kind) (max by (connector, agent_id, agent_name, root_agent_id, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", root_agent_id=\"{{.body_defenseclaw_agent_root_id}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"output\" | unwrap body_gen_ai_usage_output_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "B",
           "instant": true,
           "format": "table"
         }
@@ -2234,10 +2247,10 @@
       "title": "Reported tokens for selected session tree",
       "id": 48,
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
-      "description": "Connector-attributed provider-reported input and output tokens joined to every agent execution in the selected canonical root-session tree. An established series contributes its counter increase; a series first published inside the range contributes its latest cumulative completion value once. No rows means usage was not reported.",
+      "description": "Connector-reported tokens for the selected root session tree from canonical logs, deduplicated by logical event.",
       "gridPos": {
         "x": 0,
         "y": 116,
@@ -2246,12 +2259,24 @@
       },
       "targets": [
         {
-          "refId": "A",
+          "expr": "sum by (agent_id, agent_name, model, kind) (max by (agent_id, agent_name, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |~ \"$session\" | json | __error__=\"\" | connector=~\"$connector\" | (body_defenseclaw_session_root_id=~\"$session\" or body_gen_ai_conversation_id=~\"$session\" or body_defenseclaw_session_parent_id=~\"$session\") | body_gen_ai_agent_id=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"input\" | unwrap body_gen_ai_usage_input_tokens [$__range])))",
+          "queryType": "instant",
           "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
+            "type": "loki",
+            "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (gen_ai_agent_id, gen_ai_agent_name, gen_ai_request_model, kind) (((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",gen_ai_agent_id=~\"$agent\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",gen_ai_agent_id=~\"$agent\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\",gen_ai_agent_id=~\"$agent\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",gen_ai_agent_id=~\"$agent\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\",gen_ai_agent_id=~\"$agent\"} offset $__range))) and on (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id) max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",defenseclaw_session_root_id=~\"$session\"}[$__range])))",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "sum by (agent_id, agent_name, model, kind) (max by (agent_id, agent_name, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |~ \"$session\" | json | __error__=\"\" | connector=~\"$connector\" | (body_defenseclaw_session_root_id=~\"$session\" or body_gen_ai_conversation_id=~\"$session\" or body_defenseclaw_session_parent_id=~\"$session\") | body_gen_ai_agent_id=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"output\" | unwrap body_gen_ai_usage_output_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "B",
           "instant": true,
           "format": "table"
         }

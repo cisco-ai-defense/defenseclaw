@@ -1048,7 +1048,7 @@ def _ast_call_name(node: ast.Call) -> str | None:
 
 
 def _validate_phase_two_mutator_wrapper(source: str) -> None:
-    """Require the target wrapper to retain the lease for its real child lifetime."""
+    """Require a lease-owning supervisor with a closed child-exec boundary."""
 
     try:
         tree = ast.parse(source, filename="defenseclaw/phase_two_mutator.py")
@@ -1079,6 +1079,7 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         "os.lstat",
         "os.fstat",
         "os.path.samestat",
+        "os.set_inheritable",
         "stat.S_ISLNK",
         "stat.S_ISREG",
         "subprocess.run",
@@ -1092,6 +1093,18 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         for node in calls
     ):
         raise CandidateError("0.8.4+ mutator wrapper has an unbound child launch")
+    inheritable_calls = [
+        node for node in calls if _ast_call_name(node) == "os.set_inheritable"
+    ]
+    if not (
+        len(inheritable_calls) == 1
+        and len(inheritable_calls[0].args) == 2
+        and isinstance(inheritable_calls[0].args[0], ast.Name)
+        and inheritable_calls[0].args[0].id == "lease_fd"
+        and isinstance(inheritable_calls[0].args[1], ast.Constant)
+        and inheritable_calls[0].args[1].value is False
+    ):
+        raise CandidateError("0.8.4+ mutator wrapper does not mark the exact lease close-on-exec")
 
     child_launches: list[tuple[ast.Assign, ast.Call]] = []
     for node in ast.walk(main):
@@ -1119,27 +1132,15 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         and keywords["check"].value is False
     ):
         raise CandidateError("0.8.4+ mutator wrapper child launch must return its status")
+    close_fds = keywords.get("close_fds")
     pass_fds = keywords.get("pass_fds")
     if not (
-        isinstance(pass_fds, ast.IfExp)
-        and isinstance(pass_fds.test, ast.Compare)
-        and isinstance(pass_fds.test.left, ast.Attribute)
-        and isinstance(pass_fds.test.left.value, ast.Name)
-        and pass_fds.test.left.value.id == "os"
-        and pass_fds.test.left.attr == "name"
-        and len(pass_fds.test.ops) == 1
-        and isinstance(pass_fds.test.ops[0], ast.Eq)
-        and len(pass_fds.test.comparators) == 1
-        and isinstance(pass_fds.test.comparators[0], ast.Constant)
-        and pass_fds.test.comparators[0].value == "posix"
-        and isinstance(pass_fds.body, ast.Tuple)
-        and len(pass_fds.body.elts) == 1
-        and isinstance(pass_fds.body.elts[0], ast.Name)
-        and pass_fds.body.elts[0].id == "lease_fd"
-        and isinstance(pass_fds.orelse, ast.Tuple)
-        and not pass_fds.orelse.elts
+        isinstance(close_fds, ast.Constant)
+        and close_fds.value is True
+        and isinstance(pass_fds, ast.Tuple)
+        and not pass_fds.elts
     ):
-        raise CandidateError("0.8.4+ mutator wrapper does not hand the lease to its child")
+        raise CandidateError("0.8.4+ mutator wrapper does not close the lease at child exec")
     if not any(
         isinstance(node, ast.Return)
         and isinstance(node.value, ast.Attribute)
@@ -2968,6 +2969,12 @@ def _validate_wheel(path: Path, version: str) -> None:
             "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"
         ):
             raise CandidateError("0.8.4+ controller lacks the authenticated bridge handoff contract")
+        if candidate_key >= (0, 8, 5) and assignments.get(
+            "_STAGED_TARGET_CONTROLLER_VERSION_ENV"
+        ) != "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION":
+            raise CandidateError(
+                "0.8.5+ controller lacks the authenticated target-controller handoff contract"
+            )
 
 
 def _safe_archive_member_path(name: str, archive_name: str) -> PurePosixPath:

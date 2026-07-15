@@ -935,6 +935,104 @@ attributes:
     id: identity-v1
     notes: Exact configured disabled state
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.connector.identifiers
+  type: array
+  brief: Ordered identifier-class section of one complete connector inventory snapshot
+  examples: [[{name: openclaw}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 256, max_depth: 2, max_properties: 128}
+    notes: Sealed typed array aligned by index with connector metadata and content sections; flattened limits cover 128 one-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.connector.metadata
+  type: array
+  brief: Ordered metadata-class section of one complete connector inventory snapshot
+  examples: [[{source: built-in, tool_inspection_mode: both, subprocess_policy: sandbox}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 512, max_depth: 2, max_properties: 384}
+    notes: Sealed typed array aligned by index with connector identifier and content sections; flattened limits cover 128 three-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.connector.content
+  type: array
+  brief: Ordered content-class section of one complete connector inventory snapshot
+  examples: [[{description: built-in connector}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 256, max_depth: 2, max_properties: 128}
+    notes: Sealed typed array aligned by index with connector identifier and metadata sections; flattened limits cover 128 one-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.identifiers
+  type: array
+  brief: Ordered identifier-class section of one complete MCP inventory snapshot
+  examples: [[{name: payments-mcp, url_host: mcp.example.com:8443}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 768, max_depth: 2, max_properties: 512}
+    notes: Sealed typed array aligned by index with the MCP metadata section; flattened limits cover 256 two-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.metadata
+  type: array
+  brief: Ordered metadata-class section of one complete MCP inventory snapshot
+  examples: [[{transport: stdio, command_basename: mcp-server, auth_provider_type: oauth, disabled: false}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 1280, max_depth: 2, max_properties: 1024}
+    notes: Sealed typed array aligned by index with the MCP identifier section; flattened limits cover 256 four-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.agent.identifiers
+  type: array
+  brief: Ordered identifier-class section of one complete coding-agent inventory snapshot
+  examples: [[{name: codex, config_path_hash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000'}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 65536, max_item_utf8_bytes: 512, max_items: 192, max_depth: 2, max_properties: 128}
+    notes: Sealed typed array aligned by index with the coding-agent metadata section; flattened limits cover 64 two-property records
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.agent.metadata
+  type: array
+  brief: Ordered metadata-class section of one complete coding-agent inventory snapshot
+  examples: [[{installed: true, has_config: true, config_basename: config.toml, has_binary: true, binary_basename: codex, version: '1.2.3', probe_status: ok}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 65536, max_item_utf8_bytes: 512, max_items: 512, max_depth: 2, max_properties: 448}
+    notes: Sealed typed array aligned by index with the coding-agent identifier section; flattened limits cover 64 seven-property records
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.component.identity_score
   type: double
   brief: Confidence that the discovered component is correctly identified
@@ -1149,6 +1247,20 @@ attributes:
       enum: [cli, tui, api, unknown]
     notes: cli|tui|api|unknown
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.scanned_at
+  type: string
+  brief: Canonical RFC3339 timestamp reported for a managed coding-agent inventory snapshot
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Parsed and re-encoded as UTC RFC3339Nano by the authenticated agent-discovery endpoint
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.agent.discovery.cache_hit
   type: boolean
   brief: Whether the connector discovery report came from a local cache
@@ -1255,6 +1367,38 @@ attributes:
   cardinality: low
   normalization: {id: identity-v1, notes: Boolean; no configuration value or path is carried}
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.config_basename
+  type: string
+  brief: Conservative basename of the discovered connector configuration
+  examples: [config.toml]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'
+    notes: Basename only; path separators, arguments, controls, and shell syntax are forbidden
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.config_path_hash
+  type: string
+  brief: One-way SHA-256 identity of the discovered connector configuration path
+  examples: [sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: Validated digest only; the raw configuration path is never accepted or retained
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.agent.discovery.has_binary
   type: boolean
   brief: Whether a sanitized connector binary signal exists
@@ -1265,6 +1409,54 @@ attributes:
   sensitivity: safe
   cardinality: low
   normalization: {id: identity-v1, notes: Boolean; no binary path is carried}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.binary_basename
+  type: string
+  brief: Conservative basename of the discovered connector binary
+  examples: [codex]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'
+    notes: Basename only; path separators, arguments, controls, and shell syntax are forbidden
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.binary_path_hash
+  type: string
+  brief: One-way SHA-256 identity of the discovered connector binary path
+  examples: [sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: Validated digest only; the raw binary path is never accepted or retained
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.discovery.version
+  type: string
+  brief: Conservative version label reported by the trusted connector probe
+  examples: [codex-cli 1.2.3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 200
+      pattern: '^[A-Za-z0-9][A-Za-z0-9 .,_+@():-]*$'
+    notes: Conservative ASCII label only; raw stdout, stderr, paths, controls, shell syntax, and credential assignment syntax are forbidden
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.agent.discovery.probe_status
   type: string
@@ -3661,7 +3853,7 @@ groups:
     requirement_level: recommended
 - id: body.endpoint.inventory
   type: body_group
-  brief: Redaction-safe metadata for one connector or MCP endpoint inventory item.
+  brief: Redaction-safe metadata for one connector, MCP server, or coding-agent endpoint inventory item.
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
@@ -3687,6 +3879,28 @@ groups:
   - ref: defenseclaw.inventory.mcp.auth_provider_type
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.disabled
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.connector
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.installed
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.has_config
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.config_basename
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.config_path_hash
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.has_binary
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.binary_basename
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.binary_path_hash
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.version
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.probe_status
+    requirement_level: recommended
+  - ref: defenseclaw.agent.discovery.scanned_at
     requirement_level: recommended
 - id: body.ai.discovery.run
   type: body_group
@@ -3722,6 +3936,22 @@ groups:
     requirement_level: required
   - ref: defenseclaw.ai.discovery.errors
     requirement_level: required
+  - ref: defenseclaw.agent.discovery.scanned_at
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.connector.identifiers
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.connector.metadata
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.connector.content
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.identifiers
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.metadata
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.agent.identifiers
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.agent.metadata
+    requirement_level: recommended
 - id: body.agent.discovery.run
   type: body_group
   brief: Sanitized connector installation discovery summary body.

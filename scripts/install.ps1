@@ -38,22 +38,18 @@
     existing installations are refused and directed to the authenticated
     target-release defenseclaw-upgrade.ps1 resolver asset in latest mode,
     without -Version, so release manifests and hard-cut bridge rules are
-    applied. A coherent installed 0.8.4 bridge may also use its built-in upgrade
-    command; pre-bridge controllers require the release resolver.
+    applied. The current hard cut publishes no Windows 0.8.4 bridge or 0.8.5
+    runtime binary, so that resolver is a pre-mutation refusal surface and the
+    existing Windows installation must remain unchanged. The immutable 0.8.4
+    built-in parser cannot make this unsupported path valid. This installer is
+    retained for complete authenticated historical or future Windows asset
+    sets; it cannot install the current POSIX-only release.
 
 .EXAMPLE
-    $Version = "0.8.4"
-    $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-    & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
-
-.EXAMPLE
-    # Pin a version and pick a connector, non-interactively:
-    .\install.ps1 -Version 0.7.0 -Connector codex -Yes -Quickstart
-
-.EXAMPLE
-    # Install from a complete authenticated release-asset directory:
+    # Install only from a complete authenticated Windows release-asset directory:
     .\install.ps1 -Local C:\path\to\release-assets
-    # An unsigned directory produced by `make dist` is rejected for 0.8.4+.
+    # The current POSIX-only release has no such Windows directory.
+    # An unsigned directory produced by `make dist` is rejected.
 #>
 
 [CmdletBinding()]
@@ -2231,13 +2227,13 @@ function Show-Help {
 
 DefenseClaw Installer (Windows)
 
-Usage:
-  `$Version = "0.8.4"
-  `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
-  & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
-  .\install.ps1 -Local C:\path\to\release-assets  # complete authenticated assets
-  .\install.ps1 -Yes                          # non-interactive
-  .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap
+Usage when a complete authenticated Windows asset set is available:
+  .\install.ps1 -Local C:\path\to\release-assets
+  .\install.ps1 -Local C:\path\to\release-assets -Yes -Connector codex -Quickstart
+
+Current release status:
+  No Windows runtime is published for the POSIX-only hard cut. This installer
+  cannot install it; keep an existing Windows installation unchanged.
 
 Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))

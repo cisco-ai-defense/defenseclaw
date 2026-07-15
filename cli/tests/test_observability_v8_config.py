@@ -229,6 +229,93 @@ def test_exact_v8_rejects_other_version_values(version: object) -> None:
     assert captured.value.keyword == "exact-version"
 
 
+def test_private_upstream_allowlist_is_optional_unique_and_source_preserving() -> None:
+    minimal = load_validate_v8({"config_version": 8, "guardrail": {}, "observability": {}})
+    assert "allow_private_upstreams" not in minimal.source["guardrail"]
+
+    values = [" 10.20.30.40 ", "fd12:3456::8", "8.8.8.8", "100.64.0.8"]
+    validated = load_validate_v8(
+        {
+            "config_version": 8,
+            "guardrail": {"allow_private_upstreams": values},
+            "observability": {},
+        }
+    )
+    assert validated.source["guardrail"]["allow_private_upstreams"] == values
+
+    with pytest.raises(V8ConfigError) as duplicate:
+        load_validate_v8(
+            {
+                "config_version": 8,
+                "guardrail": {"allow_private_upstreams": ["10.20.30.40", "10.20.30.40"]},
+                "observability": {},
+            }
+        )
+    assert duplicate.value.keyword == "uniqueItems"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "10.20.30.40",
+        "172.16.0.8",
+        "192.168.1.8",
+        "fd12:3456::8",
+        "8.8.8.8",
+        "2001:4860:4860::8888",
+        "100.64.0.8",
+        "::ffff:10.20.30.40",
+        "  10.20.30.40  ",
+        "   ",
+    ],
+)
+def test_private_upstream_allowlist_accepts_go_valid_literal_classes(value: str) -> None:
+    validated = load_validate_v8(
+        {
+            "config_version": 8,
+            "guardrail": {"allow_private_upstreams": [value]},
+            "observability": {},
+        }
+    )
+    assert validated.source["guardrail"]["allow_private_upstreams"] == [value]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "10.20.30.0/24",
+        "not-an-ip",
+        "127.0.0.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "169.254.10.20",
+        "fe80::8",
+        "::ffff:169.254.10.20",
+        "224.0.0.8",
+        "ff02::8",
+        "0.0.0.0",
+        "::",
+        "::ffff:0.0.0.0",
+        "169.254.169.254",
+        "169.254.170.2",
+        "fd00:ec2::254",
+        "::ffff:169.254.169.254",
+        "2001:4860:4860::8888%eth0",
+    ],
+)
+def test_private_upstream_allowlist_rejects_go_hard_denied_or_nonliteral_values(value: str) -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(
+            {
+                "config_version": 8,
+                "guardrail": {"allow_private_upstreams": [value]},
+                "observability": {},
+            }
+        )
+    assert captured.value.path == "$.guardrail.allow_private_upstreams[0]"
+    assert captured.value.keyword == "semantic"
+
+
 @pytest.mark.parametrize(
     "source",
     [

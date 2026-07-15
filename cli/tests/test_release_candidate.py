@@ -1656,19 +1656,19 @@ def test_bridge_candidate_rejects_duplicate_wheel_publisher_member(tmp_path: Pat
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_bridge_candidate_rejects_mutator_wrapper_that_drops_child_lease(
+def test_bridge_candidate_rejects_mutator_wrapper_that_leaks_child_lease(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime_dir(tmp_path)
     wheel = runtime / PROTECTED_WHEEL
     members = _read_wheel_members(wheel)
     members["defenseclaw/phase_two_mutator.py"] = PHASE_TWO_MUTATOR_SOURCE.replace(
-        'pass_fds=(lease_fd,) if os.name == "posix" else (),',
         "pass_fds=(),",
+        "pass_fds=(lease_fd,),",
     ).encode()
     _write_wheel_members(wheel, members)
 
-    with pytest.raises(release_candidate.CandidateError, match="hand the lease to its child"):
+    with pytest.raises(release_candidate.CandidateError, match="close the lease at child exec"):
         release_candidate.verify_runtime(runtime, VERSION)
 
 
@@ -1677,58 +1677,172 @@ def test_bridge_candidate_rejects_dead_branch_lease_decoy(tmp_path: Path) -> Non
     wheel = runtime / PROTECTED_WHEEL
     members = _read_wheel_members(wheel)
     members["defenseclaw/phase_two_mutator.py"] = PHASE_TWO_MUTATOR_SOURCE.replace(
-        'pass_fds=(lease_fd,) if os.name == "posix" else (),',
-        "pass_fds=() if True else (lease_fd,),",
+        "pass_fds=(),",
+        "pass_fds=() if False else (lease_fd,),",
     ).encode()
     _write_wheel_members(wheel, members)
 
-    with pytest.raises(release_candidate.CandidateError, match="hand the lease to its child"):
+    with pytest.raises(release_candidate.CandidateError, match="close the lease at child exec"):
         release_candidate.verify_runtime(runtime, VERSION)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance canary")
-def test_candidate_wheel_mutator_holds_lease_for_real_child_lifetime(tmp_path: Path) -> None:
+def test_candidate_wheel_mutator_supervisor_holds_lease_for_real_child_lifetime(tmp_path: Path) -> None:
+    import fcntl
+
     runtime = _runtime_dir(tmp_path)
     wheel = runtime / PROTECTED_WHEEL
     wrapper = tmp_path / "phase_two_mutator.py"
     wrapper.write_bytes(_read_wheel_members(wheel)["defenseclaw/phase_two_mutator.py"])
     lease = tmp_path / "phase-two-mutator.lease"
     descriptor = os.open(lease, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    child_started = tmp_path / "child-started"
+    release_child = tmp_path / "release-child"
     child_marker = tmp_path / "child-completed"
     child = (
-        "import os, pathlib, sys, time; "
-        "os.fstat(int(sys.argv[1])); "
-        "time.sleep(0.25); "
-        "pathlib.Path(sys.argv[2]).write_text('held', encoding='utf-8')"
+        "import pathlib, sys, time; "
+        "started,release,completed=map(pathlib.Path,sys.argv[1:]); "
+        "started.touch(); deadline=time.monotonic()+10; "
+        "exec(\"while not release.exists():\\n"
+        " assert time.monotonic()<deadline\\n time.sleep(0.02)\"); "
+        "completed.write_text('held', encoding='utf-8')"
     )
-    started = time.monotonic()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(wrapper),
+            "--defenseclaw-phase-two-mutator",
+            str(lease),
+            str(descriptor),
+            "--",
+            sys.executable,
+            "-c",
+            child,
+            str(child_started),
+            str(release_child),
+            str(child_marker),
+        ],
+        pass_fds=(descriptor,),
+    )
+    os.close(descriptor)
     try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(wrapper),
-                "--defenseclaw-phase-two-mutator",
-                str(lease),
-                str(descriptor),
-                "--",
-                sys.executable,
-                "-c",
-                child,
-                str(descriptor),
-                str(child_marker),
-            ],
-            pass_fds=(descriptor,),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    finally:
-        os.close(descriptor)
+        deadline = time.monotonic() + 10
+        while not child_started.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
 
-    assert completed.returncode == 0, completed.stderr
-    assert time.monotonic() - started >= 0.2
+        competitor = os.open(lease, os.O_RDWR)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        release_child.touch()
+        assert process.wait(timeout=10) == 0
+        fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.close(competitor)
+    finally:
+        release_child.touch(exist_ok=True)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
     assert child_marker.read_text(encoding="utf-8") == "held"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance canary")
+def test_candidate_wheel_mutator_does_not_leak_lease_to_gateway_or_watchdog_descendants(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    runtime = _runtime_dir(tmp_path)
+    wheel = runtime / PROTECTED_WHEEL
+    wrapper = tmp_path / "phase_two_mutator.py"
+    wrapper.write_bytes(_read_wheel_members(wheel)["defenseclaw/phase_two_mutator.py"])
+    lease = tmp_path / "phase-two-mutator.lease"
+    descriptor = os.open(lease, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    descendants_ready = tmp_path / "descendants-ready"
+    release_descendants = tmp_path / "release-descendants"
+    descendants_done = tmp_path / "descendants-done"
+    child_script = tmp_path / "daemonizing-mutator.py"
+    child_script.write_text(
+        """import os
+import pathlib
+import subprocess
+import sys
+
+fd, lease, ready, release, done = sys.argv[1:]
+try:
+    leaked = os.path.samestat(os.fstat(int(fd)), os.stat(lease))
+except OSError:
+    leaked = False
+assert not leaked
+probe = '''import os
+import pathlib
+import sys
+import time
+
+fd, lease, ready, release, done = sys.argv[1:]
+try:
+    leaked = os.path.samestat(os.fstat(int(fd)), os.stat(lease))
+except OSError:
+    leaked = False
+assert not leaked
+pathlib.Path(ready).touch()
+deadline = time.monotonic() + 10
+while not pathlib.Path(release).exists():
+    assert time.monotonic() < deadline
+    time.sleep(0.02)
+pathlib.Path(done).touch()
+'''
+for index in range(2):
+    subprocess.Popen(
+        [sys.executable, '-c', probe, fd, lease, ready + str(index), release, done + str(index)],
+        start_new_session=True,
+    )
+""",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(wrapper),
+            "--defenseclaw-phase-two-mutator",
+            str(lease),
+            str(descriptor),
+            "--",
+            sys.executable,
+            str(child_script),
+            str(descriptor),
+            str(lease),
+            str(descendants_ready),
+            str(release_descendants),
+            str(descendants_done),
+        ],
+        pass_fds=(descriptor,),
+    )
+    os.close(descriptor)
+    try:
+        assert process.wait(timeout=10) == 0
+        deadline = time.monotonic() + 10
+        while not all((tmp_path / f"descendants-ready{i}").exists() for i in range(2)):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
+        competitor = os.open(lease, os.O_RDWR)
+        try:
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(competitor)
+    finally:
+        release_descendants.touch()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        deadline = time.monotonic() + 10
+        while not all((tmp_path / f"descendants-done{i}").exists() for i in range(2)):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
 
 
 @pytest.mark.parametrize(
@@ -1774,6 +1888,7 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
             "defenseclaw/commands/cmd_upgrade.py",
             "_UPGRADE_PROTOCOL_VERSION = 2\n"
             '_STAGED_BRIDGE_ARTIFACT_DIR_ENV = "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"\n'
+            '_STAGED_TARGET_CONTROLLER_VERSION_ENV = "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"\n'
             "def _is_bridge_to_hard_cut_phase(): return True\n"
             "def _require_release_owned_hard_cut_handoff(): pass\n"
             "def _acquire_bridge_rollback_artifacts(): pass\n"
@@ -1831,6 +1946,17 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
     )
 
     release_candidate._validate_wheel(wheel, version)
+
+    members = _read_wheel_members(wheel)
+    members["defenseclaw/commands/cmd_upgrade.py"] = members[
+        "defenseclaw/commands/cmd_upgrade.py"
+    ].replace(
+        b'_STAGED_TARGET_CONTROLLER_VERSION_ENV = "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"\n',
+        b"",
+    )
+    _write_wheel_members(wheel, members)
+    with pytest.raises(release_candidate.CandidateError, match="target-controller handoff contract"):
+        release_candidate._validate_wheel(wheel, version)
 
 
 @pytest.mark.parametrize(

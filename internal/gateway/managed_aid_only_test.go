@@ -283,6 +283,9 @@ func newManagedAIDFailOpenRuntime(
 			RetentionDays: &retentionDays,
 		},
 		Buckets: map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
+			observability.BucketAgentLifecycle: {
+				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
+			},
 			observability.BucketPlatformHealth: {
 				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
 			},
@@ -331,7 +334,7 @@ func newManagedAIDFailOpenRuntime(
 		t.Fatal(err)
 	}
 	adapter := &managedAIDFailOpenUnavailableAdapter{
-		delivered: make(chan managedAIDFailOpenDelivery, 4),
+		delivered: make(chan managedAIDFailOpenDelivery, 64),
 	}
 	runtime, err := observabilityruntime.New(
 		t.Context(),

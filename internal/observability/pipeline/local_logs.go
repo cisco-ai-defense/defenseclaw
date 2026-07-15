@@ -174,12 +174,18 @@ func (work ProjectedDelivery) Identity() ProjectedDeliveryIdentity { return work
 type LocalLogOutcome struct {
 	admission       router.Admission
 	localPersisted  bool
+	managedOnly     bool
 	optionalWork    []ProjectedDelivery
 	optionalFailure []OptionalFailure
 }
 
 func (outcome LocalLogOutcome) Admission() router.Admission { return outcome.admission }
 func (outcome LocalLogOutcome) LocalPersisted() bool        { return outcome.localPersisted }
+
+// ManagedOnly reports the narrow release-owned path where ordinary collection
+// remained disabled and only the generated managed-enterprise destination was
+// projected. Such an outcome is never locally persisted or fanned out.
+func (outcome LocalLogOutcome) ManagedOnly() bool { return outcome.managedOnly }
 func (outcome LocalLogOutcome) OptionalWork() []ProjectedDelivery {
 	return append([]ProjectedDelivery(nil), outcome.optionalWork...)
 }
@@ -280,6 +286,83 @@ func (pipeline *LocalLogPipeline) ProcessImported(
 		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
 	}
 	return pipeline.process(ctx, metadata, builder, suppressAll, originDestination)
+}
+
+// ProcessManagedLogFallback projects a locally produced canonical log only to
+// the exact generated managed-enterprise destination after ordinary collection
+// returned AdmissionDrop. This narrow release-owned exception never appends to
+// SQLite, never evaluates operator-authored destinations, and is not used by
+// imported or local-only runtime calls. The request SinkPolicy is applied to
+// the destination's centrally compiled sensitive profile.
+func (pipeline *LocalLogPipeline) ProcessManagedLogFallback(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+) (LocalLogOutcome, error) {
+	if pipeline == nil || pipeline.evaluator == nil || pipeline.projector == nil ||
+		pipeline.appender == nil || pipeline.failures == nil {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+	}
+	if ctx == nil || metadata.Identity().Signal != observability.SignalLogs {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+	}
+	if err := ctx.Err(); err != nil {
+		return LocalLogOutcome{}, &Error{code: ErrorContextDone, contextCause: err}
+	}
+	safeBuilder := func(admission router.Admission) (observability.Record, error) {
+		if builder == nil {
+			return observability.Record{}, &recordBuildFailure{}
+		}
+		record, err := builder(admission)
+		if err != nil {
+			return observability.Record{}, &recordBuildFailure{}
+		}
+		return record, nil
+	}
+	result, err := pipeline.evaluator.EvaluateManagedLogFallback(metadata, safeBuilder)
+	if err != nil {
+		var buildFailure *recordBuildFailure
+		if errors.As(err, &buildFailure) {
+			return LocalLogOutcome{}, &Error{code: ErrorRecordBuild}
+		}
+		return LocalLogOutcome{}, &Error{code: ErrorEvaluation}
+	}
+	outcome := LocalLogOutcome{admission: router.AdmissionDrop}
+	record, ok := result.Record()
+	if !ok {
+		return outcome, nil
+	}
+	delivery, ok := result.Delivery()
+	if !ok || delivery.DestinationName != config.ObservabilityV8ManagedAIDDestinationName ||
+		delivery.DestinationKind != config.ObservabilityV8DestinationOTLP ||
+		delivery.MandatoryFloor || delivery.RedactionProfile != string(v8redaction.ProfileSensitive) {
+		return LocalLogOutcome{}, &Error{code: ErrorEvaluation}
+	}
+	outcome.managedOnly = true
+	profile, found := pipeline.resolveProjectionProfile(
+		v8redaction.ProfileSensitive, legacyredaction.SinkPolicyFromContext(ctx),
+	)
+	if !found {
+		outcome.optionalFailure = append(outcome.optionalFailure, newOptionalFailure(
+			delivery, OptionalFailureProfile,
+		))
+		return outcome, nil
+	}
+	projection, _, projectErr := pipeline.projector.Project(record, profile)
+	if projectErr != nil {
+		outcome.optionalFailure = append(outcome.optionalFailure, newOptionalFailure(
+			delivery, boundedProjectionFailure(projectErr),
+		))
+		return outcome, nil
+	}
+	outcome.optionalWork = append(outcome.optionalWork, ProjectedDelivery{
+		delivery: delivery, projection: projection,
+		identity: ProjectedDeliveryIdentity{
+			recordID: record.RecordID(), bucket: record.Bucket(), signal: record.Signal(),
+			eventName: record.EventName(),
+		},
+	})
+	return outcome, nil
 }
 
 func (pipeline *LocalLogPipeline) process(

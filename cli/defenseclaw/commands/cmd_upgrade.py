@@ -90,6 +90,7 @@ _UPGRADE_HANDOFF_ENV = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
 _STAGED_UPGRADE_ENV = "DEFENSECLAW_STAGED_UPGRADE"
 _STAGED_BRIDGE_VERSION_ENV = "DEFENSECLAW_STAGED_BRIDGE_VERSION"
 _STAGED_BRIDGE_ARTIFACT_DIR_ENV = "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"
+_STAGED_TARGET_CONTROLLER_VERSION_ENV = "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"
 _UPGRADE_TEST_MODE_ENV = "DEFENSECLAW_UPGRADE_TEST_MODE"
 _UPGRADE_TEST_RELEASE_BASE_URL_ENV = "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL"
 _UPGRADE_RECOVERY_DIRECTORY = ".upgrade-recovery"
@@ -102,6 +103,13 @@ _MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
 _BUNDLE_RESTART_INTENT_FILENAME = "restart-intent.json"
 _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
+# The gateway's human-facing status command performs two independently
+# bounded five-second HTTP probes.  Its process-level caller therefore needs
+# a budget comfortably above ten seconds, especially on launchd hosts where
+# scheduling can push the observed runtime just past that boundary.  Keep the
+# controller timeout bounded, but never equal to the child command's own
+# worst-case network budget.
+_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS = 20
 _STRICT_SIGSTORE_RELEASE_VERSION = "0.8.4"
 _RELEASE_WORKFLOW_IDENTITY = f"https://github.com/{GITHUB_REPO}/.github/workflows/release.yaml@refs/heads/main"
 _COSIGN_BOOTSTRAP_VERSION = "2.6.3"
@@ -123,6 +131,9 @@ _TARGET_CONFIG_VERSION = 8
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
+_HARD_CUT_PROMOTED_REQUIREMENTS = {
+    ("0.8.4", "0.8.5"): ("jsonschema<5,>=4.23.0",),
+}
 _MACOS_GATEWAY_CODESIGN_IDENTIFIER = "com.cisco.defenseclaw.gateway"
 _PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 _V8_RECOVERY_ENTRY_RE = re.compile(r"^observability-v8-[0-9a-f]{32}$")
@@ -328,7 +339,7 @@ def upgrade(
     before the gateway is stopped, so a failed download never disrupts a
     running gateway.
     """
-    from defenseclaw import __version__ as current_version
+    from defenseclaw import __version__ as controller_version
 
     ux.banner("DefenseClaw Upgrade")
 
@@ -343,6 +354,11 @@ def upgrade(
             raise SystemExit(1)
 
     target_version = _normalize_target_version(target_version)
+    current_version = _resolve_upgrade_source_version(
+        controller_version,
+        target_version,
+        target_was_explicit=target_was_explicit,
+    )
     if _version_key(target_version) < _version_key(current_version):
         ux.err(
             f"Refusing to downgrade DefenseClaw {current_version} to {target_version} through the upgrade path.",
@@ -382,6 +398,13 @@ def upgrade(
     recovery_home = _upgrade_recovery_home()
     data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
     active_config_path = _active_upgrade_config_path(recovery_home)
+    if current_version != controller_version:
+        _preflight_staged_target_controller_source(
+            source_version=current_version,
+            controller_version=controller_version,
+            target_version=target_version,
+            recovery_home=recovery_home,
+        )
     _preflight_installed_source_coherence(
         current_version,
         os_name,
@@ -1406,6 +1429,174 @@ def _installed_gateway_filename(os_name: str) -> str:
     Windows, so the CLI finds it regardless of the suffix.
     """
     return "defenseclaw-gateway.exe" if os_name == "windows" else "defenseclaw-gateway"
+
+
+def _fail_staged_target_controller_handoff(message: str) -> NoReturn:
+    ux.err(message, indent="  ")
+    ux.subhead(
+        "The release-owned target controller did not receive one complete, exact "
+        "bridge handoff. No target network preflight ran, no services were stopped, "
+        "and no installed artifacts were changed.",
+        indent="    ",
+    )
+    raise SystemExit(1)
+
+
+def _resolve_upgrade_source_version(
+    controller_version: str,
+    target_version: str,
+    *,
+    target_was_explicit: bool,
+) -> str:
+    """Resolve an exact bridge source for an out-of-place target controller.
+
+    Ordinary installed controllers remain versioned by their own package.  The
+    release-owned POSIX resolver may instead execute the already authenticated
+    target wheel from a private venv after a healthy 0.8.4 bridge is active.
+    Only the target-controller marker enables that override; the older three
+    staged variables remain valid for an installed bridge controller and never
+    silently change the running package's source identity.
+    """
+
+    staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+    if not staged_target:
+        return controller_version
+
+    staged_upgrade = os.environ.get(_STAGED_UPGRADE_ENV, "")
+    staged_source = os.environ.get(_STAGED_BRIDGE_VERSION_ENV, "")
+    staged_dir = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
+    if (
+        staged_upgrade != "1"
+        or not target_was_explicit
+        or staged_target != controller_version
+        or target_version != controller_version
+        or staged_source != _OBSERVABILITY_V8_BRIDGE_VERSION
+        or _CANONICAL_VERSION_RE.fullmatch(controller_version) is None
+        or _CANONICAL_VERSION_RE.fullmatch(staged_source) is None
+        or _version_key(controller_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION)
+        or _version_key(staged_source) >= _version_key(controller_version)
+        or not staged_dir
+        or not os.path.isabs(os.path.expanduser(staged_dir))
+        or any(character in staged_dir for character in ("\n", "\r", "\t"))
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged target-controller source override is incomplete or mismatched."
+        )
+    return staged_source
+
+
+def _preflight_staged_target_controller_source(
+    *,
+    source_version: str,
+    controller_version: str,
+    target_version: str,
+    recovery_home: str,
+) -> None:
+    """Prove the fresh target controller and canonical installed bridge CLI.
+
+    The authenticated bridge artifact set is verified later, after target
+    provenance is authenticated, and still before backup or service mutation.
+    This early gate prevents an arbitrary target-wheel invocation from using a
+    staged source override to bypass installed-component coherence.
+    """
+
+    if (
+        source_version != _OBSERVABILITY_V8_BRIDGE_VERSION
+        or controller_version != target_version
+        or os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV) != controller_version
+        or os.name != "posix"
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged target controller is not bound to the required POSIX bridge transition."
+        )
+
+    installed_venv = os.path.realpath(os.path.join(recovery_home, ".venv"))
+    running_prefix = os.path.realpath(sys.prefix)
+    try:
+        running_inside_installed = os.path.commonpath((running_prefix, installed_venv)) == installed_venv
+    except ValueError:
+        running_inside_installed = False
+    try:
+        prefix_info = os.lstat(running_prefix)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The staged target-controller environment is unavailable."
+        )
+    if (
+        running_inside_installed
+        or stat.S_ISLNK(prefix_info.st_mode)
+        or not stat.S_ISDIR(prefix_info.st_mode)
+        or prefix_info.st_uid != os.getuid()
+        or stat.S_IMODE(prefix_info.st_mode) & 0o077
+    ):
+        _fail_staged_target_controller_handoff(
+            "The target controller is not running from a private out-of-place environment."
+        )
+
+    staged_dir = os.path.abspath(
+        os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV])
+    )
+    try:
+        staged_info = os.lstat(staged_dir)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The staged bridge artifact directory is unavailable."
+        )
+    if (
+        stat.S_ISLNK(staged_info.st_mode)
+        or not stat.S_ISDIR(staged_info.st_mode)
+        or staged_info.st_uid != os.getuid()
+        or stat.S_IMODE(staged_info.st_mode) != 0o700
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged bridge artifact directory is not private and caller-owned."
+        )
+
+    installed_cli = os.path.join(installed_venv, "bin", "defenseclaw")
+    launcher = os.path.expanduser("~/.local/bin/defenseclaw")
+    try:
+        installed_info = os.lstat(installed_cli)
+        launcher_info = os.lstat(launcher)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI is unavailable."
+        )
+    if (
+        stat.S_ISLNK(installed_info.st_mode)
+        or not stat.S_ISREG(installed_info.st_mode)
+        or installed_info.st_uid != os.getuid()
+        or installed_info.st_nlink != 1
+        or stat.S_IMODE(installed_info.st_mode) & 0o022
+        or not stat.S_IMODE(installed_info.st_mode) & stat.S_IXUSR
+        or not stat.S_ISLNK(launcher_info.st_mode)
+        or launcher_info.st_uid != os.getuid()
+        or os.path.realpath(launcher) != installed_cli
+    ):
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI lost release-managed custody."
+        )
+
+    child_env = dict(os.environ)
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        result = subprocess.run(
+            [launcher, "--version"],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI version could not be verified."
+        )
+    output = (result.stdout or "") + (result.stderr or "")
+    reported = _VERSION_TOKEN_RE.findall(output)
+    if result.returncode != 0 or reported != [source_version]:
+        _fail_staged_target_controller_handoff(
+            "The canonical installed CLI does not match the staged bridge source."
+        )
 
 
 def _fail_installed_source_coherence(message: str) -> NoReturn:
@@ -2743,13 +2934,19 @@ def _require_release_owned_hard_cut_handoff(
     staged_upgrade = os.environ.get(_STAGED_UPGRADE_ENV, "")
     staged_version = os.environ.get(_STAGED_BRIDGE_VERSION_ENV, "")
     staged_dir = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
-    supplied = any((staged_upgrade, staged_version, staged_dir))
+    staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+    supplied = any((staged_upgrade, staged_version, staged_dir, staged_target))
     if not supplied:
         # `_acquire_bridge_rollback_artifacts` downloads the exact installed
         # bridge release through mandatory Sigstore/checksum verification and
         # binds that set to the authenticated target provenance before backup.
         return
-    if staged_upgrade == "1" and staged_version == source_version and staged_dir:
+    if (
+        staged_upgrade == "1"
+        and staged_version == source_version
+        and staged_dir
+        and (not staged_target or staged_target == target_version)
+    ):
         return
     ux.err(
         f"DefenseClaw {target_version} received an incomplete or mismatched "
@@ -4045,11 +4242,42 @@ def _require_hard_cut_dependency_contract(
 ) -> None:
     source = _wheel_dependency_contract(source_wheel, source_version)
     target = _wheel_dependency_contract(target_wheel, target_version)
-    if target != source:
+    promoted = _HARD_CUT_PROMOTED_REQUIREMENTS.get((source_version, target_version), ())
+    expected = tuple(sorted((*source, *promoted)))
+    if target != expected:
         raise ValueError(
-            "hard-cut target Requires-Dist differs from the authenticated bridge; "
+            "hard-cut target Requires-Dist differs from the authenticated bridge plus "
+            "the reviewed pre-existing runtime promotion; "
             "publish an explicit dependency migration instead of mutating the bridge environment"
         )
+
+
+def _require_hard_cut_preexisting_jsonschema(python_path: str) -> None:
+    """Prove the bridge already satisfies v8 schema validation without mutation."""
+
+    script = r"""
+from importlib.metadata import version
+import re
+
+from jsonschema import Draft202012Validator
+
+value = version("jsonschema")
+match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:[.+-].*)?", value)
+if match is None:
+    raise SystemExit("installed jsonschema version is not canonical")
+major, minor = (int(match.group(1)), int(match.group(2)))
+if major != 4 or minor < 23:
+    raise SystemExit("installed jsonschema runtime is outside 4.23 <= version < 5")
+if Draft202012Validator.META_SCHEMA.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+    raise SystemExit("installed jsonschema lacks the Draft 2020-12 validator contract")
+"""
+    subprocess.run(
+        [python_path, "-I", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
 def _require_target_phase_two_mutator_wrapper(whl_path: str) -> None:
@@ -4184,6 +4412,7 @@ def _preflight_wheel_install(
                 source_version=source_version,
                 target_version=target_version,
             )
+            _require_hard_cut_preexisting_jsonschema(venv_python)
             subprocess.run(
                 [uv, "--no-config", "pip", "check", "--python", venv_python],
                 check=True,
@@ -4483,7 +4712,7 @@ def _assert_gateway_quiesced(data_dir: str, *, gateway_path: str | None = None) 
             [gateway_path, "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS,
             check=False,
             env=_gateway_process_environment(data_dir),
         )
@@ -4501,7 +4730,7 @@ def _capture_source_gateway_running_state(gateway_path: str, data_dir: str) -> b
             [gateway_path, "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS,
             check=False,
             env=_gateway_process_environment(data_dir),
         )
@@ -4673,6 +4902,7 @@ def _acquire_bridge_rollback_artifacts(
             _STAGED_UPGRADE_ENV,
             _STAGED_BRIDGE_VERSION_ENV,
             _STAGED_BRIDGE_ARTIFACT_DIR_ENV,
+            _STAGED_TARGET_CONTROLLER_VERSION_ENV,
         )
     )
     if supplied:
@@ -4680,6 +4910,14 @@ def _acquire_bridge_rollback_artifacts(
             raise OSError(f"{_STAGED_UPGRADE_ENV}=1 is required for staged handoff")
         if os.environ.get(_STAGED_BRIDGE_VERSION_ENV) != source_version:
             raise OSError(f"{_STAGED_BRIDGE_VERSION_ENV} does not match the installed bridge")
+        staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+        if staged_target:
+            from defenseclaw import __version__ as controller_version
+
+            if staged_target != controller_version:
+                raise OSError(
+                    f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller"
+                )
         staged = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
         if not staged:
             raise OSError(f"{_STAGED_BRIDGE_ARTIFACT_DIR_ENV} is required for staged handoff")

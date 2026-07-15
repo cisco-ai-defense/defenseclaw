@@ -65,10 +65,10 @@
       "id": 2,
       "type": "table",
       "title": "Agent Directory \u2014 click an Agent ID to drill down",
-      "description": "Every hook lifecycle transition updates defenseclaw.agent.last_seen. This table therefore discovers new agents automatically; no dashboard JSON is generated per agent.",
+      "description": "Canonical logs retain exact agent and lineage identities while metrics stay aggregate-only. This table groups observations by the reported identity fields and links to Agent360.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -78,10 +78,15 @@
       },
       "targets": [
         {
-          "expr": "1000 * topk by (connector, gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))",
-          "format": "table",
+          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
           "instant": true,
-          "refId": "A"
+          "format": "table"
         }
       ],
       "transformations": [
@@ -123,7 +128,7 @@
               "exported_job": true
             },
             "renameByName": {
-              "Value": "Last Seen",
+              "Value": "Observations",
               "connector": "Connector",
               "gen_ai_agent_id": "Agent ID",
               "gen_ai_agent_name": "Name",
@@ -171,18 +176,6 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Last Seen"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeFromNow"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Root Agent"
             },
             "properties": [
@@ -211,7 +204,7 @@
         "cellHeight": "sm",
         "sortBy": [
           {
-            "displayName": "Last Seen",
+            "displayName": "Observations",
             "desc": true
           }
         ]
@@ -220,10 +213,10 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Last seen",
+      "title": "Observations in range",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -233,31 +226,20 @@
       },
       "targets": [
         {
-          "expr": "time() - max(max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range]))",
-          "instant": true,
-          "refId": "A"
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" [$__range])) or vector(0)",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 300
-              },
-              {
-                "color": "red",
-                "value": 1800
-              }
-            ]
-          }
+          "unit": "short",
+          "decimals": 0
         },
         "overrides": []
       },
@@ -265,7 +247,8 @@
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value"
-      }
+      },
+      "description": "Raw canonical log observations for the selected exact agent or root tree."
     },
     {
       "id": 4,
@@ -386,8 +369,8 @@
       "type": "stat",
       "title": "Descendants in selected root tree",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 9,
@@ -397,9 +380,14 @@
       },
       "targets": [
         {
-          "expr": "count(count by (gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",defenseclaw_agent_root_id=~\"$agent\",defenseclaw_agent_parent_id!=\"\",gen_ai_agent_id!=\"$agent\"}[$__range]))) or vector(0)",
-          "instant": true,
-          "refId": "A"
+          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_defenseclaw_agent_root_id=~\"$agent\" | body_defenseclaw_agent_parent_id!=\"\" | body_gen_ai_agent_id!=\"$agent\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id!=\"\" [$__range]))) or vector(0)",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -417,10 +405,10 @@
       "id": 7,
       "type": "stat",
       "title": "Input tokens",
-      "description": "Connector-reported prompt/context tokens from completed model calls. An established series contributes its counter increase; a series first published inside the rolling one-hour window contributes its latest cumulative completion value once. Long-context agents can report much more input than output. Missing usage is absent, not guessed.",
+      "description": "Connector-reported tokens from canonical model.response logs, deduplicated by the correlation logical event ID. Missing usage is absent, not guessed.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 11,
@@ -430,9 +418,14 @@
       },
       "targets": [
         {
-          "expr": "sum((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"} offset $__range)))",
-          "instant": true,
-          "refId": "A"
+          "expr": "sum(max by (logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" | unwrap body_gen_ai_usage_input_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -452,10 +445,10 @@
       "id": 8,
       "type": "stat",
       "title": "Output tokens",
-      "description": "Connector-reported completion tokens from completed model calls. An established series contributes its counter increase; a series first published inside the rolling one-hour window contributes its latest cumulative completion value once. Missing usage is absent, not guessed.",
+      "description": "Connector-reported tokens from canonical model.response logs, deduplicated by the correlation logical event ID. Missing usage is absent, not guessed.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 14,
@@ -465,9 +458,14 @@
       },
       "targets": [
         {
-          "expr": "sum((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"} offset $__range)))",
-          "instant": true,
-          "refId": "A"
+          "expr": "sum(max by (logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" | unwrap body_gen_ai_usage_output_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -487,10 +485,10 @@
       "id": 9,
       "type": "stat",
       "title": "Reported cost",
-      "description": "Latest cumulative USD cost only when the connector explicitly reports it. Missing cost is shown as Not reported; DefenseClaw never infers prices.",
+      "description": "Latest cumulative USD cost from canonical logs, grouped by exact agent and lifecycle identity. Missing cost is Not reported; DefenseClaw never infers prices.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 17,
@@ -500,9 +498,14 @@
       },
       "targets": [
         {
-          "expr": "sum(max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id) (max_over_time(defenseclaw_agent_reported_cost_USD{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])))",
-          "instant": true,
-          "refId": "A"
+          "expr": "sum(max by (agent_id, lifecycle_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_reported_cost_present=\"true\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\", lifecycle_id=\"{{.body_defenseclaw_agent_lifecycle_id}}\" | unwrap body_defenseclaw_agent_reported_cost_usd [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -592,10 +595,10 @@
       "id": 12,
       "type": "state-timeline",
       "title": "Execution phase timeline",
-      "description": "Continuous per-execution state from the native phase gauge. Values persist between scrapes, while the ordered sequence below retains every sub-scrape transition.",
+      "description": "Per-execution state reconstructed from canonical lifecycle/work logs. Exact execution identity stays on logs instead of becoming a Prometheus label.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -605,9 +608,14 @@
       },
       "targets": [
         {
-          "expr": "max by (gen_ai_agent_name, defenseclaw_agent_execution_id) (defenseclaw_agent_phase_current_ratio{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"})",
-          "legendFormat": "{{gen_ai_agent_name}} \u00b7 {{defenseclaw_agent_execution_id}}",
-          "refId": "A"
+          "expr": "max by (gen_ai_agent_name, defenseclaw_agent_execution_id) (last_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id=~\"$execution\" | body_defenseclaw_agent_phase_code!=\"\" | label_format gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", defenseclaw_agent_execution_id=\"{{.body_defenseclaw_agent_execution_id}}\" | unwrap body_defenseclaw_agent_phase_code [$__interval]))",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "legendFormat": "{{gen_ai_agent_name}} • {{defenseclaw_agent_execution_id}}"
         }
       ],
       "fieldConfig": {
@@ -693,7 +701,7 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Agent span throughput",
+      "title": "Connector span throughput",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -706,7 +714,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (span_name) ((rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\"}[$__rate_interval])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s)))",
+          "expr": "sum by (span_name) (rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\"}[$__rate_interval]))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -731,12 +739,13 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "description": "Bounded connector-wide span throughput. Exact agent filtering is available in logs and traces below."
     },
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Agent span p95 latency",
+      "title": "Connector span p95 latency",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -749,7 +758,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, span_name) ((rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\"}[$__rate_interval])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s))))",
+          "expr": "histogram_quantile(0.95, sum by (le, span_name) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -774,16 +783,17 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "description": "Bounded connector-wide span latency. Exact agent filtering is available in logs and traces below."
     },
     {
       "id": 15,
       "type": "timeseries",
       "title": "Input/output tokens over time",
-      "description": "Rolling one-hour reported token increments. An established series contributes its counter increase; a series first published inside the window contributes its latest cumulative completion value once. The fixed window keeps completed model calls visible after their short-lived lifecycle series stop exporting.",
+      "description": "Connector-reported input/output tokens from canonical model.response logs, deduplicated per logical event.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -793,9 +803,24 @@
       },
       "targets": [
         {
-          "expr": "sum by (kind) ((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[1h]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[1h]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"} offset 1h) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[1h]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"} offset 1h)))",
-          "legendFormat": "{{kind}}",
-          "refId": "A"
+          "expr": "sum(max by (logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" | unwrap body_gen_ai_usage_input_tokens [$__interval])))",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "legendFormat": "input"
+        },
+        {
+          "expr": "sum(max by (logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\" | unwrap body_gen_ai_usage_output_tokens [$__interval])))",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "B",
+          "legendFormat": "output"
         }
       ],
       "fieldConfig": {
@@ -822,10 +847,10 @@
     {
       "id": 16,
       "type": "table",
-      "title": "Executions and last activity",
+      "title": "Executions and observations",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 12,
@@ -835,10 +860,15 @@
       },
       "targets": [
         {
-          "expr": "1000 * topk by (connector, gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]))",
-          "format": "table",
+          "expr": "sum by (connector, gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id=~\"$execution\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", defenseclaw_agent_lifecycle_id=\"{{.body_defenseclaw_agent_lifecycle_id}}\", defenseclaw_agent_execution_id=\"{{.body_defenseclaw_agent_execution_id}}\" | defenseclaw_agent_lifecycle_id!=\"\" | defenseclaw_agent_execution_id!=\"\" [$__range]))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
           "instant": true,
-          "refId": "A"
+          "format": "table"
         }
       ],
       "transformations": [
@@ -856,7 +886,7 @@
               "__name__": true
             },
             "renameByName": {
-              "Value": "Last Seen",
+              "Value": "Observations",
               "connector": "Connector",
               "gen_ai_agent_id": "Agent",
               "defenseclaw_agent_lifecycle_id": "Lifecycle",
@@ -868,18 +898,6 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Last Seen"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeFromNow"
-              }
-            ]
-          },
           {
             "matcher": {
               "id": "byName",
@@ -909,7 +927,8 @@
       "options": {
         "showHeader": true,
         "cellHeight": "sm"
-      }
+      },
+      "description": "Canonical log observation counts grouped by exact agent, lifecycle, and execution identity."
     },
     {
       "id": 27,
@@ -972,8 +991,8 @@
     {
       "id": 29,
       "type": "bargauge",
-      "title": "Execution-lifetime model p95 (active in range)",
-      "description": "Cumulative p95 for executions with activity in the selected range. Execution-scoped histogram state keeps sparse and single-call agents visible without mixing in inactive executions.",
+      "title": "Connector-wide model p95 (selected range)",
+      "description": "Bounded connector-wide model latency grouped only by provider and model.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -986,7 +1005,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_provider_name, gen_ai_request_model) ((last_over_time(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",gen_ai_request_model!=\"\",gen_ai_operation_name=~\"chat|generate_content|text_completion\"}[$__range])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s))))",
+          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_provider_name, gen_ai_request_model) (increase(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",gen_ai_request_model!=\"\",gen_ai_operation_name=~\"chat|generate_content|text_completion\"}[$__range])))",
           "instant": true,
           "legendFormat": "{{gen_ai_provider_name}} / {{gen_ai_request_model}}",
           "refId": "A"
@@ -1044,8 +1063,8 @@
     {
       "id": 31,
       "type": "bargauge",
-      "title": "Execution-lifetime tool p95 (active in range)",
-      "description": "Cumulative p95 for tool executions with activity in the selected range. Execution-scoped histogram state keeps one-off tools visible.",
+      "title": "Connector-wide tool p95 (selected range)",
+      "description": "Bounded connector-wide tool latency grouped only by tool name.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1058,7 +1077,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, histogram_quantile(0.95, sum by (le, gen_ai_tool_name) ((last_over_time(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",gen_ai_tool_name!=\"\"}[$__range])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s)))))",
+          "expr": "topk(10, histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (increase(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",gen_ai_tool_name!=\"\"}[$__range]))))",
           "instant": true,
           "legendFormat": "{{gen_ai_tool_name}}",
           "refId": "A"
@@ -1117,10 +1136,10 @@
       "id": 39,
       "type": "bargauge",
       "title": "Reported tokens by model",
-      "description": "Only connector-reported token usage. An established series contributes its counter increase; a series first published inside the rolling one-hour window contributes its latest cumulative completion value once. New observations carry provider/model labels; missing usage is not estimated.",
+      "description": "Only connector-reported token usage from canonical logs, deduplicated by logical event and grouped by model.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 16,
@@ -1130,10 +1149,26 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_provider_name, gen_ai_request_model, kind) ((((increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range]) * 0)) and defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"} offset $__range) or (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range]) unless defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"} offset $__range)))",
+          "expr": "sum by (provider, model, kind) (max by (provider, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"input\" | unwrap body_gen_ai_usage_input_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
           "instant": true,
-          "legendFormat": "{{gen_ai_provider_name}} / {{gen_ai_request_model}} / {{kind}}",
-          "refId": "A"
+          "legendFormat": "{{provider}} / {{model}} / input"
+        },
+        {
+          "expr": "sum by (provider, model, kind) (max by (provider, model, kind, logical_event_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | event_name=\"model.response\" | body_defenseclaw_telemetry_tokens_reported=\"true\" | label_format logical_event_id=\"{{if .correlation_logical_event_id}}logical:{{.correlation_logical_event_id}}{{else if .correlation_semantic_event_id}}semantic:{{.correlation_semantic_event_id}}{{else}}record:{{.record_id}}{{end}}\", provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", kind=\"output\" | unwrap body_gen_ai_usage_output_tokens [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "B",
+          "instant": true,
+          "legendFormat": "{{provider}} / {{model}} / output"
         }
       ],
       "fieldConfig": {
@@ -1153,10 +1188,10 @@
       "id": 33,
       "type": "timeseries",
       "title": "Reported cost over time",
-      "description": "Latest cumulative connector-reported USD total per lifecycle. Missing cost is shown as Not reported; DefenseClaw never infers prices.",
+      "description": "Latest cumulative connector-reported USD per lifecycle from canonical logs. Missing cost is not inferred.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -1166,9 +1201,14 @@
       },
       "targets": [
         {
-          "expr": "sum(max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, gen_ai_provider_name, gen_ai_request_model) (defenseclaw_agent_reported_cost_USD{connector=~\"$connector\",$scope_label=~\"$agent\"}))",
-          "legendFormat": "reported USD",
-          "refId": "A"
+          "expr": "sum(max by (agent_id, lifecycle_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_reported_cost_present=\"true\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\", lifecycle_id=\"{{.body_defenseclaw_agent_lifecycle_id}}\" | unwrap body_defenseclaw_agent_reported_cost_usd [$__interval])))",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "legendFormat": "reported USD"
         }
       ],
       "fieldConfig": {
@@ -1197,10 +1237,10 @@
       "id": 34,
       "type": "bargauge",
       "title": "Reported cost by model",
-      "description": "Cumulative connector-reported cost grouped by the model/provider carried by the lifecycle observation. Missing cost is shown as Not reported; DefenseClaw never infers prices.",
+      "description": "Cumulative connector-reported cost from canonical logs, deduplicated per agent lifecycle and grouped by model. DefenseClaw never infers prices.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 8,
@@ -1210,10 +1250,15 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_provider_name, gen_ai_request_model) (max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, gen_ai_provider_name, gen_ai_request_model) (max_over_time(defenseclaw_agent_reported_cost_USD{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])))",
+          "expr": "sum by (provider, model) (max by (provider, model, agent_id, lifecycle_id) (max_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_reported_cost_present=\"true\" | label_format provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", model=\"{{if .body_gen_ai_response_model}}{{.body_gen_ai_response_model}}{{else if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", agent_id=\"{{.body_gen_ai_agent_id}}\", lifecycle_id=\"{{.body_defenseclaw_agent_lifecycle_id}}\" | unwrap body_defenseclaw_agent_reported_cost_usd [$__range])))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
           "instant": true,
-          "legendFormat": "{{gen_ai_provider_name}} / {{gen_ai_request_model}}",
-          "refId": "A"
+          "legendFormat": "{{provider}} / {{model}}"
         }
       ],
       "fieldConfig": {
@@ -1305,7 +1350,7 @@
     {
       "id": 36,
       "type": "timeseries",
-      "title": "Span error rate",
+      "title": "Connector span error rate",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1318,7 +1363,7 @@
       },
       "targets": [
         {
-          "expr": "100 * (sum((rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",status_code=\"STATUS_CODE_ERROR\"}[$__rate_interval])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s))) or vector(0)) / clamp_min((sum((rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\"}[$__rate_interval])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s))) or vector(0)), 0.000000001)",
+          "expr": "100 * (sum(rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\",status_code=\"STATUS_CODE_ERROR\"}[$__rate_interval])) or vector(0)) / clamp_min((sum(rate(defenseclaw_agent_span_calls_total{connector=~\"(${connector:regex}|^$)\"}[$__rate_interval])) or vector(0)), 0.000000001)",
           "legendFormat": "error rate",
           "refId": "A"
         }
@@ -1343,12 +1388,13 @@
         "tooltip": {
           "mode": "single"
         }
-      }
+      },
+      "description": "Bounded connector-wide error rate. Use correlated logs/traces for exact agent attribution."
     },
     {
       "id": 37,
       "type": "heatmap",
-      "title": "Agent span latency heatmap",
+      "title": "Connector span latency heatmap",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1361,7 +1407,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (le) ((rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\"}[$__rate_interval])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])) >= (time() - $__range_s)))",
+          "expr": "sum by (le) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\"}[$__rate_interval]))",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -1391,16 +1437,17 @@
           "axisPlacement": "left",
           "unit": "ms"
         }
-      }
+      },
+      "description": "Bounded connector-wide span latency distribution."
     },
     {
       "id": 38,
       "type": "timeseries",
       "title": "Active agents over time",
-      "description": "Distinct selected-scope agents whose reported last-seen timestamp is within five minutes of each evaluation step.",
+      "description": "Distinct exact agent IDs observed in canonical logs during each interval; identity remains off metric labels.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 16,
@@ -1410,9 +1457,14 @@
       },
       "targets": [
         {
-          "expr": "count(max by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__interval])) > time() - 300)",
-          "legendFormat": "active agents",
-          "refId": "A"
+          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [$__interval])))",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "legendFormat": "active agents"
         }
       ],
       "fieldConfig": {
@@ -1869,8 +1921,8 @@
     {
       "id": 41,
       "type": "bargauge",
-      "title": "Average observed phase duration",
-      "description": "Average completed span duration grouped by the canonical phase carried on runtime spans.",
+      "title": "Connector average observed phase duration",
+      "description": "Connector-wide completed span duration grouped by the bounded canonical phase.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1883,7 +1935,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_agent_phase) ((increase(defenseclaw_agent_span_duration_milliseconds_sum{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",defenseclaw_agent_phase!=\"\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) >= (time() - $__range_s))) / clamp_min(sum by (defenseclaw_agent_phase) ((increase(defenseclaw_agent_span_duration_milliseconds_count{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",defenseclaw_agent_phase!=\"\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) >= (time() - $__range_s))), 1)",
+          "expr": "sum by (defenseclaw_agent_phase) (increase(defenseclaw_agent_span_duration_milliseconds_sum{connector=~\"(${connector:regex}|^$)\",defenseclaw_agent_phase!=\"\"}[$__range])) / clamp_min(sum by (defenseclaw_agent_phase) (increase(defenseclaw_agent_span_duration_milliseconds_count{connector=~\"(${connector:regex}|^$)\",defenseclaw_agent_phase!=\"\"}[$__range])), 1)",
           "instant": true,
           "legendFormat": "{{defenseclaw_agent_phase}}",
           "refId": "A"
@@ -1904,8 +1956,8 @@
     {
       "id": 42,
       "type": "bargauge",
-      "title": "Slowest operation classes (p95)",
-      "description": "The slowest span classes in the selected agent tree, split by phase so model/tool bottlenecks are immediately visible.",
+      "title": "Connector slowest operation classes (p95)",
+      "description": "Connector-wide span classes split by the bounded canonical phase.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1918,7 +1970,7 @@
       },
       "targets": [
         {
-          "expr": "topk(12, histogram_quantile(0.95, sum by (le, span_name, defenseclaw_agent_phase) ((increase(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) and on (defenseclaw_agent_execution_id) (max by (defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range])) >= (time() - $__range_s)))))",
+          "expr": "topk(12, histogram_quantile(0.95, sum by (le, span_name, defenseclaw_agent_phase) (increase(defenseclaw_agent_span_duration_milliseconds_bucket{connector=~\"(${connector:regex}|^$)\"}[$__range]))))",
           "instant": true,
           "legendFormat": "{{defenseclaw_agent_phase}} \u00b7 {{span_name}}",
           "refId": "A"
@@ -1939,8 +1991,8 @@
     {
       "id": 43,
       "type": "nodeGraph",
-      "title": "Execution phase network",
-      "description": "Directed source \u2192 target phase transitions for executions observed in the selected range. Each edge shows the cumulative execution-lifetime count seen in that range; use the adjacent table when reciprocal edges overlap visually.",
+      "title": "Connector phase network",
+      "description": "Directed source \u2192 target phase transitions aggregated across the selected connectors and range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1953,7 +2005,7 @@
       },
       "targets": [
         {
-          "expr": "label_join(label_replace(label_replace(sum by (defenseclaw_agent_phase_from, defenseclaw_agent_phase_to) (max_over_time(defenseclaw_agent_phase_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]) and on (connector, gen_ai_agent_id, defenseclaw_agent_execution_id) max by (connector, gen_ai_agent_id, defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]))), \"source\", \"$1\", \"defenseclaw_agent_phase_from\", \"(.+)\"), \"target\", \"$1\", \"defenseclaw_agent_phase_to\", \"(.+)\"), \"id\", \" \u2192 \", \"defenseclaw_agent_phase_from\", \"defenseclaw_agent_phase_to\")",
+          "expr": "label_join(label_replace(label_replace(sum by (defenseclaw_agent_phase_from, defenseclaw_agent_phase_to) (increase(defenseclaw_agent_phase_transitions_total{connector=~\"$connector\"}[$__range])), \"source\", \"$1\", \"defenseclaw_agent_phase_from\", \"(.+)\"), \"target\", \"$1\", \"defenseclaw_agent_phase_to\", \"(.+)\"), \"id\", \" \u2192 \", \"defenseclaw_agent_phase_from\", \"defenseclaw_agent_phase_to\")",
           "format": "table",
           "instant": true,
           "legendFormat": "phase transitions",
@@ -1994,8 +2046,8 @@
     {
       "id": 44,
       "type": "table",
-      "title": "Directed phase edges (source \u2192 target)",
-      "description": "Explicit direction and cumulative execution-lifetime count for every phase edge observed in the selected range. This disambiguates reciprocal transitions such as planning \u2192 tool and tool \u2192 planning.",
+      "title": "Connector directed phase edges (source \u2192 target)",
+      "description": "Explicit direction and aggregate count for each bounded phase edge in the selected connector range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -2008,7 +2060,7 @@
       },
       "targets": [
         {
-          "expr": "label_join(sum by (defenseclaw_agent_phase_from, defenseclaw_agent_phase_to) (max_over_time(defenseclaw_agent_phase_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]) and on (connector, gen_ai_agent_id, defenseclaw_agent_execution_id) max by (connector, gen_ai_agent_id, defenseclaw_agent_execution_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]))), \"direction\", \" \u2192 \", \"defenseclaw_agent_phase_from\", \"defenseclaw_agent_phase_to\")",
+          "expr": "label_join(sum by (defenseclaw_agent_phase_from, defenseclaw_agent_phase_to) (increase(defenseclaw_agent_phase_transitions_total{connector=~\"$connector\"}[$__range])), \"direction\", \" \u2192 \", \"defenseclaw_agent_phase_from\", \"defenseclaw_agent_phase_to\")",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -3558,12 +3610,12 @@
         "label": "Agent or root",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
-          "uid": "defenseclaw-prometheus"
+          "type": "loki",
+          "uid": "defenseclaw-loki"
         },
-        "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, $scope_label)",
+        "definition": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label!=\"\", body_$scope_label)",
         "query": {
-          "query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, $scope_label)",
+          "query": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label!=\"\", body_$scope_label)",
           "refId": "agent-var"
         },
         "refresh": 2,
@@ -3576,12 +3628,12 @@
         "label": "Lifecycle (drilldown)",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
-          "uid": "defenseclaw-prometheus"
+          "type": "loki",
+          "uid": "defenseclaw-loki"
         },
-        "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}, defenseclaw_agent_lifecycle_id)",
+        "definition": "label_values({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id!=\"\", body_defenseclaw_agent_lifecycle_id)",
         "query": {
-          "query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}, defenseclaw_agent_lifecycle_id)",
+          "query": "label_values({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id!=\"\", body_defenseclaw_agent_lifecycle_id)",
           "refId": "lifecycle-var"
         },
         "refresh": 2,
@@ -3603,12 +3655,12 @@
         "label": "Execution (drilldown)",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
-          "uid": "defenseclaw-prometheus"
+          "type": "loki",
+          "uid": "defenseclaw-loki"
         },
-        "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\"}, defenseclaw_agent_execution_id)",
+        "definition": "label_values({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id!=\"\", body_defenseclaw_agent_execution_id)",
         "query": {
-          "query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\"}, defenseclaw_agent_execution_id)",
+          "query": "label_values({service_name=\"defenseclaw\"} |= \"$agent\" | json | __error__=\"\" | connector=~\"$connector\" | body_$scope_label=~\"$agent\" | body_defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | body_defenseclaw_agent_execution_id!=\"\", body_defenseclaw_agent_execution_id)",
           "refId": "execution-var"
         },
         "refresh": 2,

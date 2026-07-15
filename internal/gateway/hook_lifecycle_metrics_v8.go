@@ -69,14 +69,7 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 	connector := telemetry.NormalizeMetricTextLabel(meta.Source)
 	provider := telemetry.NormalizeGenAIProviderLabel(firstNonEmpty(meta.Provider, meta.Source))
 	model := telemetry.NormalizeModelLabel(meta.Model)
-	agentID := telemetry.NormalizeMetricIdentityLabel(meta.AgentID)
-	agentName := telemetry.NormalizeMetricTextLabel(meta.AgentName)
 	agentType := telemetry.NormalizeMetricTextLabel(meta.AgentType)
-	rootAgentID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.RootAgentID, meta.AgentID))
-	parentAgentID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.ParentAgentID, "none"))
-	rootSessionID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.RootSessionID, "unknown"))
-	lifecycleID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.LifecycleID, "unknown"))
-	executionID := telemetry.NormalizeMetricIdentityLabel(firstNonEmpty(meta.ExecutionID, "unknown"))
 	lifecycleEvent := telemetry.NormalizeMetricTextLabel(firstNonEmpty(meta.LifecycleEvent, "event"))
 	lifecycleState := telemetry.NormalizeMetricTextLabel(firstNonEmpty(meta.LifecycleState, "observed"))
 	phase := telemetry.NormalizeMetricTextLabel(firstNonEmpty(meta.Phase, "observed"))
@@ -133,15 +126,8 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 					Envelope: envelope, Value: 1,
 					DefenseClawConnectorSource:     observability.Present(connector),
 					DefenseClawAgentDepth:          observability.Present(int64(depth)),
-					DefenseClawAgentExecutionID:    observability.Present(executionID),
 					DefenseClawAgentLifecycleEvent: observability.Present(lifecycleEvent),
-					DefenseClawAgentLifecycleID:    observability.Present(lifecycleID),
 					DefenseClawAgentLifecycleState: observability.Present(lifecycleState),
-					DefenseClawAgentParentID:       observability.Present(parentAgentID),
-					DefenseClawAgentRootID:         observability.Present(rootAgentID),
-					DefenseClawSessionRootID:       observability.Present(rootSessionID),
-					GenAIAgentID:                   observability.Present(agentID),
-					GenAIAgentName:                 observability.Present(agentName),
 					DefenseClawAgentType:           observability.Present(agentType),
 					GenAIProviderName:              observability.Present(provider),
 					GenAIRequestModel:              observability.Present(model),
@@ -153,15 +139,8 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 		) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawAgentLastSeen(observability.MetricDefenseClawAgentLastSeenInput{
 				Envelope: envelope, Value: float64(now.UnixNano()) / float64(time.Second),
-				DefenseClawConnectorSource:  observability.Present(connector),
-				DefenseClawAgentExecutionID: observability.Present(executionID),
-				DefenseClawAgentLifecycleID: observability.Present(lifecycleID),
-				DefenseClawAgentParentID:    observability.Present(parentAgentID),
-				DefenseClawAgentRootID:      observability.Present(rootAgentID),
-				DefenseClawSessionRootID:    observability.Present(rootSessionID),
-				GenAIAgentID:                observability.Present(agentID),
-				GenAIAgentName:              observability.Present(agentName),
-				DefenseClawAgentType:        observability.Present(agentType),
+				DefenseClawConnectorSource: observability.Present(connector),
+				DefenseClawAgentType:       observability.Present(agentType),
 			})
 		}),
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawAgentPhaseCurrent), func(
@@ -169,12 +148,7 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 		) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawAgentPhaseCurrent(observability.MetricDefenseClawAgentPhaseCurrentInput{
 				Envelope: envelope, Value: int64(telemetry.AgentPhaseCode(phase)),
-				DefenseClawConnectorSource:  observability.Present(connector),
-				DefenseClawAgentExecutionID: observability.Present(executionID),
-				DefenseClawAgentLifecycleID: observability.Present(lifecycleID),
-				DefenseClawAgentRootID:      observability.Present(rootAgentID),
-				GenAIAgentID:                observability.Present(agentID),
-				GenAIAgentName:              observability.Present(agentName),
+				DefenseClawConnectorSource: observability.Present(connector),
 			})
 		}),
 	}
@@ -186,13 +160,9 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 				return builder.BuildMetricDefenseClawAgentPhaseTransitions(
 					observability.MetricDefenseClawAgentPhaseTransitionsInput{
 						Envelope: envelope, Value: 1,
-						DefenseClawConnectorSource:  observability.Present(connector),
-						DefenseClawAgentExecutionID: observability.Present(executionID),
-						DefenseClawAgentPhaseFrom:   observability.Present(previousPhase),
-						DefenseClawAgentPhaseTo:     observability.Present(phase),
-						DefenseClawAgentRootID:      observability.Present(rootAgentID),
-						GenAIAgentID:                observability.Present(agentID),
-						GenAIAgentName:              observability.Present(agentName),
+						DefenseClawConnectorSource: observability.Present(connector),
+						DefenseClawAgentPhaseFrom:  observability.Present(previousPhase),
+						DefenseClawAgentPhaseTo:    observability.Present(phase),
 					},
 				)
 			},
@@ -207,14 +177,9 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 				return builder.BuildMetricDefenseClawAgentReportedCost(
 					observability.MetricDefenseClawAgentReportedCostInput{
 						Envelope: envelope, Value: meta.ReportedCostUSD,
-						DefenseClawConnectorSource:  observability.Present(connector),
-						DefenseClawAgentExecutionID: observability.Present(executionID),
-						DefenseClawAgentLifecycleID: observability.Present(lifecycleID),
-						DefenseClawAgentRootID:      observability.Present(rootAgentID),
-						GenAIAgentID:                observability.Present(agentID),
-						GenAIAgentName:              observability.Present(agentName),
-						GenAIProviderName:           observability.Present(provider),
-						GenAIRequestModel:           observability.Present(model),
+						DefenseClawConnectorSource: observability.Present(connector),
+						GenAIProviderName:          observability.Present(provider),
+						GenAIRequestModel:          observability.Present(model),
 					},
 				)
 			},

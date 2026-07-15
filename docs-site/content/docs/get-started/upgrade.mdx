@@ -9,18 +9,22 @@ keywords:
   - DefenseClaw rollback
 ---
 
-From a coherent installed `0.8.4` bridge, use the current release-owned POSIX
-resolver. It automatically authenticates an ephemeral Cosign verifier when the
-host does not already have one, then privately acquires the exact published
-`0.8.4` rollback artifacts before backup, service stop, or target mutation:
+On every supported POSIX source, including an installed `0.8.4` bridge, use the
+authenticated resolver asset owned by the current target release. It
+automatically authenticates an ephemeral Cosign verifier when the host does not
+already have one, then privately acquires the exact published `0.8.4` rollback
+artifacts before backup, service stop, or target mutation:
 
 ```bash
 bash defenseclaw-upgrade.sh --yes
 ```
 
-The frozen `0.8.4` built-in `defenseclaw upgrade --yes` remains valid when
-Cosign is already on `PATH`; that published controller cannot gain the new
-automatic bootstrap retroactively.
+The frozen `0.8.4` built-in `defenseclaw upgrade --yes` cannot cross this hard
+cut, even when Cosign is already on `PATH`: its immutable manifest parser
+requires a nonempty Windows bridge matrix, while the truthful target manifest
+has `platform_tested_source_versions.windows: []` because no Windows `0.8.4`
+bridge was published. Use the target-release resolver above in latest mode,
+without a version override.
 
 For `0.8.3` or older, follow the complete Sigstore and SHA-256 bootstrap in the
 linked CLI reference below, then run the authenticated target-release resolver
@@ -62,8 +66,9 @@ protocol-2 upgrade controller that can safely drive the later v8 hard cut.
 For an existing `0.8.3`-or-older installation, run the release-owned resolver
 without a target version. Latest mode is allowed to follow a manifest-declared
 bridge; an explicit request that skips a required bridge is refused before
-services or installed files change. A coherent installed `0.8.4` bridge may use
-its built-in controller, which acquires authenticated rollback custody itself.
+services or installed files change. A host already on `0.8.4` uses that same
+target-release resolver; the frozen built-in parser cannot accept the truthful
+empty Windows matrix.
 
 Installed users must download and authenticate the release-owned resolver
 asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap in the
@@ -75,17 +80,16 @@ binary was published.
 
 When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
 health-checks the bridge for a pre-bridge source, then hands control to its
-freshly installed controller. A host already on a coherent `0.8.4` begins at
-that controller and authenticates its exact published rollback artifacts
-directly. Before target mutation, the controller retains those bridge artifacts
-and exact snapshots of the active gateway, `config.yaml`, `.env`, and migration
-cursor. It stops and proves the target gateway quiescent, runs target
-migrations, verifies the target's reported binary provenance in a fresh
-target-wheel process, and records a durable receipt. A target install,
-migration, start, or health failure triggers restoration of the bridge wheel,
-gateway, managed state, and any refreshed local-observability bundle files;
-rollback is only reported successful after the restored `0.8.4` gateway passes
-the same exact-version health check.
+freshly installed controller. A host already on `0.8.4` skips only that first
+installation hop. In both cases the resolver authenticates the exact published
+rollback artifacts before target mutation and retains exact snapshots of the
+active gateway, `config.yaml`, `.env`, and migration cursor. It stops and proves
+the target gateway quiescent, runs target migrations in a fresh target-wheel
+process, verifies reported binary provenance, and records a durable receipt. A
+target install, migration, start, or health failure triggers restoration of the
+bridge wheel, gateway, managed state, and any refreshed local-observability
+bundle files; rollback is only reported successful after the restored `0.8.4`
+gateway passes the same exact-version health check.
 
 The first hop is transactional too. Before stopping an older source, the
 resolver durably journals its exact CLI, gateway, managed configuration and
@@ -141,7 +145,7 @@ Windows runtime for this cut.
 
 | Path | Existing installation behavior |
 | --- | --- |
-| Built-in `defenseclaw upgrade` | A coherent installed `0.8.4` controller supports `0.8.4 → 0.8.5` when Cosign is already on `PATH`; the immutable controller predates automatic verifier bootstrap. From `0.8.5` onward, the POSIX built-in command can authenticate a temporary pinned verifier. Frozen older controllers refuse a direct hard cut before mutation. |
+| Built-in `defenseclaw upgrade` | The immutable `0.8.4` command cannot parse the truthful hard-cut manifest with an empty Windows bridge matrix, regardless of whether Cosign is installed. Frozen pre-bridge controllers also cannot learn the staged handoff. Use the target-release POSIX resolver to cross into `0.8.5`; from `0.8.5` onward, the built-in command may drive later compatible manifests and can authenticate a temporary pinned verifier. |
 | Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. The signed PowerShell resolver is refusal-only because Windows publication remains disabled. |
 | Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. No Windows fresh-install binary is published for this cut. |
 | Package manager | No in-place package-manager hard-cut path is supported unless that package invokes the same resolver; direct replacement must be disabled. |
@@ -272,7 +276,8 @@ health verification fails:
 - a surviving wheel, migration, bundle, or service child keeps a private mutator
   lease, so recovery waits instead of racing that orphan after a parent-only kill;
 - the command exits nonzero and prints the original error plus rollback outcome;
-- retrying the same `defenseclaw upgrade` reruns only unapplied work.
+- retrying the same authenticated target-release resolver in latest mode reruns
+  only unapplied work.
 
 The gateway itself is strict: it neither rewrites v7 configuration during startup
 or reload nor runs v7 and v8 observability pipelines side by side.
@@ -285,7 +290,7 @@ remote destination is reported as degraded and retries independently.
 
 Release/support tooling may expose the same deterministic converter as a
 read-only, secret-free preview. Such a preview is optional, is never a
-prerequisite for `defenseclaw upgrade`, and has no second apply protocol.
+prerequisite for the target-release resolver, and has no second apply protocol.
 
 ## Verify the result
 

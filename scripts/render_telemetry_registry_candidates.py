@@ -209,6 +209,20 @@ _STRUCTURED_TYPE_IDS: Final = (
     "gen_ai.compaction_part",
     "gen_ai.generic_part",
     "gen_ai.generic_server_tool_payload",
+    "defenseclaw.inventory.connector_identifier",
+    "defenseclaw.inventory.connector_identifiers",
+    "defenseclaw.inventory.connector_metadata_item",
+    "defenseclaw.inventory.connector_metadata",
+    "defenseclaw.inventory.connector_content_item",
+    "defenseclaw.inventory.connector_content",
+    "defenseclaw.inventory.mcp_identifier",
+    "defenseclaw.inventory.mcp_identifiers",
+    "defenseclaw.inventory.mcp_metadata_item",
+    "defenseclaw.inventory.mcp_metadata",
+    "defenseclaw.inventory.agent_identifier",
+    "defenseclaw.inventory.agent_identifiers",
+    "defenseclaw.inventory.agent_metadata_item",
+    "defenseclaw.inventory.agent_metadata",
 )
 _STRUCTURED_EXPECTED_BINDINGS: Final = (
     ("gen_ai.input.messages", "gen_ai.input_messages", "sealed_typed", "native_json"),
@@ -225,6 +239,13 @@ _STRUCTURED_EXPECTED_BINDINGS: Final = (
         "ordered_typed_entries",
         "native_json_object",
     ),
+    ("defenseclaw.inventory.connector.identifiers", "defenseclaw.inventory.connector_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.connector.metadata", "defenseclaw.inventory.connector_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.connector.content", "defenseclaw.inventory.connector_content", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.mcp.identifiers", "defenseclaw.inventory.mcp_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.mcp.metadata", "defenseclaw.inventory.mcp_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.agent.identifiers", "defenseclaw.inventory.agent_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.agent.metadata", "defenseclaw.inventory.agent_metadata", "sealed_typed", "native_json"),
 )
 _STRUCTURED_EXPECTED_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
@@ -293,11 +314,60 @@ _STRUCTURED_EXPECTED_OBJECT_FIELDS: Final = {
     ),
     "gen_ai.generic_part": (),
     "gen_ai.generic_server_tool_payload": (("type", True, "scalar", "string"),),
+    "defenseclaw.inventory.connector_identifier": (("name", True, "scalar", "string"),),
+    "defenseclaw.inventory.connector_metadata_item": (
+        ("source", True, "scalar", "string"),
+        ("tool_inspection_mode", True, "scalar", "string"),
+        ("subprocess_policy", True, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.connector_content_item": (("description", False, "scalar", "string"),),
+    "defenseclaw.inventory.mcp_identifier": (
+        ("name", True, "scalar", "string"),
+        ("url_host", False, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.mcp_metadata_item": (
+        ("transport", False, "scalar", "string"),
+        ("command_basename", False, "scalar", "string"),
+        ("auth_provider_type", False, "scalar", "string"),
+        ("disabled", True, "scalar", "boolean"),
+    ),
+    "defenseclaw.inventory.agent_identifier": (
+        ("name", True, "scalar", "string"),
+        ("config_path_hash", False, "scalar", "string"),
+        ("binary_path_hash", False, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.agent_metadata_item": (
+        ("installed", True, "scalar", "boolean"),
+        ("has_config", True, "scalar", "boolean"),
+        ("config_basename", False, "scalar", "string"),
+        ("has_binary", True, "scalar", "boolean"),
+        ("binary_basename", False, "scalar", "string"),
+        ("version", False, "scalar", "string"),
+        ("probe_status", True, "scalar", "string"),
+    ),
 }
+_STRUCTURED_SEALED_OBJECTS: Final = frozenset(
+    {
+        "defenseclaw.inventory.connector_identifier",
+        "defenseclaw.inventory.connector_metadata_item",
+        "defenseclaw.inventory.connector_content_item",
+        "defenseclaw.inventory.mcp_identifier",
+        "defenseclaw.inventory.mcp_metadata_item",
+        "defenseclaw.inventory.agent_identifier",
+        "defenseclaw.inventory.agent_metadata_item",
+    }
+)
 _STRUCTURED_EXPECTED_ARRAYS: Final = {
     "gen_ai.input_messages": ("gen_ai.chat_message", 0, 256),
     "gen_ai.output_messages": ("gen_ai.output_message", 0, 256),
     "gen_ai.message_parts": ("gen_ai.message_part", 0, 256),
+    "defenseclaw.inventory.connector_identifiers": ("defenseclaw.inventory.connector_identifier", 0, 128),
+    "defenseclaw.inventory.connector_metadata": ("defenseclaw.inventory.connector_metadata_item", 0, 128),
+    "defenseclaw.inventory.connector_content": ("defenseclaw.inventory.connector_content_item", 0, 128),
+    "defenseclaw.inventory.mcp_identifiers": ("defenseclaw.inventory.mcp_identifier", 0, 256),
+    "defenseclaw.inventory.mcp_metadata": ("defenseclaw.inventory.mcp_metadata_item", 0, 256),
+    "defenseclaw.inventory.agent_identifiers": ("defenseclaw.inventory.agent_identifier", 0, 64),
+    "defenseclaw.inventory.agent_metadata": ("defenseclaw.inventory.agent_metadata_item", 0, 64),
 }
 _STRUCTURED_NULLABLE_OPTIONALS: Final = {
     "gen_ai.chat_message": frozenset({"name"}),
@@ -327,7 +397,7 @@ _STRUCTURED_EXPECTED_KNOWN_VALUES: Final = {
     ("gen_ai.uri_part", "modality"): ("image", "video", "audio", "document"),
 }
 _STRUCTURED_DISPOSITIONS_SHA256: Final = "19aa6a80165bed241ae9e427b9b4f7cea9d0b7001c11e5f6460b84c89bd4c0c3"
-_STRUCTURED_TYPES_SHA256: Final = "f4ca4b3986b0c1b90439f6a127e06f7eb00176ba5b4bcad14a7a1dbe9383cbdb"
+_STRUCTURED_TYPES_SHA256: Final = "7a9f94ce612f11e76ba2fc1f7707fd63fbd6886a55aa82484fc5584b50fafa70"
 _STRUCTURAL_CONTRACT_SHA256: Final = "a5f1dcae714d17b138a130a9a8b99f754165370974dbaef994976d67a8f8abaa"
 _CANONICAL_JSON_LIMITS: Final = {
     "max_depth": 8,
@@ -3412,7 +3482,12 @@ def _validate_exact_structured_contracts(
         structured = structured_types[type_id]
         fields = structured["fields"]
         dynamic = structured["dynamic_members"]
-        if structured["kind"] != "object" or not isinstance(fields, tuple) or dynamic is None:
+        expects_dynamic = type_id not in _STRUCTURED_SEALED_OBJECTS
+        if (
+            structured["kind"] != "object"
+            or not isinstance(fields, tuple)
+            or (dynamic is not None) != expects_dynamic
+        ):
             raise CandidateRenderError("materialized structured object contract is not canonical")
         observed_fields: list[tuple[str, bool, str, str]] = []
         expected_nullable = _STRUCTURED_NULLABLE_OPTIONALS.get(type_id, frozenset())
@@ -3438,9 +3513,14 @@ def _validate_exact_structured_contracts(
                     _STRUCTURED_REFERENCE_FIELDS,
                 )
                 observed_fields.append((name, field["required"], "reference", reference["structured_ref"]))
-        members = _tagged(dynamic, "StructuredDynamicMembersIR", _STRUCTURED_DYNAMIC_MEMBERS_FIELDS)
-        value = _tagged(members["value"], "StructuredReferenceIR", _STRUCTURED_REFERENCE_FIELDS)
-        if tuple(observed_fields) != expected_fields or value["structured_ref"] != "gen_ai.canonical_json":
+        dynamic_ref = None
+        if dynamic is not None:
+            members = _tagged(dynamic, "StructuredDynamicMembersIR", _STRUCTURED_DYNAMIC_MEMBERS_FIELDS)
+            value = _tagged(members["value"], "StructuredReferenceIR", _STRUCTURED_REFERENCE_FIELDS)
+            dynamic_ref = value["structured_ref"]
+        if tuple(observed_fields) != expected_fields or (
+            expects_dynamic and dynamic_ref != "gen_ai.canonical_json"
+        ):
             raise CandidateRenderError("materialized structured object contract is not canonical")
 
     for type_id, (expected_ref, expected_min, expected_max) in _STRUCTURED_EXPECTED_ARRAYS.items():
@@ -5864,7 +5944,12 @@ def build_candidate_render_index(view: object) -> CandidateRenderIndex:
 
     for ref, binding in structured_bindings.items():
         attribute = attributes.get(ref)
-        if attribute is None or attribute.field_types != ("canonical_json",):
+        expected_field_types = (
+            ("array",)
+            if ref.startswith("defenseclaw.inventory.")
+            else ("canonical_json",)
+        )
+        if attribute is None or attribute.field_types != expected_field_types:
             raise CandidateRenderError("materialized structured binding attribute is incompatible")
         metadata = dict(attribute.metadata)
         metadata["structured_type"] = binding["structured_type"]

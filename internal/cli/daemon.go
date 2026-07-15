@@ -80,6 +80,9 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
 
 	if running, pid := d.IsRunning(); running {
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
@@ -147,6 +150,9 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return fmt.Errorf("restart daemon: %w", err)
+	}
 
 	// Stop the watchdog first so it doesn't fire false alarms during restart.
 	_ = runWatchdogStop(nil, nil)

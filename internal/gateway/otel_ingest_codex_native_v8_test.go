@@ -334,12 +334,18 @@ func TestOTLPInboundRealCodexTurnProjectsOnceAndJoinsHookRoot(t *testing.T) {
 			continue
 		}
 		attributes := metric.Attributes()
-		if attributes["defenseclaw.agent.root.id"] != agentID ||
-			attributes["gen_ai.agent.id"] != agentID ||
-			attributes["defenseclaw.agent.lifecycle.id"] != meta.LifecycleID ||
-			attributes["defenseclaw.agent.execution.id"] != meta.ExecutionID ||
-			attributes["connector"] != "codex" || attributes["kind"] == "" {
+		if attributes["connector"] != "codex" || attributes["kind"] == "" ||
+			attributes["gen_ai.provider.name"] != "codex" ||
+			attributes["gen_ai.request.model"] != "gpt-5.4" {
 			t.Fatalf("agent token local labels=%#v", attributes)
+		}
+		for _, key := range []string{
+			"defenseclaw.agent.root.id", "gen_ai.agent.id",
+			"defenseclaw.agent.lifecycle.id", "defenseclaw.agent.execution.id",
+		} {
+			if _, leaked := attributes[key]; leaked {
+				t.Fatalf("native Codex high-cardinality %q leaked into metric labels=%#v", key, attributes)
+			}
 		}
 		correlation := metric.CanonicalRecord().Correlation()
 		if correlation.SessionID != conversationID || correlation.AgentID != agentID || correlation.TurnID != turnID {

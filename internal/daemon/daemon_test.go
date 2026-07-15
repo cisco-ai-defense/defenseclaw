@@ -18,6 +18,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,171 @@ import (
 	"testing"
 	"time"
 )
+
+const daemonStartProbeEnv = "DC_TEST_DAEMON_START_PROBE"
+const daemonRestartProbeEnv = "DC_TEST_DAEMON_RESTART_PROBE"
+
+// TestDaemonStartProbe is executed only by a child that Daemon.Start launched
+// from a parent test. Writing the marker makes an accidental child launch
+// observable without letting the recursively invoked test binary run the full
+// suite.
+func TestDaemonStartProbe(t *testing.T) {
+	marker := os.Getenv(daemonStartProbeEnv)
+	if marker == "" {
+		return
+	}
+	if err := os.WriteFile(marker, []byte("launched\n"), 0o600); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+// TestDaemonRestartProbe stays alive until its parent test terminates it. It
+// gives Restart a real, verified child whose identity must remain untouched
+// when a separate daemon identity file is unsafe.
+func TestDaemonRestartProbe(t *testing.T) {
+	marker := os.Getenv(daemonRestartProbeEnv)
+	if marker == "" {
+		return
+	}
+	if err := os.WriteFile(marker, []byte("running\n"), 0o600); err != nil {
+		os.Exit(2)
+	}
+	for {
+		time.Sleep(time.Second)
+	}
+}
+
+func waitForProbeMarker(t *testing.T, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("probe marker stat: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for probe marker %s", marker)
+}
+
+func TestRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	marker := filepath.Join(t.TempDir(), "restart-probe-running")
+	t.Setenv(daemonRestartProbeEnv, marker)
+
+	pid, err := d.Start([]string{"-test.run=^TestDaemonRestartProbe$"})
+	if err != nil {
+		t.Fatalf("start restart probe: %v", err)
+	}
+	waitForProbeMarker(t, marker)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(dataDir, WatchdogPIDFileName))
+		_ = d.Stop(3 * time.Second)
+	})
+
+	watchdogPath := filepath.Join(dataDir, WatchdogPIDFileName)
+	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {
+		t.Fatalf("write malformed watchdog identity: %v", err)
+	}
+
+	restartedPID, err := d.Restart([]string{"-test.run=^TestDaemonRestartProbe$"}, 3*time.Second)
+	if restartedPID != 0 {
+		t.Fatalf("Restart PID = %d, want 0", restartedPID)
+	}
+	if !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Restart error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if running, currentPID := d.IsRunning(); !running || currentPID != pid {
+		t.Fatalf("gateway after refused restart = running %v PID %d, want running PID %d", running, currentPID, pid)
+	}
+}
+
+func assertStartRefusesUnsafeIdentity(t *testing.T, d *Daemon, identityName string) {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "child-launched")
+	t.Setenv(daemonStartProbeEnv, marker)
+
+	pid, err := d.Start([]string{"-test.run=^TestDaemonStartProbe$"})
+	if pid != 0 {
+		t.Fatalf("Start PID = %d, want 0", pid)
+	}
+	if !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Start error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !strings.Contains(err.Error(), identityName) || !strings.Contains(err.Error(), "refusing to start") {
+		t.Fatalf("Start error = %q, want clear refusal naming %s", err, identityName)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("child marker stat error = %v, want child not launched", statErr)
+	}
+	if _, statErr := os.Stat(d.logFile); !os.IsNotExist(statErr) {
+		t.Fatalf("log file stat error = %v, want preflight refusal before log open", statErr)
+	}
+}
+
+func TestStartRefusesMalformedGatewayIdentityBeforeLaunchingChild(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	if err := os.WriteFile(d.pidFile, []byte("malformed-gateway-identity\n"), 0o600); err != nil {
+		t.Fatalf("write malformed gateway identity: %v", err)
+	}
+	assertStartRefusesUnsafeIdentity(t, d, PIDFileName)
+}
+
+func TestStartRefusesUnreadableGatewayIdentityBeforeLaunchingChild(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	// A directory at the identity path is deterministically unreadable as a
+	// PID file, including when tests run as root.
+	if err := os.Mkdir(d.pidFile, 0o700); err != nil {
+		t.Fatalf("create unreadable gateway identity: %v", err)
+	}
+	assertStartRefusesUnsafeIdentity(t, d, PIDFileName)
+}
+
+func TestStartRefusesMalformedWatchdogIdentityBeforeLaunchingChild(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	watchdogPath := filepath.Join(dataDir, WatchdogPIDFileName)
+	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {
+		t.Fatalf("write malformed watchdog identity: %v", err)
+	}
+	assertStartRefusesUnsafeIdentity(t, d, WatchdogPIDFileName)
+}
+
+func TestStartRefusesMalformedWatchdogIdentityBeforeAlreadyRunningFastPath(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("read current process identity: %v", err)
+	}
+	if err := d.writePIDInfo(os.Getpid(), executable, identity); err != nil {
+		t.Fatalf("write valid live gateway identity: %v", err)
+	}
+	watchdogPath := filepath.Join(dataDir, WatchdogPIDFileName)
+	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {
+		t.Fatalf("write malformed watchdog identity: %v", err)
+	}
+	assertStartRefusesUnsafeIdentity(t, d, WatchdogPIDFileName)
+}
+
+func TestStartRefusesUnreadableWatchdogIdentityBeforeLaunchingChild(t *testing.T) {
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	watchdogPath := filepath.Join(dataDir, WatchdogPIDFileName)
+	if err := os.Mkdir(watchdogPath, 0o700); err != nil {
+		t.Fatalf("create unreadable watchdog identity: %v", err)
+	}
+	assertStartRefusesUnsafeIdentity(t, d, WatchdogPIDFileName)
+}
 
 func TestWriteAndReadPIDInfo(t *testing.T) {
 	dir := t.TempDir()

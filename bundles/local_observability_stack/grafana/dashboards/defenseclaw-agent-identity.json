@@ -142,10 +142,10 @@
     {
       "type": "stat",
       "title": "Active agent.id (5m)",
-      "description": "Distinct connector + gen_ai_agent_id identities with lifecycle activity in the last 5 minutes.",
+      "description": "Distinct exact agent IDs observed in canonical logs during the last five minutes.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -155,7 +155,12 @@
       },
       "targets": [
         {
-          "expr": "count(max by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[5m])) > time() - 300) or vector(0)",
+          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [5m]))) or vector(0)",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
           "refId": "A",
           "instant": true
         }
@@ -847,10 +852,10 @@
     {
       "type": "table",
       "title": "Observed agents — click Agent ID for Agent360",
-      "description": "One row per stable agent identity with the latest observed timestamp and the identity and lineage labels exported by defenseclaw.agent.last_seen. Open Agent360 for lifecycle state, depth, execution, and event details.",
+      "description": "Canonical-log observation counts grouped by exact agent and lineage identity. Open Agent360 for correlated lifecycle details.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
@@ -860,10 +865,15 @@
       },
       "targets": [
         {
-          "expr": "topk by (connector, gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))",
-          "format": "table",
+          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
           "instant": true,
-          "refId": "A"
+          "format": "table"
         }
       ],
       "transformations": [
@@ -901,7 +911,7 @@
               "exported_job": true
             },
             "renameByName": {
-              "Value": "Last Seen (Unix s)",
+              "Value": "Observations",
               "connector": "Connector",
               "gen_ai_agent_id": "Agent ID",
               "gen_ai_agent_name": "Name",
@@ -977,7 +987,7 @@
         "cellHeight": "sm",
         "sortBy": [
           {
-            "displayName": "Last Seen (Unix s)",
+            "displayName": "Observations",
             "desc": true
           }
         ]

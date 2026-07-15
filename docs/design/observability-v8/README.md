@@ -11,8 +11,8 @@ phase-specific implementation and verification progress.
 - Repository baseline: DefenseClaw configuration v7
 - Repository location: `docs/design/observability-v8/`
 - Execution ledger: [`../../../spec.md`](../../../spec.md)
-- Decision registry: 23 locked product decisions, 12 semantic decisions, and 75
-  ambiguity-removal decisions (110 total)
+- Decision registry: 24 locked product decisions, 12 semantic decisions, and 76
+  ambiguity-removal decisions (112 total)
 
 ## Purpose
 
@@ -82,9 +82,12 @@ The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and
 12. Configuration v8 is a runtime cutover. Legacy `otel`, top-level and connector
     `audit_sinks`, and `privacy.disable_redaction` blocks are rejected by runtime
     validation; connector `webhooks` remain notification-only compatibility data.
-13. The normal `defenseclaw upgrade` command automatically migrates supported v7
-    configuration. A standalone CLI command is optional for preview/support; the
-    gateway performs no startup migration and runs no dual-format mode.
+13. One authenticated target-release resolver command automatically stages a
+    supported POSIX config-v7 installation through the published `0.8.4` protocol-2
+    bridge and then performs the required v8 migration under a fresh controller.
+    A standalone CLI command is optional for preview/support; the gateway performs
+    no startup migration and runs no dual-format mode. Windows fails before mutation
+    because no Windows `0.8.4` bridge was published.
 14. Valid configuration reload is atomic. Invalid reload leaves the previous
     runtime graph active.
 15. Local retention defaults to 90 days and applies to event, evidence, and judge
@@ -104,14 +107,16 @@ The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and
     optional-destination wildcards do not silently absorb them.
 20. Supported config mutations must preserve comments, key order, and the concise
     ASCII operator guide in existing v8 YAML.
-21. A supported v7 installation needs only the ordinary `defenseclaw upgrade`
-    workflow and its existing confirmation or `--yes`; no intermediate release,
-    plan file, plan hash, or second apply step is required.
-22. The target release runs one registered required migration that builds, validates,
-    and atomically activates the v8 candidate after the ordinary upgrade backup.
-23. A failed required conversion leaves or restores the exact v7 source and never
-    starts a v8 gateway against it; the existing gateway-binary snapshot remains the
-    recovery artifact rather than a new rollback protocol.
+21. A supported POSIX v7 installation needs one target-release resolver invocation
+    and its existing confirmation or `--yes`; the required `0.8.4` bridge hop and
+    fresh-controller handoff are automatic, with no plan file, plan hash, or second
+    apply step.
+22. The verified `0.8.4` bridge hands protocol-2 custody to the target release, which
+    runs one registered required migration that builds, validates, and atomically
+    activates the v8 candidate after the staged-upgrade backup.
+23. A failed required conversion, target start, or health check restores the exact
+    healthy `0.8.4` CLI, gateway, config-v7 source, cursor, and custodied state; the
+    protocol-2 rollback receipt records the failure without masking its cause.
 24. The optional standalone migration command uses the same library as upgrade but
     is not a prerequisite for ordinary locally managed installations.
 25. Trace collection uses a rich, bounded semantic contract that preserves the

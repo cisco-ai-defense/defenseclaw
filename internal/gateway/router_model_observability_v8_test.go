@@ -172,8 +172,12 @@ func TestEventRouterModelV8SessionMessagePreservesContentMetricsAndW3CHierarchy(
 	}
 	for _, point := range tokenPoints {
 		if point.value != wantTokens[point.attributes["gen_ai.token.type"]] ||
-			point.attributes["gen_ai.conversation.id"] != "session-model-1" {
+			point.attributes["gen_ai.provider.name"] != "openai" ||
+			point.attributes["gen_ai.request.model"] != "gpt-5" {
 			t.Errorf("model token point=%+v", point)
+		}
+		if _, leaked := point.attributes["gen_ai.conversation.id"]; leaked {
+			t.Errorf("model token conversation identity leaked=%+v", point)
 		}
 	}
 }

@@ -21,6 +21,7 @@ type recordingGatewayEgressRuntime struct {
 	gatewayEgressV8Runtime
 	mu      sync.Mutex
 	metrics []observability.EventName
+	records []observability.Record
 	emitErr error
 }
 
@@ -41,11 +42,26 @@ func (runtime *recordingGatewayEgressRuntime) RecordGeneratedMetric(
 	family observability.EventName,
 	builder observabilityruntime.GeneratedMetricBuilder,
 ) (telemetry.V8MetricRecordResult, error) {
-	result, err := runtime.gatewayEgressV8Runtime.RecordGeneratedMetric(ctx, family, builder)
+	capturingBuilder := func(snapshot observabilityruntime.EmitContext) (observability.Record, error) {
+		record, err := builder(snapshot)
+		if err == nil {
+			runtime.mu.Lock()
+			runtime.records = append(runtime.records, record)
+			runtime.mu.Unlock()
+		}
+		return record, err
+	}
+	result, err := runtime.gatewayEgressV8Runtime.RecordGeneratedMetric(ctx, family, capturingBuilder)
 	runtime.mu.Lock()
 	runtime.metrics = append(runtime.metrics, family)
 	runtime.mu.Unlock()
 	return result, err
+}
+
+func (runtime *recordingGatewayEgressRuntime) metricRecords() []observability.Record {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return append([]observability.Record(nil), runtime.records...)
 }
 
 func (runtime *recordingGatewayEgressRuntime) metricFamilies() []observability.EventName {
@@ -82,7 +98,8 @@ func TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath(t *testing.T
 	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{AgentID: "agent-egress-1", UserID: "user-egress-1"})
 	proxy.emitEgress(ctx, gatewaylog.EgressPayload{
 		TargetHost: "api.example.com", TargetPath: "/v1/chat?api-key=secret",
-		BodyShape: "messages", LooksLikeLLM: true, Branch: "shape",
+		ResolvedIP: "10.50.2.101",
+		BodyShape:  "messages", LooksLikeLLM: true, Branch: "shape",
 		Decision: "block", Reason: "unknown-host-no-shape", Source: "go",
 	})
 
@@ -109,6 +126,7 @@ func TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath(t *testing.T
 		"gen_ai.tool.call.id":                "tool-call-egress-1",
 		"defenseclaw.network.target_ref":     "api.example.com",
 		"defenseclaw.network.target_path":    "/v1/chat",
+		"defenseclaw.network.resolved_ip":    "10.50.2.101",
 		"defenseclaw.network.body_shape":     "messages",
 		"defenseclaw.network.branch":         "shape",
 		"defenseclaw.network.decision":       "block",
@@ -118,6 +136,30 @@ func TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath(t *testing.T
 	} {
 		if payload[key] != want {
 			t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, payload[key], want, payload)
+		}
+	}
+	metricRecords := runtime.metricRecords()
+	if len(metricRecords) != 1 {
+		t.Fatalf("generated metric records=%d, want one", len(metricRecords))
+	}
+	instrumentValue, present := metricRecords[0].InstrumentData()
+	if !present {
+		t.Fatal("generated egress metric omitted instrument data")
+	}
+	instrument, err := instrumentValue.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attributes, ok := instrument["attributes"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated egress metric attributes=%T %#v", instrument["attributes"], instrument)
+	}
+	if _, exists := attributes["defenseclaw.network.resolved_ip"]; exists {
+		t.Fatalf("resolved IP escaped into metric labels: %#v", attributes)
+	}
+	for key, value := range attributes {
+		if value == "10.50.2.101" {
+			t.Fatalf("resolved IP escaped into metric label %q", key)
 		}
 	}
 }

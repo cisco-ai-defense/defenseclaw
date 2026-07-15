@@ -631,6 +631,25 @@ func validateFamilyFieldValue(descriptor familyFieldDescriptor, value any) error
 	return nil
 }
 
+// validateFamilyStructuredScalar applies the registry-derived scalar contract
+// before a generated sealed structured value reaches the generic canonical
+// JSON limits. Keeping this in the private kernel prevents typed structured
+// inputs from bypassing their field-level enum, pattern, and size rules.
+func validateFamilyStructuredScalar(
+	value any,
+	typeOf familyFieldType,
+	constraints familyFieldConstraints,
+) error {
+	switch typeOf {
+	case familyFieldString, familyFieldBoolean, familyFieldInt64, familyFieldDouble:
+		return validateFamilyFieldValue(familyFieldDescriptor{
+			typeOf: typeOf, constraints: constraints,
+		}, value)
+	default:
+		return familyBuildFailure(FamilyBuildInvalidDescriptor)
+	}
+}
+
 func validateFamilyString(value string, constraints familyFieldConstraints) error {
 	if !utf8.ValidString(value) || constraints.maxUTF8Bytes > 0 && len(value) > constraints.maxUTF8Bytes {
 		return familyBuildFailure(FamilyBuildConstraint)

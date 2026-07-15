@@ -56,13 +56,7 @@ EXPECTED_DATASOURCE_UIDS = {
 }
 EXPECTED_SPANMETRICS_DIMENSIONS = {
     "gen_ai.operation.name",
-    "gen_ai.agent.id",
-    "gen_ai.agent.name",
     "gen_ai.agent.type",
-    "defenseclaw.agent.root.id",
-    "defenseclaw.agent.parent.id",
-    "defenseclaw.agent.lifecycle.id",
-    "defenseclaw.agent.execution.id",
     "defenseclaw.agent.lifecycle.event",
     "defenseclaw.agent.lifecycle.state",
     "defenseclaw.agent.phase",

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
@@ -26,6 +27,8 @@ func TestParseCorrelationQueryRequiresOneTypedAnchor(t *testing.T) {
 		ok     bool
 	}{
 		{"semantic", url.Values{"semantic_event_id": {string(semantic)}, "limit": {"25"}}, true},
+		{"lifecycle", url.Values{"lifecycle_id": {"lifecycle-1"}}, true},
+		{"execution", url.Values{"execution_id": {"execution-1"}}, true},
 		{"trace and span", url.Values{"trace_id": {strings.Repeat("a", 32)}, "span_id": {strings.Repeat("b", 16)}}, true},
 		{"none", url.Values{}, false},
 		{"two", url.Values{"session_id": {"s"}, "turn_id": {"t"}}, false},
@@ -62,6 +65,18 @@ func TestCorrelationReadAPIIsNoStoreAndFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(t.Context(), audit.CorrelationObservation{
+		RecordID: "api-lifecycle-observation", SemanticEventID: audit.SemanticEventID(req.SemanticEventID),
+		Signal: audit.CorrelationSignalLogs, Bucket: "agent_lifecycle", EventName: "tool.started",
+		ObservedAt: time.Now().UTC(), LifecycleID: "api-lifecycle", ExecutionID: "api-execution",
+		Status: audit.CorrelationObservationExportEligible,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/api/v1/correlation/explain?semantic_event_id="+url.QueryEscape(req.SemanticEventID), nil)
 	recorder := httptest.NewRecorder()
@@ -75,6 +90,18 @@ func TestCorrelationReadAPIIsNoStoreAndFailClosed(t *testing.T) {
 	}
 	if len(body) == 0 {
 		t.Fatal("empty correlation response")
+	}
+	for parameter, value := range map[string]string{
+		"lifecycle_id": "api-lifecycle",
+		"execution_id": "api-execution",
+	} {
+		anchored := httptest.NewRequest(http.MethodGet,
+			"/api/v1/correlation/graph?"+parameter+"="+url.QueryEscape(value), nil)
+		recorder = httptest.NewRecorder()
+		server.handleCorrelationGraphV8(recorder, anchored)
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), req.SemanticEventID) {
+			t.Fatalf("%s status=%d body=%s", parameter, recorder.Code, recorder.Body.String())
+		}
 	}
 
 	bad := httptest.NewRequest(http.MethodGet, "/api/v1/correlation/graph?semantic_event_id=bad", nil)

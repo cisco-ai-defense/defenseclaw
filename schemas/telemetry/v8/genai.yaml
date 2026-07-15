@@ -2346,19 +2346,7 @@ groups:
   attributes:
   - ref: gen_ai.operation.name
     requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
-    requirement_level: recommended
   - ref: defenseclaw.agent.type
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.parent.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
     requirement_level: recommended
   - ref: defenseclaw.agent.lifecycle.event
     requirement_level: recommended
@@ -2416,7 +2404,7 @@ groups:
         dimensions_cache_size: 10000
         resource_metrics_cache_size: 1000
         metrics_expiration: 24h
-        high_cardinality_exception: gen_ai.agent.id and gen_ai.agent.name are local spanmetrics compatibility dimensions only, bounded by the named cache and expiry; they remain forbidden on canonical metric families
+        identity_correlation: Stable and native identities remain queryable through canonical logs, traces, and the correlation ledger; spanmetrics are aggregate-only.
 - id: content.input
   type: attribute_group
   brief: Projected input and honest availability state.
@@ -3812,26 +3800,12 @@ groups:
         missing_values: never fabricated
 - id: metric.defenseclaw.agent.last_seen
   type: metric
-  brief: Unix seconds when an agent lifecycle transition was last observed.
+  brief: Unix seconds when an agent lifecycle transition was last observed, aggregated by connector and agent type.
   stability: stable
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
-    requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.parent.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: defenseclaw.session.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
     requirement_level: recommended
   - ref: defenseclaw.agent.type
     requirement_level: recommended
@@ -3866,7 +3840,7 @@ groups:
         missing_values: never fabricated
 - id: metric.defenseclaw.agent.lifecycle.transitions
   type: metric
-  brief: Agent lifecycle transitions by stable identity, execution, event, and state.
+  brief: Agent lifecycle transitions aggregated by bounded connector, event, state, type, provider, and model dimensions.
   stability: stable
   introduced_in: telemetry-registry-v1
   extends: []
@@ -3875,23 +3849,9 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.depth
     requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
   - ref: defenseclaw.agent.lifecycle.event
     requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
   - ref: defenseclaw.agent.lifecycle.state
-    requirement_level: recommended
-  - ref: defenseclaw.agent.parent.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: defenseclaw.session.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
     requirement_level: recommended
   - ref: defenseclaw.agent.type
     requirement_level: recommended
@@ -3937,16 +3897,6 @@ groups:
   attributes:
   - ref: defenseclaw.connector.source
     requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
-    requirement_level: recommended
   body_fields: []
   metric:
     instrument_name: defenseclaw.agent.phase.current
@@ -3976,24 +3926,16 @@ groups:
         missing_values: never fabricated
 - id: metric.defenseclaw.agent.phase.transitions
   type: metric
-  brief: Directed execution phase transitions by stable agent identity and execution.
+  brief: Directed execution phase transitions aggregated by connector and phase pair.
   stability: stable
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
     requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
   - ref: defenseclaw.agent.phase.from
     requirement_level: recommended
   - ref: defenseclaw.agent.phase.to
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
     requirement_level: recommended
   body_fields: []
   metric:
@@ -4030,16 +3972,6 @@ groups:
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
-    requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
     requirement_level: recommended
   - ref: gen_ai.provider.name
     requirement_level: recommended
@@ -4080,16 +4012,6 @@ groups:
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
-    requirement_level: recommended
-  - ref: defenseclaw.agent.execution.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.lifecycle.id
-    requirement_level: recommended
-  - ref: defenseclaw.agent.root.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
     requirement_level: recommended
   - ref: gen_ai.provider.name
     requirement_level: recommended
@@ -4733,10 +4655,6 @@ groups:
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
-    requirement_level: recommended
   - ref: gen_ai.operation.name
     requirement_level: recommended
   - ref: gen_ai.provider.name
@@ -4782,12 +4700,6 @@ groups:
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
-  - ref: gen_ai.agent.id
-    requirement_level: recommended
-  - ref: gen_ai.agent.name
-    requirement_level: recommended
-  - ref: gen_ai.conversation.id
-    requirement_level: recommended
   - ref: gen_ai.operation.name
     requirement_level: recommended
   - ref: gen_ai.provider.name
@@ -4858,14 +4770,14 @@ attribute_extensions:
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: preserve a nonempty bounded producer identifier; canonical metrics forbid it and local-observability spanmetrics applies its explicit bounded cache and expiry exception
+    notes: preserve a nonempty bounded producer identifier on logs, traces, and correlation records; all metric surfaces forbid it
 - ref: gen_ai.agent.name
   field_class: identifier
   sensitivity: sensitive
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: NFC bounded producer name; canonical metrics forbid it and local-observability spanmetrics alone applies its explicit bounded cache and expiry exception
+    notes: NFC bounded producer name on logs, traces, and correlation records; all metric surfaces forbid it
 - ref: gen_ai.conversation.id
   field_class: identifier
   sensitivity: sensitive

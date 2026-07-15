@@ -63,6 +63,7 @@
     "deployment_mode": {
       "type": "string",
       "enum": [
+        "",
         "managed_enterprise",
         "unmanaged_byod",
         "ci_cd",
@@ -350,7 +351,7 @@
         "mode": { "type": "string", "maxLength": 64 },
         "version": { "type": "string", "maxLength": 128, "default": "0.6.2" },
         "sandbox_home": { "$ref": "#/$defs/boundedString" },
-        "auto_pair": { "type": "boolean", "default": true },
+        "auto_pair": { "type": ["boolean", "null"], "default": true },
         "host_networking": { "type": "boolean", "default": true }
       }
     },
@@ -453,6 +454,11 @@
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "connector": { "$ref": "#/$defs/boundedString" },
         "allow_empty_providers": { "type": "boolean", "default": false },
+        "allow_private_upstreams": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
         "llm": { "$ref": "#/$defs/llm" },
         "model": { "$ref": "#/$defs/boundedString", "deprecated": true },
         "model_name": { "$ref": "#/$defs/boundedString", "deprecated": true },
@@ -478,7 +484,7 @@
         "allow_unknown_llm_domains": { "type": "boolean", "default": false },
         "llm_role": {
           "type": "string",
-          "enum": ["judge_only", "judge_and_agent"]
+          "enum": ["", "judge_only", "judge_and_agent"]
         },
         "hook_fail_mode": { "type": "string", "enum": ["open", "closed"], "default": "closed" },
         "hook_self_heal": { "type": "boolean", "default": true },
@@ -831,6 +837,10 @@
           "$ref": "#/$defs/pathString"
         },
         "workspace_dir": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "openclaw_home_original": {
           "type": "string",
           "maxLength": 4096
         }

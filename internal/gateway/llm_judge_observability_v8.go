@@ -371,8 +371,6 @@ func (operation *judgeTraceOperation) metricItems(
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientTokenUsage(observability.MetricGenAIClientTokenUsageInput{
 					Envelope: envelope, Value: float64(count),
-					GenAIAgentID:        optionalJudgeMetricText(operation.input.Envelope.Correlation.AgentID),
-					GenAIConversationID: optionalJudgeMetricText(operation.input.Envelope.Correlation.SessionID),
 					// The judge is a DefenseClaw role, while the underlying GenAI
 					// operation remains the standards-defined chat operation. Keep the
 					// role in defenseclaw.judge.kind rather than inventing a GenAI enum.

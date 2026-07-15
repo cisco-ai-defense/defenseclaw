@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const maxAgentDiscoveryAgents = 32
@@ -76,6 +77,9 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 			source: discoverySourceOrUnknown(report.Source), cacheHit: report.CacheHit,
 			result: "rejected", durationMs: report.DurationMs, agentsTotal: len(report.Agents),
 		})
+		if len(dropped) > 0 {
+			_ = a.emitManagedAgentInventory(r.Context(), &report, 0, true)
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -107,6 +111,10 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 		source: source, cacheHit: report.CacheHit, result: "ok", durationMs: report.DurationMs,
 		agentsTotal: len(report.Agents), installedTotal: installed,
 	})
+	// Managed inventory is a separate ai.discovery snapshot. It remains
+	// available when the operator disables the agent.lifecycle family and the
+	// generated managed plan prevents it from reaching sibling destinations.
+	_ = a.emitManagedAgentInventory(r.Context(), &report, installed, len(dropped) > 0)
 
 	a.writeJSON(w, http.StatusOK, agentDiscoveryResponse{
 		Status:    "ok",
@@ -132,10 +140,15 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 	if strings.TrimSpace(report.ScannedAt) == "" || len(report.ScannedAt) > 64 {
 		return nil, fmt.Errorf("scanned_at is required")
 	}
+	scannedAt, err := time.Parse(time.RFC3339Nano, report.ScannedAt)
+	if err != nil {
+		return nil, fmt.Errorf("scanned_at must be RFC3339")
+	}
+	report.ScannedAt = scannedAt.UTC().Format(time.RFC3339Nano)
 	if report.DurationMs < 0 {
 		return nil, fmt.Errorf("duration_ms must be non-negative")
 	}
-	if len(report.Agents) == 0 {
+	if report.Agents == nil {
 		return nil, fmt.Errorf("agents is required")
 	}
 	if len(report.Agents) > maxAgentDiscoveryAgents {
@@ -151,6 +164,7 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 		reg = getFallbackConnectorRegistry()
 	}
 	var dropped []string
+	validatedAgents := make(map[string]agentDiscoverySignal, len(report.Agents))
 	for name, signal := range report.Agents {
 		normalized := strings.TrimSpace(strings.ToLower(name))
 		if normalized == "" {
@@ -161,14 +175,18 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 			// the whole batch. Caller surfaces this as an OTel signal
 			// so the drop isn't invisible.
 			dropped = append(dropped, normalized)
-			delete(report.Agents, name)
 			continue
 		}
 		if err := validateDiscoverySignal(signal); err != nil {
 			return nil, fmt.Errorf("%s: %w", normalized, err)
 		}
+		if _, duplicate := validatedAgents[normalized]; duplicate {
+			return nil, fmt.Errorf("duplicate connector name")
+		}
+		validatedAgents[normalized] = signal
 	}
-	if len(report.Agents) == 0 {
+	report.Agents = validatedAgents
+	if len(report.Agents) == 0 && len(dropped) > 0 {
 		// Every entry was unknown — preserve the historical 400 so a
 		// CLI that ONLY reports unknown connectors gets a clear error
 		// (otherwise the operator-side telemetry shows agent_discovery=ok
@@ -180,12 +198,21 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 }
 
 func validateDiscoverySignal(signal agentDiscoverySignal) error {
+	if !signal.HasConfig && (signal.ConfigBasename != "" || signal.ConfigPathHash != "") {
+		return fmt.Errorf("configuration metadata requires has_config")
+	}
+	if !signal.HasBinary && (signal.BinaryBasename != "" || signal.BinaryPathHash != "" || signal.Version != "") {
+		return fmt.Errorf("binary metadata requires has_binary")
+	}
 	for _, v := range []string{signal.ConfigBasename, signal.BinaryBasename} {
 		if len(v) > 128 {
 			return fmt.Errorf("basename too long")
 		}
 		if v != "" && (filepath.Base(v) != v || strings.ContainsAny(v, `/\`)) {
 			return fmt.Errorf("basename must not contain path separators")
+		}
+		if v != "" && inventorySafeBasename(v) != v {
+			return fmt.Errorf("basename contains unsafe characters")
 		}
 	}
 	for _, v := range []string{signal.ConfigPathHash, signal.BinaryPathHash} {
@@ -195,6 +222,10 @@ func validateDiscoverySignal(signal agentDiscoverySignal) error {
 	}
 	if len(signal.Version) > 200 {
 		return fmt.Errorf("version too long")
+	}
+	if signal.Version != "" && (inventorySafeBounded(signal.Version, 200) != signal.Version ||
+		!endpointInventoryVersionPattern.MatchString(signal.Version)) {
+		return fmt.Errorf("version must be a safe version label")
 	}
 	if normalizeDiscoveryProbeStatus(signal.VersionProbeStatus) != signal.VersionProbeStatus && signal.VersionProbeStatus != "" {
 		return fmt.Errorf("unsupported version_probe_status")

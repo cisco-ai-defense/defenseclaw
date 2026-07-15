@@ -65,6 +65,18 @@ var defenseClawConfigV8ObservabilityReferenceYAML []byte
 //go:embed config/v8/reference/observability.md
 var defenseClawConfigV8ObservabilityReferenceMarkdown []byte
 
+//go:embed gateway-event-envelope.json
+var gatewayEventEnvelopeSchema []byte
+
+//go:embed scan-event.json
+var gatewayScanEventSchema []byte
+
+//go:embed scan-finding-event.json
+var gatewayScanFindingEventSchema []byte
+
+//go:embed activity-event.json
+var gatewayActivityEventSchema []byte
+
 //go:embed telemetry/v8/registry.yaml
 var telemetryV8Registry []byte
 
@@ -125,6 +137,30 @@ func DefenseClawConfigV8ObservabilityReferenceYAML() []byte {
 // generated human-readable v8 observability field catalog.
 func DefenseClawConfigV8ObservabilityReferenceMarkdown() []byte {
 	return append([]byte(nil), defenseClawConfigV8ObservabilityReferenceMarkdown...)
+}
+
+// GatewayEventEnvelopeSchema returns a defensive copy of the canonical legacy
+// managed-ingest envelope schema.
+func GatewayEventEnvelopeSchema() []byte {
+	return append([]byte(nil), gatewayEventEnvelopeSchema...)
+}
+
+// GatewayScanEventSchema returns a defensive copy of the scan payload schema
+// referenced by GatewayEventEnvelopeSchema.
+func GatewayScanEventSchema() []byte {
+	return append([]byte(nil), gatewayScanEventSchema...)
+}
+
+// GatewayScanFindingEventSchema returns a defensive copy of the scan-finding
+// payload schema referenced by GatewayEventEnvelopeSchema.
+func GatewayScanFindingEventSchema() []byte {
+	return append([]byte(nil), gatewayScanFindingEventSchema...)
+}
+
+// GatewayActivityEventSchema returns a defensive copy of the activity payload
+// schema referenced by GatewayEventEnvelopeSchema.
+func GatewayActivityEventSchema() []byte {
+	return append([]byte(nil), gatewayActivityEventSchema...)
 }
 
 // TelemetryV8Registry returns a copy of the immutable v8 telemetry registry

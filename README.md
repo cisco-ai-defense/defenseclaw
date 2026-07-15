@@ -344,13 +344,14 @@ See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), the
 [schema ownership map](schemas/README.md). Splunk-specific setup is in
 [docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
 
-An installed, coherent `0.8.4` bridge crosses the `0.8.5` hard cut with the
-built-in `defenseclaw upgrade --yes`; before backup or service stop, it
-authenticates and privately acquires its exact `0.8.4` rollback artifacts. For
-`0.8.3` or older, do not execute any obsolete raw-network hint printed by the
-frozen built-in CLI. Authenticate the current release-owned resolver and run it
-in latest mode, without a version override. It performs `source → 0.8.4 bridge
-→ fresh 0.8.4 controller → 0.8.5 hard cut` as one transaction. The migration
+Every supported existing POSIX installation, including one already on `0.8.4`,
+crosses the `0.8.5` hard cut with the authenticated target-release
+`defenseclaw-upgrade.sh` asset in latest mode, without a version override. The
+immutable `0.8.4` built-in parser cannot accept the truthful target manifest
+whose Windows bridge matrix is empty. Do not execute any obsolete raw-network
+hint printed by a frozen built-in CLI. The release-owned resolver performs
+`source → 0.8.4 bridge → fresh 0.8.4 controller → 0.8.5 hard cut` as one
+transaction. The migration
 backs up and atomically converts configuration, preserves narrower
 routing/redaction behavior and root/subagent Agent360 compatibility, refreshes
 owned local dashboards without resetting volumes, and never requires a separate

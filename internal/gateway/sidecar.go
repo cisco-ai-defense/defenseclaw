@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -1138,7 +1139,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		return fmt.Errorf("config reload schema v8 has no active owned runtime graph")
 	}
 	candidatePlan, candidateChanged, err := sidecarObservabilityV8ManagedReloadCandidate(
-		source.compiledV8, newCfg, activePlan,
+		source.compiledV8, newCfg, activePlan, source.raw,
 	)
 	if err != nil {
 		return fmt.Errorf("config reload observability v8 managed destination: %w", err)

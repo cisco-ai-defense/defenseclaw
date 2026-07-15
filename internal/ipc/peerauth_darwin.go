@@ -42,8 +42,10 @@ var plutilBinary = "/usr/bin/plutil"
 const codesignTimeout = 3 * time.Second
 
 // plutilTimeout bounds a bundle-id lookup. plutil is faster than
-// codesign but we keep the same posture just in case.
-const plutilTimeout = 3 * time.Second
+// codesign but we keep the same posture just in case. It is a variable only
+// so the hermetic command-stub test can tolerate heavily loaded CI hosts;
+// production never changes the three-second fail-closed bound.
+var plutilTimeout = 3 * time.Second
 
 var (
 	// codesign -dv --verbose=4 writes its metadata to STDERR (that's

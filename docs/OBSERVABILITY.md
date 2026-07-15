@@ -686,13 +686,14 @@ See the [Galileo guide](../docs-site/content/docs/observability/galileo.mdx).
 
 ## Automatic v7 upgrade
 
-Do not hand-convert a supported installation. A coherent installed `0.8.4`
-bridge crosses the `0.8.5` hard cut with its built-in controller; before backup
-or service stop, it authenticates and privately acquires the exact published
-`0.8.4` rollback artifacts:
+Do not hand-convert a supported installation. Every supported POSIX source,
+including an installed `0.8.4` bridge, crosses the `0.8.5` hard cut with the
+authenticated target-release resolver. Before backup or service stop, it
+authenticates and privately acquires the exact published `0.8.4` rollback
+artifacts:
 
 ```bash
-defenseclaw upgrade --yes
+bash defenseclaw-upgrade.sh --yes
 ```
 
 For `0.8.3` or older, authenticate the current target release's resolver asset
@@ -703,10 +704,12 @@ verified asset in latest mode without a version override:
 bash defenseclaw-upgrade.sh --yes
 ```
 
-Do not execute any obsolete raw-network hint printed by a frozen
-`0.8.3`-or-older built-in controller and do not stream a resolver directly into
-a shell. The authenticated resolver performs `source → 0.8.4 bridge → fresh
-0.8.4 controller → 0.8.5 hard cut` as one transaction.
+The immutable `0.8.4` built-in parser cannot accept the truthful target
+manifest because `platform_tested_source_versions.windows` is empty; this is
+independent of whether Cosign is installed. Do not execute any obsolete
+raw-network hint printed by a frozen built-in controller and do not stream a
+resolver directly into a shell. The authenticated resolver performs `source →
+0.8.4 bridge → fresh 0.8.4 controller → 0.8.5 hard cut` as one transaction.
 
 During the `0.8.5` hard cut, the upgrader backs up the
 exact source, establishes and validates the v7 bridge state, creates and
@@ -722,8 +725,8 @@ v7 and v8 observability pipelines side by side. A required migration failure res
 the original files and does not start the v8 gateway against v7 config.
 
 The same converter may be exposed by release/support tooling as a read-only,
-secret-free preview. Such a preview is never required before
-`defenseclaw upgrade` and does not introduce a second apply protocol.
+secret-free preview. Such a preview is never required before the authenticated
+target-release resolver and does not introduce a second apply protocol.
 
 ### Install and environment ownership
 
@@ -731,10 +734,9 @@ Release `0.8.4` remains on `config_version: 7` and does not create the v8
 destination model. A fresh `0.8.5` install writes
 strict `config_version: 8`; its setup commands will add or update named entries
 under `observability.destinations`. Use the release installer only for a new
-host. On an existing installation, use the coherent `0.8.4` controller or, for
-`0.8.3` and older, the authenticated release-owned resolver in latest mode so
-configuration, owned dashboard assets, restart, and health checks remain one
-transaction.
+host. On every supported existing POSIX installation, use the authenticated
+target-release resolver in latest mode so bridge selection, configuration,
+owned dashboard assets, restart, and health checks remain one transaction.
 
 Live observability policy is YAML, not ambient process state. V8 ignores
 `DEFENSECLAW_OTEL_*`, standard `OTEL_EXPORTER_OTLP_*`, and

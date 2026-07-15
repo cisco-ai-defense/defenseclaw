@@ -93,11 +93,14 @@ reviewable.
 
 ### G-11: Automatic upgrade migration
 
-The normal `defenseclaw upgrade` workflow MUST automatically convert supported v7
-configuration to v8 as one required registered migration. A failed conversion MUST
-leave or restore the exact v7 source and MUST NOT start a v8 gateway against it; no
-separate plan, acknowledgement protocol, or prerequisite migration command is
-required.
+One authenticated target-release resolver command MUST automatically stage supported
+POSIX v7 installations through the published `0.8.4` protocol-2 bridge, re-exec under
+a fresh bridge controller, and run the required registered v8 migration. A failed
+conversion, target start, or health check MUST restore the exact healthy `0.8.4`
+CLI, gateway, v7 source, cursor, and custodied state and MUST NOT leave a v8 gateway
+running against v7 configuration. No separate plan or second apply command is
+required. A platform without a published bridge, including Windows for this hard
+cut, MUST refuse before service stop or installed-state mutation.
 
 ### G-12: Rich portable traces
 
@@ -146,7 +149,8 @@ consumer compatibility and do not authorize a legacy producer/provider.
   redaction path.
 - Storing complete traces or raw metric samples in SQLite.
 - Performing automatic runtime conversion of legacy configuration in gateway
-  startup or reload. The upgrader performs the one-time conversion.
+  startup or reload. The staged target-release resolver and migration controller
+  perform the one-time conversion.
 - Making all existing internal actions public configuration vocabulary.
 - Turning YAML into a policy language with includes, arbitrary expressions, runtime
   scripts, or mutable hidden audience presets.

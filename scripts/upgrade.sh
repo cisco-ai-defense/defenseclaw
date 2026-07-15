@@ -3403,6 +3403,14 @@ UPGRADE_MANIFEST_FILE=""
 RELEASE_PROVENANCE_FILE=""
 RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256=""
 FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256=""
+FINAL_RELEASE_VERSION=""
+FINAL_RELEASE_WHL_NAME=""
+FINAL_RELEASE_WHL_URL=""
+FINAL_RELEASE_MATERIALIZED_WHL_NAME=""
+FINAL_RELEASE_WHL_SHA256=""
+TARGET_CONTROLLER_PROTECTED_WHEEL=""
+TARGET_CONTROLLER_VENV=""
+TARGET_CONTROLLER_CLI=""
 CONTRACT_DIR=""
 MIGRATION_FAILURE_POLICY="warn"
 REQUIRED_MIGRATIONS_MISSING=""
@@ -4084,6 +4092,28 @@ prepare_release_contract() {
     preflight_release_artifacts
 }
 
+capture_hard_cut_target_controller_contract() {
+    local expected matches
+    [[ "${RELEASE_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE:-}" ]] \
+        && die "The hard-cut target controller cannot be the bridge release. No changes were made."
+    [[ -n "${CHECKSUMS_FILE}" && "${CHECKSUMS_SIGNATURE_VERIFIED}" -eq 1 ]] \
+        || die "The hard-cut target controller lacks an authenticated checksum manifest. No changes were made."
+    [[ -n "${WHL_NAME}" && -n "${WHL_URL}" && -n "${MATERIALIZED_WHL_NAME}" ]] \
+        || die "The hard-cut target controller wheel contract is incomplete. No changes were made."
+    matches="$(awk -v f="${WHL_NAME}" '$2 == f || $2 == "./" f {print $1}' "${CHECKSUMS_FILE}")"
+    [[ "$(printf '%s\n' "${matches}" | sed '/^$/d' | wc -l | tr -d ' ')" == "1" ]] \
+        || die "The hard-cut target controller wheel has no unique authenticated digest. No changes were made."
+    expected="$(printf '%s\n' "${matches}" | sed -n '1p' | tr '[:upper:]' '[:lower:]')"
+    [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The hard-cut target controller wheel digest is invalid. No changes were made."
+
+    FINAL_RELEASE_VERSION="${RELEASE_VERSION}"
+    FINAL_RELEASE_WHL_NAME="${WHL_NAME}"
+    FINAL_RELEASE_WHL_URL="${WHL_URL}"
+    FINAL_RELEASE_MATERIALIZED_WHL_NAME="${MATERIALIZED_WHL_NAME}"
+    FINAL_RELEASE_WHL_SHA256="${expected}"
+}
+
 resolve_staged_upgrade() {
     local supported
     [[ -n "${MANIFEST_MINIMUM_SOURCE:-}" ]] || return 0
@@ -4093,6 +4123,7 @@ resolve_staged_upgrade() {
     if version_gte "${CURRENT_VERSION}" "${MANIFEST_MINIMUM_SOURCE}"; then
         if [[ "${CURRENT_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE}" ]] \
             && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
+            capture_hard_cut_target_controller_contract
             FRESH_HARD_CUT_HANDOFF=1
             STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
         fi
@@ -4113,6 +4144,7 @@ resolve_staged_upgrade() {
   Remain on ${CURRENT_VERSION} and contact DefenseClaw support for a validated state-aware recovery path."
     fi
 
+    capture_hard_cut_target_controller_contract
     STAGED_FINAL_VERSION="${RELEASE_VERSION}"
     STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
     RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"
@@ -5578,11 +5610,208 @@ PY
     return 1
 }
 
+prepare_hard_cut_target_controller() {
+    local protected_wheel wheel_root materialized_wheel uv_bin base_python observed actual
+    [[ -z "${TARGET_CONTROLLER_CLI:-}" ]] || return 0
+    [[ -n "${FINAL_RELEASE_VERSION}" \
+       && -n "${FINAL_RELEASE_WHL_NAME}" \
+       && -n "${FINAL_RELEASE_WHL_URL}" \
+       && -n "${FINAL_RELEASE_MATERIALIZED_WHL_NAME}" \
+       && "${FINAL_RELEASE_WHL_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "The authenticated hard-cut target-controller contract is unavailable. No services changed."
+
+    section "Preparing Fresh Target Controller"
+    protected_wheel="${STAGING_DIR}/target-controller-${FINAL_RELEASE_WHL_NAME}"
+    step "Downloading authenticated ${FINAL_RELEASE_VERSION} target controller ..."
+    fetch_artifact "${FINAL_RELEASE_WHL_URL}" "${protected_wheel}"
+    chmod 600 "${protected_wheel}" \
+        || die "Could not establish private target-controller wheel custody. No services changed."
+    actual="$(${SHA256_CMD} "${protected_wheel}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+    [[ "${actual}" == "${FINAL_RELEASE_WHL_SHA256}" ]] \
+        || die "The hard-cut target controller wheel failed its authenticated digest check. No services changed."
+
+    wheel_root="${STAGING_DIR}/target-controller-wheel"
+    mkdir "${wheel_root}" \
+        || die "Could not create private target-controller wheel custody. No services changed."
+    chmod 700 "${wheel_root}"
+    materialized_wheel="${wheel_root}/${FINAL_RELEASE_MATERIALIZED_WHL_NAME}"
+    materialize_protected_artifact \
+        "${protected_wheel}" "${materialized_wheel}" "${FINAL_RELEASE_WHL_SHA256}" \
+        || die "Could not materialize the authenticated hard-cut target controller. No services changed."
+    preflight_python_wheel "${materialized_wheel}"
+
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    [[ -n "${uv_bin}" ]] \
+        || die "uv not found on PATH — cannot prepare the fresh target controller. No services changed."
+    [[ -x "${DEFENSECLAW_VENV}/bin/python" ]] \
+        || die "The installed bridge Python environment is unavailable. No services changed."
+    base_python="$(${DEFENSECLAW_VENV}/bin/python -I -c \
+        'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
+        || die "Could not resolve the bridge base Python interpreter. No services changed."
+    [[ -x "${base_python}" ]] \
+        || die "The bridge base Python interpreter is unavailable. No services changed."
+    python3 - "${base_python}" "${DEFENSECLAW_VENV}" <<'PY' \
+        || die "The target controller cannot use a Python interpreter inside the active bridge venv. No services changed."
+import os
+import sys
+
+interpreter, installed_venv = (os.path.realpath(value) for value in sys.argv[1:])
+try:
+    inside = os.path.commonpath((interpreter, installed_venv)) == installed_venv
+except ValueError:
+    inside = False
+raise SystemExit(1 if inside else 0)
+PY
+
+    TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"
+    "${uv_bin}" --no-config venv "${TARGET_CONTROLLER_VENV}" --python "${base_python}" --quiet \
+        || die "Could not create the private target-controller venv. No services changed."
+    chmod 700 "${TARGET_CONTROLLER_VENV}"
+    "${uv_bin}" --no-config pip install \
+        --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet "${materialized_wheel}" \
+        || die "Could not install the authenticated target controller in private custody. No services changed."
+    observed="$(PYTHONDONTWRITEBYTECODE=1 "${TARGET_CONTROLLER_VENV}/bin/python" -I -c \
+        'from defenseclaw import __version__; print(__version__)')" \
+        || die "Could not import the fresh target controller. No services changed."
+    [[ "${observed}" == "${FINAL_RELEASE_VERSION}" ]] \
+        || die "Fresh target controller version mismatch: expected ${FINAL_RELEASE_VERSION}, got ${observed:-missing}. No services changed."
+    TARGET_CONTROLLER_CLI="${TARGET_CONTROLLER_VENV}/bin/defenseclaw"
+    [[ -x "${TARGET_CONTROLLER_CLI}" && ! -L "${TARGET_CONTROLLER_CLI}" ]] \
+        || die "The fresh target-controller entrypoint lost private custody. No services changed."
+    TARGET_CONTROLLER_PROTECTED_WHEEL="${protected_wheel}"
+    ok "Fresh ${FINAL_RELEASE_VERSION} target controller prepared in private custody"
+}
+
+verify_hard_cut_target_controller_handoff() {
+    local bridge_version="$1" target_version="$2" handoff_dir="$3"
+    python3 - \
+        "${TARGET_CONTROLLER_VENV}" \
+        "${TARGET_CONTROLLER_CLI}" \
+        "${DEFENSECLAW_VENV}" \
+        "${INSTALL_DIR}/defenseclaw" \
+        "${INSTALL_DIR}/defenseclaw-gateway" \
+        "${handoff_dir}" \
+        "${TARGET_CONTROLLER_PROTECTED_WHEEL}" \
+        "${FINAL_RELEASE_WHL_SHA256}" \
+        "${bridge_version}" \
+        "${target_version}" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+
+path_values = tuple(map(os.path.abspath, sys.argv[1:7]))
+(
+    target_venv,
+    target_cli,
+    installed_venv,
+    installed_launcher,
+    installed_gateway,
+    handoff_dir,
+    protected_wheel,
+    protected_sha256,
+    bridge_version,
+    target_version,
+) = (*path_values, *sys.argv[7:])
+
+
+def private_directory(path: str, *, exact_mode: int = 0o700) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != exact_mode
+    ):
+        raise RuntimeError(f"private handoff directory is unsafe: {os.path.basename(path)}")
+
+
+def managed_executable(path: str, *, require_single_link: bool = False) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or (require_single_link and info.st_nlink != 1)
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or not stat.S_IMODE(info.st_mode) & stat.S_IXUSR
+    ):
+        raise RuntimeError(f"handoff executable is unsafe: {os.path.basename(path)}")
+
+
+def reported_version(path: str) -> str:
+    completed = subprocess.run(
+        [path, "--version"],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    values = re.findall(
+        r"(?<![0-9A-Za-z.])((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?![0-9A-Za-z.])",
+        (completed.stdout or "") + (completed.stderr or ""),
+    )
+    if completed.returncode != 0 or len(values) != 1:
+        raise RuntimeError(f"handoff executable version is unverifiable: {os.path.basename(path)}")
+    return values[0]
+
+
+private_directory(target_venv)
+private_directory(handoff_dir)
+managed_executable(target_cli, require_single_link=True)
+installed_cli = os.path.realpath(os.path.join(installed_venv, "bin", "defenseclaw"))
+managed_executable(installed_cli)
+managed_executable(installed_gateway)
+launcher_info = os.lstat(installed_launcher)
+if (
+    not stat.S_ISLNK(launcher_info.st_mode)
+    or launcher_info.st_uid != os.geteuid()
+    or os.path.realpath(installed_launcher) != installed_cli
+):
+    raise RuntimeError("installed bridge launcher is not the canonical managed symlink")
+try:
+    target_inside_installed = os.path.commonpath(
+        (os.path.realpath(target_venv), os.path.realpath(installed_venv))
+    ) == os.path.realpath(installed_venv)
+except ValueError:
+    target_inside_installed = False
+if target_inside_installed:
+    raise RuntimeError("target controller is not out-of-place from the installed bridge")
+
+wheel_info = os.lstat(protected_wheel)
+if (
+    stat.S_ISLNK(wheel_info.st_mode)
+    or not stat.S_ISREG(wheel_info.st_mode)
+    or wheel_info.st_uid != os.geteuid()
+    or wheel_info.st_nlink != 1
+    or stat.S_IMODE(wheel_info.st_mode) & 0o077
+    or not 0 < wheel_info.st_size <= 256 * 1024 * 1024
+):
+    raise RuntimeError("authenticated target-controller wheel lost private custody")
+value = hashlib.sha256()
+with open(protected_wheel, "rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        value.update(chunk)
+if value.hexdigest() != protected_sha256:
+    raise RuntimeError("authenticated target-controller wheel changed before handoff")
+if reported_version(target_cli) != target_version:
+    raise RuntimeError("fresh target-controller version changed before handoff")
+if reported_version(installed_launcher) != bridge_version:
+    raise RuntimeError("installed bridge CLI changed before target handoff")
+if reported_version(installed_gateway) != bridge_version:
+    raise RuntimeError("installed bridge gateway changed before target handoff")
+PY
+}
+
 handoff_existing_bridge_to_hard_cut() {
     local final_version="${RELEASE_VERSION}"
     local final_min_protocol="${STAGED_FINAL_MIN_PROTOCOL}"
     local handoff_dir
 
+    prepare_hard_cut_target_controller
     RELEASE_VERSION="${CURRENT_VERSION}"
     configure_release
     prepare_release_contract
@@ -5611,16 +5840,20 @@ handoff_existing_bridge_to_hard_cut() {
 
     handoff_dir="${STAGING_DIR}/bridge-handoff"
     create_bridge_handoff_directory "${handoff_dir}" >/dev/null
+    verify_hard_cut_target_controller_handoff \
+        "${CURRENT_VERSION}" "${final_version}" "${handoff_dir}" \
+        || die "Fresh target-controller handoff verification failed; the healthy bridge was preserved."
     section "Fresh Controller Handoff"
-    ok "Verified ${CURRENT_VERSION} rollback artifacts retained; launching its installed controller"
+    ok "Verified ${CURRENT_VERSION} rollback artifacts retained; launching the authenticated ${final_version} controller"
     trap - EXIT
     export DEFENSECLAW_STAGED_UPGRADE=1
     export DEFENSECLAW_STAGED_BRIDGE_VERSION="${CURRENT_VERSION}"
     export DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR="${handoff_dir}"
+    export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"
     export DEFENSECLAW_HOME="${CONTROLLER_HOME}"
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
-    exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"
+    exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"
 }
 
 validate_tarball_members() {
@@ -6235,15 +6468,19 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     bridge_backup="${BACKUP_DIR}"
     handoff_dir="${bridge_backup}/staged-handoff"
     create_bridge_handoff_directory "${handoff_dir}" >/dev/null
-    rm -rf "${STAGING_DIR}"
+    prepare_hard_cut_target_controller
+    verify_hard_cut_target_controller_handoff \
+        "${RELEASE_VERSION}" "${final_version}" "${handoff_dir}" \
+        || die "Fresh target-controller handoff verification failed; the healthy bridge was preserved."
     trap - EXIT
     export DEFENSECLAW_STAGED_UPGRADE=1
     export DEFENSECLAW_STAGED_BRIDGE_VERSION="${RELEASE_VERSION}"
     export DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR="${handoff_dir}"
+    export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"
     export DEFENSECLAW_HOME="${CONTROLLER_HOME}"
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
-    exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"
+    exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"
 fi
 
 section "Upgrade Complete"

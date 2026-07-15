@@ -77,10 +77,11 @@ const (
 )
 
 type ClawConfig struct {
-	Mode         ClawMode `mapstructure:"mode"          yaml:"mode"`
-	HomeDir      string   `mapstructure:"home_dir"      yaml:"home_dir"`
-	ConfigFile   string   `mapstructure:"config_file"   yaml:"config_file"`
-	WorkspaceDir string   `mapstructure:"workspace_dir" yaml:"workspace_dir,omitempty"`
+	Mode                 ClawMode `mapstructure:"mode"                       yaml:"mode"`
+	HomeDir              string   `mapstructure:"home_dir"                   yaml:"home_dir"`
+	ConfigFile           string   `mapstructure:"config_file"                yaml:"config_file"`
+	WorkspaceDir         string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
+	OpenClawHomeOriginal string   `mapstructure:"openclaw_home_original"     yaml:"openclaw_home_original,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this
@@ -2233,8 +2234,9 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 		return ObservabilityV8ManagedAIDOptions{}, err
 	}
 	return ObservabilityV8ManagedAIDOptions{
-		DeploymentMode: candidate.DeploymentMode,
-		Endpoint:       candidate.CiscoAIDefense.Endpoint,
+		DeploymentMode:    candidate.DeploymentMode,
+		Endpoint:          candidate.CiscoAIDefense.Endpoint,
+		SourceContentHash: ObservabilityV8SourceContentHash(raw),
 	}, nil
 }
 

@@ -70,11 +70,9 @@ connectors:
   # remains available for end-to-end trace-topology validation.
   forward/agent360:
 
-  # Turn completed runtime spans into per-agent RED metrics. These dimensions
-  # are the stable Agent360 correlation contract; request IDs and prompt text
-  # are intentionally excluded from labels. The native agent.last_seen metric
-  # powers the durable directory while these derived metrics power latency,
-  # throughput, tool, model, and error panels.
+  # Turn completed runtime spans into aggregate RED metrics. Stable/native
+  # identities stay on traces and logs so neither spanmetrics nor application
+  # metrics can create one time series per agent, lifecycle, or execution.
   spanmetrics/agent360:
     namespace: defenseclaw.agent.span
     histogram:
@@ -82,13 +80,7 @@ connectors:
         buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s, 30s, 1m, 5m]
     dimensions:
       - name: gen_ai.operation.name
-      - name: gen_ai.agent.id
-      - name: gen_ai.agent.name
       - name: gen_ai.agent.type
-      - name: defenseclaw.agent.root.id
-      - name: defenseclaw.agent.parent.id
-      - name: defenseclaw.agent.lifecycle.id
-      - name: defenseclaw.agent.execution.id
       - name: defenseclaw.agent.lifecycle.event
       - name: defenseclaw.agent.lifecycle.state
       - name: defenseclaw.agent.phase

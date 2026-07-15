@@ -17,7 +17,8 @@ dependencies = [
     "requests==2.33.0",
     "rich>=13.0",
     # Runtime validation of config_version: 8 uses the schema bundled in the
-    # wheel. Keep this direct even though scanner dependencies also install it.
+    # wheel. The 0.8.4 bridge already carries this transitively; the hard-cut
+    # controller verifies that exact pre-existing runtime before mutation.
     "jsonschema>=4.23.0,<5",
     # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
     # protobuf canary span without starting the gateway.

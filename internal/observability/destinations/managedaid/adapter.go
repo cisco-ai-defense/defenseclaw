@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/otlp"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/push"
+	collectorlogpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 )
 
 const (
@@ -66,6 +67,7 @@ type Config struct {
 	Destination string
 	Endpoint    string
 	LoggerName  string
+	ContentHash string
 	Timeout     time.Duration
 	Resource    otlp.LogResourceSnapshot
 	Network     push.NetworkOptions
@@ -75,11 +77,14 @@ type Config struct {
 // Adapter is synchronous; the common generation dispatcher owns its bounded
 // queue, batching, retries, health, activation, and drain lifecycle.
 type Adapter struct {
-	endpoint string
-	timeout  time.Duration
-	resolver ProviderResolver
-	builder  *otlp.CanonicalLogRequestBuilder
-	client   *http.Client
+	endpoint    string
+	timeout     time.Duration
+	resolver    ProviderResolver
+	builder     *otlp.CanonicalLogRequestBuilder
+	client      *http.Client
+	deviceID    string
+	hostname    string
+	contentHash string
 
 	remintMu   sync.Mutex
 	lastRemint time.Time
@@ -97,8 +102,14 @@ func New(ctx context.Context, source Config, resolver ProviderResolver) (*Adapte
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
+	resourceValues, deviceID, hostname, resourceOK := managedResourceSnapshot(source.Resource.Values)
+	contentHashOK := validManagedContentHash(source.ContentHash)
+	resource := source.Resource
+	if resourceOK {
+		resource.Values = resourceValues
+	}
 	builder, err := otlp.NewCanonicalLogRequestBuilder(
-		source.Destination, source.LoggerName, source.Resource,
+		source.Destination, source.LoggerName, resource,
 	)
 	if err != nil {
 		return nil, err
@@ -119,7 +130,8 @@ func New(ctx context.Context, source Config, resolver ProviderResolver) (*Adapte
 	}
 	return &Adapter{
 		endpoint: endpoint, timeout: timeout, resolver: resolver, builder: builder,
-		client: client, available: endpointOK && resolver != nil,
+		client: client, available: endpointOK && resolver != nil && resourceOK && contentHashOK,
+		deviceID: deviceID, hostname: hostname, contentHash: source.ContentHash,
 	}, nil
 }
 
@@ -192,8 +204,23 @@ func (adapter *Adapter) Deliver(ctx context.Context, batch delivery.Batch) deliv
 	if !ok || estimate != batch.EncodedSize() {
 		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
 	}
+	items := batch.Items()
+	compatibility := make([]managedCompatibilityProjection, len(items))
+	applied := make([]bool, len(items))
+	for index := range items {
+		projected, useProjection, valid := projectManagedCompatibility(
+			items[index], adapter.deviceID, adapter.hostname, adapter.contentHash,
+		)
+		if !valid {
+			return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		}
+		compatibility[index], applied[index] = projected, useProjection
+	}
 	request, ok := adapter.builder.Build(batch)
 	if !ok {
+		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+	}
+	if !applyManagedCompatibilityRequest(request, compatibility, applied) {
 		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
 	}
 	inner, err := otlp.MarshalCanonicalLogRequestJSON(request)
@@ -236,6 +263,37 @@ func (adapter *Adapter) Deliver(ctx context.Context, batch delivery.Batch) deliv
 		}
 	}
 	return delivery.DeliveryResult{Outcome: classifyStatus(status)}
+}
+
+func applyManagedCompatibilityRequest(
+	request *collectorlogpb.ExportLogsServiceRequest,
+	projections []managedCompatibilityProjection,
+	applied []bool,
+) bool {
+	if request == nil || len(projections) != len(applied) {
+		return false
+	}
+	index := 0
+	for _, resourceLogs := range request.ResourceLogs {
+		if resourceLogs == nil {
+			return false
+		}
+		for _, scopeLogs := range resourceLogs.ScopeLogs {
+			if scopeLogs == nil {
+				return false
+			}
+			for _, record := range scopeLogs.LogRecords {
+				if index >= len(projections) {
+					return false
+				}
+				if applied[index] && !applyManagedCompatibility(record, projections[index]) {
+					return false
+				}
+				index++
+			}
+		}
+	}
+	return index == len(projections)
 }
 
 func classifyCredentialError(err error) delivery.DeliveryOutcome {

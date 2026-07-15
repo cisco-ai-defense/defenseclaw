@@ -260,10 +260,14 @@ func (factory *Factory) prepareManagedAID(
 	resourceContext telemetry.V8ResourceContext,
 	noResource observabilityruntime.DestinationAdapterCleanup,
 ) (delivery.Adapter, observabilityruntime.DestinationAdapterCleanup, error) {
+	contentHash, ok := config.ObservabilityV8ManagedAIDSourceContentHash(destination)
+	if !ok {
+		return nil, noResource, newError(ErrorInvalidDestination)
+	}
 	adapter, err := managedaid.New(ctx, managedaid.Config{
 		Destination: destination.Name, Endpoint: destination.Transport.Endpoint,
-		LoggerName: destination.Transport.LoggerName,
-		Timeout:    time.Duration(destination.Transport.TimeoutMS) * time.Millisecond,
+		LoggerName: destination.Transport.LoggerName, ContentHash: contentHash,
+		Timeout: time.Duration(destination.Transport.TimeoutMS) * time.Millisecond,
 		Resource: otlp.LogResourceSnapshot{
 			SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 			DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),
@@ -637,15 +641,13 @@ func isManagedAIDDestination(destination config.ObservabilityV8EffectiveDestinat
 
 func validManagedAIDDestination(destination config.ObservabilityV8EffectiveDestination) bool {
 	transport := destination.Transport
+	_, contentHashOK := config.ObservabilityV8ManagedAIDSourceContentHash(destination)
 	if !destination.Generated || destination.Kind != config.ObservabilityV8DestinationOTLP ||
 		!exactLogOnlyDestination(destination) || destination.PolicyForm != config.ObservabilityV8PolicyImplicitLocal ||
-		!destination.FirstMatchPerSignal || len(destination.Routes) != 1 ||
-		!destination.Routes[0].Generated || destination.Routes[0].Action != config.ObservabilityV8RouteSend ||
-		len(destination.Routes[0].Signals) != 1 || destination.Routes[0].Signals[0] != observability.SignalLogs ||
-		!destination.Routes[0].Selector.BucketWildcard || len(destination.Routes[0].RedactionProfileByBucket) == 0 {
+		!destination.FirstMatchPerSignal || !contentHashOK || !validManagedAIDRoutes(destination.Routes) {
 		return false
 	}
-	for _, profile := range destination.Routes[0].RedactionProfileByBucket {
+	for _, profile := range destination.Routes[2].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			return false
 		}
@@ -658,6 +660,43 @@ func validManagedAIDDestination(destination config.ObservabilityV8EffectiveDesti
 		transport.Index == "" && transport.Source == "" && transport.SourceType == "" &&
 		len(transport.SourceTypeOverrides) == 0 && transport.TLS == nil && transport.NetworkSafety == nil &&
 		len(transport.SignalOverrides) == 0 && validManagedAIDBatch(transport.Batch)
+}
+
+func validManagedAIDRoutes(routes []config.ObservabilityV8EffectiveRoute) bool {
+	if len(routes) != 3 {
+		return false
+	}
+	for index := range routes {
+		if !routes[index].Generated || routes[index].Index != index ||
+			len(routes[index].Signals) != 1 || routes[index].Signals[0] != observability.SignalLogs {
+			return false
+		}
+	}
+	local := routes[0]
+	if local.Name != "drop-local-inventory-diagnostics" || local.Action != config.ObservabilityV8RouteDrop ||
+		local.Selector.BucketWildcard || len(local.Selector.Buckets) != 1 ||
+		local.Selector.Buckets[0] != observability.BucketAIDiscovery || len(local.Selector.Actions) != 1 ||
+		local.Selector.Actions[0] != config.ObservabilityV8LocalInventoryDiagnosticAction ||
+		len(local.Selector.EventNames) != 0 || len(local.RedactionProfileByBucket) != 0 {
+		return false
+	}
+	components := routes[1]
+	if components.Name != "drop-managed-inventory-components" ||
+		components.Action != config.ObservabilityV8RouteDrop || components.Selector.BucketWildcard ||
+		len(components.Selector.Buckets) != 1 || components.Selector.Buckets[0] != observability.BucketAIDiscovery ||
+		len(components.Selector.Actions) != 3 ||
+		components.Selector.Actions[0] != config.ObservabilityV8ManagedAgentInventoryAction ||
+		components.Selector.Actions[1] != config.ObservabilityV8ManagedConnectorInventoryAction ||
+		components.Selector.Actions[2] != config.ObservabilityV8ManagedMCPInventoryAction ||
+		len(components.Selector.EventNames) != 1 || components.Selector.EventNames[0] != "ai_component.observed" ||
+		len(components.RedactionProfileByBucket) != 0 {
+		return false
+	}
+	send := routes[2]
+	return send.Name == "all-collected-logs" && send.Action == config.ObservabilityV8RouteSend &&
+		send.Selector.BucketWildcard && len(send.Selector.Buckets) > 0 &&
+		len(send.Selector.Actions) == 0 && len(send.Selector.EventNames) == 0 &&
+		len(send.RedactionProfileByBucket) > 0
 }
 
 func validManagedAIDBatch(batch *config.ObservabilityV8BatchSource) bool {

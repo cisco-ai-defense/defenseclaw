@@ -49,7 +49,10 @@ const (
 	projectionIntegrityDomain = "defenseclaw-observability-projection-integrity-v1"
 )
 
-const maxEventHistoryVerificationRange = 1000
+const (
+	maxEventHistoryVerificationRange          = 1000
+	maxCanonicalLogCorrelationIdentifierBytes = 256
+)
 
 // EventHistoryVerificationStatus is a bounded, machine-readable local
 // integrity result. No status embeds persisted record content or database
@@ -547,6 +550,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	}
 	if correlation.SemanticEventID != "" {
 		observationTraceID, observationSpanID := exactObservationTopology(correlation.TraceID, correlation.SpanID)
+		observationLifecycleID, observationExecutionID := exactLogLifecycleAndExecution(record)
 		if err := putCorrelationObservationTx(ctx, tx, writer.store, CorrelationObservation{
 			RecordID:         record.RecordID(),
 			SemanticEventID:  SemanticEventID(correlation.SemanticEventID),
@@ -559,6 +563,8 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 			SessionID:        correlation.SessionID,
 			TurnID:           correlation.TurnID,
 			AgentID:          correlation.AgentID,
+			LifecycleID:      observationLifecycleID,
+			ExecutionID:      observationExecutionID,
 			ModelRequestID:   correlation.ModelRequestID,
 			ModelResponseID:  correlation.ModelResponseID,
 			ToolInvocationID: correlation.ToolInvocationID,
@@ -572,6 +578,66 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		}
 	}
 	return outcome, nil
+}
+
+// exactLogLifecycleAndExecution reads only the two registered canonical
+// lifecycle attributes. They are intentionally not generic Correlation fields,
+// so preserving them in log observations requires an exact attribute lookup.
+// No connector aliases, content fields, or contextual fallbacks are inspected.
+func exactLogLifecycleAndExecution(record observability.Record) (string, string) {
+	var lifecycleID, executionID string
+	for _, value := range []func() (observability.Value, bool){record.InstrumentData, record.Body} {
+		candidate, ok := value()
+		if !ok {
+			continue
+		}
+		object, err := candidate.Object()
+		if err != nil {
+			continue
+		}
+		candidateLifecycleID, candidateExecutionID := exactLogLifecycleAndExecutionAttributes(object)
+		if lifecycleID == "" {
+			lifecycleID = candidateLifecycleID
+		}
+		if executionID == "" {
+			executionID = candidateExecutionID
+		}
+		if lifecycleID != "" && executionID != "" {
+			break
+		}
+	}
+	return lifecycleID, executionID
+}
+
+func exactLogLifecycleAndExecutionAttributes(object map[string]any) (string, string) {
+	attributes := object
+	if nested, ok := object["attributes"].(map[string]any); ok {
+		attributes = nested
+	}
+	return exactLogCorrelationIdentifier(attributes["defenseclaw.agent.lifecycle.id"]),
+		exactLogCorrelationIdentifier(attributes["defenseclaw.agent.execution.id"])
+}
+
+func exactLogCorrelationIdentifier(value any) string {
+	identifier, ok := value.(string)
+	// The canonical telemetry registry constrains these two log attributes to
+	// 256 UTF-8 bytes. The ledger's broader 512-byte identifier ceiling covers
+	// other rails and must not make an invalid canonical log record admissible.
+	if !ok || identifier == "" || len(identifier) > maxCanonicalLogCorrelationIdentifierBytes || !utf8.ValidString(identifier) {
+		return ""
+	}
+	for index := 0; index < len(identifier); index++ {
+		character := identifier[index]
+		alphaNumeric := character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9'
+		if alphaNumeric || index > 0 && (character == '.' || character == '_' ||
+			character == ':' || character == '/' || character == '-') {
+			continue
+		}
+		return ""
+	}
+	return identifier
 }
 
 // exactObservationTopology separates the legacy audit correlation envelope

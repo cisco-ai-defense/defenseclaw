@@ -192,21 +192,6 @@ inbound_bindings:
     - id: genai-token-metric-v1
       target_family: metric.gen_ai.client.token.usage
       field_rules:
-        - {target: gen_ai.agent.id, disposition: omit}
-        - target: gen_ai.agent.name
-          disposition: project
-          requirement: required
-          normalization: bounded-label-v1
-          source_groups:
-            - {placement: authenticated_source, keys: [$authenticated_source]}
-            - {placement: resource_attribute, keys: [service.name]}
-        - target: gen_ai.conversation.id
-          disposition: project
-          requirement: optional
-          normalization: identifier-label-v1
-          source_groups:
-            - {placement: metric_point_attribute, keys: [gen_ai.conversation.id]}
-            - {placement: resource_attribute, keys: [gen_ai.conversation.id]}
         - target: gen_ai.operation.name
           disposition: project
           requirement: required
@@ -289,14 +274,6 @@ inbound_bindings:
     - id: genai-duration-metric-v1
       target_family: metric.gen_ai.client.operation.duration
       field_rules:
-        - {target: gen_ai.agent.id, disposition: omit}
-        - target: gen_ai.agent.name
-          disposition: project
-          requirement: required
-          normalization: bounded-label-v1
-          source_groups:
-            - {placement: authenticated_source, keys: [$authenticated_source]}
-            - {placement: resource_attribute, keys: [service.name]}
         - target: gen_ai.operation.name
           disposition: project
           requirement: required
@@ -1046,11 +1023,116 @@ structured_types:
       duplicate_name_policy: reject
       fixed_name_collision_policy: reject
       post_redaction_name_collision_policy: reject
+  - id: defenseclaw.inventory.connector_identifier
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: name, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 128, pattern: '^[^/\\]*$'}}}
+  - id: defenseclaw.inventory.connector_identifiers
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.connector_identifier}
+    min_items: 0
+    max_items: 128
+  - id: defenseclaw.inventory.connector_metadata_item
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: source, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [built-in, plugin]}}}
+      - {name: tool_inspection_mode, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [pre-execution, response-scan, both]}}}
+      - {name: subprocess_policy, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [sandbox, shims, none]}}}
+  - id: defenseclaw.inventory.connector_metadata
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.connector_metadata_item}
+    min_items: 0
+    max_items: 128
+  - id: defenseclaw.inventory.connector_content_item
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: description, required: false, type: string, field_class: content, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 512}}}
+  - id: defenseclaw.inventory.connector_content
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.connector_content_item}
+    min_items: 0
+    max_items: 128
+  - id: defenseclaw.inventory.mcp_identifier
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: name, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^[^/\\]*$'}}}
+      - {name: url_host, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^([A-Za-z0-9][A-Za-z0-9._:-]*|\\[[0-9A-Fa-f:.]+\\](:[0-9]+)?)$'}}}
+  - id: defenseclaw.inventory.mcp_identifiers
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.mcp_identifier}
+    min_items: 0
+    max_items: 256
+  - id: defenseclaw.inventory.mcp_metadata_item
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: transport, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]*$'}}}
+      - {name: command_basename, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'}}}
+      - {name: auth_provider_type, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]*$'}}}
+      - {name: disabled, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
+  - id: defenseclaw.inventory.mcp_metadata
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.mcp_metadata_item}
+    min_items: 0
+    max_items: 256
+  - id: defenseclaw.inventory.agent_identifier
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: name, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: identifier-v1, overrides: {max_utf8_bytes: 128}}}
+      - {name: config_path_hash, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}}}
+      - {name: binary_path_hash, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}}}
+  - id: defenseclaw.inventory.agent_identifiers
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.agent_identifier}
+    min_items: 0
+    max_items: 64
+  - id: defenseclaw.inventory.agent_metadata_item
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: installed, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
+      - {name: has_config, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
+      - {name: config_basename, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'}}}
+      - {name: has_binary, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
+      - {name: binary_basename, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'}}}
+      - {name: version, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 200, pattern: '^[A-Za-z0-9][A-Za-z0-9 .,_+@():-]*$'}}}
+      - {name: probe_status, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [ok, timeout, nonzero_exit, empty_output, probe_failed, not_probed, unknown, other]}}}
+  - id: defenseclaw.inventory.agent_metadata
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.inventory.agent_metadata_item}
+    min_items: 0
+    max_items: 64
 structured_bindings:
   - {attribute: gen_ai.input.messages, structured_type: gen_ai.input_messages, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
   - {attribute: gen_ai.output.messages, structured_type: gen_ai.output_messages, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
   - {attribute: gen_ai.tool.call.arguments, structured_type: gen_ai.tool_call_arguments, public_encoding: ordered_typed_entries, canonical_wire_encoding: native_json_object}
   - {attribute: gen_ai.tool.call.result, structured_type: gen_ai.tool_call_result, public_encoding: ordered_typed_entries, canonical_wire_encoding: native_json_object}
+  - {attribute: defenseclaw.inventory.connector.identifiers, structured_type: defenseclaw.inventory.connector_identifiers, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.connector.metadata, structured_type: defenseclaw.inventory.connector_metadata, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.connector.content, structured_type: defenseclaw.inventory.connector_content, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.mcp.identifiers, structured_type: defenseclaw.inventory.mcp_identifiers, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.mcp.metadata, structured_type: defenseclaw.inventory.mcp_metadata, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.agent.identifiers, structured_type: defenseclaw.inventory.agent_identifiers, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.inventory.agent.metadata, structured_type: defenseclaw.inventory.agent_metadata, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
 go_symbol_policy:
   version: 1
   package: observability
@@ -1385,88 +1467,9 @@ metric_defaults:
   cardinality_limit: 2048
 metric_compatibility_profiles:
   - id: local-observability-v1
-    high_cardinality_families:
-      - family: defenseclaw.agent.last_seen
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.lifecycle.id
-          - defenseclaw.agent.parent.id
-          - defenseclaw.agent.root.id
-          - defenseclaw.session.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - defenseclaw.agent.type
-      - family: defenseclaw.agent.lifecycle.transitions
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.depth
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.lifecycle.event
-          - defenseclaw.agent.lifecycle.id
-          - defenseclaw.agent.lifecycle.state
-          - defenseclaw.agent.parent.id
-          - defenseclaw.agent.root.id
-          - defenseclaw.session.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - defenseclaw.agent.type
-          - gen_ai.provider.name
-          - gen_ai.request.model
-      - family: defenseclaw.agent.phase.current
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.lifecycle.id
-          - defenseclaw.agent.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-      - family: defenseclaw.agent.phase.transitions
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.phase.from
-          - defenseclaw.agent.phase.to
-          - defenseclaw.agent.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-      - family: defenseclaw.agent.reported_cost
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.lifecycle.id
-          - defenseclaw.agent.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - gen_ai.provider.name
-          - gen_ai.request.model
-      - family: defenseclaw.agent.token.usage
-        labels:
-          - defenseclaw.connector.source
-          - defenseclaw.agent.execution.id
-          - defenseclaw.agent.lifecycle.id
-          - defenseclaw.agent.root.id
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - gen_ai.provider.name
-          - gen_ai.request.model
-          - gen_ai.token.type
-      - family: gen_ai.client.operation.duration
-        labels:
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - gen_ai.operation.name
-          - gen_ai.provider.name
-          - gen_ai.request.model
-      - family: gen_ai.client.token.usage
-        labels:
-          - gen_ai.agent.id
-          - gen_ai.agent.name
-          - gen_ai.conversation.id
-          - gen_ai.operation.name
-          - gen_ai.provider.name
-          - gen_ai.request.model
-          - gen_ai.token.type
+    # Metric series are aggregate-only. Stable and native identities remain on
+    # logs, traces, and the correlation ledger, never in metric label sets.
+    high_cardinality_families: []
     derived_spanmetrics:
       pipeline: spanmetrics/agent360
       dimensions_cache_size: 10000

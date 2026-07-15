@@ -281,6 +281,10 @@ func migrateCorrelationStateV8(ex dbExecer) error {
 			ON correlation_observations(turn_id, observed_time_unix_nano);
 		CREATE INDEX IF NOT EXISTS idx_correlation_observations_agent
 			ON correlation_observations(agent_id, observed_time_unix_nano);
+		CREATE INDEX IF NOT EXISTS idx_correlation_observations_lifecycle
+			ON correlation_observations(lifecycle_id, observed_time_unix_nano);
+		CREATE INDEX IF NOT EXISTS idx_correlation_observations_execution
+			ON correlation_observations(execution_id, observed_time_unix_nano);
 		CREATE INDEX IF NOT EXISTS idx_correlation_observations_model_request
 			ON correlation_observations(model_request_id);
 		CREATE INDEX IF NOT EXISTS idx_correlation_observations_model_response

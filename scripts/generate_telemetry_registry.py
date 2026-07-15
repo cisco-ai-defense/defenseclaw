@@ -216,6 +216,20 @@ EXPECTED_STRUCTURED_TYPE_IDS: Final = (
     "gen_ai.compaction_part",
     "gen_ai.generic_part",
     "gen_ai.generic_server_tool_payload",
+    "defenseclaw.inventory.connector_identifier",
+    "defenseclaw.inventory.connector_identifiers",
+    "defenseclaw.inventory.connector_metadata_item",
+    "defenseclaw.inventory.connector_metadata",
+    "defenseclaw.inventory.connector_content_item",
+    "defenseclaw.inventory.connector_content",
+    "defenseclaw.inventory.mcp_identifier",
+    "defenseclaw.inventory.mcp_identifiers",
+    "defenseclaw.inventory.mcp_metadata_item",
+    "defenseclaw.inventory.mcp_metadata",
+    "defenseclaw.inventory.agent_identifier",
+    "defenseclaw.inventory.agent_identifiers",
+    "defenseclaw.inventory.agent_metadata_item",
+    "defenseclaw.inventory.agent_metadata",
 )
 EXPECTED_STRUCTURED_BINDINGS: Final = (
     ("gen_ai.input.messages", "gen_ai.input_messages", "sealed_typed", "native_json"),
@@ -232,6 +246,13 @@ EXPECTED_STRUCTURED_BINDINGS: Final = (
         "ordered_typed_entries",
         "native_json_object",
     ),
+    ("defenseclaw.inventory.connector.identifiers", "defenseclaw.inventory.connector_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.connector.metadata", "defenseclaw.inventory.connector_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.connector.content", "defenseclaw.inventory.connector_content", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.mcp.identifiers", "defenseclaw.inventory.mcp_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.mcp.metadata", "defenseclaw.inventory.mcp_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.agent.identifiers", "defenseclaw.inventory.agent_identifiers", "sealed_typed", "native_json"),
+    ("defenseclaw.inventory.agent.metadata", "defenseclaw.inventory.agent_metadata", "sealed_typed", "native_json"),
 )
 EXPECTED_GO_SYMBOL_POLICY: Final = {
     "version": 1,
@@ -376,7 +397,7 @@ _GO_RESERVED_IDENTIFIERS: Final = frozenset(
         "uintptr",
     }
 )
-EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "8ed3cab115fd647fde11b1aa78dd16386b56a6eec3b0c47ab76e3def1bc73e94"
+EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "9736265ad7a56d3ca7f6bc50c34dc8c7a312711fc790b7204fe10f1914e9b623"
 EXPECTED_MESSAGE_PART_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
     ("tool_call", "gen_ai.tool_call_request_part"),
@@ -444,11 +465,60 @@ EXPECTED_STRUCTURED_OBJECT_FIELDS: Final = {
     ),
     "gen_ai.generic_part": (),
     "gen_ai.generic_server_tool_payload": (("type", True, "scalar", "string"),),
+    "defenseclaw.inventory.connector_identifier": (("name", True, "scalar", "string"),),
+    "defenseclaw.inventory.connector_metadata_item": (
+        ("source", True, "scalar", "string"),
+        ("tool_inspection_mode", True, "scalar", "string"),
+        ("subprocess_policy", True, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.connector_content_item": (("description", False, "scalar", "string"),),
+    "defenseclaw.inventory.mcp_identifier": (
+        ("name", True, "scalar", "string"),
+        ("url_host", False, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.mcp_metadata_item": (
+        ("transport", False, "scalar", "string"),
+        ("command_basename", False, "scalar", "string"),
+        ("auth_provider_type", False, "scalar", "string"),
+        ("disabled", True, "scalar", "boolean"),
+    ),
+    "defenseclaw.inventory.agent_identifier": (
+        ("name", True, "scalar", "string"),
+        ("config_path_hash", False, "scalar", "string"),
+        ("binary_path_hash", False, "scalar", "string"),
+    ),
+    "defenseclaw.inventory.agent_metadata_item": (
+        ("installed", True, "scalar", "boolean"),
+        ("has_config", True, "scalar", "boolean"),
+        ("config_basename", False, "scalar", "string"),
+        ("has_binary", True, "scalar", "boolean"),
+        ("binary_basename", False, "scalar", "string"),
+        ("version", False, "scalar", "string"),
+        ("probe_status", True, "scalar", "string"),
+    ),
 }
+EXPECTED_SEALED_STRUCTURED_OBJECTS: Final = frozenset(
+    {
+        "defenseclaw.inventory.connector_identifier",
+        "defenseclaw.inventory.connector_metadata_item",
+        "defenseclaw.inventory.connector_content_item",
+        "defenseclaw.inventory.mcp_identifier",
+        "defenseclaw.inventory.mcp_metadata_item",
+        "defenseclaw.inventory.agent_identifier",
+        "defenseclaw.inventory.agent_metadata_item",
+    }
+)
 EXPECTED_STRUCTURED_ARRAYS: Final = {
     "gen_ai.input_messages": ("gen_ai.chat_message", 0, 256),
     "gen_ai.output_messages": ("gen_ai.output_message", 0, 256),
     "gen_ai.message_parts": ("gen_ai.message_part", 0, 256),
+    "defenseclaw.inventory.connector_identifiers": ("defenseclaw.inventory.connector_identifier", 0, 128),
+    "defenseclaw.inventory.connector_metadata": ("defenseclaw.inventory.connector_metadata_item", 0, 128),
+    "defenseclaw.inventory.connector_content": ("defenseclaw.inventory.connector_content_item", 0, 128),
+    "defenseclaw.inventory.mcp_identifiers": ("defenseclaw.inventory.mcp_identifier", 0, 256),
+    "defenseclaw.inventory.mcp_metadata": ("defenseclaw.inventory.mcp_metadata_item", 0, 256),
+    "defenseclaw.inventory.agent_identifiers": ("defenseclaw.inventory.agent_identifier", 0, 64),
+    "defenseclaw.inventory.agent_metadata": ("defenseclaw.inventory.agent_metadata_item", 0, 64),
 }
 # The pinned OTel GenAI schema requires finish_reason, while DefenseClaw also
 # accepts provider responses that legitimately omit it.  Keep the imported
@@ -3745,7 +3815,12 @@ def _parse_structured_types(
             )
             for field in item.fields or ()
         )
-        if item.kind != "object" or observed_fields != expected_fields or item.dynamic_members is None:
+        expects_dynamic = type_id not in EXPECTED_SEALED_STRUCTURED_OBJECTS
+        if (
+            item.kind != "object"
+            or observed_fields != expected_fields
+            or (item.dynamic_members is not None) != expects_dynamic
+        ):
             raise RegistryError(f"{path}: {type_id} object contract mismatch")
     for (type_id, field_name), expected in AUDITED_STRUCTURED_SCALARS.items():
         field = next(field for field in by_id[type_id].fields or () if field.name == field_name)
@@ -6546,6 +6621,8 @@ def _attribute_type_accepts(value: Any, field_type: str) -> bool:
         return type(value) in {int, float} and not isinstance(value, bool) and math.isfinite(value)
     if field_type == "object":
         return isinstance(value, dict)
+    if field_type == "array":
+        return isinstance(value, list) and _json_value_stats(value) is not None
     if field_type.endswith("[]"):
         if not isinstance(value, list):
             return False
@@ -7916,10 +7993,10 @@ def _parse_metric_settings(
         if family in observed:
             raise RegistryError(f"{item_path}.family: duplicate family")
         observed[family] = labels
-    if len(observed) != 8:
+    if observed:
         raise RegistryError(
             "registry.metric_compatibility_profiles[0].high_cardinality_families: "
-            "expected the eight reviewed application families"
+            "high-cardinality metric exceptions are forbidden"
         )
     spanmetrics = profile["derived_spanmetrics"]
     if not isinstance(spanmetrics, dict):
@@ -10524,7 +10601,28 @@ def compile_registry(root: Path) -> RegistryIR:
         missing = sorted(referenced_upstream - set(upstream_extensions))
         unreferenced = sorted(set(upstream_extensions) - referenced_upstream)
         raise RegistryError(f"attribute extensions: coverage mismatch missing={missing} unreferenced={unreferenced}")
+    local_inventory_bindings = {
+        "defenseclaw.inventory.connector.identifiers": ("identifier", "internal"),
+        "defenseclaw.inventory.connector.metadata": ("metadata", "internal"),
+        "defenseclaw.inventory.connector.content": ("content", "internal"),
+        "defenseclaw.inventory.mcp.identifiers": ("identifier", "internal"),
+        "defenseclaw.inventory.mcp.metadata": ("metadata", "internal"),
+        "defenseclaw.inventory.agent.identifiers": ("identifier", "internal"),
+        "defenseclaw.inventory.agent.metadata": ("metadata", "internal"),
+    }
     for binding in structured_bindings:
+        local = local_attributes.get(binding.attribute)
+        expected_local_privacy = local_inventory_bindings.get(binding.attribute)
+        if expected_local_privacy is not None:
+            if (
+                local is None
+                or local.field_type != "array"
+                or (local.field_class, local.sensitivity) != expected_local_privacy
+                or binding.public_encoding != "sealed_typed"
+                or binding.canonical_wire_encoding != "native_json"
+            ):
+                raise RegistryError(f"structured binding {binding.attribute}: incompatible local attribute/privacy")
+            continue
         upstream = upstream_attributes.get(binding.attribute)
         extension = upstream_extensions.get(binding.attribute)
         if (
@@ -11015,7 +11113,6 @@ def _validate_metric_attribute_safety(
         raise RegistryError("metric families: instrument names must be present and unique")
     if not set(metric_inventory).issubset(instruments):
         raise RegistryError("metric families: legacy inventory contains an unknown instrument")
-    profile_exceptions: dict[str, frozenset[str]] = {}
     prohibited_classes = {"content", "credential", "path", "evidence", "reason", "error"}
     for group in metric_groups:
         assert group.instrument_name is not None
@@ -11054,7 +11151,6 @@ def _validate_metric_attribute_safety(
                 )
             if group.empty_labels_reason != inventory.empty_labels_reason:
                 raise RegistryError(f"metric {group.id}: empty-label reason differs from legacy inventory")
-        high_labels: set[str] = set()
         for reference in labels:
             local = local_attributes.get(reference)
             extension = upstream_extensions.get(reference)
@@ -11078,7 +11174,9 @@ def _validate_metric_attribute_safety(
                     f"class={field_class} cardinality={cardinality}"
                 )
             if cardinality == "high":
-                high_labels.add(reference)
+                raise RegistryError(
+                    f"metric {group.id}: high-cardinality label attribute {reference} is forbidden"
+                )
             if set(field_types) & {"string", "string[]"}:
                 if normalization.id not in {"enum-v1", "bounded-v1", "identifier-v1"}:
                     raise RegistryError(
@@ -11086,23 +11184,6 @@ def _validate_metric_attribute_safety(
                     )
                 if "max_utf8_bytes" not in normalization.effective_constraints:
                     raise RegistryError(f"metric {group.id}: string label {reference} lacks max_utf8_bytes")
-        if high_labels:
-            profile_exceptions[group.instrument_name] = labels
-    configured_exceptions = {
-        family: frozenset(labels) for family, labels in compatibility_profile.high_cardinality_families.items()
-    }
-    if profile_exceptions != configured_exceptions:
-        missing = sorted(profile_exceptions.keys() - configured_exceptions.keys())
-        extra = sorted(configured_exceptions.keys() - profile_exceptions.keys())
-        mismatched = sorted(
-            family
-            for family in profile_exceptions.keys() & configured_exceptions.keys()
-            if profile_exceptions[family] != configured_exceptions[family]
-        )
-        raise RegistryError(
-            "metric compatibility profile: high-cardinality coverage mismatch "
-            f"missing={missing} extra={extra} mismatched={mismatched}"
-        )
 
 
 def _validate_span_name_patterns(

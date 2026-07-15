@@ -274,15 +274,13 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 			DefenseClawConnectorSource: observability.Present("codex"),
 		},
 	)))
-	// gauge/double: unmapped canonical identity labels must survive alongside
-	// the connector/type aliases used by the Agent360 dashboards.
+	// gauge/double: aggregate connector/type labels survive without creating a
+	// series per native agent, lifecycle, or execution identity.
 	harness.record(t, generatedMetricBuilt(builder.BuildMetricDefenseClawAgentLastSeen(
 		observability.MetricDefenseClawAgentLastSeenInput{
 			Envelope: envelope, Value: 123.5,
-			DefenseClawConnectorSource:  observability.Present("codex"),
-			DefenseClawAgentLifecycleID: observability.Present("lifecycle-1"),
-			GenAIAgentID:                observability.Present("agent-1"),
-			DefenseClawAgentType:        observability.Present("root"),
+			DefenseClawConnectorSource: observability.Present("codex"),
+			DefenseClawAgentType:       observability.Present("root"),
 		},
 	)))
 	// updowncounter/int64: the cumulative pull value retains signed updates.
@@ -310,7 +308,7 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 		`defenseclaw_connector_hook_latency_milliseconds_sum{connector="codex",event_type="prompt",reason="allow",result="ok"} 7.5`,
 		`defenseclaw_connector_hook_latency_milliseconds_count{connector="codex",event_type="prompt",reason="allow",result="ok"} 1`,
 		`defenseclaw_agent_discovery_installed_ratio{connector="codex"} 4`,
-		`defenseclaw_agent_last_seen_seconds{connector="codex",defenseclaw_agent_lifecycle_id="lifecycle-1",gen_ai_agent_id="agent-1",gen_ai_agent_type="root"} 123.5`,
+		`defenseclaw_agent_last_seen_seconds{connector="codex",gen_ai_agent_type="root"} 123.5`,
 		`defenseclaw_audit_sink_circuit_state{sink_kind="otlp",sink_name="primary"} 2`,
 	} {
 		if !strings.Contains(body, want) {
@@ -318,7 +316,9 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 		}
 	}
 	for _, forbidden := range []string{
-		"defenseclaw_metric_action=", "defenseclaw_connector_source=", "otel_scope_", "target_info", "go_gc_", "process_cpu_",
+		"defenseclaw_metric_action=", "defenseclaw_connector_source=", "gen_ai_agent_id=",
+		"defenseclaw_agent_lifecycle_id=", "defenseclaw_agent_execution_id=", "otel_scope_",
+		"target_info", "go_gc_", "process_cpu_",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("generated private scrape contains %q", forbidden)
