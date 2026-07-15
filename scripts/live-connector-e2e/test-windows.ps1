@@ -746,6 +746,10 @@ try {
         'required lifecycle certification no longer routes through the legacy wheel materializer'
     $standardUserSafetyText = Get-Content -LiteralPath $standardUserSafety -Raw
     $standardUserFileGuardText = Get-Content -LiteralPath $standardUserFileGuard -Raw
+    $standardUserChildPreamble = [regex]::Match(
+        $standardUserCIText,
+        '(?s)function Invoke-ChildMode\b.*?(?=\r?\n    \$sandboxRoot = )'
+    ).Value
     $sameLiveProcessFunction = [regex]::Match(
         $standardUserCIText,
         '(?s)function Get-SameLiveProcess\b.*?(?=\r?\nfunction )'
@@ -770,6 +774,13 @@ try {
         $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
         $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
         'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($standardUserCIText -match '(?s)child-entry.*?windows-native-paths\.ps1.*?file-guard-load-start.*?windows-disposable-user-safety\.ps1.*?file-guard-load-complete' -and
+        $standardUserCIText -match "'-NoLogo', '-NoProfile', '-NonInteractive', '-File'" -and
+        $standardUserCIText -match '''-ExpectedChildSid'', \$accountSid' -and
+        $standardUserCIText -match '\[string\]\$ExpectedChildSid' -and
+        $standardUserChildPreamble -match '\$identity\.User\.Equals\(\$expectedSid\)' -and
+        $standardUserChildPreamble -notmatch 'Get-LocalUser|Add-Type|IsCurrentProcessElevated|Test-IsAdministrator') `
+        'disposable child records startup before helper loading and validates the parent-bound SID without provider-dependent identity work'
     Assert-True ($standardUserLauncherText -match 'CreateProcessWithLogonW' -and
         $standardUserLauncherText -match 'LOGON_WITH_PROFILE' -and
         $standardUserLauncherText -match 'SecureString password' -and

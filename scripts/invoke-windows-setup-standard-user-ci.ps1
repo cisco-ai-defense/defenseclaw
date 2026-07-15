@@ -26,13 +26,40 @@ param(
     [switch]$Child,
     [switch]$ExerciseWmiEscape,
     [string]$ExpectedSetupSha256 = '',
+    [string]$ExpectedChildSid = '',
     [string]$ResultPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Write-ChildProgress([string]$Path, [string]$Phase) {
+    try {
+        [IO.File]::AppendAllText(
+            $Path,
+            (([DateTime]::UtcNow.ToString('o') + ' ' + $Phase) + [Environment]::NewLine),
+            [Text.UTF8Encoding]::new($false)
+        )
+    } catch {
+        # Progress is diagnostic only and must never change lifecycle behavior.
+    }
+}
+
+$earlyProgress = ''
+if ($Child) {
+    $earlyResult = [IO.Path]::GetFullPath($ResultPath)
+    $earlyResultDirectory = [IO.Path]::GetDirectoryName($earlyResult)
+    if ([string]::IsNullOrWhiteSpace($earlyResultDirectory)) {
+        throw 'disposable child result path has no parent directory'
+    }
+    $earlyProgress = Join-Path $earlyResultDirectory 'progress.log'
+    Write-ChildProgress $earlyProgress 'child-entry'
+}
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
+if ($Child) { Write-ChildProgress $earlyProgress 'native-paths-loaded' }
+if ($Child) { Write-ChildProgress $earlyProgress 'file-guard-load-start' }
 . (Join-Path $PSScriptRoot 'windows-disposable-user-safety.ps1')
+if ($Child) { Write-ChildProgress $earlyProgress 'file-guard-load-complete' }
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -50,18 +77,6 @@ function Write-ChildResult([string]$Path, [bool]$Succeeded, [string]$Detail) {
         detail = $bounded
     } | ConvertTo-Json -Depth 3
     [IO.File]::WriteAllText($Path, $payload, [Text.UTF8Encoding]::new($false))
-}
-
-function Write-ChildProgress([string]$Path, [string]$Phase) {
-    try {
-        [IO.File]::AppendAllText(
-            $Path,
-            (([DateTime]::UtcNow.ToString('o') + ' ' + $Phase) + [Environment]::NewLine),
-            [Text.UTF8Encoding]::new($false)
-        )
-    } catch {
-        # Progress is diagnostic only and must never change lifecycle behavior.
-    }
 }
 
 function Test-ActualChildFilesystemBoundary {
@@ -146,27 +161,24 @@ function Invoke-ChildMode {
     $result = [IO.Path]::GetFullPath($ResultPath)
     $state = [IO.Path]::GetFullPath($StateRoot)
     $artifacts = [IO.Path]::GetFullPath($ArtifactRoot)
-    if (Test-IsAdministrator) {
-        throw 'disposable Setup acceptance child is an administrator'
-    }
-
-    $standardLauncher = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
-    Add-Type -Path $standardLauncher
-    if ([DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
-        throw 'disposable Setup acceptance child token is elevated'
-    }
-
+    Write-ChildProgress $earlyProgress 'child-paths-resolved'
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ([string]::IsNullOrWhiteSpace($ExpectedChildSid)) {
+        throw 'parent did not supply the exact disposable child SID'
+    }
+    try {
+        $expectedSid = [Security.Principal.SecurityIdentifier]::new($ExpectedChildSid)
+    } catch {
+        throw 'parent supplied an invalid disposable child SID'
+    }
+    if ($null -eq $identity.User -or -not $identity.User.Equals($expectedSid)) {
+        throw 'disposable Setup acceptance child has an unexpected user SID'
+    }
     $accountName = ($identity.Name -split '\\')[-1]
     if ($accountName -notmatch '^dcacc[0-9a-f]{10}$') {
         throw 'child mode is restricted to a DefenseClaw disposable Setup CI account'
     }
-    $localAccount = Get-LocalUser -Name $accountName -ErrorAction Stop
-    if ($null -eq $identity.User -or
-        -not $localAccount.SID.Equals($identity.User) -or
-        $localAccount.Description -ne 'DefenseClaw disposable Setup CI account') {
-        throw 'child mode could not verify the disposable Setup CI account identity'
-    }
+    Write-ChildProgress $earlyProgress 'child-user-validated'
 
     $sandboxRoot = Split-Path -Parent $state
     $expectedScripts = Join-Path $sandboxRoot 'workspace\scripts'
@@ -196,8 +208,15 @@ function Invoke-ChildMode {
         throw 'child mode paths do not match the private disposable-user sandbox layout'
     }
     $progress = Join-Path $expectedResults 'progress.log'
+    if (-not $earlyProgress.Equals(
+            [IO.Path]::GetFullPath($progress),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'early progress path does not match the private disposable-user result root'
+    }
     Write-ChildProgress $progress 'layout-validated'
     $interactive = [Security.Principal.SecurityIdentifier]::new('S-1-5-4')
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $groupSids = if ($null -eq $identity.Groups) { @() } else { @(
         $identity.Groups | ForEach-Object {
             $_.Translate([Security.Principal.SecurityIdentifier]).Value
@@ -205,6 +224,9 @@ function Invoke-ChildMode {
     ) }
     if ($null -eq $identity.User -or $interactive.Value -notin $groupSids) {
         throw 'disposable Setup acceptance child is not an interactive standard user'
+    }
+    if ($administrators.Value -in $groupSids) {
+        throw 'disposable Setup acceptance child is an administrator'
     }
     Write-ChildProgress $progress 'identity-validated'
 
@@ -235,6 +257,10 @@ function Invoke-ChildMode {
         # Win32_Process.Create is serviced outside the launcher's job object.
         # The harmless sleeper proves that the parent account-SID sweep catches
         # a process that intentionally escaped the kill-on-close job.
+        $standardLauncher = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
+        Write-ChildProgress $progress 'wmi-launcher-load-start'
+        Add-Type -Path $standardLauncher
+        Write-ChildProgress $progress 'wmi-launcher-load-complete'
         $pwsh = Join-Path $PSHOME 'pwsh.exe'
         $commandLine = [DefenseClaw.SetupStandardUserLauncher]::QuoteWindowsArgument($pwsh) +
             ' -NoLogo -NoProfile -NonInteractive -Command ' +
@@ -742,13 +768,14 @@ try {
     $desktopGrant = [DefenseClaw.DisposableStandardUserLauncher]::GrantInteractiveDesktop($accountSid)
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
     $arguments = @(
-        '-NoLogo', '-NoProfile', '-File',
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
         (Join-Path $scripts 'invoke-windows-setup-standard-user-ci.ps1'),
         '-Child', '-Mode', $Mode,
         '-ArtifactRoot', $childArtifacts,
         '-StateRoot', $childState,
         '-DiagnosticsRoot', $childDiagnostics,
-        '-ResultPath', $result
+        '-ResultPath', $result,
+        '-ExpectedChildSid', $accountSid
     )
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
@@ -764,7 +791,7 @@ try {
         $password,
         $pwsh,
         [string[]]$arguments,
-        $workspace,
+        $childState,
         $accountSid
     )
     $timedOut = -not $childProcess.WaitForExit($TimeoutSeconds * 1000)
