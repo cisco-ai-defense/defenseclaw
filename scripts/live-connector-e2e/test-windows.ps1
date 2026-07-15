@@ -868,6 +868,14 @@ try {
         $standardUserFileGuardText -match 'NumberOfLinks != 1' -and
         $standardUserFileGuardText -match 'FileMode\.CreateNew') `
         'diagnostic/result handoff validates and consumes one no-follow, single-link regular-file handle'
+    Assert-True ($standardUserSafetyText -match 'function Grant-DisposableAncestorReadLease' -and
+        $standardUserSafetyText -match 'function Restore-DisposableAncestorReadLease' -and
+        $standardUserSafetyText -match '(?s)Grant-DisposableAncestorReadLease.*?FileSystemRights\]::ReadAndExecute.*?InheritanceFlags\]::None.*?PropagationFlags\]::None' -and
+        $standardUserSafetyText -match 'GetSecurityDescriptorBinaryForm' -and
+        $standardUserSafetyText -match 'SetSecurityDescriptorBinaryForm' -and
+        $standardUserCIText -match '(?s)Grant-DisposableAncestorReadLease.*?\$stateBoundary \$stateBase \$sidObject' -and
+        $standardUserCIText -match '(?s)if \(\$executionBoundaryComplete -and \$ancestorReadLease\.Count -ne 0\).*?Restore-DisposableAncestorReadLease') `
+        'disposable-user provider traversal uses an exact non-inheriting ACL lease restored only after process drain'
     Assert-True ($standardUserCIText -match 'Test-ActualChildFilesystemBoundary' -and
         $standardUserSafetyText -match 'function Assert-ChildOperationAccessDenied' -and
         $standardUserCIText -match 'Setup overwrite probe' -and
@@ -875,8 +883,12 @@ try {
         $standardUserCIText -match 'rename probe' -and
         $standardUserCIText -match 'delete probe' -and
         $standardUserCIText -match 'replacement probe' -and
+        $standardUserCIText -match 'Get-ChildItem -LiteralPath \$providerNested' -and
+        $standardUserCIText -match 'Remove-Item -LiteralPath \$providerFile' -and
+        $standardUserCIText -match 'parent-only sibling read probe' -and
+        $standardUserCIText -match 'parent-only sibling write probe' -and
         $standardUserCIText -match 'actual child immutability probe changed the exact Setup bytes') `
-        'the real disposable child proves protected payload denial and writable state/results before Setup'
+        'the real disposable child proves protected payload denial, provider deletion, and sibling isolation before Setup'
     Assert-True ($setupStandardUserLauncherText -match 'TokenLinkedToken' -and
         $setupStandardUserLauncherText -match 'TokenElevationTypeLimited' -and
         $setupStandardUserLauncherText -match 'ValidateStandardUserPrimaryToken' -and

@@ -56,6 +56,67 @@ try {
     Assert-DisposableChildAcl $payload $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -ExpectInheritance
 
+    $leaseBoundary = Join-Path $base 'lease-boundary'
+    $leaseMiddle = Join-Path $leaseBoundary 'middle'
+    $leaseBase = Join-Path $leaseMiddle 'state-base'
+    [IO.Directory]::CreateDirectory($leaseBase) | Out-Null
+    $leasePaths = @($leaseBoundary, $leaseMiddle, $leaseBase)
+    $leaseSnapshots = @{}
+    foreach ($path in $leasePaths) {
+        $security = [IO.FileSystemAclExtensions]::GetAccessControl(
+            [IO.DirectoryInfo]::new($path)
+        )
+        $leaseSnapshots[$path] = [Convert]::ToBase64String(
+            $security.GetSecurityDescriptorBinaryForm()
+        )
+    }
+    $ancestorLease = @()
+    try {
+        $ancestorLease = @(Grant-DisposableAncestorReadLease `
+            $leaseBoundary $leaseBase $childSid)
+        if ($ancestorLease.Count -ne $leasePaths.Count) {
+            throw 'ancestor ACL lease did not include every path component'
+        }
+        for ($index = 0; $index -lt $leasePaths.Count; $index++) {
+            if (-not ([string]$ancestorLease[$index].Path).Equals(
+                    $leasePaths[$index],
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'ancestor ACL lease path order is not boundary-to-base'
+            }
+        }
+        Assert-DisposableAncestorReadLease $ancestorLease $childSid
+    } finally {
+        if ($ancestorLease.Count -ne 0) {
+            Restore-DisposableAncestorReadLease $ancestorLease
+            $ancestorLease = @()
+        }
+    }
+    foreach ($path in $leasePaths) {
+        $security = [IO.FileSystemAclExtensions]::GetAccessControl(
+            [IO.DirectoryInfo]::new($path)
+        )
+        if ([Convert]::ToBase64String($security.GetSecurityDescriptorBinaryForm()) -cne
+            [string]$leaseSnapshots[$path]) {
+            throw "ancestor ACL lease did not restore the exact descriptor: $path"
+        }
+        $remaining = @($security.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object { $_.IdentityReference.Equals($childSid) })
+        if ($remaining.Count -ne 0) {
+            throw "ancestor ACL lease retained a child-SID ACE: $path"
+        }
+    }
+    $outsideLeaseRejected = $false
+    try {
+        $null = Grant-DisposableAncestorReadLease $leaseBoundary $outside $childSid
+    } catch { $outsideLeaseRejected = $true }
+    if (-not $outsideLeaseRejected) {
+        throw 'ancestor ACL lease accepted a state base outside its boundary'
+    }
+
     $created = [datetime]::UtcNow
     $baselineProcess = [pscustomobject]@{ ProcessId = 4242; CreationDate = $created }
     $unverifiableBaseline = [Collections.Generic.HashSet[string]]::new(

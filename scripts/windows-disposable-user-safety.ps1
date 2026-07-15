@@ -211,6 +211,175 @@ function Assert-DisposableChildAcl {
     }
 }
 
+function Assert-DisposableAncestorReadLease {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object[]]$Lease,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ChildSid
+    )
+
+    $expected = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    foreach ($entry in $Lease) {
+        $security = [IO.FileSystemAclExtensions]::GetAccessControl(
+            [IO.DirectoryInfo]::new([string]$entry.Path),
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+        $rules = @($security.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object { $_.IdentityReference.Equals($ChildSid) })
+        if ($rules.Count -ne 1) {
+            throw "ancestor lease has $($rules.Count) exact child ACEs, expected one: $($entry.Path)"
+        }
+        $rule = $rules[0]
+        $rights = $rule.FileSystemRights -band `
+            (-bnot [int][Security.AccessControl.FileSystemRights]::Synchronize)
+        $expectedRights = $expected -band `
+            (-bnot [int][Security.AccessControl.FileSystemRights]::Synchronize)
+        if ($rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rights -ne $expectedRights -or
+            $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw "ancestor lease is not an exact non-inheriting ReadAndExecute ACE: $($entry.Path)"
+        }
+    }
+}
+
+function Restore-DisposableAncestorReadLease {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object[]]$Lease)
+
+    $sections = [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    $failures = [Collections.Generic.List[string]]::new()
+    for ($index = $Lease.Count - 1; $index -ge 0; $index--) {
+        $entry = $Lease[$index]
+        try {
+            $descriptor = [Convert]::FromBase64String([string]$entry.Descriptor)
+            $restored = [Security.AccessControl.DirectorySecurity]::new()
+            $restored.SetSecurityDescriptorBinaryForm($descriptor, $sections)
+            $directory = [IO.DirectoryInfo]::new([string]$entry.Path)
+            [IO.FileSystemAclExtensions]::SetAccessControl($directory, $restored)
+
+            $observed = [IO.FileSystemAclExtensions]::GetAccessControl(
+                $directory,
+                $sections
+            )
+            $observedDescriptor = [Convert]::ToBase64String(
+                $observed.GetSecurityDescriptorBinaryForm()
+            )
+            if ($observedDescriptor -cne [string]$entry.Descriptor -or
+                $observed.GetSecurityDescriptorSddlForm($sections) -cne
+                    [string]$entry.Sddl) {
+                throw 'restored security descriptor does not match its snapshot'
+            }
+            $remaining = @($observed.GetAccessRules(
+                $true,
+                $true,
+                [Security.Principal.SecurityIdentifier]
+            ) | Where-Object {
+                $_.IdentityReference.Value -eq [string]$entry.ChildSid
+            })
+            if ($remaining.Count -ne 0) {
+                throw 'restored security descriptor retains an exact child-SID ACE'
+            }
+        } catch {
+            $failures.Add("$($entry.Path): $($_.Exception.Message)")
+        }
+    }
+    if ($failures.Count -ne 0) {
+        throw "ancestor ACL lease restore failed: $($failures -join '; ')"
+    }
+}
+
+function Grant-DisposableAncestorReadLease {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StateBoundary,
+        [Parameter(Mandatory)][string]$StateBase,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ChildSid
+    )
+
+    $boundary = Assert-DisposableNoReparseAncestors -Path $StateBoundary `
+        -AllowedRoot $StateBoundary -RequireExists
+    $base = Assert-DisposableNoReparseAncestors -Path $StateBase `
+        -AllowedRoot $boundary -RequireExists
+    if (-not [IO.Directory]::Exists($boundary) -or -not [IO.Directory]::Exists($base)) {
+        throw 'ancestor ACL lease endpoints must be existing directories'
+    }
+
+    $paths = [Collections.Generic.List[string]]::new()
+    $cursor = $base
+    while ($true) {
+        $paths.Add($cursor)
+        if ($cursor.Equals($boundary, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = [IO.Directory]::GetParent($cursor)
+        if ($null -eq $parent -or
+            -not (Test-PathWithinOrEqual $parent.FullName $boundary)) {
+            throw "ancestor ACL lease could not reach its approved boundary from: $base"
+        }
+        $cursor = $parent.FullName.TrimEnd('\')
+    }
+    $paths.Reverse()
+
+    $sections = [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    $lease = [Collections.Generic.List[object]]::new()
+    foreach ($path in $paths) {
+        $verified = Assert-DisposableNoReparseAncestors -Path $path `
+            -AllowedRoot $boundary -RequireExists
+        if (-not [IO.Directory]::Exists($verified)) {
+            throw "ancestor ACL lease component is not a directory: $verified"
+        }
+        $directory = [IO.DirectoryInfo]::new($verified)
+        $security = [IO.FileSystemAclExtensions]::GetAccessControl($directory, $sections)
+        $existing = @($security.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object { $_.IdentityReference.Equals($ChildSid) })
+        if ($existing.Count -ne 0) {
+            throw "ancestor ACL lease found a pre-existing exact child-SID ACE: $verified"
+        }
+        $lease.Add([pscustomobject]@{
+            Path = $verified
+            ChildSid = $ChildSid.Value
+            Descriptor = [Convert]::ToBase64String(
+                $security.GetSecurityDescriptorBinaryForm()
+            )
+            Sddl = $security.GetSecurityDescriptorSddlForm($sections)
+        })
+    }
+
+    try {
+        foreach ($entry in $lease) {
+            $directory = [IO.DirectoryInfo]::new([string]$entry.Path)
+            $security = [IO.FileSystemAclExtensions]::GetAccessControl($directory, $sections)
+            [void]$security.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    $ChildSid,
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                    [Security.AccessControl.InheritanceFlags]::None,
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
+        }
+        Assert-DisposableAncestorReadLease @($lease) $ChildSid
+    } catch {
+        $grantFailure = $_.Exception.Message
+        try { Restore-DisposableAncestorReadLease @($lease) }
+        catch { throw "$grantFailure; rollback failed: $($_.Exception.Message)" }
+        throw $grantFailure
+    }
+    return $lease.ToArray()
+}
+
 function Copy-BoundedDisposableDiagnostics {
     [CmdletBinding()]
     param(

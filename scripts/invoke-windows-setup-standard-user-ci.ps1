@@ -152,6 +152,49 @@ function Test-ActualChildFilesystemBoundary {
         [IO.File]::Delete($probe)
     }
 
+    # Exercise PowerShell's filesystem provider through the leased ancestor
+    # chain. Direct System.IO access alone does not cover provider path
+    # normalization, which enumerates parent components on Windows.
+    $providerProbe = Join-Path $State ('provider-probe-' + [guid]::NewGuid().ToString('N'))
+    $providerNested = Join-Path $providerProbe 'nested'
+    [IO.Directory]::CreateDirectory($providerNested) | Out-Null
+    $providerFile = Join-Path $providerNested 'probe.txt'
+    [IO.File]::WriteAllText($providerFile, 'provider writable')
+    $listed = @(Get-ChildItem -LiteralPath $providerNested -Force -ErrorAction Stop)
+    if (@($listed | Where-Object { $_.Name -ceq 'probe.txt' }).Count -ne 1) {
+        throw 'PowerShell provider did not enumerate the writable child probe'
+    }
+    Remove-Item -LiteralPath $providerFile -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $providerFile) {
+        throw 'PowerShell provider did not delete the writable child probe'
+    }
+    Remove-Item -LiteralPath $providerProbe -Recurse -Force -ErrorAction Stop
+
+    $parentOnlySibling = $SandboxRoot + '-parent-only'
+    $expectedStateBase = Split-Path -Parent $SandboxRoot
+    if (-not (Split-Path -Parent $parentOnlySibling).Equals(
+            $expectedStateBase,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or (Test-PathWithinOrEqual $parentOnlySibling $SandboxRoot)) {
+        throw 'parent-only sibling probe does not match the isolated state layout'
+    }
+    $siblingSentinel = Join-Path $parentOnlySibling 'sentinel.txt'
+    Assert-ChildOperationAccessDenied 'parent-only sibling read probe' {
+        $null = [IO.File]::ReadAllText($siblingSentinel)
+    }
+    Assert-ChildOperationAccessDenied 'parent-only sibling write probe' {
+        $stream = [IO.File]::Open(
+            $siblingSentinel,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $stream.Dispose()
+    }
+    Assert-ChildOperationAccessDenied 'parent-only sibling enumeration probe' {
+        Get-ChildItem -LiteralPath $parentOnlySibling -Force -ErrorAction Stop | Out-Null
+    }
+
     foreach ($immutable in @($Workspace, $Scripts, $Artifacts)) {
         if (-not (Test-Path -LiteralPath $immutable -PathType Container) -or
             (Test-Path -LiteralPath "$immutable.dc-immutability-moved") -or
@@ -704,6 +747,8 @@ $password = New-RandomSecurePassword
 $accountSid = ''
 $accountCreated = $false
 $sandbox = ''
+$ancestorReadLease = @()
+$parentOnlySibling = ''
 $desktopGrant = $null
 $readinessEvent = $null
 $childProcess = $null
@@ -861,6 +906,42 @@ try {
             ([Security.AccessControl.FileSystemRights]::Modify) -ExpectInheritance
     }
 
+    # The temporary traversal lease must not grant access to adjacent state.
+    # Protect a sibling before granting the non-inheriting ancestor ACEs so the
+    # actual child can prove the boundary remains intact.
+    $parentOnlySibling = $sandbox + '-parent-only'
+    $parentOnlyDirectory = [IO.Directory]::CreateDirectory($parentOnlySibling)
+    $parentOnlySecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $parentOnlySecurity.SetOwner($parentSid)
+    $parentOnlySecurity.SetAccessRuleProtection($true, $false)
+    $parentOnlyInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($trustedSid in @(
+        $parentSid,
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    )) {
+        [void]$parentOnlySecurity.AddAccessRule(
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $trustedSid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                $parentOnlyInheritance,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+        )
+    }
+    [IO.FileSystemAclExtensions]::SetAccessControl(
+        $parentOnlyDirectory,
+        $parentOnlySecurity
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $parentOnlySibling 'sentinel.txt'),
+        'parent-only',
+        [Text.UTF8Encoding]::new($false)
+    )
+    $ancestorReadLease = @(Grant-DisposableAncestorReadLease `
+        $stateBoundary $stateBase $sidObject)
+
     $result = Join-Path $childResults 'result.json'
     $wmiFixtureRecord = Join-Path $childResults 'wmi-escape-pid.txt'
     $progressRecord = Join-Path $childResults 'progress.log'
@@ -1006,6 +1087,14 @@ try {
         catch { $cleanupFailures.Add("interactive desktop ACL restore: $($_.Exception.Message)") }
     }
     if ($null -ne $readinessEvent) { $readinessEvent.Dispose() }
+    if ($executionBoundaryComplete -and $ancestorReadLease.Count -ne 0) {
+        try {
+            Restore-DisposableAncestorReadLease $ancestorReadLease
+            $ancestorReadLease = @()
+        } catch {
+            $cleanupFailures.Add("ancestor ACL lease restore: $($_.Exception.Message)")
+        }
+    }
     if ($executionBoundaryComplete -and
         -not [string]::IsNullOrWhiteSpace($DiagnosticsRoot) -and
         -not [string]::IsNullOrWhiteSpace($childDiagnostics) -and
@@ -1040,6 +1129,20 @@ try {
             }
             Remove-DisposableTreeSafely $resolvedSandbox $stateBase
         } catch { $cleanupFailures.Add("sandbox cleanup: $($_.Exception.Message)") }
+    }
+    if ($executionBoundaryComplete -and
+        -not [string]::IsNullOrWhiteSpace($parentOnlySibling) -and
+        (Test-Path -LiteralPath $parentOnlySibling)) {
+        try {
+            $resolvedSibling = [IO.Path]::GetFullPath($parentOnlySibling).TrimEnd('\')
+            if (-not $resolvedSibling.Equals(
+                    ([IO.Path]::GetFullPath($sandbox).TrimEnd('\') + '-parent-only'),
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or -not (Test-PathWithin $resolvedSibling $stateBase)) {
+                throw "refusing to remove unexpected parent-only sibling: $resolvedSibling"
+            }
+            Remove-DisposableTreeSafely $resolvedSibling $stateBase
+        } catch { $cleanupFailures.Add("parent-only sibling cleanup: $($_.Exception.Message)") }
     }
 }
 
