@@ -280,6 +280,26 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("entries=28", check.detail)
 
+    def test_native_stable_hook_runtime_is_accepted_for_codex_and_claude(self) -> None:
+        local_app_data = self.root / "Local AppData"
+        runtime = local_app_data / "DefenseClaw" / "HookRuntime" / "defenseclaw-hook.exe"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_bytes(b"MZfixture")
+
+        with (
+            patch(
+                "defenseclaw.doctor_hooks._windows_known_folder_path",
+                return_value=str(local_app_data),
+            ),
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+        ):
+            for connector in ("codex", "claudecode"):
+                with self.subTest(connector=connector):
+                    config = self._config(connector, f'"{runtime}" hook --connector {connector}')
+                    check = self._validate(connector, config)
+                    self.assertEqual(check.state, "healthy", check.detail)
+                    self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
     def test_healthy_claude_exec_form_with_path_spaces(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))

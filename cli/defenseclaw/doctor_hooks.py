@@ -534,6 +534,22 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
     return body
 
 
+def _windows_hook_runtime_root(path: str) -> str | None:
+    """Return the exact installer-managed stable hook root for ``path``."""
+    # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
+    local_app_data = _windows_known_folder_path("f1b32785-6fba-4fcf-9d55-7b8e7f157091")
+    if not local_app_data:
+        return None
+    root = os.path.abspath(os.path.join(local_app_data, "DefenseClaw", "HookRuntime"))
+    expected = os.path.join(root, "defenseclaw-hook.exe")
+    try:
+        if os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(expected)):
+            return None
+    except (OSError, ValueError):
+        return None
+    return root
+
+
 def _packaged_windows_install_root(
     data_dir: str,
     *,
@@ -2157,7 +2173,11 @@ def validate_windows_hook_registration(
                 )
             runtime = "PowerShell"
         elif basename == "defenseclaw-hook.exe":
-            header = _stable_regular_file(resolved, install_root, read_limit=2)
+            # Native Setup publishes the stable launcher outside the replaceable
+            # install tree. Trust only its exact Known Folder-derived location;
+            # legacy install-tree launchers retain the normal containment check.
+            runtime_root = _windows_hook_runtime_root(resolved) or install_root
+            header = _stable_regular_file(resolved, runtime_root, read_limit=2)
             if header != b"MZ":
                 raise _InspectionError("foreign", f"registered hook executable is not a Windows PE file: {resolved}")
             runtime = "executable"
