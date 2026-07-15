@@ -8,6 +8,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -16,6 +18,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
+BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
+AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
 assert SPEC and SPEC.loader
 artifacts = importlib.util.module_from_spec(SPEC)
@@ -112,9 +116,10 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
 
     names = sorted(path.name for path in payload.iterdir())
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "version": version,
         "source_commit": source_commit,
+        "distribution_flavor": "oss",
         "python_version": "3.14.6",
         "gateway_archive": gateway_name,
         "wheel": wheel_name,
@@ -127,10 +132,6 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "cosign_verifier": "cosign.exe",
         "files": {name: _sha256(payload / name) for name in names},
     }
-    (payload / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    embedded = tmp_path / "installer-payload.zip"
-    artifacts.deterministic_zip(payload, embedded, 1_700_000_000, include_root=True)
     setup = tmp_path / "DefenseClawSetup-x64.exe"
     setup.write_bytes(b"signed setup fixture")
     with zipfile.ZipFile(payload / gateway_name) as gateway:
@@ -146,6 +147,49 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "startup-launcher": _sha256(payload / "defenseclaw-startup.exe"),
         "cosign": _sha256(payload / "cosign.exe"),
     }
+    authenticode_files = {}
+
+    def add_evidence(installed_path: str, sbom_name: str, digest: str) -> None:
+        authenticode_files[installed_path] = {
+            "schema_version": 1,
+            "installed_path": installed_path,
+            "sbom_file_name": sbom_name,
+            "sha256": digest,
+            "expected": {"policy": "fixture"},
+            "observed": {"status": "Valid", "embedded_signatures": [{}]},
+        }
+
+    add_evidence(setup.name, f"./{setup.name}", component_hashes["setup"])
+    for installed_path in (
+        "bin/defenseclaw.exe",
+        "bin/skill-scanner.exe",
+        "bin/mcp-scanner.exe",
+        "bin/defenseclaw-observability.exe",
+    ):
+        add_evidence(installed_path, "./payload/defenseclaw-launcher.exe", component_hashes["launcher"])
+    add_evidence(
+        "bin/defenseclaw-startup.exe",
+        "./payload/defenseclaw-startup.exe",
+        component_hashes["startup-launcher"],
+    )
+    add_evidence("bin/defenseclaw-gateway.exe", "./expanded/gateway/defenseclaw.exe", gateway_sha256)
+    add_evidence("bin/defenseclaw-hook.exe", "./expanded/gateway/defenseclaw-hook.exe", hook_sha256)
+    add_evidence(
+        "runtime/python/python.exe",
+        "./expanded/python/python.exe",
+        hashlib.sha256(b"python").hexdigest(),
+    )
+    add_evidence("runtime/tools/cosign.exe", "./payload/cosign.exe", component_hashes["cosign"])
+    manifest["unsigned"] = False
+    manifest["authenticode"] = {
+        "schema_version": 1,
+        "files": {name: evidence for name, evidence in authenticode_files.items() if name != setup.name},
+    }
+    (payload / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    embedded = tmp_path / "installer-payload.zip"
+    artifacts.deterministic_zip(payload, embedded, 1_700_000_000, include_root=True)
+    authenticode_inventory = tmp_path / "authenticode-inventory.json"
+    authenticode_inventory.write_text(json.dumps({"schema_version": 1, "files": authenticode_files}), encoding="utf-8")
     go_inventory = tmp_path / "go-components.json"
     go_inventory.write_text(
         json.dumps(
@@ -175,6 +219,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         python_version="3.14.6",
         cosign_version="2.6.2",
         go_inventory=go_inventory,
+        authenticode_inventory=authenticode_inventory,
     )
 
 
@@ -238,6 +283,66 @@ def test_site_packages_normalization_removes_cache_paths_and_repairs_record(tmp_
     )
 
 
+def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")
+    assert ". $WindowsAuthenticodeHelper" in build
+    assert "Get-DefenseClawAuthenticodeEvidence" in build
+    assert build.index(". $WindowsAuthenticodeHelper") < build.index("Get-DefenseClawAuthenticodeEvidence")
+    assert "schema_version = 2" in build
+    assert "authenticode = $releaseAuthenticode" in build
+    assert "'--authenticode-inventory', $authenticodeInventoryPath" in build
+    assert "function Get-DefenseClawTimestampEvidence" in helper
+    assert "ExpectedSignerThumbprintSha256" in helper
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")
+def test_digest_only_authenticode_evidence_is_strict_mode_safe(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    pwsh = shutil.which("pwsh")
+    if not go or not pwsh:
+        pytest.skip("Go and PowerShell are required for the native Authenticode regression test")
+
+    source = tmp_path / "main.go"
+    source.write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    executable = tmp_path / "unsigned.exe"
+    build_env = os.environ.copy()
+    build_env["CGO_ENABLED"] = "0"
+    subprocess.run(
+        [go, "build", "-o", executable, source],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=build_env,
+    )
+
+    test_env = os.environ.copy()
+    test_env["DEFENSECLAW_AUTHENTICODE_HELPER"] = str(AUTHENTICODE_PS1)
+    test_env["DEFENSECLAW_UNSIGNED_PE"] = str(executable)
+    command = """
+Set-StrictMode -Version Latest
+. $env:DEFENSECLAW_AUTHENTICODE_HELPER
+$evidence = Get-DefenseClawAuthenticodeEvidence `
+    -Path $env:DEFENSECLAW_UNSIGNED_PE `
+    -InstalledPath 'runtime/tools/cosign.exe' `
+    -SbomFileName './payload/cosign.exe' `
+    -Policy 'digest-only-upstream' `
+    -ExpectedStatus 'NotSigned' `
+    -ExpectedPublisher '' `
+    -TimestampRequired $false
+if (@($evidence.observed.embedded_signatures).Count -ne 0) {
+    throw 'unsigned evidence unexpectedly contains embedded signatures'
+}
+"""
+    subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=test_env,
+    )
+
+
 def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     summary = artifacts.build_sbom(args)
@@ -247,6 +352,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
     assert summary["payload_digests"] == 10
+    assert summary["authenticode_files"] == 10
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
@@ -267,6 +373,12 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
     setup_package = next(package for package in document["packages"] if package["name"] == "DefenseClaw Windows Setup")
     assert setup_package["checksums"][0]["checksumValue"] == _sha256(args.setup)
+    setup_file = next(file for file in document["files"] if file["fileName"] == "./DefenseClawSetup-x64.exe")
+    assert setup_file["comment"].startswith("DefenseClaw Authenticode evidence: ")
+    hook_file = next(
+        file for file in document["files"] if file["fileName"] == "./expanded/gateway/defenseclaw-hook.exe"
+    )
+    assert '"installed_path":"bin/defenseclaw-hook.exe"' in hook_file["comment"]
 
 
 def test_sbom_fails_closed_when_payload_digest_no_longer_matches(tmp_path: Path) -> None:
@@ -289,4 +401,27 @@ def test_sbom_fails_closed_when_go_inventory_is_not_for_exact_binary(tmp_path: P
     inventory["components"]["setup"]["sha256"] = "0" * 64
     args.go_inventory.write_text(json.dumps(inventory), encoding="utf-8")
     with pytest.raises(artifacts.ArtifactError, match="Go inventory binary digest does not match"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_fails_closed_when_release_authenticode_evidence_differs(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["bin/defenseclaw-hook.exe"]["sha256"] = "0" * 64
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    with pytest.raises(artifacts.ArtifactError, match="Release and payload Authenticode evidence differ"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_fails_closed_when_bound_authenticode_digest_differs(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["bin/defenseclaw-hook.exe"]["sha256"] = "0" * 64
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["authenticode"]["files"]["bin/defenseclaw-hook.exe"]["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+    with pytest.raises(artifacts.ArtifactError, match="evidence digest does not match SPDX file"):
         artifacts.build_sbom(args)

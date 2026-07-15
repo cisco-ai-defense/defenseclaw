@@ -513,6 +513,83 @@ class SpdxDocument:
             raise ArtifactError("SPDX document must describe exactly one setup package")
 
 
+def _attach_authenticode_evidence(document: SpdxDocument, inventory_path: Path, payload_manifest: dict) -> int:
+    inventory = json.loads(inventory_path.resolve(strict=True).read_text(encoding="utf-8-sig"))
+    files = inventory.get("files")
+    if inventory.get("schema_version") != 1 or not isinstance(files, dict) or not files:
+        raise ArtifactError("Authenticode inventory is missing or unsupported")
+    payload_inventory = payload_manifest.get("authenticode")
+    payload_files = payload_inventory.get("files") if isinstance(payload_inventory, dict) else None
+    payload_inventory_schema = payload_inventory.get("schema_version") if isinstance(payload_inventory, dict) else None
+    if (
+        payload_manifest.get("schema_version") != 2
+        or payload_inventory_schema != 1
+        or not isinstance(payload_files, dict)
+        or not payload_files
+    ):
+        raise ArtifactError("Payload manifest lacks the required Authenticode inventory")
+    expected_release_paths = {"DefenseClawSetup-x64.exe", *payload_files}
+    if set(files) != expected_release_paths:
+        raise ArtifactError("Release and payload Authenticode inventory paths differ")
+    if any(files[name] != evidence for name, evidence in payload_files.items()):
+        raise ArtifactError("Release and payload Authenticode evidence differ")
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for installed_path, evidence in sorted(files.items()):
+        installed_identity = PurePosixPath(installed_path) if isinstance(installed_path, str) else None
+        if (
+            installed_identity is None
+            or not installed_path
+            or not installed_path.isascii()
+            or "\\" in installed_path
+            or ":" in installed_path
+            or installed_identity.is_absolute()
+            or installed_identity.as_posix() != installed_path
+            or any(part in {"", ".", ".."} for part in installed_identity.parts)
+        ):
+            raise ArtifactError(f"Invalid Authenticode installed path {installed_path!r}")
+        if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+            raise ArtifactError(f"Invalid Authenticode evidence for {installed_path!r}")
+        if evidence.get("installed_path") != installed_path:
+            raise ArtifactError(f"Authenticode installed path mismatch for {installed_path!r}")
+        sbom_name = evidence.get("sbom_file_name")
+        if (
+            not isinstance(sbom_name, str)
+            or not sbom_name.startswith("./")
+            or not sbom_name[2:]
+            or not sbom_name.isascii()
+            or "\\" in sbom_name
+            or ":" in sbom_name
+            or PurePosixPath(sbom_name[2:]).as_posix() != sbom_name[2:]
+            or any(part in {"", ".", ".."} for part in PurePosixPath(sbom_name[2:]).parts)
+        ):
+            raise ArtifactError(f"Invalid Authenticode SPDX file identity for {installed_path!r}")
+        digest = evidence.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ArtifactError(f"Invalid Authenticode SHA-256 for {installed_path!r}")
+        if not isinstance(evidence.get("expected"), dict) or not isinstance(evidence.get("observed"), dict):
+            raise ArtifactError(f"Incomplete Authenticode policy evidence for {installed_path!r}")
+        grouped[sbom_name].append(evidence)
+
+    if "./DefenseClawSetup-x64.exe" not in grouped:
+        raise ArtifactError("Authenticode inventory omits the outer Setup executable")
+    by_name = {record["fileName"]: record for record in document.files.values()}
+    for sbom_name, evidence_list in sorted(grouped.items()):
+        record = by_name.get(sbom_name)
+        if record is None:
+            raise ArtifactError(f"Authenticode evidence names an absent SPDX file: {sbom_name}")
+        spdx_sha256 = next(
+            (item["checksumValue"] for item in record["checksums"] if item.get("algorithm") == "SHA256"),
+            None,
+        )
+        if any(item["sha256"] != spdx_sha256 for item in evidence_list):
+            raise ArtifactError(f"Authenticode evidence digest does not match SPDX file: {sbom_name}")
+        record["comment"] = "DefenseClaw Authenticode evidence: " + json.dumps(
+            evidence_list, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+    return len(files)
+
+
 def _archive_entries(
     document: SpdxDocument,
     archive_path: Path,
@@ -996,6 +1073,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
     if missing_digests:
         raise ArtifactError(f"SPDX document omitted payload digests: {missing_digests}")
 
+    authenticode_files = _attach_authenticode_evidence(document, args.authenticode_inventory, manifest)
     rendered = document.render()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
@@ -1013,6 +1091,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         "python_distributions": len(distributions),
         "go_modules": go_modules,
         "payload_digests": len(payload_digests),
+        "authenticode_files": authenticode_files,
     }
 
 
@@ -1047,6 +1126,7 @@ def _parser() -> argparse.ArgumentParser:
     sbom_parser.add_argument("--python-version", required=True)
     sbom_parser.add_argument("--cosign-version", required=True)
     sbom_parser.add_argument("--go-inventory", type=Path, required=True)
+    sbom_parser.add_argument("--authenticode-inventory", type=Path, required=True)
     return parser
 
 

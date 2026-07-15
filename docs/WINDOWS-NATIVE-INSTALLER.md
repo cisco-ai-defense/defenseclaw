@@ -166,6 +166,14 @@ also rejects a non-amd64 PE or any attempt to patch an already signed file.
 GoReleaser applies the same contract to the standalone Windows ZIP, so the
 archive and native setup do not diverge.
 
+The builder also inventories every PE that Setup installs, including native
+Python extensions and the explicitly unsigned pinned Cosign binary. The
+schema-2 payload manifest and external provenance bind each installed path to
+its exact SHA-256, expected trust policy, observed signer/certificate/timestamp
+evidence, and SPDX file identity. The merged SBOM carries the same canonical
+evidence on the corresponding file records and fails if any evidence digest or
+file identity does not match.
+
 ## Install and maintenance layout
 
 Setup resolves Windows Known Folders rather than trusting profile environment
@@ -249,6 +257,16 @@ and upgrade preserve connector/mode state, then idempotently reconcile the
 recorded connector so interrupted or drifted setup can converge without adding
 duplicate registrations. A fresh explicit connector selection initializes the
 chosen integration during the same committed transaction.
+
+Before the private staging tree can be published, Setup requires an exact
+one-to-one match between its Authenticode inventory and every extracted PE,
+checks each file digest, and enforces the recorded Windows trust policy. Signed
+DefenseClaw executables must retain the Cisco publisher, signer identity, and
+RFC 3161 timestamp; unsigned PR/local builds are accepted only when the
+manifest explicitly declares the unsigned policy. Setup repeats inventory
+verification after publication and verifies the maintenance and stable-hook
+copies so extraction or copy-time tampering cannot silently cross the install
+boundary.
 
 On upgrade, the CLI uses the installer-owned cosign binary (never an
 environment-selected verifier) to verify the signed checksums and the upgrade

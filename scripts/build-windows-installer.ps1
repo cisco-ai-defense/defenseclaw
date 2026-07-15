@@ -47,6 +47,7 @@ $CosignName = 'cosign-windows-amd64.exe'
 $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignName"
 $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
 $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
+$WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -390,11 +391,14 @@ if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 $resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
-foreach ($requiredSetupInput in @($resourceIcon, $WindowsArtifactHelper)) {
+foreach ($requiredSetupInput in @(
+    $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper
+)) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
         throw "Required Windows installer input is missing: $requiredSetupInput"
     }
 }
+. $WindowsAuthenticodeHelper
 
 if ($DistributionFlavor -eq 'managed-enterprise') {
     throw @'
@@ -653,6 +657,70 @@ foreach ($resourceContract in @(
 )) {
     Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
 }
+
+$payloadAuthenticodeFiles = [ordered]@{}
+function Add-PayloadAuthenticodeEvidence(
+    [string]$InstalledPath,
+    [string]$SourcePath,
+    [string]$SbomFileName,
+    [switch]$DefenseClawProduct,
+    [switch]$DigestOnlyUpstream
+) {
+    $normalizedInstalledPath = $InstalledPath.Replace('\', '/')
+    if ($payloadAuthenticodeFiles.Contains($normalizedInstalledPath)) {
+        throw "Duplicate installed Authenticode identity: $normalizedInstalledPath"
+    }
+    $arguments = @{
+        Path = $SourcePath
+        InstalledPath = $normalizedInstalledPath
+        SbomFileName = $SbomFileName.Replace('\', '/')
+    }
+    if ($DefenseClawProduct) {
+        $arguments.Policy = 'defenseclaw-product-publisher'
+        $arguments.ExpectedStatus = if ($payloadSigned) { 'Valid' } else { 'NotSigned' }
+        $arguments.ExpectedPublisher = if ($payloadSigned) { 'Cisco Systems, Inc.' } else { '' }
+        $arguments.TimestampRequired = [bool]$payloadSigned
+    } elseif ($DigestOnlyUpstream) {
+        $arguments.Policy = 'digest-only-upstream'
+        $arguments.ExpectedStatus = 'NotSigned'
+        $arguments.ExpectedPublisher = ''
+        $arguments.TimestampRequired = $false
+    }
+    $payloadAuthenticodeFiles[$normalizedInstalledPath] = Get-DefenseClawAuthenticodeEvidence @arguments
+}
+
+foreach ($mapping in @(
+    [pscustomobject]@{ Installed = 'bin/defenseclaw.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/skill-scanner.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/mcp-scanner.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-observability.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-startup.exe'; Source = $startupLauncher; Sbom = './payload/defenseclaw-startup.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-gateway.exe'; Source = $gatewayBinary; Sbom = './expanded/gateway/defenseclaw.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' }
+)) {
+    Add-PayloadAuthenticodeEvidence $mapping.Installed $mapping.Source $mapping.Sbom -DefenseClawProduct
+}
+
+# Inventory every third-party PE that Setup installs. Pinned archive digests
+# remain the supply-chain root; this evidence also binds the observed Windows
+# publisher/certificate/timestamp state to the manifest and final SBOM.
+foreach ($file in Get-ChildItem -LiteralPath $validationRuntime -File -Recurse | Sort-Object FullName) {
+    if (Test-PathWithin $file.FullName $validationSite) { continue }
+    if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
+    $relative = [IO.Path]::GetRelativePath($validationRuntime, $file.FullName).Replace('\', '/')
+    Add-PayloadAuthenticodeEvidence "runtime/python/$relative" $file.FullName "./expanded/python/$relative"
+}
+foreach ($file in Get-ChildItem -LiteralPath $sitePackages -File -Recurse | Sort-Object FullName) {
+    if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
+    $relative = [IO.Path]::GetRelativePath($sitePackages, $file.FullName).Replace('\', '/')
+    Add-PayloadAuthenticodeEvidence `
+        "runtime/python/Lib/site-packages/$relative" `
+        $file.FullName `
+        "./expanded/site-packages/$relative"
+}
+# The exact pinned Cosign 2.6.2 Windows release is not Authenticode-signed.
+Add-PayloadAuthenticodeEvidence `
+    'runtime/tools/cosign.exe' $cosignVerifier './payload/cosign.exe' -DigestOnlyUpstream
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
 Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip $validationPython $sourceDateEpoch $reproducibilityRoot
 
@@ -670,7 +738,7 @@ foreach ($file in Get-ChildItem -LiteralPath $payload -File | Sort-Object Name) 
 }
 
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     version = $Version
     source_commit = $sourceCommit
     distribution_flavor = $DistributionFlavor
@@ -685,6 +753,10 @@ $manifest = [ordered]@{
     startup_launcher = "defenseclaw-startup.exe"
     cosign_verifier = 'cosign.exe'
     unsigned = -not $payloadSigned
+    authenticode = [ordered]@{
+        schema_version = 1
+        files = $payloadAuthenticodeFiles
+    }
     toolchain = [ordered]@{
         go = (& go version)
         uv = (& uv --version)
@@ -700,7 +772,7 @@ $manifest = [ordered]@{
     }
     files = $files
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $payload "manifest.json") -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $payload "manifest.json") -Encoding UTF8
 
 $embeddedPayload = Join-Path $repoRoot "cmd\defenseclaw-setup\payload\installer-payload.zip"
 # loadPayload deliberately extracts into a private parent and resolves the
@@ -764,6 +836,27 @@ try {
     )
 
     $reproducibleBuiltAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$sourceDateEpoch).UtcDateTime.ToString('o')
+    $releaseAuthenticodeFiles = [ordered]@{
+        'DefenseClawSetup-x64.exe' = Get-DefenseClawAuthenticodeEvidence `
+            -Path $setupPath `
+            -InstalledPath 'DefenseClawSetup-x64.exe' `
+            -SbomFileName './DefenseClawSetup-x64.exe' `
+            -Policy 'defenseclaw-product-publisher' `
+            -ExpectedStatus $(if ($setupSigned) { 'Valid' } else { 'NotSigned' }) `
+            -ExpectedPublisher $(if ($setupSigned) { 'Cisco Systems, Inc.' } else { '' }) `
+            -TimestampRequired ([bool]$setupSigned)
+    }
+    foreach ($entry in $payloadAuthenticodeFiles.GetEnumerator()) {
+        $releaseAuthenticodeFiles[$entry.Key] = $entry.Value
+    }
+    $releaseAuthenticode = [ordered]@{
+        schema_version = 1
+        files = $releaseAuthenticodeFiles
+    }
+    $authenticodeInventoryPath = Join-Path $build 'authenticode-inventory.json'
+    $releaseAuthenticode | ConvertTo-Json -Depth 16 |
+        Set-Content -LiteralPath $authenticodeInventoryPath -Encoding UTF8
+
     $provenance = [ordered]@{
         schema_version = 1
         artifact = (Split-Path -Leaf $setupPath)
@@ -773,6 +866,7 @@ try {
         distribution_flavor = $DistributionFlavor
         built_at_utc = if ($signed) { [DateTime]::UtcNow.ToString('o') } else { $reproducibleBuiltAt }
         unsigned = -not $signed
+        authenticode = $releaseAuthenticode
         inputs = [ordered]@{
             gateway_archive = (Split-Path -Leaf $gatewayZip)
             gateway_archive_sha256 = Get-FileHashHex $gatewayZip
@@ -796,7 +890,7 @@ try {
         }
         toolchain = $manifest.toolchain
     }
-    $provenance | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
+    $provenance | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
 
     Invoke-CheckedProcess $validationPython @(
         $WindowsArtifactHelper, 'sbom',
@@ -809,7 +903,8 @@ try {
         '--source-epoch', $sourceDateEpoch,
         '--python-version', $PythonVersion,
         '--cosign-version', $CosignVersion,
-        '--go-inventory', $goInventoryPath
+        '--go-inventory', $goInventoryPath,
+        '--authenticode-inventory', $authenticodeInventoryPath
     )
     $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]$sbom.spdxVersion -ne 'SPDX-2.3' -or
