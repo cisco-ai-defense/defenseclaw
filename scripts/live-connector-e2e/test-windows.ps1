@@ -509,6 +509,9 @@ try {
     $unrelatedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-Command', 'Start-Sleep -Seconds 30'
     ) -PassThru -WindowStyle Hidden
+    $originalStateRoot = $StateRoot
+    $cleanupFixtureStateRoot = Join-Path $temp 'cleanup-fixture'
+    $StateRoot = $cleanupFixtureStateRoot
     $ownedRoot = Join-Path $StateRoot 'cleanup-owned-process'
     [IO.Directory]::CreateDirectory($ownedRoot) | Out-Null
     $argvOwnedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
@@ -543,6 +546,10 @@ try {
         $unrelatedDescendant.Dispose()
         $argvOwnedDescendant.Dispose()
         $productDescendant.Dispose()
+        $StateRoot = $originalStateRoot
+        if (Test-Path -LiteralPath $cleanupFixtureStateRoot) {
+            Remove-Item -LiteralPath $cleanupFixtureStateRoot -Recurse -Force
+        }
     }
 
     $jsonl = Join-Path $temp 'gateway.jsonl'

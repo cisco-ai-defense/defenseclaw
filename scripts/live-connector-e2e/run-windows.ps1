@@ -1474,7 +1474,7 @@ function Stop-IsolatedProcessTree {
     foreach ($entry in @($managedProductProcesses.GetEnumerator())) {
         try {
             if ($PSCmdlet.ShouldProcess("PID $($entry.Key)", 'Stop managed product process')) {
-                $entry.Value.Kill()
+                $entry.Value.Kill($true)
                 if (-not $entry.Value.WaitForExit(5000)) {
                     Write-Warning "managed product PID $($entry.Key) did not exit within 5 seconds"
                 }
