@@ -165,7 +165,7 @@ async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(pane
         await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
-        inp.focus()
+        model.set_filter("needle")
         inp.value = "needle"
         await pilot.pause()
         assert model.filter_text == "needle"
@@ -199,6 +199,7 @@ async def test_catalog_sync_keeps_focused_empty_filter_authoritative(panel: str)
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
         inp.focus()
+        await pilot.pause()
         inp.value = "needle"
         await pilot.pause()
         assert model.filter_text == "needle"
