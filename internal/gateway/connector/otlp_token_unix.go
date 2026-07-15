@@ -24,6 +24,12 @@ import (
 	"syscall"
 )
 
+// otlpValidateDirectory is a no-op on Unix, where the existing token-file
+// mode and ownership checks remain the compatibility contract.
+func otlpValidateDirectory(_ string) error {
+	return nil
+}
+
 // otlpOpenNoFollow returns O_NOFOLLOW flag value for symlink-safe file opens.
 func otlpOpenNoFollow() int {
 	return syscall.O_NOFOLLOW

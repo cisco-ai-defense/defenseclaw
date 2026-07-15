@@ -1007,6 +1007,21 @@ func (s *Sidecar) requestProcessRestart() {
 	}
 }
 
+// requestProcessShutdown cancels the complete Sidecar run context. It is kept
+// separate from requestProcessRestart at the API boundary so a local graceful
+// stop cannot accidentally acquire restart-helper semantics later.
+func (s *Sidecar) requestProcessShutdown() {
+	if s == nil {
+		return
+	}
+	s.runCancelMu.Lock()
+	cancel := s.runCancel
+	s.runCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func configReloadMode(cfg *config.Config) string {
 	if cfg == nil {
 		return "hot"
@@ -2285,6 +2300,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.currentConfig().DataDir,
@@ -2308,6 +2324,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
+		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
@@ -2403,12 +2420,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
 			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
 		}
-		if err := connector.SaveActiveConnector(s.currentConfig().DataDir, conn.Name()); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
-		}
-		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock: %v\n", err)
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn); err != nil {
+			return err
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
@@ -3180,6 +3193,7 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
@@ -3197,6 +3211,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard:   false,
 		AgentVersion:       agentVersion,
+		AgentExecutable:    agentExecutable,
 		HookContractID:     contractResolution.Contract.ContractID,
 	}, nil
 }
@@ -3305,8 +3320,8 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
 	}
 	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock for %s: %v\n", conn.Name(), err)
+	if err := connector.SaveFreshHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
+		return fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 	}
 	return nil
 }
@@ -3680,6 +3695,18 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	return err
 }
 
+func (s *Sidecar) saveSingleConnectorReadyState(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+	}
+	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveFreshHookContractLockEntry(opts.DataDir, lockEntry); err != nil {
+		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
+		return s.failGuardrailWithRollback(ctx, opts, conn, "hook contract lock", lockErr)
+	}
+	return nil
+}
+
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
 	if conn == nil {
 		return
@@ -3767,6 +3794,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 	}

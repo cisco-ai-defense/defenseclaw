@@ -236,11 +236,15 @@ def test_mcp_parse_scoped_group_and_empty_group() -> None:
 
 def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path) -> None:
     hermes_config = tmp_path / "hermes-home" / "config.yaml"
+    claude_config = tmp_path / "claude-home" / "settings.json"
+    codex_config = tmp_path / "codex-home" / "config.toml"
     monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
+    monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
     cases = {
         "openclaw": "OpenClaw config",
-        "claudecode": "~/.claude/settings.json",
-        "codex": "./.mcp.json",
+        "claudecode": str(claude_config),
+        "codex": str(codex_config),
         "zeptoclaw": "~/.zeptoclaw/config.json",
         "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
@@ -838,6 +842,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
 # ---------------------------------------------------------------------------
 # WU13: multi-connector focus — list command targets the focused connector
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "model_factory, base_args",

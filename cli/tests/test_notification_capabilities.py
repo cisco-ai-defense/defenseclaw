@@ -9,6 +9,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from defenseclaw import config as config_module
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.notification_capabilities import desktop_notification_capability
 
@@ -19,7 +20,7 @@ def test_desktop_notification_capability_matrix() -> None:
     for system, supported, provider in (
         ("Darwin", True, "osascript"),
         ("Linux", True, "notify-send"),
-        ("Windows", False, ""),
+        ("Windows", True, "Shell_NotifyIconW"),
         ("Plan9", False, ""),
     ):
         capability = desktop_notification_capability(system)
@@ -35,7 +36,18 @@ def _invoke(app, *args: str):
     return result, restart
 
 
-def test_windows_status_reports_legacy_enabled_as_inactive_and_preserves_file() -> None:
+def _reload_windows_config(config_path: str, data_dir: str):
+    with (
+        patch.dict(
+            os.environ,
+            {"DEFENSECLAW_CONFIG": config_path, "DEFENSECLAW_HOME": data_dir},
+        ),
+        patch("defenseclaw.config.platform.system", return_value="Windows"),
+    ):
+        return config_module.load()
+
+
+def test_windows_status_reports_enabled_as_active_and_preserves_file() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
         app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
@@ -50,9 +62,8 @@ def test_windows_status_reports_legacy_enabled_as_inactive_and_preserves_file() 
         assert "configured (notifications.enabled):" in result.output
         assert "ON" in result.output
         assert "native desktop delivery:" in result.output
-        assert "INACTIVE" in result.output
-        assert "UNSUPPORTED" in result.output
-        assert "ACTIVE" not in result.output.replace("INACTIVE", "")
+        assert "ACTIVE" in result.output
+        assert "UNSUPPORTED" not in result.output
         assert open(app.cfg.config_path, "rb").read() == before
         assert app.cfg.notifications.enabled is True
         restart.assert_not_called()
@@ -60,7 +71,7 @@ def test_windows_status_reports_legacy_enabled_as_inactive_and_preserves_file() 
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_windows_status_reports_disabled_or_missing_default_as_inactive() -> None:
+def test_windows_status_reports_disabled_as_inactive() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
         app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
@@ -71,54 +82,45 @@ def test_windows_status_reports_disabled_or_missing_default_as_inactive() -> Non
         assert "configured (notifications.enabled):" in result.output
         assert "OFF" in result.output
         assert "INACTIVE" in result.output
-        assert "UNSUPPORTED" in result.output
+        assert "UNSUPPORTED" not in result.output
         restart.assert_not_called()
     finally:
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_windows_enable_rejected_without_mutation_save_restart_or_audit() -> None:
-    app, tmp_dir, db_path = make_app_context()
-    try:
-        app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
-        app.cfg.notifications.enabled = False
-        app.cfg.notifications.block_would_block = True
-        app.cfg.save()
-        before_bytes = open(app.cfg.config_path, "rb").read()
-        before_notifications = deepcopy(app.cfg.notifications)
-        before_webhooks = deepcopy(app.cfg.webhooks)
-
-        with (
-            patch("defenseclaw.notification_capabilities.platform.system", return_value="Windows"),
-            patch.object(app.cfg, "save", wraps=app.cfg.save) as save,
-            patch.object(app.logger, "log_action", wraps=app.logger.log_action) as log_action,
-        ):
-            result, restart = _invoke(app, "notifications", "on", "--yes")
-
-        assert result.exit_code != 0
-        assert "unsupported" in result.output.lower()
-        assert app.cfg.notifications == before_notifications
-        assert app.cfg.webhooks == before_webhooks
-        assert open(app.cfg.config_path, "rb").read() == before_bytes
-        save.assert_not_called()
-        restart.assert_not_called()
-        log_action.assert_not_called()
-    finally:
-        cleanup_app(app, db_path, tmp_dir)
-
-
-def test_windows_onboarding_enable_is_rejected_without_prompt_or_traceback() -> None:
+def test_windows_enable_succeeds_without_restart() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
         app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
         app.cfg.notifications.enabled = False
         with patch("defenseclaw.notification_capabilities.platform.system", return_value="Windows"):
-            result, restart = _invoke(app, "notifications", "--yes")
-        assert result.exit_code != 0
-        assert "unsupported" in result.output.lower()
-        assert "Show desktop notifications" not in result.output
+            app.cfg.save()
+            before = open(app.cfg.config_path, "rb").read()
+            result, restart = _invoke(app, "notifications", "on", "--no-restart")
+
+        assert result.exit_code == 0, result.output
+        assert app.cfg.notifications.enabled is True
+        assert open(app.cfg.config_path, "rb").read() != before
+        assert _reload_windows_config(app.cfg.config_path, tmp_dir).notifications.enabled is True
+        restart.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_windows_onboarding_yes_enables_without_traceback() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
+        app.cfg.notifications.enabled = False
+        with patch("defenseclaw.notification_capabilities.platform.system", return_value="Windows"):
+            app.cfg.save()
+            before = open(app.cfg.config_path, "rb").read()
+            result, restart = _invoke(app, "notifications", "--yes", "--no-restart")
+        assert result.exit_code == 0, result.output
         assert "Traceback" not in result.output
-        assert app.cfg.notifications.enabled is False
+        assert app.cfg.notifications.enabled is True
+        assert open(app.cfg.config_path, "rb").read() != before
+        assert _reload_windows_config(app.cfg.config_path, tmp_dir).notifications.enabled is True
         restart.assert_not_called()
     finally:
         cleanup_app(app, db_path, tmp_dir)
