@@ -467,6 +467,12 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
     system = _windows_system_directory()
     if system:
         roots.append(system)
+    # npm/pnpm may place Codex or Claude outside their default Windows bins.
+    # Discovery admits these manager-reported roots only after a token-bound,
+    # no-shell query plus ACL and reparse validation; reuse that exact evidence
+    # for explicit native-image selection instead of trusting ambient HOME or
+    # package-manager environment variables here.
+    roots.extend(agent_discovery._windows_configured_package_manager_bin_prefixes())
     return tuple(dict.fromkeys(os.path.abspath(root) for root in roots if root))
 
 

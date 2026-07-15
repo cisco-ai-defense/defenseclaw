@@ -829,6 +829,14 @@ try {
         $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
         $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
         'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($nativeHarnessText -match 'DefenseClawWindowsResourceVerifier-x64\.exe' -and
+        $nativeHarnessText -match "'build', '-trimpath', '-buildvcs=false'" -and
+        $nativeHarnessText -match '\./internal/tools/windowsresources' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
+        $standardUserCIText -match '\$resourceVerifierInputs = @\(' -and
+        $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
+        'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
         $standardUserCIText -match 'Read-BoundedDisposableResult \$SourcePath \$SourceRoot 1048576' -and
         $standardUserCIText -match '\[string\]\$record\.os -cne ''windows''' -and
@@ -1027,7 +1035,21 @@ try {
     $windowsLiveJob = [regex]::Match($liveWorkflowText, '(?s)  windows-live:.*?(?=\r?\n  # -+\r?\n  # Report)').Value
     Assert-True ($windowsLiveJob -notmatch 'continue-on-error') 'Windows live jobs are not advisory'
     Assert-True ($windowsLiveJob -notmatch 'shell:\s*bash') 'Windows live jobs never select Bash'
-    Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") 'provider-secret Windows tests are manual-only'
+    Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") `
+        'Connector Live Windows radar remains manual-only'
+    $releaseCertificationJob = [regex]::Match(
+        $releaseWorkflowText,
+        '(?s)  windows-real-client-certification:.*?(?=\r?\n  publish:)'
+    ).Value
+    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release,\s*windows-installer\]' -and
+        $releaseCertificationJob -match '-Operation release-certification' -and
+        $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
+        $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
+        $releaseCertificationJob -notmatch 'continue-on-error') `
+        'production release has a required provider-backed Windows real-client gate'
+    Assert-True ($releaseWorkflowText -match 'needs: \[release, windows-real-client-certification\]' -and
+        $releaseWorkflowText -match 'name: release-dist-windows-certified') `
+        'immutable release publication consumes only the certified Windows artifact bundle'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
@@ -1041,10 +1063,10 @@ try {
     }
     Assert-True ($harnessText -match "Invoke-DangerousCommandCorpus observe" -and $harnessText -match "Invoke-DangerousCommandCorpus action") 'connector contract executes dangerous-command corpus in observe and action modes'
     Assert-True ($harnessText -match 'raw_action' -and $harnessText -match 'would_block' -and $harnessText -match 'enforced') 'dangerous-command contract asserts raw and enforced decisions'
-    foreach ($enterpriseOperation in @('install', 'reconcile', 'watch')) {
-        Assert-True ($harnessText -match 'enterprise-hooks:\$\(\$command\.Name\):native-rejection' -and $harnessText.Contains("Name = '$enterpriseOperation'")) "built enterprise hooks $enterpriseOperation rejection is required"
-    }
-    Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks rejection is bounded, exit 1, and checks an unchanged tree'
+    Assert-True ($harnessText -match 'enterprise-hooks:install:elevation-required' -and
+        $harnessText -match 'require an elevated administrator or LocalSystem token') `
+        'native enterprise hooks require elevation in the standard-user connector contract'
+    Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
     Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
@@ -1092,7 +1114,7 @@ try {
         $isolatedCleanup -match '\$livePath, \$recordedPath, \[StringComparison\]::OrdinalIgnoreCase') `
         'isolated process cleanup strongly identifies detached product processes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and
-        $harnessText -match 'obsolete gateway launcher' -and
+        $harnessText -match 'cannot be resolved' -and
         $harnessText -match 'does not use the native hook runtime' -and
         $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) `
         'Doctor connector contract rejects connector-specific tampered hook commands with exit 1'

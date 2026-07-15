@@ -46,11 +46,12 @@ func init() {
 // machine-facing entrypoint, not something a human runs directly.
 func newHookCmd() *cobra.Command {
 	var (
-		connector string
-		event     string
-		apiAddr   string
-		failMode  string
-		inputFile string
+		connector         string
+		event             string
+		apiAddr           string
+		failMode          string
+		inputFile         string
+		enterpriseManaged bool
 	)
 
 	cmd := &cobra.Command{
@@ -65,7 +66,10 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts := buildHookOptions(connector, event, apiAddr, failMode)
+			if enterpriseManaged && enterpriseManagedHookRuntimeNoop() {
+				return nil
+			}
+			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
@@ -97,7 +101,9 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
+	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
+	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")
 
 	return cmd
@@ -156,7 +162,23 @@ func openCursorHookInputFile(hookDir, path string) (*os.File, error) {
 // environment only when it tightens policy. It is factored out of RunE (which
 // calls os.Exit) so it can be unit-tested.
 func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Options {
+	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
+}
+
+func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
 	home, trustedNativeState := trustedNativeHookHome()
+	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
+		// The administrator-owned runtime failed trust validation. Do not read its
+		// sidecar/token or contact any endpoint derived from those files; hand an
+		// unavailable strict runtime directly to hookexec's fail-closed boundary.
+		return hookexec.Options{
+			Connector:          connector,
+			Event:              event,
+			FailMode:           "closed",
+			StrictAvailability: true,
+			ManagedEnterprise:  true,
+		}
+	}
 	if !trustedNativeState {
 		home = config.DefaultDataPath()
 	}
@@ -220,6 +242,7 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		HookDir:            hookDir,
 		Token:              token,
 		StrictAvailability: hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
+		ManagedEnterprise:  enterpriseManaged,
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),
 			os.Getenv("TRACEPARENT"),
@@ -234,7 +257,6 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()
 	}
-
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			if !trustedNativeState || n <= 1<<20 {

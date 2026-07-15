@@ -90,11 +90,12 @@ type APIServer struct {
 	configWriteMu  sync.Mutex
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
-	// per-source OTLP path tokens loaded from
+	// per-source OTLP credentials loaded from
 	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
-	// loopback OTLP request that lacks an Authorization header (i.e.
-	// the path-token branch in tokenAuth), so the map is held under
-	// an RWMutex to keep the hot path lock-free for readers.
+	// loopback OTLP request authenticated by either a scoped Authorization
+	// header (Codex and Claude Code) or the legacy path-token transport
+	// (Gemini CLI), so the map is held under an RWMutex to keep the hot
+	// path lock-free for readers.
 	//
 	// The map is populated at boot by SetOTLPPathTokens AND refreshed
 	// lazily by lookupOTLPPathToken in two cases:
@@ -3173,6 +3174,32 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
 			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
+		}
+		// Codex and Claude Code support arbitrary OTLP headers. Bind their
+		// connector-scoped bearer to the authenticated source while keeping the
+		// credential out of the URL. Once a scoped credential exists, refuse the
+		// master gateway bearer for that source exactly as the path-token route
+		// does; a leaked connector configuration must never grant management API
+		// authority. Gemini CLI still uses the path form below because its native
+		// exporter cannot set an authorization header.
+		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
+			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
+			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
+				scoped := a.lookupOTLPPathToken(string(scope))
+				if scoped != "" {
+					if token != "" && constantTimeStringMatch(token, scoped) {
+						// Preserve only the canonical source name used to select the
+						// credential so attribution cannot drift through an alias.
+						r.Header.Set(otelSourceHeader, string(scope))
+						r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+						next.ServeHTTP(w, r)
+						return
+					}
+					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
+			}
 		}
 		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
 			scoped := a.lookupOTLPPathToken(source)

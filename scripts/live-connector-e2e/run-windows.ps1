@@ -11,9 +11,12 @@ param(
     [string]$NativeDataRoot = '',
     [string]$ResultsPath = '',
     [string]$ArtifactPath = '',
+    [string]$AgentPath = '',
+    [string]$ExpectedAgentVersion = '',
     [ValidateRange(1, 1800)][int]$CommandTimeoutSeconds = 180,
     [ValidateSet('run', 'capture', 'cleanup')][string]$Operation = 'run',
     [switch]$AllowNativeDataRoot,
+    [switch]$ReleaseCertification,
     [switch]$NoRun
 )
 
@@ -64,6 +67,18 @@ function Get-EffectiveConnectorConfigPath(
 ) {
     $fileName = if ($ConnectorName -eq 'codex') { 'config.toml' } else { 'settings.json' }
     return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
+}
+
+function Get-StableHookRuntimeExecutable {
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'could not resolve the current user LocalAppData Known Folder'
+    }
+    return [IO.Path]::GetFullPath(
+        (Join-Path $localAppData 'DefenseClaw\HookRuntime\defenseclaw-hook.exe')
+    )
 }
 
 function Protect-TestDirectory([string]$Path) {
@@ -636,6 +651,10 @@ function Assert-DoctorHookRegistration {
     $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
     if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
     if ($rows[0].status -ne 'pass') { throw "doctor rejected setup-created $Connector hooks: $($rows[0].detail)" }
+    $expectedHookExecutable = Get-StableHookRuntimeExecutable
+    if ($rows[0].detail.IndexOf($expectedHookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "doctor validated an unexpected $Connector hook target: $($rows[0].detail)"
+    }
     if (Test-ObsoleteWindowsHookGuidance $rows[0].detail) {
         throw "doctor returned obsolete Unix guidance for native Windows $Connector hooks"
     }
@@ -862,7 +881,7 @@ function Assert-DoctorWindowsHookRegistration {
     if ($check.status -ne 'pass' -or $check.detail -notmatch 'healthy Windows-native executable registration') {
         throw "Doctor did not validate the registered $Connector Windows hook: $($check.status) $($check.detail)"
     }
-    $hookExecutable = (Get-Command 'defenseclaw-hook' -ErrorAction Stop).Source
+    $hookExecutable = Get-StableHookRuntimeExecutable
     if ($check.detail.IndexOf($hookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw "Doctor validated an unexpected hook target: $($check.detail)"
     }
@@ -895,7 +914,7 @@ function Assert-DoctorWindowsHookRegistration {
         if ($tamperedChecks.Count -ne 1) { throw "Tampered Doctor run returned $($tamperedChecks.Count) '$label' checks, expected one" }
         $tamperedCheck = $tamperedChecks[0]
         $expectedTamperDetail = if ($Connector -eq 'codex') {
-            'obsolete gateway launcher'
+            'cannot be resolved'
         } else {
             'does not use the native hook runtime'
         }
@@ -930,32 +949,54 @@ function Assert-DoctorWindowsHookRegistration {
     Wait-Gateway
 }
 
-function Assert-NativeEnterpriseHooksRejected {
-    $root = Join-Path $StateRoot 'enterprise-hooks-native-rejection'
+function Assert-NativeEnterpriseHooksRequireElevation {
+    $root = Join-Path $StateRoot 'enterprise-hooks-elevation-required'
     $targetHome = Join-Path $root 'target-home'
     $dataDir = Join-Path $targetHome '.defenseclaw'
     [IO.Directory]::CreateDirectory($dataDir) | Out-Null
     [IO.File]::WriteAllText((Join-Path $targetHome 'preserve.txt'), 'preserve')
-    $manifest = Join-Path $root 'targets.yaml'
-    [IO.File]::WriteAllText($manifest, "version: 1`ntargets: []`n", [Text.UTF8Encoding]::new($false))
     $gateway = (Get-Command 'defenseclaw-gateway' -ErrorAction Stop).Source
-    $commands = @(
-        [pscustomobject]@{ Name = 'install'; Args = @('enterprise', 'hooks', 'install', '--connector', $Connector, '--user-home', $targetHome, '--data-dir', $dataDir) },
-        [pscustomobject]@{ Name = 'reconcile'; Args = @('enterprise', 'hooks', 'reconcile', '--manifest', $manifest) },
-        [pscustomobject]@{ Name = 'watch'; Args = @('enterprise', 'hooks', 'watch', '--manifest', $manifest, '--interval', '1s', '--debounce', '100ms') }
-    )
-    foreach ($command in $commands) {
-        $before = Get-TreeFingerprint $root
-        $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList $command.Args -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot "enterprise-hooks-$($command.Name).log")
-        $after = Get-TreeFingerprint $root
-        if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw "enterprise hooks $($command.Name) did not return bounded exit 1" }
-        if (($result.StdOut + $result.StdErr) -notmatch 'enterprise hooks are unsupported on native Windows') { throw "enterprise hooks $($command.Name) did not report native Windows rejection" }
-        if ($before -ne $after) { throw "enterprise hooks $($command.Name) modified the disposable target tree" }
-        Write-Result "enterprise-hooks:$($command.Name):native-rejection" pass 'exit=1 bounded=true target-tree=unchanged'
-    }
+    $before = Get-TreeFingerprint $root
+    $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList @(
+        'enterprise', 'hooks', 'install', '--connector', $Connector,
+        '--user-home', $targetHome, '--data-dir', $dataDir
+    ) -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot 'enterprise-hooks-install.log')
+    $after = Get-TreeFingerprint $root
+    if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw 'enterprise hooks install did not return bounded exit 1' }
+    if (($result.StdOut + $result.StdErr) -notmatch 'require an elevated administrator or LocalSystem token') { throw 'enterprise hooks install did not require native Windows elevation' }
+    if ($before -ne $after) { throw 'enterprise hooks install modified the disposable target tree' }
+    Write-Result 'enterprise-hooks:install:elevation-required' pass 'exit=1 bounded=true target-tree=unchanged'
 }
 
 function Install-Agent {
+    if ($ReleaseCertification) {
+        if ([string]::IsNullOrWhiteSpace($AgentPath) -or
+            [string]::IsNullOrWhiteSpace($ExpectedAgentVersion)) {
+            throw 'release certification requires an explicit preinstalled agent path and exact version'
+        }
+        if ($ExpectedAgentVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "release certification requires an exact numeric client version, got: $ExpectedAgentVersion"
+        }
+        $script:AgentPath = (Resolve-Path -LiteralPath $AgentPath -ErrorAction Stop).Path
+        $statePrefix = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+        if (-not $script:AgentPath.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "release client must be installed below the disposable certification state root: $script:AgentPath"
+        }
+        $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') `
+            -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
+        $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
+        $observedVersions = [regex]::Matches(
+            $script:AgentVersion,
+            '(?<![0-9A-Za-z.+-])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![0-9A-Za-z.+-])'
+        )
+        if ($observedVersions.Count -ne 1 -or
+            $observedVersions[0].Value -cne $ExpectedAgentVersion) {
+            throw "$Connector client version output '$($script:AgentVersion)' does not prove exact pin $ExpectedAgentVersion"
+        }
+        Write-Result install pass "exact=$ExpectedAgentVersion output=$($script:AgentVersion)"
+        return
+    }
+
     [IO.Directory]::CreateDirectory($script:ToolRoot) | Out-Null
     $package = if ($Connector -eq 'codex') { '@openai/codex@' + ($env:CODEX_VERSION ?? 'latest') } else { '@anthropic-ai/claude-code@' + ($env:CLAUDE_VERSION ?? 'latest') }
     Invoke-Tool 'npm.cmd' @('install', '--no-audit', '--no-fund', '--prefix', $script:ToolRoot, $package) -Timeout 300 | Out-Null
@@ -1293,7 +1334,7 @@ function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
     Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     Assert-TimeoutHandling
-    Assert-NativeEnterpriseHooksRejected
+    Assert-NativeEnterpriseHooksRequireElevation
     Initialize-DefenseClawEnv
     Invoke-Tool 'defenseclaw' @(
         'init', '--skip-install', '--non-interactive', '--yes', '--connector', $Connector,
@@ -1328,8 +1369,11 @@ function Invoke-ContractRun {
 function Invoke-LiveRun {
     Install-Agent
     Initialize-DefenseClawEnv
-    Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    if (-not $ReleaseCertification) {
+        Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    }
     Invoke-Setup action
+    Assert-DoctorWindowsHookRegistration
     if ($Connector -eq 'codex') {
         # Real official package probes belong to the manual release/live-client
         # certification layer. The mandatory deterministic contract stays
@@ -1338,6 +1382,9 @@ function Invoke-LiveRun {
         Assert-CodexPinnedTrustMatrix
         $codexJavaScript = Join-Path $script:ToolRoot 'node_modules\@openai\codex\bin\codex.js'
         Assert-CodexHooksListTrusted $codexJavaScript $script:AgentVersion
+        if ($ReleaseCertification) {
+            Write-Result codex:auto-trust pass 'hooks/list verified every setup-created handler enabled and trusted without manual approval'
+        }
     }
     $start = @(Get-EventLines $script:GatewayJsonl).Count
     Invoke-Agent lifecycle 'Reply with only the word ready. Do not use tools.' | Out-Null
@@ -1507,9 +1554,24 @@ if (-not $NoRun) {
     $StateRoot = [IO.Path]::GetFullPath($StateRoot)
     if ($StateRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw 'StateRoot must not be the real user profile' }
     $useHomeDataRoot = -not [string]::IsNullOrWhiteSpace($HomeRoot)
-    $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
-    if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'HomeRoot must be contained by StateRoot'
+    if ($ReleaseCertification) {
+        if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+            throw 'release certification may mutate only a disposable GitHub-hosted Windows runner user'
+        }
+        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'release certification requires RUNNER_TEMP'
+        }
+        $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+        if (-not $StateRoot.StartsWith($runnerTemp + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'release certification StateRoot must be below RUNNER_TEMP'
+        }
+        $HomeRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        $useHomeDataRoot = $true
+    } else {
+        $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
+        if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'HomeRoot must be contained by StateRoot'
+        }
     }
     Protect-TestDirectory $StateRoot
     $script:ResultsPath = if ($ResultsPath) { [IO.Path]::GetFullPath($ResultsPath) } else { Join-Path $StateRoot 'results.jsonl' }
@@ -1536,7 +1598,7 @@ if (-not $NoRun) {
     } else {
         Join-Path $StateRoot 'defenseclaw'
     }
-    Protect-TestDirectory $env:USERPROFILE
+    if (-not $ReleaseCertification) { Protect-TestDirectory $env:USERPROFILE }
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }

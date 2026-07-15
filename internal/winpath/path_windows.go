@@ -65,3 +65,31 @@ func UTF16Ptr(path string) (*uint16, error) {
 	}
 	return windows.UTF16PtrFromString(extended)
 }
+
+// RejectReparseChain rejects any existing reparse point between path and its
+// volume root. Missing path elements are allowed so callers can validate a
+// destination before creating it.
+func RejectReparseChain(path string) error {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for {
+		ptr, err := UTF16Ptr(current)
+		if err != nil {
+			return err
+		}
+		attributes, err := windows.GetFileAttributes(ptr)
+		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return fmt.Errorf("reparse point in path: %s", current)
+		}
+		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
+			return err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
+}

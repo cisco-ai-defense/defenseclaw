@@ -1015,6 +1015,48 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 	}
 }
 
+func TestStrictOrManagedAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
+	tests := []struct {
+		name    string
+		home    func(*testing.T) string
+		strict  bool
+		managed bool
+	}{
+		{name: "strict missing", strict: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "managed missing", managed: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "strict disabled", strict: true, home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "managed disabled", managed: true, home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:          "claudecode",
+				Home:               tt.home(t),
+				StrictAvailability: tt.strict,
+				ManagedEnterprise:  tt.managed,
+				Stdout:             &stdout,
+				Stderr:             &stderr,
+			})
+			if code != blockExit || !strings.Contains(stderr.String(), "availability") {
+				t.Fatalf("strict unavailable home = (code=%d, stdout=%q, stderr=%q)", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name string

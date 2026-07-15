@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +36,48 @@ func HookConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 		return nil
 	}
 	return uniqueNonEmptyStrings(ResolvedConnectorLocations(opts, conn).HookConfigPaths)
+}
+
+// HookPolicyWatchPathsForConnector returns every locally inspectable file that
+// can change the effective hook decision. Setup/teardown still own only
+// HookConfigPathsForConnector; this wider set exists solely so the runtime
+// guardian re-evaluates policy when Claude's higher-precedence sources change.
+func HookPolicyWatchPathsForConnector(conn Connector, opts SetupOpts) []string {
+	paths := HookConfigPathsForConnector(conn, opts)
+	if conn == nil || conn.Name() != "claudecode" {
+		return paths
+	}
+	paths = append(paths, claudeCodeRemoteSettingsPath())
+	if workspace := strings.TrimSpace(opts.WorkspaceDir); workspace != "" {
+		workspace = filepath.Clean(workspace)
+		projectDir := filepath.Join(workspace, ".claude")
+		// The directory itself lets a watcher on workspace observe first-time
+		// creation; the two files cover subsequent scalar policy edits.
+		paths = append(paths,
+			projectDir,
+			filepath.Join(projectDir, "settings.json"),
+			filepath.Join(projectDir, "settings.local.json"),
+		)
+	}
+	if managedRoot, err := claudeCodeManagedSettingsRoot(); err == nil {
+		paths = append(paths, filepath.Join(managedRoot, "managed-settings.json"))
+		dropin := filepath.Join(managedRoot, "managed-settings.d")
+		paths = append(paths, dropin)
+		if entries, err := os.ReadDir(dropin); err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				if !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(strings.ToLower(name), ".json") {
+					paths = append(paths, filepath.Join(dropin, name))
+				}
+			}
+		}
+	}
+	if raw := strings.TrimSpace(opts.ClaudeSettingsOverride); raw != "" && !strings.HasPrefix(raw, "{") {
+		if source, err := readClaudeCodeCLISettings(raw, strings.TrimSpace(opts.WorkspaceDir)); err == nil && source != nil {
+			paths = append(paths, source.path)
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
 // ownedHookCommandNeedles returns escaping-invariant marker string(s) that the
@@ -201,7 +242,7 @@ func structuredNativeExecHookReferences(entry map[string]interface{}, needles []
 		return false
 	}
 	command := strings.TrimSpace(stringValue(entry["command"]))
-	if command == "" || !pathidentity.Same(command, defenseclawHookBinary()) {
+	if command == "" || !isDefenseClawManagedHookExecutable(command) {
 		return false
 	}
 	rawArgs, ok := entry["args"].([]interface{})

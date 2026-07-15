@@ -284,8 +284,13 @@ defenseclaw upgrade
 defenseclaw doctor
 ```
 
-Native Windows is hook-only. Sandbox, enterprise hooks, OpenHands, OmniGent,
-OpenClaw and ZeptoClaw are unsupported on Windows. Desktop security
+Native Windows is hook-only. Sandbox mode is unsupported. Native Windows
+enterprise hooks are unsupported for Codex, OpenHands, OmniGent, OpenClaw, and
+ZeptoClaw on Windows.
+Elevated enterprise deployment for Claude Code is supported through the
+administrator-managed `managed-settings.d` policy tier, including
+`allowManagedHooksOnly`; see [Enterprise deployment](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks).
+Desktop security
 notifications are delivered natively by the signed gateway through the Windows
 notification area; enable them with `defenseclaw setup notifications on`.
 Bundled Local Splunk and the separate local observability stack are supported

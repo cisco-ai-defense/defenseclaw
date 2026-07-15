@@ -1476,6 +1476,9 @@ func validateCommittedInstallForUninstallHandoff(transaction setupTransaction) e
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
 	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
+	}
 	return nil
 }
 
@@ -1567,7 +1570,6 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 		publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		gatewayPath := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
-		reconciliation := connectorReconciliationRecorder{}
 		if pathExists(transaction.TrashPath) {
 			state, err := loadTransactionInstallState(transaction.TrashPath, transaction)
 			if err != nil {
@@ -1579,20 +1581,17 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			if _, err := stopOwnedServices(gatewayPath, transaction.DataRoot); err != nil {
 				return err
 			}
-			reconciliation = reconcileRemovedConnectors(
-				transaction,
-				gatewayPath,
-				transactionPreviousChildEnv(transaction),
-				runConnectorLifecycleWithEnv,
-			)
-		} else if transaction.PreviousState != nil || len(transaction.PreviousConnectors) != 0 {
-			for _, connectorName := range transaction.PreviousConnectors {
-				configHome := connectorConfigHome(transaction, connectorName, true)
-				reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-					return errors.New("committed uninstall no longer has its owned payload tree; connector cleanup was not attempted")
-				})
-			}
 		}
+		// Connector lifecycle is always run by the manifest-verified gateway
+		// embedded in the executing Setup binary. The installed/trash copy is
+		// retained above only as the process-ownership identity used to stop a
+		// previously running service; it is never trusted to edit agent config.
+		reconciliation := reconcileRemovedConnectorsWithMaintenance(
+			transaction,
+			transactionPreviousChildEnv(transaction),
+			prepareConnectorMaintenanceGateway,
+			runConnectorLifecycleWithEnv,
+		)
 		if err := reconciliation.persist(); err != nil {
 			return fmt.Errorf("persist connector reconciliation residue: %w", err)
 		}
@@ -1632,6 +1631,9 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	}
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
+	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
 	}
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
@@ -1712,13 +1714,25 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			}
 		}
 	}
+	persistReconciliation := func() error {
+		if err := retryPendingConnectorReconciliation(
+			transaction,
+			gatewayPath,
+			&reconciliation,
+			readConnectorReconciliation,
+			runConnectorLifecycleWithEnv,
+		); err != nil {
+			return fmt.Errorf("retry pending connector reconciliation: %w", err)
+		}
+		return reconciliation.persist()
+	}
 	connectorReconciliationPending, err := settleInstallConnectorReconciliation(
 		transaction.ID,
 		gatewayPath,
 		transaction.DataRoot,
 		transaction.TargetServices,
 		len(reconciliation.failures) != 0,
-		reconciliation.persist,
+		persistReconciliation,
 		connectorReconciliationSummary,
 		nativeInstallRuntimeConvergenceOps(),
 	)
@@ -2296,6 +2310,13 @@ func removeTransactionPath(path, allowedRoot string) error {
 }
 
 func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
+	return cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readConnectorReconciliation)
+}
+
+func cleanupCommittedSetupTransactionWithReconciliationReader(
+	transaction setupTransaction,
+	readReconciliation func() (*connectorReconciliationState, error),
+) error {
 	if transaction.Action == "install" {
 		state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
 		if err != nil {
@@ -2354,7 +2375,7 @@ func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 	}
 	if transaction.DeleteUserData {
-		residue, err := readConnectorReconciliation()
+		residue, err := readReconciliation()
 		if err != nil {
 			return err
 		}

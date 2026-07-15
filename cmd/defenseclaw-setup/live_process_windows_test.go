@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestLiveProcessWithinInstallRoot(t *testing.T) {
@@ -72,6 +74,25 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 	}
 	if pid != 0 || imagePath != "" {
 		t.Fatalf("ignored installed process = (%d, %q), want no match", pid, imagePath)
+	}
+}
+
+func TestProcessIdentityReportsExitedProcess(t *testing.T) {
+	cmd := exec.Command("cmd.exe", "/c", "exit", "0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
+	pid := uint32(cmd.Process.Pid)
+	processHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		t.Fatalf("open process synchronization handle: %v", err)
+	}
+	defer func() { _ = windows.CloseHandle(processHandle) }()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for process: %v", err)
+	}
+	if _, _, err := processIdentity(pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("processIdentity(%d) error = %v, want os.ErrProcessDone", pid, err)
 	}
 }
 

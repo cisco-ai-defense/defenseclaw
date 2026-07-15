@@ -8731,6 +8731,33 @@ def _gateway_pid_file_identifies_gateway(pid_file: str) -> bool:
     return process_is_gateway(pid)
 
 
+def _gateway_lifecycle_executable(*, native: bool = False) -> str | None:
+    """Resolve one stable executable for a complete gateway lifecycle call.
+
+    A packaged Windows CLI must use the gateway beside its verified embedded
+    runtime.  Passing a bare executable name lets Windows search the current
+    directory before ``PATH`` and allowed a stale checkout binary to shadow the
+    installed service.  Developer and non-Windows flows retain their existing
+    behavior; native Job Object callers still require a concrete executable.
+    """
+
+    from defenseclaw.gateway import (
+        packaged_windows_gateway_path,
+        packaged_windows_install_root,
+    )
+
+    if packaged_windows_install_root():
+        # A corroborated package with a missing sibling is broken; fail closed
+        # instead of allowing PATH/current-directory executable shadowing.
+        return packaged_windows_gateway_path()
+    if native:
+        executable = shutil.which("defenseclaw-gateway")
+        if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+            return None
+        return str(Path(executable).resolve())
+    return "defenseclaw-gateway"
+
+
 def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
@@ -8768,7 +8795,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    cmd = ["defenseclaw-gateway", "restart"] if was_running else ["defenseclaw-gateway", "start"]
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        click.echo(" ✗ (binary not found)")
+        click.echo("    Build with: make gateway")
+        return False
+    cmd = [executable, "restart"] if was_running else [executable, "start"]
     try:
         result = subprocess.run(
             cmd,
@@ -8800,12 +8832,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         # child cannot outlive the failed setup command.  On restart, preserve
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
-        status = _gateway_lifecycle_status()
+        status = _gateway_lifecycle_status(executable)
         if status:
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
-            _cleanup_timed_out_gateway_start()
+            _cleanup_timed_out_gateway_start(executable)
         click.echo(" ✗ (timed out; final status is not healthy)")
         return False
 
@@ -8829,8 +8861,8 @@ def _restart_defense_gateway_native(data_dir: str, *, start_if_stopped: bool = T
     if ctx is not None:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
-    executable = shutil.which("defenseclaw-gateway")
-    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    executable = _gateway_lifecycle_executable(native=True)
+    if not executable:
         click.echo("  defenseclaw-gateway: native executable not found.")
         return False
 
@@ -8848,7 +8880,7 @@ def _restart_defense_gateway_native(data_dir: str, *, start_if_stopped: bool = T
     click.echo(f"  defenseclaw-gateway: {'restarting' if was_running else 'starting'}...", nl=False)
     try:
         result = runner.run(
-            [str(Path(executable).resolve()), action],
+            [executable, action],
             timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
         )
     except LocalStackError:
@@ -8895,18 +8927,18 @@ def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
 def _stop_defense_gateway_native(data_dir: str) -> bool:
     from defenseclaw.observability.local_stack import CommandRunner
 
-    executable = shutil.which("defenseclaw-gateway")
-    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    executable = _gateway_lifecycle_executable(native=True)
+    if not executable:
         return False
     if not _native_gateway_lifecycle_stop(CommandRunner(), executable):
         return False
     return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
 
 
-def _gateway_lifecycle_status() -> bool:
+def _gateway_lifecycle_status(executable: str) -> bool:
     try:
         result = subprocess.run(
-            ["defenseclaw-gateway", "status"],
+            [executable, "status"],
             capture_output=True,
             text=True,
             timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
@@ -8916,10 +8948,10 @@ def _gateway_lifecycle_status() -> bool:
     return result.returncode == 0
 
 
-def _cleanup_timed_out_gateway_start() -> None:
+def _cleanup_timed_out_gateway_start(executable: str) -> None:
     try:
         subprocess.run(
-            ["defenseclaw-gateway", "stop"],
+            [executable, "stop"],
             capture_output=True,
             text=True,
             timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,

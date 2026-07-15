@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -204,7 +205,11 @@ func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
 			if err := setValue("Path", test.current); err != nil {
 				t.Fatal(err)
 			}
-			if err := removeOwnedUserPathValue(key, commandDir, false, test.valueCreated); err != nil {
+			if _, err := mutateRegistryUserPath(
+				registry.CURRENT_USER,
+				keyPath,
+				removeUserPathMutation(commandDir, false, test.valueCreated),
+			); err != nil {
 				t.Fatal(err)
 			}
 			got, gotType, err := key.GetStringValue("Path")
@@ -253,15 +258,23 @@ func TestOwnedUserPathRegistryRemovalRetriesAfterLaterFailures(t *testing.T) {
 
 	// The first mutation can be durable even when the subsequent desktop
 	// broadcast fails. A committed retry must accept the already-absent entry.
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	removeOwned := func() error {
+		_, mutationErr := mutateRegistryUserPath(
+			registry.CURRENT_USER,
+			keyPath,
+			removeUserPathMutation(commandDir, false, false),
+		)
+		return mutationErr
+	}
+	if err := removeOwned(); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	if err := removeOwned(); err != nil {
 		t.Fatalf("retry after post-mutation broadcast failure: %v", err)
 	}
 	// If Apps & Features removal then fails, the next committed retry reaches
 	// PATH removal once more and must remain idempotent.
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	if err := removeOwned(); err != nil {
 		t.Fatalf("retry after later Apps & Features failure: %v", err)
 	}
 	got, _, err := key.GetStringValue("Path")
@@ -509,6 +522,42 @@ func TestWizardCompletionMessageUsesPrivateApplicationRange(t *testing.T) {
 	}
 	if idPrimary != 1 || idCancel != 2 {
 		t.Fatalf("standard dialog command IDs changed: primary=%d cancel=%d", idPrimary, idCancel)
+	}
+}
+
+func TestWizardReportsCancellationOnlyAfterSuccessfulRollback(t *testing.T) {
+	cancelled := errors.Join(errSetupCancelled, context.Canceled)
+	if !wizardCancellationCompleted(userExitCode, cancelled) {
+		t.Fatal("completed cancellation was not recognized")
+	}
+	if wizardCancellationCompleted(retryRequiredCode, errors.Join(cancelled, errors.New("rollback remains pending"))) {
+		t.Fatal("pending rollback was reported as a completed cancellation")
+	}
+	if wizardCancellationCompleted(userExitCode, errors.New("unrelated failure")) {
+		t.Fatal("unrelated failure was reported as a completed cancellation")
+	}
+}
+
+func TestWizardCancellationConfirmationRechecksCompletedOperation(t *testing.T) {
+	cancelCalls := 0
+	wizard := setupWizard{
+		running: true,
+		operationCancel: func() {
+			cancelCalls++
+		},
+	}
+	wizard.requestCancellationWithPrompt(func() bool {
+		// MessageBoxW pumps window messages; model wmDone clearing the operation
+		// before the user confirms cancellation.
+		wizard.running = false
+		wizard.operationCancel = nil
+		return true
+	})
+	if wizard.cancelRequested {
+		t.Fatal("completed operation was changed to cancelling after confirmation closed")
+	}
+	if cancelCalls != 0 {
+		t.Fatalf("completed operation cancel calls = %d, want 0", cancelCalls)
 	}
 }
 

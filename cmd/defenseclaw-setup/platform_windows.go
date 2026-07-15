@@ -27,7 +27,14 @@ import (
 )
 
 func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
-	return hookruntime.Publish(source, gatewayPath, dataRoot, transactionID)
+	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
+		return err
+	}
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return err
+	}
+	return verifyPublishedStableHookRuntime(source, paths.Launcher)
 }
 
 func disableStableHookRuntime(transactionID string) error {
@@ -424,14 +431,27 @@ try {
 
 func processIdentity(pid uint32) (string, string, error) {
 	handle, err := windows.OpenProcess(
-		windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
 		false,
 		pid,
 	)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return "", "", os.ErrProcessDone
+		}
 		return "", "", err
 	}
 	defer windows.CloseHandle(handle)
+	waitResult, err := windows.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return "", "", err
+	}
+	if waitResult == uint32(windows.WAIT_OBJECT_0) {
+		return "", "", os.ErrProcessDone
+	}
+	if waitResult != uint32(windows.WAIT_TIMEOUT) {
+		return "", "", fmt.Errorf("unexpected process wait result %#x", waitResult)
+	}
 
 	// QueryFullProcessImageNameW accepts the full NT path limit. A fixed
 	// MAX_PATH buffer breaks service ownership checks when the per-user install
@@ -566,45 +586,67 @@ func isReparsePoint(path string) (bool, error) {
 	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, nil
 }
 
+const (
+	userPathMutationMaxAttempts      = 8
+	userPathTransactionTimeoutMillis = 5000
+)
+
+var (
+	userPathKTM                    = windows.NewLazySystemDLL("KtmW32.dll")
+	userPathRegistry               = windows.NewLazySystemDLL("advapi32.dll")
+	procCreateUserPathTransaction  = userPathKTM.NewProc("CreateTransaction")
+	procCommitUserPathTransaction  = userPathKTM.NewProc("CommitTransaction")
+	procOpenUserPathKeyTransactedW = userPathRegistry.NewProc("RegOpenKeyTransactedW")
+)
+
+type userPathMutation struct {
+	Next            userPathSnapshot
+	Changed         bool
+	ReusedSeparator bool
+	ValueCreated    bool
+}
+
+type userPathCompareAndSwap func(
+	func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error)
+
 func addUserPath(commandDir string) (bool, bool, bool, error) {
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
+	mutation, err := mutateRegistryUserPath(
+		registry.CURRENT_USER,
+		`Environment`,
+		addUserPathMutation(commandDir),
+	)
 	if err != nil {
-		return false, false, false, err
-	}
-	defer key.Close()
-	current, valueType, err := key.GetStringValue("Path")
-	if err != nil && err != registry.ErrNotExist {
-		return false, false, false, err
-	}
-	valueCreated := err == registry.ErrNotExist
-	entries := strings.Split(current, ";")
-	if pathContains(entries, commandDir) {
-		// A previous attempt may have observed its SetValue before RegFlushKey
-		// completed. Flush even on the idempotent retry path before convergence
-		// is allowed to advance.
-		if err := flushRegistryKey(key); err != nil {
-			return false, false, false, err
-		}
-		updateCurrentProcessPath(commandDir, true)
-		if err := broadcastEnvironmentChange(); err != nil {
-			return false, false, false, err
-		}
-		return false, false, false, nil
-	}
-	next, reusedSeparator := prependUserPathEntry(current, commandDir)
-	if err := setRegistryPath(key, next, valueType); err != nil {
-		return false, false, false, err
-	}
-	if err := flushRegistryKey(key); err != nil {
-		return false, false, false, err
+		return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, err
 	}
 	updateCurrentProcessPath(commandDir, true)
 	if err := broadcastEnvironmentChange(); err != nil {
-		// The registry mutation is already flushed and therefore owned even if
-		// another desktop process did not acknowledge the change broadcast.
-		return true, reusedSeparator, valueCreated, err
+		// A committed registry transaction is already owned even when another
+		// desktop process does not acknowledge the environment broadcast.
+		return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, err
 	}
-	return true, reusedSeparator, valueCreated, nil
+	return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, nil
+}
+
+func addUserPathMutation(commandDir string) func(userPathSnapshot) (userPathMutation, error) {
+	return func(current userPathSnapshot) (userPathMutation, error) {
+		if pathContains(strings.Split(current.Value, ";"), commandDir) {
+			return userPathMutation{Next: current}, nil
+		}
+		next, reusedSeparator := prependUserPathEntry(current.Value, commandDir)
+		valueCreated := !current.Existed
+		current.Existed = true
+		current.Value = next
+		if current.ValueType == 0 {
+			current.ValueType = registry.SZ
+		}
+		return userPathMutation{
+			Next:            current,
+			Changed:         true,
+			ReusedSeparator: reusedSeparator,
+			ValueCreated:    valueCreated,
+		}, nil
+	}
 }
 
 func captureUserPath() (userPathSnapshot, error) {
@@ -617,20 +659,7 @@ func captureUserPath() (userPathSnapshot, error) {
 		return userPathSnapshot{}, err
 	}
 	defer key.Close()
-	value, valueType, err := key.GetStringValue("Path")
-	if err == registry.ErrNotExist {
-		return snapshot, nil
-	}
-	if err != nil {
-		return userPathSnapshot{}, err
-	}
-	if valueType != registry.SZ && valueType != registry.EXPAND_SZ {
-		return userPathSnapshot{}, fmt.Errorf("unsupported user PATH registry type %d", valueType)
-	}
-	snapshot.Existed = true
-	snapshot.Value = value
-	snapshot.ValueType = valueType
-	return snapshot, nil
+	return readUserPathSnapshot(key)
 }
 
 func prependUserPathEntry(current, commandDir string) (string, bool) {
@@ -646,43 +675,247 @@ func prependUserPathEntry(current, commandDir string) (string, bool) {
 }
 
 func removeUserPath(commandDir string, reusedSeparator, valueCreated bool) error {
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
+	_, err := mutateRegistryUserPath(
+		registry.CURRENT_USER,
+		`Environment`,
+		removeUserPathMutation(commandDir, reusedSeparator, valueCreated),
+	)
 	if err != nil {
-		return err
-	}
-	defer key.Close()
-	if err := removeOwnedUserPathValue(key, commandDir, reusedSeparator, valueCreated); err != nil {
-		return err
-	}
-	if err := flushRegistryKey(key); err != nil {
 		return err
 	}
 	updateCurrentProcessPath(commandDir, false)
 	return broadcastEnvironmentChange()
 }
 
-func removeOwnedUserPathValue(key registry.Key, commandDir string, reusedSeparator, valueCreated bool) error {
-	current, valueType, err := key.GetStringValue("Path")
-	if err == registry.ErrNotExist {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	next, deleteValue, err := planOwnedUserPathRemoval(current, commandDir, reusedSeparator, valueCreated)
-	if err != nil {
-		return err
-	}
-	// Missing values are created as REG_SZ. A different current type is a user
-	// mutation; preserve that value (empty) even when its content is otherwise
-	// identical to the original managed entry.
-	if deleteValue && valueType == registry.SZ {
-		if err := key.DeleteValue("Path"); err != nil && err != registry.ErrNotExist {
-			return err
+func removeUserPathMutation(
+	commandDir string,
+	reusedSeparator, valueCreated bool,
+) func(userPathSnapshot) (userPathMutation, error) {
+	return func(current userPathSnapshot) (userPathMutation, error) {
+		if !current.Existed {
+			return userPathMutation{Next: current}, nil
 		}
+		next, deleteValue, err := planOwnedUserPathRemoval(
+			current.Value,
+			commandDir,
+			reusedSeparator,
+			valueCreated,
+		)
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		// A missing value was created as REG_SZ. If the user changed its type,
+		// preserve the now-empty value rather than claiming ownership of it.
+		if deleteValue && current.ValueType == registry.SZ {
+			return userPathMutation{Changed: true}, nil
+		}
+		if next == current.Value {
+			return userPathMutation{Next: current}, nil
+		}
+		current.Value = next
+		return userPathMutation{Next: current, Changed: true}, nil
+	}
+}
+
+func mutateRegistryUserPath(
+	root registry.Key,
+	keyPath string,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	if err := validateUserPathTransactionSupport(); err != nil {
+		return userPathMutation{}, err
+	}
+	key, _, err := registry.CreateKey(root, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	if err := key.Close(); err != nil {
+		return userPathMutation{}, err
+	}
+
+	mutation, err := mutateUserPath(
+		func(transform func(userPathSnapshot) (userPathMutation, error)) (userPathMutation, error) {
+			return compareAndSwapRegistryUserPath(root, keyPath, transform)
+		},
+		transform,
+	)
+	if err != nil {
+		return mutation, err
+	}
+	key, err = registry.OpenKey(root, keyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return mutation, err
+	}
+	defer key.Close()
+	if err := flushRegistryKey(key); err != nil {
+		return mutation, err
+	}
+	return mutation, nil
+}
+
+func validateUserPathTransactionSupport() error {
+	for _, required := range []struct {
+		name string
+		proc *windows.LazyProc
+	}{
+		{"KtmW32.dll!CreateTransaction", procCreateUserPathTransaction},
+		{"KtmW32.dll!CommitTransaction", procCommitUserPathTransaction},
+		{"advapi32.dll!RegOpenKeyTransactedW", procOpenUserPathKeyTransactedW},
+	} {
+		if err := required.proc.Find(); err != nil {
+			return fmt.Errorf("resolve required user PATH transaction procedure %s: %w", required.name, err)
+		}
+	}
+	return nil
+}
+
+func mutateUserPath(
+	compareAndSwap userPathCompareAndSwap,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	var conflictErr error
+	for attempt := 0; attempt < userPathMutationMaxAttempts; attempt++ {
+		mutation, err := compareAndSwap(transform)
+		if err == nil {
+			return mutation, nil
+		}
+		if !isUserPathTransactionConflict(err) {
+			return mutation, err
+		}
+		conflictErr = err
+	}
+	return userPathMutation{}, fmt.Errorf(
+		"user PATH changed concurrently during %d mutation attempts: %w",
+		userPathMutationMaxAttempts,
+		conflictErr,
+	)
+}
+
+func compareAndSwapRegistryUserPath(
+	root registry.Key,
+	keyPath string,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	transaction, err := createUserPathTransaction()
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	defer windows.CloseHandle(transaction)
+
+	keyPathPtr, err := windows.UTF16PtrFromString(keyPath)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	var key registry.Key
+	result, _, _ := procOpenUserPathKeyTransactedW.Call(
+		uintptr(root),
+		uintptr(unsafe.Pointer(keyPathPtr)),
+		0,
+		registry.QUERY_VALUE|registry.SET_VALUE,
+		uintptr(unsafe.Pointer(&key)),
+		uintptr(transaction),
+		0,
+	)
+	if result != 0 {
+		return userPathMutation{}, syscall.Errno(result)
+	}
+	defer key.Close()
+
+	current, err := readUserPathSnapshot(key)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	mutation, err := transform(current)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	if mutation.Changed {
+		if mutation.Next.Existed {
+			err = setRegistryPath(key, mutation.Next.Value, mutation.Next.ValueType)
+		} else {
+			err = key.DeleteValue("Path")
+		}
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		// TxR detects a normal write after this transaction has staged its own
+		// write. Validate the original snapshot after staging as well, covering
+		// the complementary race where another process wrote between our read
+		// and staged write. A later external write conflicts with the staged
+		// transaction, so the validation and commit form a compare-and-swap.
+		observed, err := readRegistryUserPathSnapshot(root, keyPath)
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		if observed != current {
+			return userPathMutation{}, windows.ERROR_TRANSACTIONAL_CONFLICT
+		}
+	}
+	if err := commitUserPathTransaction(transaction); err != nil {
+		return userPathMutation{}, err
+	}
+	return mutation, nil
+}
+
+func createUserPathTransaction() (windows.Handle, error) {
+	result, _, callErr := procCreateUserPathTransaction.Call(
+		0,
+		0,
+		0,
+		0,
+		0,
+		userPathTransactionTimeoutMillis,
+		0,
+	)
+	transaction := windows.Handle(result)
+	if transaction != windows.InvalidHandle {
+		return transaction, nil
+	}
+	if callErr != nil && callErr != windows.ERROR_SUCCESS {
+		return 0, callErr
+	}
+	return 0, errors.New("create user PATH registry transaction failed")
+}
+
+func commitUserPathTransaction(transaction windows.Handle) error {
+	result, _, callErr := procCommitUserPathTransaction.Call(uintptr(transaction))
+	if result != 0 {
 		return nil
 	}
-	return setRegistryPath(key, next, valueType)
+	if callErr != nil && callErr != windows.ERROR_SUCCESS {
+		return callErr
+	}
+	return errors.New("commit user PATH registry transaction failed")
+}
+
+func isUserPathTransactionConflict(err error) bool {
+	return errors.Is(err, windows.ERROR_TRANSACTIONAL_CONFLICT) ||
+		errors.Is(err, windows.ERROR_TRANSACTION_NOT_ACTIVE) ||
+		errors.Is(err, windows.ERROR_TRANSACTION_ALREADY_ABORTED) ||
+		errors.Is(err, windows.ERROR_OPERATION_ABORTED)
+}
+
+func readUserPathSnapshot(key registry.Key) (userPathSnapshot, error) {
+	value, valueType, err := key.GetStringValue("Path")
+	if err == registry.ErrNotExist {
+		return userPathSnapshot{}, nil
+	}
+	if err != nil {
+		return userPathSnapshot{}, err
+	}
+	if valueType != registry.SZ && valueType != registry.EXPAND_SZ {
+		return userPathSnapshot{}, fmt.Errorf("unsupported user PATH registry type %d", valueType)
+	}
+	return userPathSnapshot{Existed: true, Value: value, ValueType: valueType}, nil
+}
+
+func readRegistryUserPathSnapshot(root registry.Key, keyPath string) (userPathSnapshot, error) {
+	key, err := registry.OpenKey(root, keyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return userPathSnapshot{}, err
+	}
+	defer key.Close()
+	return readUserPathSnapshot(key)
 }
 
 func planOwnedUserPathRemoval(current, commandDir string, reusedSeparator, valueCreated bool) (string, bool, error) {

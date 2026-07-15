@@ -17,6 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import defenseclaw.doctor_hooks as doctor_hooks
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
@@ -68,6 +70,40 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_claude_managed_paths_use_program_files_known_folder(self) -> None:
+        trusted = self.root / "Trusted Program Files"
+        attacker = self.root / "Attacker Program Files"
+        with (
+            patch.dict(os.environ, {"ProgramFiles": str(attacker)}),
+            patch(
+                "defenseclaw.doctor_hooks._windows_known_folder_path",
+                return_value=str(trusted),
+            ),
+        ):
+            paths = doctor_hooks._default_claude_managed_settings_paths()
+
+        self.assertEqual(paths, (str(trusted / "ClaudeCode" / "managed-settings.json"),))
+
+    def test_claude_managed_paths_fail_closed_without_known_folder(self) -> None:
+        with patch("defenseclaw.doctor_hooks._windows_known_folder_path", return_value=""):
+            with self.assertRaisesRegex(_InspectionError, "trusted Windows Program Files"):
+                doctor_hooks._default_claude_managed_settings_paths()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder contract")
+    def test_known_folder_lookup_ignores_process_profile_overrides(self) -> None:
+        folder_id = "f1b32785-6fba-4fcf-9d55-7b8e7f157091"
+        expected = doctor_hooks._windows_known_folder_path(folder_id)
+        self.assertTrue(expected)
+
+        spoofed = str(self.root / "spoofed-local-app-data")
+        with patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": spoofed, "USERPROFILE": str(self.root / "spoofed-profile")},
+        ):
+            observed = doctor_hooks._windows_known_folder_path(folder_id)
+
+        self.assertEqual(os.path.normcase(observed), os.path.normcase(expected))
 
     def _runtime(self, name: str = "defenseclaw-hook.exe", body: bytes | None = None) -> Path:
         path = self.install / name
@@ -196,6 +232,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
         pathext: str = ".EXE;.CMD",
         managed_settings_paths: tuple[str, ...] | None = (),
         inspect_effective_policy: bool = True,
+        workspace_dir: str = "",
+        cli_settings: str | None = None,
+        remote_settings_path: str | None = None,
+        managed_enterprise: bool = False,
     ):
         return validate_windows_hook_registration(
             connector=connector,
@@ -206,6 +246,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
             pathext=pathext,
             claude_managed_settings_paths=managed_settings_paths,
             inspect_effective_policy=inspect_effective_policy,
+            workspace_dir=workspace_dir,
+            claude_cli_settings=cli_settings,
+            claude_remote_settings_path=remote_settings_path,
+            managed_enterprise=managed_enterprise,
         )
 
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
@@ -222,6 +266,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
             with (
                 contextlib.redirect_stdout(output),
                 patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+                patch(
+                    "defenseclaw.doctor_hooks._windows_known_folder_path",
+                    return_value=str(self.root / "Trusted Program Files"),
+                ),
                 patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock,
             ):
                 _check_hook_contract_lock(
@@ -246,6 +294,26 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("entries=28", check.detail)
+
+    def test_native_stable_hook_runtime_is_accepted_for_codex_and_claude(self) -> None:
+        local_app_data = self.root / "Local AppData"
+        runtime = local_app_data / "DefenseClaw" / "HookRuntime" / "defenseclaw-hook.exe"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_bytes(b"MZfixture")
+
+        with (
+            patch(
+                "defenseclaw.doctor_hooks._windows_known_folder_path",
+                return_value=str(local_app_data),
+            ),
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+        ):
+            for connector in ("codex", "claudecode"):
+                with self.subTest(connector=connector):
+                    config = self._config(connector, f'"{runtime}" hook --connector {connector}')
+                    check = self._validate(connector, config)
+                    self.assertEqual(check.state, "healthy", check.detail)
+                    self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
 
     def test_healthy_claude_exec_form_with_path_spaces(self) -> None:
         runtime = self._runtime()
@@ -964,6 +1032,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(policy, {"allowManagedHooksOnly": True})
         fake_winreg.OpenKey.assert_called_once()
 
+        fake_winreg.QueryValueEx.return_value = ("   ", 3)
+        with (
+            patch.dict(sys.modules, {"winreg": fake_winreg}),
+            patch("defenseclaw.doctor_hooks.os.name", "nt"),
+        ):
+            policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
+        self.assertIsNone(policy)
+
     def test_claude_ignores_policy_helper_from_hkcu_user_settings(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
@@ -980,6 +1056,152 @@ class WindowsHookDoctorTests(unittest.TestCase):
             check = self._validate("claudecode", config, managed_settings_paths=None)
 
         self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_claude_workspace_and_cli_sources_follow_precedence(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        workspace = self.root / "workspace"
+        settings_dir = workspace / ".claude"
+        settings_dir.mkdir(parents=True)
+        project = settings_dir / "settings.json"
+        local = settings_dir / "settings.local.json"
+        project.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+
+        check = self._validate("claudecode", config, workspace_dir=str(workspace))
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn(str(project), check.detail)
+
+        local.write_text(json.dumps({"disableAllHooks": False}), encoding="utf-8")
+        check = self._validate("claudecode", config, workspace_dir=str(workspace))
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn(f"workspace={workspace}", check.detail)
+
+        check = self._validate(
+            "claudecode",
+            config,
+            workspace_dir=str(workspace),
+            cli_settings=json.dumps({"disableAllHooks": True}),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("CLI --settings", check.detail)
+
+    def test_claude_remote_source_replaces_lower_managed_tiers(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        managed = self.root / "managed-settings.json"
+        managed.write_text(json.dumps({"allowManagedHooksOnly": False}), encoding="utf-8")
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"allowManagedHooksOnly": True}), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+        self.assertIn(str(remote), check.detail)
+
+    def test_claude_policy_helper_only_blocks_when_its_file_tier_is_active(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        managed = self.root / "managed-settings.json"
+        managed.write_text(
+            json.dumps({"policyHelper": {"path": r"C:\Program Files\Policy\helper.exe"}}),
+            encoding="utf-8",
+        )
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"allowManagedHooksOnly": False}), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+
+        remote.write_text("{}", encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(managed),),
+            remote_settings_path=str(remote),
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("dynamic policyHelper", check.detail)
+        self.assertIn(str(managed), check.detail)
+
+    def test_claude_managed_enterprise_validates_the_winning_hook_matrix(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for groups in document["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    handler["args"].append("--enterprise-managed")
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("managed_source=explicit managed settings", check.detail)
+
+        remote = self.root / "remote-settings.json"
+        remote.write_text(json.dumps({"model": "remote-wins"}), encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            remote_settings_path=str(remote),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("remote/server-managed settings", check.detail)
+        self.assertIn("no hooks table", check.detail)
+
+        remote.write_text("{}", encoding="utf-8")
+        check = self._validate(
+            "claudecode",
+            config,
+            managed_settings_paths=(str(config),),
+            remote_settings_path=str(remote),
+            managed_enterprise=True,
+        )
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("managed_source=explicit managed settings", check.detail)
+
+    def test_claude_managed_enterprise_rejects_hkcu_hook_authority(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for groups in document["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    handler["args"].append("--enterprise-managed")
+
+        def registry_policy(hive_name: str):
+            return document if hive_name == "HKEY_CURRENT_USER" else None
+
+        with (
+            patch("defenseclaw.doctor_hooks._read_claude_registry_policy", side_effect=registry_policy),
+            patch("defenseclaw.doctor_hooks._default_claude_managed_settings_paths", return_value=()),
+        ):
+            check = self._validate(
+                "claudecode",
+                config,
+                managed_settings_paths=None,
+                managed_enterprise=True,
+            )
+
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("administrator-managed settings source", check.detail)
 
     def test_codex_requires_complete_trusted_event_matrix(self) -> None:
         runtime = self._runtime()
@@ -1184,7 +1406,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self._lock(connector, config)
                 result = _DoctorResult()
                 config_before = config.read_bytes()
-                with patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock:
+                with (
+                    patch(
+                        "defenseclaw.doctor_hooks._windows_known_folder_path",
+                        return_value=str(self.root / "Trusted Program Files"),
+                    ),
+                    patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock,
+                ):
                     check_hooks(
                         self.cfg,
                         result,

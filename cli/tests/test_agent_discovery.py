@@ -65,6 +65,13 @@ def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def isolate_configured_package_manager_roots(monkeypatch) -> None:
+    """Keep unit scans independent of npm/pnpm installed on the test host."""
+
+    monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+
+
 def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_path = tmp_path / "managed" / "config.yaml"
@@ -600,6 +607,334 @@ def test_windows_package_manager_prefixes_ignore_relative_environment_roots(
     )
 
     assert prefixes == ()
+
+
+def _stub_windows_manager_folders(monkeypatch, tmp_path: Path) -> ad._WindowsPackageManagerFolders:
+    folders = ad._WindowsPackageManagerFolders(
+        profile=str(tmp_path / "token-profile"),
+        local_app_data=str(tmp_path / "token-local"),
+        roaming_app_data=str(tmp_path / "token-roaming"),
+        program_files=str(tmp_path / "program-files"),
+        program_files_x86=str(tmp_path / "program-files-x86"),
+        system_directory=str(tmp_path / "windows" / "System32"),
+    )
+    for path in folders:
+        Path(path).mkdir(parents=True)
+    monkeypatch.setattr(ad, "_windows_package_manager_folders", lambda: folders)
+    return folders
+
+
+def test_windows_package_manager_probe_discovers_user_npmrc_prefix_without_ambient_environment(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    custom_prefix = tmp_path / "configured-only-in-npmrc"
+    custom_prefix.mkdir()
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    poisoned = tmp_path / "project-controlled"
+    for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+        monkeypatch.setenv(name, str(poisoned))
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(poisoned / "npm"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(poisoned / ".npmrc"))
+    monkeypatch.setenv("PNPM_HOME", str(poisoned / "pnpm"))
+    monkeypatch.setenv("NODE_OPTIONS", "--require=project-controlled.js")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_package_manager_path",
+        lambda manager, path: manager == "npm" and path == str(npm),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_validated_windows_configured_bin_prefix",
+        lambda path: path if ad._path_key(path) == ad._path_key(str(custom_prefix)) else "",
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["shell"] is False
+        assert kwargs["timeout"] == ad.PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is False
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["cwd"] == folders.profile
+        assert kwargs["close_fds"] is True
+        expected_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        assert kwargs["creationflags"] == expected_flags
+        environment = kwargs["env"]
+        assert environment["HOME"] == folders.profile
+        assert environment["USERPROFILE"] == folders.profile
+        assert environment["LOCALAPPDATA"] == folders.local_app_data
+        assert environment["APPDATA"] == folders.roaming_app_data
+        assert environment["NPM_CONFIG_USERCONFIG"] == str(Path(folders.profile) / ".npmrc")
+        assert "NPM_CONFIG_PREFIX" not in environment
+        assert "PNPM_HOME" not in environment
+        assert "NODE_OPTIONS" not in environment
+        return subprocess.CompletedProcess(command, 0, stdout=str(custom_prefix).encode(), stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    prefixes = ad._probe_windows_configured_package_manager_bin_prefixes()
+
+    assert prefixes == (str(custom_prefix),)
+    assert calls == [[str(npm), "config", "get", "prefix", "--location=user"]]
+
+
+def test_windows_package_manager_probe_discovers_pnpm_global_bin_dir(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    configured = tmp_path / "configured-pnpm-bin"
+    configured.mkdir()
+    pnpm = Path(folders.local_app_data) / "pnpm" / "pnpm.cmd"
+    pnpm.parent.mkdir(parents=True, exist_ok=True)
+    pnpm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(pnpm),) if manager == "pnpm" else (),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_package_manager_path",
+        lambda manager, path: manager == "pnpm" and path == str(pnpm),
+    )
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=str(configured).encode(), stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(configured),)
+    assert calls == [[str(pnpm), "config", "get", "global-bin-dir", "--location=user"]]
+
+
+def test_windows_devtools_node_is_a_narrow_package_manager_bootstrap_root(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    candidates = ad._windows_package_manager_executable_candidates("npm")
+
+    assert str(npm) in candidates
+    roots = ad._windows_package_manager_static_roots("npm", folders)
+    assert str(npm.parent) in roots
+    assert folders.local_app_data not in roots
+
+
+def test_windows_package_manager_probe_never_executes_untrusted_path(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    planted = tmp_path / "path-plant" / "npm.cmd"
+    planted.parent.mkdir()
+    planted.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(planted),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: False)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("untrusted manager executed")),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b"relative-prefix\n",
+        b"undefined\n",
+        b"C:\\first\nC:\\second\n",
+        b"\x00C:\\invalid\n",
+    ],
+)
+def test_windows_package_manager_probe_rejects_ambiguous_or_relative_output(
+    monkeypatch,
+    tmp_path,
+    stdout,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = tmp_path / "trusted-node" / "npm.cmd"
+    npm.parent.mkdir()
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b""),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+def test_windows_package_manager_probe_timeout_is_best_effort(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = tmp_path / "trusted-node" / "npm.cmd"
+    npm.parent.mkdir()
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda command, **_kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(command, ad.PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS)
+        ),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+def test_windows_package_manager_probe_keeps_npm_prefix_when_pnpm_fails(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm_prefix = tmp_path / "configured-npm"
+    npm_prefix.mkdir()
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    pnpm = tmp_path / "trusted-pnpm" / "pnpm.cmd"
+    pnpm.parent.mkdir()
+    pnpm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: {"npm": (str(npm),), "pnpm": (str(pnpm),)}[manager],
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+
+    def run(command, **_kwargs):
+        if command[0] == str(npm):
+            return subprocess.CompletedProcess(command, 0, stdout=str(npm_prefix).encode(), stderr=b"")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=b"",
+            stderr=b"global bin directory is not on PATH",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(npm_prefix),)
+
+
+def test_windows_manager_probe_cache_signature_ignores_ambient_profile_poisoning(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    monkeypatch.setattr(ad, "_windows_package_manager_executable_candidates", lambda _manager: ())
+    monkeypatch.setenv("HOME", str(tmp_path / "poison-one"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(tmp_path / "poison-one" / ".npmrc"))
+    first = ad._windows_manager_probe_signature()
+
+    monkeypatch.setenv("HOME", str(tmp_path / "poison-two"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(tmp_path / "poison-two" / ".npmrc"))
+
+    assert ad._windows_manager_probe_signature() == first
+
+
+def test_windows_configured_binary_requires_containment_extension_and_safe_chain(
+    monkeypatch,
+    tmp_path,
+):
+    prefix = tmp_path / "configured-bin"
+    prefix.mkdir()
+    binary = prefix / "codex.cmd"
+    binary.write_text("@echo off\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "codex.cmd"
+    outside.parent.mkdir()
+    outside.write_text("@echo off\n", encoding="utf-8")
+    text_file = prefix / "codex.txt"
+    text_file.write_text("not executable\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda _path: str(prefix))
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: True)
+    monkeypatch.setattr(ad, "_windows_acl_chain_is_safe", lambda *_args: True)
+
+    assert ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+    assert not ad._trusted_windows_configured_binary_path(str(outside), str(prefix))
+    assert not ad._trusted_windows_configured_binary_path(str(text_file), str(prefix))
+
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: False)
+    assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: True)
+    monkeypatch.setattr(ad, "_windows_acl_chain_is_safe", lambda *_args: False)
+    assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+
+
+def test_windows_configured_manager_prefix_is_candidate_and_trusted_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    configured = tmp_path / "custom-npm-prefix"
+    configured.mkdir()
+    wrapper = configured / "codex.cmd"
+    wrapper.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ad,
+        "_windows_configured_package_manager_bin_prefixes",
+        lambda: (str(configured),),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_configured_binary_path",
+        lambda path, prefix: (
+            ad._path_key(path) == ad._path_key(str(wrapper)) and ad._path_key(prefix) == ad._path_key(str(configured))
+        ),
+    )
+
+    candidates = {ad._path_key(path) for path in ad._windows_binary_candidates("codex", "codex")}
+    trusted = {ad._path_key(path) for path in ad._trusted_bin_prefixes()}
+
+    assert ad._path_key(str(wrapper)) in candidates
+    assert ad._path_key(str(configured)) in trusted
 
 
 def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):

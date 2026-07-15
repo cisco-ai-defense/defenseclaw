@@ -168,22 +168,71 @@ class _WindowsGUID(ctypes.Structure):
 
 
 def _windows_known_folder_path(folder_id: str) -> str:
-    """Resolve a Known Folder without trusting spoofable environment values."""
+    """Resolve a Known Folder for the explicit current-process token.
+
+    Passing a null token to ``SHGetKnownFolderPath`` can consult process-level
+    profile overrides.  Connector test and agent processes legitimately set
+    ``USERPROFILE`` and ``LOCALAPPDATA``, so bind the lookup to the same token
+    that native Setup uses instead of letting those values move the trust
+    boundary.
+    """
     if os.name != "nt" or not hasattr(ctypes, "windll"):
         return ""
     raw = uuid.UUID(folder_id).bytes_le
     guid = _WindowsGUID.from_buffer_copy(raw)
-    result = ctypes.c_wchar_p()
+    result = ctypes.c_void_p()
+    token = ctypes.c_void_p()
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
     shell32 = ctypes.windll.shell32
     ole32 = ctypes.windll.ole32
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    advapi32.OpenProcessToken.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.OpenProcessToken.restype = ctypes.c_int
+    shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(_WindowsGUID),
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+
+    # TOKEN_QUERY | TOKEN_IMPERSONATE, as required when a non-null token is
+    # supplied to SHGetKnownFolderPath.
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        0x0008 | 0x0004,
+        ctypes.byref(token),
+    ):
+        return ""
     try:
-        status = int(shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(result)))
-        if status != 0 or not result.value:
-            return ""
-        return os.path.abspath(result.value)
+        try:
+            status = int(
+                shell32.SHGetKnownFolderPath(
+                    ctypes.byref(guid),
+                    0,
+                    token,
+                    ctypes.byref(result),
+                )
+            )
+            if status != 0 or not result.value:
+                return ""
+            return os.path.abspath(ctypes.wstring_at(result.value))
+        finally:
+            if result.value:
+                ole32.CoTaskMemFree(result)
     finally:
-        if result:
-            ole32.CoTaskMemFree(result)
+        kernel32.CloseHandle(token)
 
 
 def _codex_system_requirements_path() -> str:
@@ -532,6 +581,22 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
     if identity_before != identity_after or is_link_or_reparse(path):
         raise _InspectionError("stale", f"registered hook target changed during inspection: {path}")
     return body
+
+
+def _windows_hook_runtime_root(path: str) -> str | None:
+    """Return the exact installer-managed stable hook root for ``path``."""
+    # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
+    local_app_data = _windows_known_folder_path("f1b32785-6fba-4fcf-9d55-7b8e7f157091")
+    if not local_app_data:
+        return None
+    root = os.path.abspath(os.path.join(local_app_data, "DefenseClaw", "HookRuntime"))
+    expected = os.path.join(root, "defenseclaw-hook.exe")
+    try:
+        if os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(expected)):
+            return None
+    except (OSError, ValueError):
+        return None
+    return root
 
 
 def _packaged_windows_install_root(
@@ -983,7 +1048,13 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> st
 
 def _default_claude_managed_settings_paths() -> tuple[str, ...]:
     """Return locally inspectable Windows file-policy sources in merge order."""
-    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    # FOLDERID_ProgramFiles = {905E63B6-C1BF-494E-B29C-65B732D3D21A}
+    program_files = _windows_known_folder_path("905e63b6-c1bf-494e-b29c-65b732d3d21a")
+    if not program_files:
+        raise _InspectionError(
+            "policy-blocked",
+            "cannot resolve the trusted Windows Program Files Known Folder for Claude Code managed policy",
+        )
     root = os.path.join(program_files, "ClaudeCode")
     paths = [os.path.join(root, "managed-settings.json")]
     dropins = os.path.join(root, "managed-settings.d")
@@ -1000,6 +1071,17 @@ def _default_claude_managed_settings_paths() -> tuple[str, ...]:
         raise _InspectionError("policy-blocked", f"cannot inspect Claude Code managed policy directory: {exc}") from exc
     paths.extend(os.path.join(dropins, name) for name in names)
     return tuple(paths)
+
+
+@dataclass(frozen=True)
+class _ClaudeSettingsSource:
+    name: str
+    path: str
+    settings: dict[str, Any]
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.path})" if self.path else self.name
 
 
 def _read_optional_claude_policy(path: str) -> dict[str, Any] | None:
@@ -1060,6 +1142,8 @@ def _read_claude_registry_policy(hive_name: str) -> dict[str, Any] | None:
         ) from exc
     if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ} or not isinstance(raw, str):
         raise _InspectionError("policy-blocked", f"Claude Code {hive_name} Settings policy has an invalid type")
+    if not raw.strip():
+        return None
     try:
         document = json.loads(raw)
     except ValueError as exc:
@@ -1071,88 +1155,254 @@ def _read_claude_registry_policy(hive_name: str) -> dict[str, Any] | None:
     return document
 
 
-def _merge_claude_file_policies(paths: tuple[str, ...]) -> dict[str, Any]:
+def _merge_claude_file_policies(paths: tuple[str, ...]) -> tuple[dict[str, Any], tuple[str, ...]]:
     """Merge Claude file-policy tiers in their documented precedence order."""
     managed: dict[str, Any] = {}
+    loaded: list[str] = []
     for path in paths:
         policy = _read_optional_claude_policy(path)
         if policy is None:
             continue
-        # Base policy is read first; sorted drop-ins override scalars and
-        # extend arrays, matching Claude Code's file-policy merge order.
-        for key, value in policy.items():
-            if isinstance(value, list) and isinstance(managed.get(key), list):
-                combined = list(managed[key])
-                combined.extend(item for item in value if item not in combined)
-                managed[key] = combined
-            else:
-                managed[key] = value
-    return managed
+        # Base policy is read first; sorted drop-ins override scalars, extend
+        # arrays, and deep-merge objects, matching Claude Code's file tier.
+        managed = _merge_claude_settings(managed, policy)
+        loaded.append(path)
+    return managed, tuple(loaded)
 
 
-def _validate_claude_policy(document: dict[str, Any], managed_settings_paths: tuple[str, ...] | None) -> None:
-    """Reject local policy states that prevent user-scoped Claude hooks."""
+def _merge_claude_settings(lower: dict[str, Any], higher: dict[str, Any]) -> dict[str, Any]:
+    result = dict(lower)
+    for key, value in higher.items():
+        existing = result.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            result[key] = _merge_claude_settings(existing, value)
+        elif isinstance(value, list) and isinstance(existing, list):
+            combined = list(existing)
+            combined.extend(item for item in value if item not in combined)
+            result[key] = combined
+        elif isinstance(value, dict):
+            result[key] = _merge_claude_settings({}, value)
+        elif isinstance(value, list):
+            result[key] = list(value)
+        else:
+            result[key] = value
+    return result
+
+
+def _default_claude_remote_settings_path(config_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "remote-settings.json")
+
+
+def _read_claude_cli_settings(raw: str, workspace_dir: str) -> _ClaudeSettingsSource:
+    value = raw.strip()
+    if value.startswith("{"):
+        try:
+            document = json.loads(value)
+        except ValueError as exc:
+            raise _InspectionError(
+                "policy-blocked", f"cannot parse Claude Code CLI --settings inline JSON: {exc}"
+            ) from exc
+        if not isinstance(document, dict):
+            raise _InspectionError("policy-blocked", "Claude Code CLI --settings inline JSON is not an object")
+        return _ClaudeSettingsSource("CLI --settings", "inline JSON", document)
+    path = os.path.expanduser(os.path.expandvars(value))
+    if not os.path.isabs(path):
+        path = os.path.join(workspace_dir or os.getcwd(), path)
+    path = os.path.abspath(path)
+    document = _read_optional_claude_policy(path)
+    if document is None:
+        raise _InspectionError("policy-blocked", f"Claude Code CLI --settings file is missing: {path}")
+    return _ClaudeSettingsSource("CLI --settings", path, document)
+
+
+def _claude_managed_sources(
+    config_path: str,
+    managed_settings_paths: tuple[str, ...] | None,
+    remote_settings_path: str | None,
+) -> tuple[
+    _ClaudeSettingsSource | None,
+    _ClaudeSettingsSource | None,
+    _ClaudeSettingsSource | None,
+    _ClaudeSettingsSource | None,
+]:
+    # An explicit managed path list is the deterministic test/embedding seam;
+    # it excludes host registry and remote state unless a remote path is also
+    # supplied explicitly.
     if managed_settings_paths is None:
-        # Claude chooses the highest available local managed tier rather than
-        # merging tiers: HKLM, then system files, then HKCU.
-        managed = _read_claude_registry_policy("HKEY_LOCAL_MACHINE") or {}
-        policy_source = "machine registry"
-        if not managed:
-            managed = _merge_claude_file_policies(_default_claude_managed_settings_paths())
-            policy_source = "system managed settings"
-        if not managed:
-            managed = _read_claude_registry_policy("HKEY_CURRENT_USER") or {}
-            policy_source = "user registry"
-    else:
-        # An explicit list is a deterministic test/embedding seam and excludes
-        # host registry state.
-        managed = _merge_claude_file_policies(managed_settings_paths)
-        policy_source = "explicit managed settings"
+        remote_path = remote_settings_path or _default_claude_remote_settings_path(config_path)
+        remote_doc = _read_optional_claude_policy(remote_path)
+        remote = (
+            _ClaudeSettingsSource("remote/server-managed settings", remote_path, remote_doc)
+            if remote_doc
+            else None
+        )
+        hklm_doc = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
+        hklm = (
+            _ClaudeSettingsSource(
+                "MDM/OS managed settings",
+                r"HKLM\SOFTWARE\Policies\ClaudeCode\Settings",
+                hklm_doc,
+            )
+            if hklm_doc
+            else None
+        )
+        file_paths = _default_claude_managed_settings_paths()
+        file_doc, loaded_file_paths = _merge_claude_file_policies(file_paths)
+        file_source = (
+            _ClaudeSettingsSource("file-based managed settings", ", ".join(loaded_file_paths), file_doc)
+            if file_doc
+            else None
+        )
+        hkcu_doc = _read_claude_registry_policy("HKEY_CURRENT_USER")
+        hkcu = (
+            _ClaudeSettingsSource(
+                "HKCU managed settings fallback",
+                r"HKCU\SOFTWARE\Policies\ClaudeCode\Settings",
+                hkcu_doc,
+            )
+            if hkcu_doc
+            else None
+        )
+        return remote, hklm, file_source, hkcu
 
-    # Claude only honors policyHelper from machine-managed policy. A value in
-    # HKCU is ordinary user input and is explicitly ignored by Claude itself.
-    if "policyHelper" in managed and policy_source != "user registry":
-        raise _InspectionError(
-            "policy-blocked",
-            "Claude Code uses a dynamic policyHelper, so passive Doctor inspection cannot prove user hooks are active",
+    remote = None
+    if remote_settings_path:
+        remote_doc = _read_optional_claude_policy(remote_settings_path)
+        remote = (
+            _ClaudeSettingsSource("remote/server-managed settings", remote_settings_path, remote_doc)
+            if remote_doc
+            else None
         )
+    file_doc, loaded_file_paths = _merge_claude_file_policies(managed_settings_paths)
+    file_source = (
+        _ClaudeSettingsSource("explicit managed settings", ", ".join(loaded_file_paths), file_doc)
+        if file_doc
+        else None
+    )
+    return remote, None, file_source, None
 
-    managed_disable = managed.get("disableAllHooks")
-    if managed_disable is not None and not isinstance(managed_disable, bool):
-        raise _InspectionError("policy-blocked", "Claude Code managed disableAllHooks policy is malformed")
-    user_disable = document.get("disableAllHooks")
-    if user_disable is not None and not isinstance(user_disable, bool):
-        raise _InspectionError("policy-blocked", "Claude Code user disableAllHooks setting is malformed")
-    if managed_disable is True or user_disable is True:
-        source = "managed policy" if managed_disable is True else "user settings"
-        raise _InspectionError("policy-blocked", f"Claude Code {source} sets disableAllHooks=true")
-    if managed.get("allowManagedHooksOnly") is True:
-        raise _InspectionError(
-            "policy-blocked",
-            "Claude Code managed policy sets allowManagedHooksOnly=true, so the user-scoped "
-            "DefenseClaw hooks are ignored",
-        )
-    if "allowManagedHooksOnly" in managed and not isinstance(managed["allowManagedHooksOnly"], bool):
-        raise _InspectionError("policy-blocked", "Claude Code managed allowManagedHooksOnly policy is malformed")
-    strict = managed.get("strictPluginOnlyCustomization")
-    if strict is True or (isinstance(strict, list) and "hooks" in strict):
-        raise _InspectionError(
-            "policy-blocked",
-            "Claude Code managed policy restricts hooks to plugins or managed settings, so the "
-            "user-scoped DefenseClaw hooks are ignored",
-        )
+
+def _validate_claude_managed_controls(source: _ClaudeSettingsSource | None, managed_hook: bool) -> None:
+    if source is None:
+        return
+    settings = source.settings
+    if "disableAllHooks" in settings and type(settings["disableAllHooks"]) is not bool:
+        raise _InspectionError("policy-blocked", f"Claude Code disableAllHooks from {source.label} is malformed")
+    if settings.get("disableAllHooks") is True:
+        raise _InspectionError("policy-blocked", f"Claude Code {source.label} sets disableAllHooks=true")
+    if "allowManagedHooksOnly" in settings and type(settings["allowManagedHooksOnly"]) is not bool:
+        raise _InspectionError("policy-blocked", f"Claude Code allowManagedHooksOnly from {source.label} is malformed")
+    strict = settings.get("strictPluginOnlyCustomization")
     if strict is not None and not (
-        isinstance(strict, bool) or (isinstance(strict, list) and all(isinstance(item, str) for item in strict))
+        type(strict) is bool or (isinstance(strict, list) and all(isinstance(item, str) for item in strict))
     ):
         raise _InspectionError(
-            "policy-blocked", "Claude Code managed strictPluginOnlyCustomization policy is malformed"
+            "policy-blocked", f"Claude Code strictPluginOnlyCustomization from {source.label} is malformed"
         )
+    if not managed_hook and settings.get("allowManagedHooksOnly") is True:
+        raise _InspectionError(
+            "policy-blocked",
+            f"Claude Code {source.label} sets allowManagedHooksOnly=true, "
+            "so the user-scoped DefenseClaw hooks are ignored",
+        )
+    if not managed_hook and (strict is True or (isinstance(strict, list) and "hooks" in strict)):
+        raise _InspectionError(
+            "policy-blocked",
+            f"Claude Code {source.label} restricts hooks to plugins or managed settings, "
+            "so the user-scoped DefenseClaw hooks are ignored",
+        )
+
+
+def _resolve_claude_effective_document(
+    document: dict[str, Any],
+    *,
+    config_path: str,
+    managed_settings_paths: tuple[str, ...] | None,
+    workspace_dir: str,
+    cli_settings: str | None,
+    remote_settings_path: str | None,
+    managed_enterprise: bool,
+) -> tuple[dict[str, Any], str]:
+    remote, os_managed, file_managed, hkcu = _claude_managed_sources(
+        config_path, managed_settings_paths, remote_settings_path
+    )
+
+    active_managed = next(
+        (source for source in (remote, os_managed, file_managed, hkcu) if source is not None and source.settings),
+        None,
+    )
+    # policyHelper is honored only when its administrator-controlled MDM/file
+    # source is the active managed tier. A non-empty remote source supersedes
+    # both, and OS policy supersedes a helper in the lower file tier.
+    if (
+        active_managed is not None
+        and (active_managed is os_managed or active_managed is file_managed)
+        and active_managed.settings.get("policyHelper") is not None
+    ):
+        raise _InspectionError(
+            "policy-blocked",
+            f"Claude Code uses a dynamic policyHelper from {active_managed.label} that cannot be passively verified; "
+            "include the DefenseClaw managed hook matrix in the helper output",
+        )
+    if managed_enterprise:
+        authoritative_managed = (remote, os_managed, file_managed)
+        if not any(active_managed is source for source in authoritative_managed if source is not None):
+            raise _InspectionError(
+                "policy-blocked",
+                "Claude Code has no active administrator-managed settings source "
+                "containing the DefenseClaw hook matrix",
+            )
+        _validate_claude_managed_controls(active_managed, True)
+        hooks = active_managed.settings.get("hooks")
+        if not isinstance(hooks, dict):
+            raise _InspectionError(
+                "policy-blocked",
+                f"Claude Code {active_managed.label} has no hooks table containing the DefenseClaw contract",
+            )
+        return active_managed.settings, f"managed_source={active_managed.label}"
+
+    _validate_claude_managed_controls(active_managed, False)
+    sources: list[_ClaudeSettingsSource] = []
+    if cli_settings and cli_settings.strip():
+        sources.append(_read_claude_cli_settings(cli_settings, workspace_dir))
+    if workspace_dir:
+        workspace = os.path.abspath(os.path.expanduser(workspace_dir))
+        local_path = os.path.join(workspace, ".claude", "settings.local.json")
+        project_path = os.path.join(workspace, ".claude", "settings.json")
+        for name, path in (("local project settings", local_path), ("project settings", project_path)):
+            settings = _read_optional_claude_policy(path)
+            if settings is not None:
+                sources.append(_ClaudeSettingsSource(name, path, settings))
+    sources.append(_ClaudeSettingsSource("user settings", config_path, document))
+
+    for source in sources:
+        if "hooks" in source.settings and not isinstance(source.settings["hooks"], dict):
+            raise _InspectionError("policy-blocked", f"Claude Code hooks from {source.label} are malformed")
+        if "disableAllHooks" not in source.settings:
+            continue
+        disabled = source.settings["disableAllHooks"]
+        if type(disabled) is not bool:
+            raise _InspectionError("policy-blocked", f"Claude Code disableAllHooks from {source.label} is malformed")
+        if disabled:
+            raise _InspectionError(
+                "policy-blocked",
+                f"Claude Code {source.name} sets disableAllHooks=true (source: {source.path}), "
+                "so the user-scoped DefenseClaw hooks are inactive",
+            )
+        break
+
+    managed_detail = active_managed.label if active_managed else "none observed"
+    workspace_detail = (
+        os.path.abspath(workspace_dir) if workspace_dir else "not pinned (project/local scopes not selected)"
+    )
+    cli_detail = "supplied" if cli_settings and cli_settings.strip() else "not supplied for this inspection"
+    return document, f"managed_source={managed_detail}; workspace={workspace_detail}; cli_settings={cli_detail}"
 
 
 def _managed_hook_command(command: str, connector: str) -> bool:
     """Report whether a command is a current or recognized legacy launcher."""
     try:
-        target, _args, _kind = _command_target(command, connector)
+        target, _args, _kind = _command_target(command, connector, allow_enterprise_managed=True)
     except _InspectionError:
         target = _malformed_owned_hook_target(command, connector)
         if not target:
@@ -1417,8 +1667,7 @@ def _commands_from_hooks(
     claude_managed_settings_paths: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Extract managed commands after validating connector-specific policy."""
-    if connector == "claudecode":
-        _validate_claude_policy(document, claude_managed_settings_paths)
+    _ = claude_managed_settings_paths  # retained for call-site compatibility
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "hook registration has no hooks table")
@@ -1503,7 +1752,7 @@ def _handler_targets_defenseclaw(handler: Any, connector: str) -> bool:
             if isinstance(args, list) and all(isinstance(arg, str) for arg in args):
                 command = subprocess.list2cmdline([command, *args])
         try:
-            target, _args, _kind = _command_target(command, connector)
+            target, _args, _kind = _command_target(command, connector, allow_enterprise_managed=True)
         except _InspectionError:
             continue
         if ntpath.basename(target).casefold() in {
@@ -1663,7 +1912,7 @@ def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> i
     return count
 
 
-def _validate_claude_hook_matrix(document: dict[str, Any]) -> int:
+def _validate_claude_hook_matrix(document: dict[str, Any], *, managed_enterprise: bool = False) -> int:
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "Claude Code hook registration has no hooks table")
@@ -1723,7 +1972,7 @@ def _validate_claude_hook_matrix(document: dict[str, Any]) -> int:
                     f"Claude Code event {event} {label} has a narrowing if condition",
                 )
         command = _handler_command_line(handler, "claudecode", windows=True)
-        target, _args, _kind = _command_target(command, "claudecode")
+        target, _args, _kind = _command_target(command, "claudecode", allow_enterprise_managed=managed_enterprise)
         if ntpath.basename(target).casefold() not in {
             "defenseclaw-hook",
             "defenseclaw-hook.exe",
@@ -1754,7 +2003,9 @@ def _split_windows(command: str) -> list[str]:
     return normalized
 
 
-def _command_target(command: str, connector: str) -> tuple[str, list[str], str]:
+def _command_target(
+    command: str, connector: str, *, allow_enterprise_managed: bool = False
+) -> tuple[str, list[str], str]:
     value = command.strip()
     prefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
     if value.casefold().startswith("set "):
@@ -1813,7 +2064,11 @@ def _command_target(command: str, connector: str) -> tuple[str, list[str], str]:
         target = parts[0]
         args = parts[1:]
         kind = "powershell" if call_operator and ntpath.splitext(target)[1].casefold() == ".ps1" else "direct"
-    if args != ["hook", "--connector", connector]:
+    expected = ["hook", "--connector", connector]
+    enterprise_expected = [*expected, "--enterprise-managed"]
+    if args != expected and not (
+        connector == "claudecode" and allow_enterprise_managed and args == enterprise_expected
+    ):
         if len(args) == 3 and args[:2] == ["hook", "--connector"]:
             raise _InspectionError(
                 "foreign",
@@ -1893,6 +2148,10 @@ def validate_windows_hook_registration(
     pathext: str,
     claude_managed_settings_paths: tuple[str, ...] | None = None,
     inspect_effective_policy: bool = True,
+    workspace_dir: str = "",
+    claude_cli_settings: str | None = None,
+    claude_remote_settings_path: str | None = None,
+    managed_enterprise: bool = False,
 ) -> WindowsHookCheck:
     """Return a classified Windows registration and effective-policy result.
 
@@ -1908,19 +2167,33 @@ def validate_windows_hook_registration(
     raw_target = ""
     try:
         document = _read_config(config_path, connector)
+        policy_detail = ""
+        if connector == "claudecode":
+            document, policy_detail = _resolve_claude_effective_document(
+                document,
+                config_path=config_path,
+                managed_settings_paths=claude_managed_settings_paths,
+                workspace_dir=workspace_dir,
+                cli_settings=claude_cli_settings,
+                remote_settings_path=claude_remote_settings_path,
+                managed_enterprise=managed_enterprise,
+            )
         commands = _commands_from_hooks(
             document,
             connector,
             claude_managed_settings_paths=claude_managed_settings_paths,
         )
         command = commands[0]
-        policy_detail = ""
         if connector == "codex":
             if inspect_effective_policy:
                 policy_detail = _validate_codex_effective_hook_policy(data_dir, config_path)
         else:
-            matrix_entries = _validate_claude_hook_matrix(document)
-        raw_target, _args, kind = _command_target(command, connector)
+            matrix_entries = _validate_claude_hook_matrix(document, managed_enterprise=managed_enterprise)
+        raw_target, _args, kind = _command_target(
+            command,
+            connector,
+            allow_enterprise_managed=managed_enterprise,
+        )
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
         if not resolved:
             raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
@@ -1949,7 +2222,11 @@ def validate_windows_hook_registration(
                 )
             runtime = "PowerShell"
         elif basename == "defenseclaw-hook.exe":
-            header = _stable_regular_file(resolved, install_root, read_limit=2)
+            # Native Setup publishes the stable launcher outside the replaceable
+            # install tree. Trust only its exact Known Folder-derived location;
+            # legacy install-tree launchers retain the normal containment check.
+            runtime_root = _windows_hook_runtime_root(resolved) or install_root
+            header = _stable_regular_file(resolved, runtime_root, read_limit=2)
             if header != b"MZ":
                 raise _InspectionError("foreign", f"registered hook executable is not a Windows PE file: {resolved}")
             runtime = "executable"
