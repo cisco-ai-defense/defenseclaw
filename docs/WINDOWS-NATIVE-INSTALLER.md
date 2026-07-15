@@ -286,8 +286,23 @@ Those installations must be serviced by the enterprise deployment channel.
 The release workflow builds setup on `windows-latest`, requires real signing
 credentials, runs the full native install/repair/connector/uninstall acceptance
 suite against that exact signed EXE (including installed-publisher validation),
-emits SHA-256, merged SPDX SBOM, and provenance outputs, and adds the signed EXE
-to the final checksum manifest before the immutable release is created.
+uploads the staging bundle, and passes its immutable artifact ID and SHA-256
+digest to a separate non-advisory real-client job. That job downloads the exact
+bundle by ID, verifies the Cisco signature plus installer sidecar/provenance
+digests, requires provenance and installed payload state to match the exact
+workflow `GITHUB_SHA`, and installs that same EXE. The gate installs
+exact official Codex CLI `0.144.3` and Claude Code `2.1.208` packages, requires
+both provider credentials, verifies automatic Codex hook trust without a manual
+`/hooks` approval, and requires lifecycle, tool allow/block, gateway JSONL,
+SQLite audit correlation, and connector-tagged OTLP evidence from both clients.
+It then runs repair and same-version upgrade with the same signed Setup bytes and
+requires uninstall itself to remove both connectors, user data, Installed Apps,
+and the user PATH entry while preserving a seeded unrelated `~/.codex/hooks.json`
+handler byte-for-byte. Missing secrets, either skipped connector, an unsigned
+or non-Cisco executable, a client-version mismatch, or missing evidence fails the
+release before publication. The workflow emits SHA-256, merged SPDX SBOM,
+provenance, and `DefenseClawSetup-x64.exe.certification.json`, then adds every
+artifact to the final checksum manifest before the immutable release is created.
 macOS and Linux artifacts continue through their existing build path.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the

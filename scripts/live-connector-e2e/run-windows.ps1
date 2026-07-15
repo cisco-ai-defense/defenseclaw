@@ -11,9 +11,12 @@ param(
     [string]$NativeDataRoot = '',
     [string]$ResultsPath = '',
     [string]$ArtifactPath = '',
+    [string]$AgentPath = '',
+    [string]$ExpectedAgentVersion = '',
     [ValidateRange(1, 1800)][int]$CommandTimeoutSeconds = 180,
     [ValidateSet('run', 'capture', 'cleanup')][string]$Operation = 'run',
     [switch]$AllowNativeDataRoot,
+    [switch]$ReleaseCertification,
     [switch]$NoRun
 )
 
@@ -966,6 +969,30 @@ function Assert-NativeEnterpriseHooksRequireElevation {
 }
 
 function Install-Agent {
+    if ($ReleaseCertification) {
+        if ([string]::IsNullOrWhiteSpace($AgentPath) -or
+            [string]::IsNullOrWhiteSpace($ExpectedAgentVersion)) {
+            throw 'release certification requires an explicit preinstalled agent path and exact version'
+        }
+        if ($ExpectedAgentVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "release certification requires an exact numeric client version, got: $ExpectedAgentVersion"
+        }
+        $script:AgentPath = (Resolve-Path -LiteralPath $AgentPath -ErrorAction Stop).Path
+        $statePrefix = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+        if (-not $script:AgentPath.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "release client must be installed below the disposable certification state root: $script:AgentPath"
+        }
+        $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') `
+            -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
+        $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
+        $escapedVersion = [regex]::Escape($ExpectedAgentVersion)
+        if ($script:AgentVersion -notmatch "(?<![0-9.])$escapedVersion(?![0-9.])") {
+            throw "$Connector client version output '$($script:AgentVersion)' does not prove exact pin $ExpectedAgentVersion"
+        }
+        Write-Result install pass "exact=$ExpectedAgentVersion output=$($script:AgentVersion)"
+        return
+    }
+
     [IO.Directory]::CreateDirectory($script:ToolRoot) | Out-Null
     $package = if ($Connector -eq 'codex') { '@openai/codex@' + ($env:CODEX_VERSION ?? 'latest') } else { '@anthropic-ai/claude-code@' + ($env:CLAUDE_VERSION ?? 'latest') }
     Invoke-Tool 'npm.cmd' @('install', '--no-audit', '--no-fund', '--prefix', $script:ToolRoot, $package) -Timeout 300 | Out-Null
@@ -1338,8 +1365,11 @@ function Invoke-ContractRun {
 function Invoke-LiveRun {
     Install-Agent
     Initialize-DefenseClawEnv
-    Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    if (-not $ReleaseCertification) {
+        Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    }
     Invoke-Setup action
+    Assert-DoctorWindowsHookRegistration
     if ($Connector -eq 'codex') {
         # Real official package probes belong to the manual release/live-client
         # certification layer. The mandatory deterministic contract stays
@@ -1348,6 +1378,9 @@ function Invoke-LiveRun {
         Assert-CodexPinnedTrustMatrix
         $codexJavaScript = Join-Path $script:ToolRoot 'node_modules\@openai\codex\bin\codex.js'
         Assert-CodexHooksListTrusted $codexJavaScript $script:AgentVersion
+        if ($ReleaseCertification) {
+            Write-Result codex:auto-trust pass 'hooks/list verified every setup-created handler enabled and trusted without manual approval'
+        }
     }
     $start = @(Get-EventLines $script:GatewayJsonl).Count
     Invoke-Agent lifecycle 'Reply with only the word ready. Do not use tools.' | Out-Null
@@ -1517,9 +1550,24 @@ if (-not $NoRun) {
     $StateRoot = [IO.Path]::GetFullPath($StateRoot)
     if ($StateRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw 'StateRoot must not be the real user profile' }
     $useHomeDataRoot = -not [string]::IsNullOrWhiteSpace($HomeRoot)
-    $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
-    if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'HomeRoot must be contained by StateRoot'
+    if ($ReleaseCertification) {
+        if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+            throw 'release certification may mutate only a disposable GitHub-hosted Windows runner user'
+        }
+        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'release certification requires RUNNER_TEMP'
+        }
+        $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+        if (-not $StateRoot.StartsWith($runnerTemp + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'release certification StateRoot must be below RUNNER_TEMP'
+        }
+        $HomeRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        $useHomeDataRoot = $true
+    } else {
+        $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
+        if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'HomeRoot must be contained by StateRoot'
+        }
     }
     Protect-TestDirectory $StateRoot
     $script:ResultsPath = if ($ResultsPath) { [IO.Path]::GetFullPath($ResultsPath) } else { Join-Path $StateRoot 'results.jsonl' }
@@ -1546,7 +1594,7 @@ if (-not $NoRun) {
     } else {
         Join-Path $StateRoot 'defenseclaw'
     }
-    Protect-TestDirectory $env:USERPROFILE
+    if (-not $ReleaseCertification) { Protect-TestDirectory $env:USERPROFILE }
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }

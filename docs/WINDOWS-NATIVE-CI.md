@@ -39,10 +39,18 @@ connector jobs. Failure diagnostics are bounded, secret-redacted, retained for
 five days, and followed by an unconditional isolated-process/listener/temp
 cleanup step.
 
-Real upstream Codex and Claude Code tests stay in `Connector Live E2E`. Those
-jobs require provider credentials and remain `workflow_dispatch`-only; they are
-an alerting/regression radar and must not be configured as a pull-request merge
-gate, especially for fork pull requests.
+The pull-request gate remains secretless. Manual real-client cells in
+`Connector Live E2E` are an alerting/regression radar and are not a fork-PR
+merge gate. Production publication has a separate required Windows release
+cell: it installs the exact Authenticode-signed Setup artifact, installs exact
+official Codex and Claude Code versions, fails closed when either provider
+credential is unavailable, and requires both connectors' live allow/block,
+automatic-trust, audit, and OTLP evidence. `publish` depends on that cell, and
+the resulting `DefenseClawSetup-x64.exe.certification.json` is included in the
+signed release checksum set. Its bounded three-hour job budget leaves time for
+cleanup and failure-diagnostics upload after every bounded child operation. The
+certification cell never builds or installs
+DefenseClaw from the source checkout.
 
 GitHub-hosted Windows runners do not provide the certified Docker Desktop
 Linux-container/Hyper-V runtime. The deterministic merge gate mocks that
