@@ -38,6 +38,7 @@ const (
 	dmSetDefID        = wmUser + 1
 	dcHasDefID        = 0x534B
 	wmDone            = wmApp + 1
+	wmTerminalDone    = wmApp + 2
 
 	wsOverlapped  = 0x00000000
 	wsCaption     = 0x00C00000
@@ -134,6 +135,8 @@ var (
 	procGetStockObject     = gdi32.NewProc("GetStockObject")
 	procShellExecute       = shell32.NewProc("ShellExecuteW")
 	procInitCommonControls = comctl32.NewProc("InitCommonControls")
+
+	launchWizardTerminal = launchInstalledTerminal
 )
 
 type point struct {
@@ -188,13 +191,15 @@ type setupWizard struct {
 	openLog        uintptr
 	logPath        string
 
-	running         bool
-	done            bool
-	cancelRequested bool
-	operationCancel context.CancelFunc
-	code            int
-	err             error
-	mu              sync.Mutex
+	running           bool
+	done              bool
+	cancelRequested   bool
+	operationCancel   context.CancelFunc
+	terminalLaunching bool
+	code              int
+	err               error
+	terminalErr       error
+	mu                sync.Mutex
 }
 
 type wizardChoice struct {
@@ -352,6 +357,9 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 			wiz.requestCancellation()
 			return 0
 		}
+		if wiz != nil && wiz.terminalLaunchBlocksClose() {
+			return 0
+		}
 		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmQueryEndSession:
@@ -370,6 +378,11 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 	case wmDone:
 		if wiz != nil {
 			wiz.finish()
+			return 0
+		}
+	case wmTerminalDone:
+		if wiz != nil {
+			wiz.completeTerminalLaunch()
 			return 0
 		}
 	case wmDestroy:
@@ -532,6 +545,9 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 		}
 	case idPrimary:
 		if w.done {
+			if w.terminalLaunchBlocksClose() {
+				return
+			}
 			procDestroyWindow.Call(w.hwnd)
 			return
 		}
@@ -542,6 +558,9 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 		if w.running {
 			w.requestCancellation()
 		} else {
+			if w.terminalLaunchBlocksClose() {
+				return
+			}
 			w.mu.Lock()
 			w.code = userExitCode
 			w.mu.Unlock()
@@ -552,6 +571,10 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 	case idOpenLog:
 		w.openSetupLog()
 	}
+}
+
+func (w *setupWizard) terminalLaunchBlocksClose() bool {
+	return w.terminalLaunching
 }
 
 func (w *setupWizard) syncGatewayChoice() {
@@ -733,29 +756,46 @@ func (w *setupWizard) show(hwnd uintptr, show bool) {
 }
 
 func (w *setupWizard) openTerminal() {
-	commandDir := filepath.Join(w.installRoot, "bin")
-	launcher := filepath.Join(commandDir, "defenseclaw.exe")
-	powerShell, err := systemPowerShellPath()
-	if err != nil {
-		messageBox(w.hwnd, "Setup could not locate the system PowerShell. Open a new terminal and run defenseclaw.", "DefenseClaw Setup", 0x30)
+	if !w.done || w.opts.Action == "uninstall" || w.terminalLaunching {
 		return
 	}
-	verb := windows.StringToUTF16Ptr("open")
-	file := windows.StringToUTF16Ptr(powerShell)
-	params := windows.StringToUTF16Ptr(terminalPowerShellParams(launcher))
-	dir := windows.StringToUTF16Ptr(commandDir)
-	ret, _, _ := procShellExecute.Call(w.hwnd, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(file)), uintptr(unsafe.Pointer(params)), uintptr(unsafe.Pointer(dir)), swShowNormal)
-	runtime.KeepAlive(verb)
-	runtime.KeepAlive(file)
-	runtime.KeepAlive(params)
-	runtime.KeepAlive(dir)
-	if ret <= 32 {
-		messageBox(w.hwnd, "Setup could not open PowerShell. Open a new terminal and run defenseclaw.", "DefenseClaw Setup", 0x30)
-	}
+	w.terminalLaunching = true
+	w.mu.Lock()
+	w.terminalErr = nil
+	w.mu.Unlock()
+	procEnableWindow.Call(w.openTerm, 0)
+	procEnableWindow.Call(w.primary, 0)
+
+	installRoot, hwnd := w.installRoot, w.hwnd
+	go func() {
+		err := launchWizardTerminal(installRoot)
+		w.mu.Lock()
+		w.terminalErr = err
+		w.mu.Unlock()
+		procPostMessage.Call(hwnd, wmTerminalDone, 0, 0)
+	}()
 }
 
-func terminalPowerShellParams(launcher string) string {
-	return "-NoExit -NoProfile -Command \"& '" + strings.ReplaceAll(launcher, "'", "''") + "'\""
+func (w *setupWizard) completeTerminalLaunch() {
+	w.terminalLaunching = false
+	w.mu.Lock()
+	err := w.terminalErr
+	w.terminalErr = nil
+	w.mu.Unlock()
+	if w.done && w.opts.Action != "uninstall" {
+		procEnableWindow.Call(w.openTerm, 1)
+	}
+	if w.done {
+		procEnableWindow.Call(w.primary, 1)
+	}
+	if err != nil {
+		messageBox(
+			w.hwnd,
+			"Setup could not open a trusted terminal. Open a new terminal and run defenseclaw.\r\n\r\n"+err.Error(),
+			"DefenseClaw Setup",
+			0x30,
+		)
+	}
 }
 
 func (w *setupWizard) openSetupLog() {

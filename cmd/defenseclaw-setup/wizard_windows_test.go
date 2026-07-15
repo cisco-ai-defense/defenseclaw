@@ -517,8 +517,13 @@ func TestHighWord(t *testing.T) {
 }
 
 func TestWizardCompletionMessageUsesPrivateApplicationRange(t *testing.T) {
-	if wmDone < wmApp || wmDone == dmGetDefID || wmDone == dmSetDefID {
-		t.Fatalf("wmDone=%#x overlaps dialog-manager messages", wmDone)
+	for name, message := range map[string]uint32{"wmDone": wmDone, "wmTerminalDone": wmTerminalDone} {
+		if message < wmApp || message == dmGetDefID || message == dmSetDefID {
+			t.Fatalf("%s=%#x overlaps dialog-manager messages", name, message)
+		}
+	}
+	if wmDone == wmTerminalDone {
+		t.Fatalf("completion messages overlap: %#x", wmDone)
 	}
 	if idPrimary != 1 || idCancel != 2 {
 		t.Fatalf("standard dialog command IDs changed: primary=%d cancel=%d", idPrimary, idCancel)
@@ -586,16 +591,5 @@ func TestWizardFailureDescriptionDistinguishesConnectorResidue(t *testing.T) {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("connector residue detail %q does not contain %q", detail, want)
 		}
-	}
-}
-
-func TestTerminalPowerShellParamsRunsExactInstalledLauncher(t *testing.T) {
-	launcher := `C:\Users\O'Brien\AppData\Local\Programs\DefenseClaw\bin\defenseclaw.exe`
-	params := terminalPowerShellParams(launcher)
-	if !strings.Contains(params, `O''Brien`) || !strings.Contains(params, "& '") {
-		t.Fatalf("PowerShell parameters do not safely invoke the exact launcher: %q", params)
-	}
-	if strings.Contains(params, "defenseclaw init") {
-		t.Fatalf("terminal launch unexpectedly starts initialization: %q", params)
 	}
 }
