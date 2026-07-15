@@ -390,10 +390,19 @@ func TestRetryPendingConnectorReconciliationRetainsTerminalFailure(t *testing.T)
 			Message: "old failure", TransactionID: strings.Repeat("6", 32),
 		}},
 	}
+	verifyCalls := 0
 	err := retryPendingConnectorReconciliation(
 		transaction, filepath.Join(root, "gateway.exe"), &recorder,
 		func() (*connectorReconciliationState, error) { return state, nil },
-		func(_, _, _, action string, _ []string) error { return fmt.Errorf("%s failed", action) },
+		func(_, _, _, action string, _ []string) error {
+			if action == "verify" {
+				verifyCalls++
+				if verifyCalls == 2 {
+					return nil
+				}
+			}
+			return fmt.Errorf("%s failed", action)
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -403,7 +412,7 @@ func TestRetryPendingConnectorReconciliationRetainsTerminalFailure(t *testing.T)
 	}
 	failure := recorder.failures[0]
 	if failure.TransactionID != transaction.ID || failure.Operation != "teardown" ||
-		!strings.Contains(failure.Message, "verification after teardown") {
+		!strings.Contains(failure.Message, "teardown retry") {
 		t.Fatalf("terminal retry failure = %+v", failure)
 	}
 }

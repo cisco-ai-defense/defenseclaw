@@ -130,12 +130,15 @@ func retryPendingConnectorReconciliation(
 		finalVerifyErr := verify()
 		operation := "verify"
 		terminalErr := finalVerifyErr
-		if teardownErr != nil && finalVerifyErr != nil {
+		if teardownErr != nil {
 			operation = "teardown"
-			terminalErr = errors.Join(
-				fmt.Errorf("teardown retry: %w", teardownErr),
-				fmt.Errorf("verification after teardown: %w", finalVerifyErr),
-			)
+			terminalErr = fmt.Errorf("teardown retry: %w", teardownErr)
+			if finalVerifyErr != nil {
+				terminalErr = errors.Join(
+					terminalErr,
+					fmt.Errorf("verification after teardown: %w", finalVerifyErr),
+				)
+			}
 		}
 		recorder.run(transaction.ID, connectorName, failure.ConfigHome, operation, func() error {
 			return terminalErr
