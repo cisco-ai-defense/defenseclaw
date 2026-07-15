@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,6 +33,32 @@ import (
 
 const activeConnectorFile = "active_connector.json"
 const hookContractLockFile = "hook_contract_lock.json"
+const agentSelectionFile = "agent_selection.json"
+
+const (
+	agentSelectionSchemaVersion = 1
+	agentSelectionMaxBytes      = 64 << 10
+	hookContractLockMaxBytes    = 2 << 20
+	agentSelectionMaxLifetime   = 15 * time.Minute
+	agentSelectionClockSkew     = 5 * time.Minute
+)
+
+type agentSelectionReceipt struct {
+	SchemaVersion int                               `json:"schema_version"`
+	UpdatedAt     string                            `json:"updated_at"`
+	Selections    map[string]agentSelectionEvidence `json:"selections"`
+}
+
+type agentSelectionEvidence struct {
+	Connector         string `json:"connector"`
+	Source            string `json:"source"`
+	Executable        string `json:"executable"`
+	RawVersion        string `json:"raw_version"`
+	NormalizedVersion string `json:"normalized_version"`
+	SHA256            string `json:"sha256"`
+	SelectedAt        string `json:"selected_at"`
+	ExpiresAt         string `json:"expires_at"`
+}
 
 // hookContractLockVersion 2 separates artifacts that have one physical copy
 // per data directory from connector-owned registration artifacts.  Version 1
@@ -78,6 +105,9 @@ type HookContractLockEntry struct {
 	Connector              string             `json:"connector"`
 	RawAgentVersion        string             `json:"raw_agent_version,omitempty"`
 	NormalizedAgentVersion string             `json:"normalized_agent_version,omitempty"`
+	AgentExecutable        string             `json:"agent_executable,omitempty"`
+	AgentExecutableSource  string             `json:"agent_executable_source,omitempty"`
+	AgentExecutableSHA256  string             `json:"agent_executable_sha256,omitempty"`
 	ContractID             string             `json:"contract_id,omitempty"`
 	CompatibilityStatus    string             `json:"compatibility_status,omitempty"`
 	CompatibilityReason    string             `json:"compatibility_reason,omitempty"`
@@ -184,10 +214,35 @@ func LoadHookContractLockEntry(dataDir, connectorName string) HookContractLockEn
 	if lock.Connectors == nil {
 		return HookContractLockEntry{}
 	}
-	return lock.Connectors[normalizeConnectorName(connectorName)]
+	connectorName = normalizeConnectorName(connectorName)
+	entry := lock.Connectors[connectorName]
+	if runtime.GOOS == "windows" && connectorName == "codex" {
+		if _, ok := supersedingCodexSetupSelection(dataDir, entry); ok {
+			// An explicit setup action selected and protected newer executable
+			// evidence. Treat the previous lock as absent for this one repair so
+			// the normal compatibility-drift gate does not block the operation
+			// whose purpose is to refresh that lock. The old bytes remain on disk
+			// until Setup succeeds and SaveFreshHookContractLockEntry atomically
+			// replaces only the Codex entry.
+			return HookContractLockEntry{}
+		}
+	}
+	return entry
 }
 
 func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, false)
+}
+
+// SaveFreshHookContractLockEntry persists the same contract evidence as
+// SaveHookContractLockEntry but forces an atomic rewrite when the evidence is
+// otherwise unchanged. Gateway boot uses this narrow variant as its durable
+// readiness acknowledgement; ordinary callers retain idempotent no-op saves.
+func SaveFreshHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, true)
+}
+
+func saveHookContractLockEntry(dataDir string, entry HookContractLockEntry, forceRefresh bool) error {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
 	}
@@ -264,13 +319,21 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 				entry.UpdatedAt = previous.UpdatedAt
 			}
 		}
-		if !entryChanged && !lockChanged {
+		if !entryChanged && !lockChanged && !forceRefresh {
 			return nil
 		}
-		if entry.UpdatedAt == "" {
-			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		nowTime := time.Now().UTC()
+		now := nowTime.Format(time.RFC3339)
+		if forceRefresh {
+			now = nowTime.Format(time.RFC3339Nano)
+			if now == entry.UpdatedAt {
+				now = nowTime.Add(time.Nanosecond).Format(time.RFC3339Nano)
+			}
 		}
-		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if entry.UpdatedAt == "" || forceRefresh {
+			entry.UpdatedAt = now
+		}
+		lock.UpdatedAt = now
 		lock.Connectors[entry.Connector] = entry
 		data, err := json.MarshalIndent(lock, "", "  ")
 		if err != nil {
@@ -363,10 +426,61 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
+	if runtime.GOOS == "windows" && entry.Connector == "codex" {
+		executable, digest, ok := setupSelectedAgentExecutableEvidence(opts.AgentExecutable)
+		if ok {
+			entry.AgentExecutable = executable
+			entry.AgentExecutableSource = "setup-selected"
+			entry.AgentExecutableSHA256 = digest
+		}
+	}
 	if opts.HookContractID != "" {
 		entry.ContractID = opts.HookContractID
 	}
 	return entry
+}
+
+// setupSelectedAgentExecutableEvidence binds the exact regular executable
+// selected by Setup to the versioned hook-contract entry. Runtime policy
+// inspection revalidates the protected source, path, product, ACL, and digest;
+// this stable hash prevents an in-place replacement from inheriting trust.
+func setupSelectedAgentExecutableEvidence(path string) (string, string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" || strings.ContainsAny(path, "\x00\r\n") || !filepath.IsAbs(path) {
+		return "", "", false
+	}
+	path = filepath.Clean(path)
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return "", "", false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", false
+	}
+	openedBefore, openedBeforeErr := file.Stat()
+	if openedBeforeErr != nil || openedBefore.Mode()&os.ModeSymlink != 0 ||
+		!openedBefore.Mode().IsRegular() || !os.SameFile(before, openedBefore) {
+		_ = file.Close()
+		return "", "", false
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	openedAfter, openedAfterErr := file.Stat()
+	closeErr := file.Close()
+	after, statErr := os.Lstat(path)
+	if copyErr != nil || openedAfterErr != nil || closeErr != nil || statErr != nil ||
+		openedAfter.Mode()&os.ModeSymlink != 0 || !openedAfter.Mode().IsRegular() ||
+		after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!os.SameFile(before, openedAfter) || !os.SameFile(openedAfter, after) ||
+		before.Size() != openedBefore.Size() || openedBefore.Size() != openedAfter.Size() ||
+		openedAfter.Size() != after.Size() ||
+		!before.ModTime().Equal(openedBefore.ModTime()) ||
+		!openedBefore.ModTime().Equal(openedAfter.ModTime()) ||
+		!openedAfter.ModTime().Equal(after.ModTime()) {
+		return "", "", false
+	}
+	return path, hex.EncodeToString(hash.Sum(nil)), true
 }
 
 func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocations {
@@ -538,29 +652,266 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
-	if strings.TrimSpace(dataDir) == "" {
+	if runtime.GOOS == "windows" && normalizeConnectorName(connectorName) == "codex" {
+		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
+			if validCodexAgentExecutableEvidence(entry) {
+				return strings.TrimSpace(entry.RawAgentVersion)
+			}
+			// Once a Codex contract exists it is the only runtime authority.
+			// Missing/legacy executable evidence requires an explicit repair and
+			// must never fall back to an automatic discovery cache or receipt.
+			return ""
+		}
+		if selection, ok := loadSetupAgentSelection(dataDir, "codex"); ok {
+			return selection.RawVersion
+		}
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
-	if err != nil {
-		return ""
-	}
-	var payload struct {
-		Agents map[string]struct {
-			Version string `json:"version"`
-		} `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return ""
-	}
-	if payload.Agents == nil {
-		return ""
-	}
-	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
 	if !ok {
 		return ""
 	}
 	return strings.TrimSpace(signal.Version)
+}
+
+// LoadCachedAgentExecutable is retained as a compatibility name for setup
+// callers. On Windows, Codex never reads agent_discovery.json here: an existing
+// install uses only its protected, version/contract-bound lock entry, while a
+// fresh install may consume the short-lived setup-selected receipt. The policy
+// inspector revalidates source, product, path, ACL, and digest before launch.
+// Other platforms retain their established discovery-cache behavior.
+func LoadCachedAgentExecutable(dataDir, connectorName string) string {
+	if runtime.GOOS == "windows" && normalizeConnectorName(connectorName) == "codex" {
+		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
+			if validCodexAgentExecutableEvidence(entry) {
+				return strings.TrimSpace(entry.AgentExecutable)
+			}
+			return ""
+		}
+		if selection, ok := loadSetupAgentSelection(dataDir, "codex"); ok {
+			return selection.Executable
+		}
+		return ""
+	}
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(signal.BinaryPath)
+}
+
+func loadProtectedCodexContractEntry(dataDir string) (HookContractLockEntry, bool) {
+	path := filepath.Join(dataDir, hookContractLockFile)
+	_, statErr := os.Lstat(path)
+	fileExists := statErr == nil || !os.IsNotExist(statErr)
+	data, valid := readStablePrivateStateFile(dataDir, hookContractLockFile, hookContractLockMaxBytes)
+	if !valid {
+		return HookContractLockEntry{}, fileExists
+	}
+	var lock hookContractLock
+	if err := json.Unmarshal(data, &lock); err != nil || lock.Version < 1 || lock.Version > hookContractLockVersion {
+		// The file exists but is malformed/unsupported. Return exists=true so
+		// callers fail closed instead of treating it as a fresh installation.
+		return HookContractLockEntry{}, true
+	}
+	entry, ok := lock.Connectors["codex"]
+	if !ok {
+		return HookContractLockEntry{}, false
+	}
+	if _, supersedes := supersedingCodexSetupSelection(dataDir, entry); supersedes {
+		// The short-lived receipt is explicit repair authority, not discovery
+		// cache authority. Returning exists=false makes the existing callers use
+		// that receipt and lets policy validation re-check its exact path, ACL,
+		// version, and digest before any hook registration is changed.
+		return HookContractLockEntry{}, false
+	}
+	return entry, true
+}
+
+// supersedingCodexSetupSelection returns a fresh explicit setup receipt only
+// when it can safely replace the existing Windows Codex lock. Invalid or
+// expired receipts are rejected by loadSetupAgentSelection. A valid lock keeps
+// authority unless the receipt is newer, or was written in the same timestamp
+// tick with different evidence. Matching evidence never displaces a freshly
+// persisted lock, which hands authority back to hook_contract_lock.json as soon
+// as Setup succeeds.
+func supersedingCodexSetupSelection(
+	dataDir string,
+	entry HookContractLockEntry,
+) (agentSelectionEvidence, bool) {
+	selection, ok := loadSetupAgentSelection(dataDir, "codex")
+	if !ok {
+		return agentSelectionEvidence{}, false
+	}
+	if !validCodexAgentExecutableEvidence(entry) {
+		return selection, true
+	}
+
+	selectedAt, selectedErr := time.Parse(time.RFC3339, selection.SelectedAt)
+	lockedAt, lockedErr := time.Parse(time.RFC3339, entry.UpdatedAt)
+	if selectedErr != nil {
+		return agentSelectionEvidence{}, false
+	}
+	if lockedErr != nil || selectedAt.After(lockedAt) {
+		return selection, true
+	}
+	if selectedAt.Equal(lockedAt) && !codexSelectionMatchesLock(selection, entry) {
+		return selection, true
+	}
+	return agentSelectionEvidence{}, false
+}
+
+func codexSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
+	return strings.TrimSpace(selection.RawVersion) == strings.TrimSpace(entry.RawAgentVersion) &&
+		strings.TrimSpace(selection.NormalizedVersion) == strings.TrimSpace(entry.NormalizedAgentVersion) &&
+		sameCodexExecutablePath(selection.Executable, entry.AgentExecutable) &&
+		strings.EqualFold(selection.SHA256, entry.AgentExecutableSHA256)
+}
+
+func validCodexAgentExecutableEvidence(entry HookContractLockEntry) bool {
+	if entry.Connector != "codex" ||
+		entry.AgentExecutableSource != "setup-selected" ||
+		strings.ContainsAny(entry.AgentExecutable, "\x00\r\n") ||
+		!filepath.IsAbs(entry.AgentExecutable) ||
+		filepath.Clean(entry.AgentExecutable) != entry.AgentExecutable ||
+		!validLowerHexSHA256(entry.AgentExecutableSHA256) ||
+		entry.NormalizedAgentVersion == "" || entry.ContractID == "" {
+		return false
+	}
+	resolution := ResolveHookContract("codex", entry.RawAgentVersion)
+	return resolution.Status == HookCompatibilityKnown &&
+		resolution.NormalizedVersion == entry.NormalizedAgentVersion &&
+		resolution.Contract.ContractID == entry.ContractID &&
+		entry.CompatibilityStatus == resolution.Status
+}
+
+func loadSetupAgentSelection(dataDir, connectorName string) (agentSelectionEvidence, bool) {
+	connectorName = normalizeConnectorName(connectorName)
+	data, exists := readStablePrivateStateFile(dataDir, agentSelectionFile, agentSelectionMaxBytes)
+	if !exists {
+		return agentSelectionEvidence{}, false
+	}
+	var receipt agentSelectionReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil ||
+		receipt.SchemaVersion != agentSelectionSchemaVersion ||
+		receipt.Selections == nil {
+		return agentSelectionEvidence{}, false
+	}
+	if _, err := time.Parse(time.RFC3339, receipt.UpdatedAt); err != nil {
+		return agentSelectionEvidence{}, false
+	}
+	selection, ok := receipt.Selections[connectorName]
+	if !ok || selection.Connector != connectorName ||
+		selection.Source != "setup-selected" ||
+		strings.ContainsAny(selection.Executable, "\x00\r\n") ||
+		!filepath.IsAbs(selection.Executable) ||
+		filepath.Clean(selection.Executable) != selection.Executable ||
+		!validLowerHexSHA256(selection.SHA256) ||
+		strings.TrimSpace(selection.RawVersion) == "" ||
+		strings.TrimSpace(selection.NormalizedVersion) == "" {
+		return agentSelectionEvidence{}, false
+	}
+	selectedAt, selectedErr := time.Parse(time.RFC3339, selection.SelectedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339, selection.ExpiresAt)
+	now := time.Now().UTC()
+	if selectedErr != nil || expiresErr != nil || selectedAt.After(now.Add(agentSelectionClockSkew)) ||
+		!expiresAt.After(now) || !expiresAt.After(selectedAt) ||
+		expiresAt.Sub(selectedAt) > agentSelectionMaxLifetime {
+		return agentSelectionEvidence{}, false
+	}
+	resolution := ResolveHookContract(connectorName, selection.RawVersion)
+	if resolution.Status != HookCompatibilityKnown ||
+		resolution.NormalizedVersion != selection.NormalizedVersion {
+		return agentSelectionEvidence{}, false
+	}
+	return selection, true
+}
+
+func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool) {
+	if strings.TrimSpace(dataDir) == "" || !filepath.IsAbs(dataDir) || filepath.Base(name) != name {
+		return nil, false
+	}
+	path := filepath.Join(dataDir, name)
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
+		return nil, false
+	}
+	if runtime.GOOS != "windows" && before.Mode().Perm()&0o077 != 0 {
+		return nil, false
+	}
+	if err := hookAPIValidateDirectory(filepath.Clean(dataDir)); err != nil {
+		return nil, false
+	}
+	if err := hookAPIValidateOwner(path, before); err != nil {
+		return nil, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	openedBefore, openedBeforeErr := file.Stat()
+	if openedBeforeErr != nil || openedBefore.Mode()&os.ModeSymlink != 0 ||
+		!openedBefore.Mode().IsRegular() || !os.SameFile(before, openedBefore) {
+		_ = file.Close()
+		return nil, false
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	openedAfter, openedAfterErr := file.Stat()
+	closeErr := file.Close()
+	after, statErr := os.Lstat(path)
+	if readErr != nil || openedAfterErr != nil || closeErr != nil || statErr != nil || int64(len(data)) > limit ||
+		openedAfter.Mode()&os.ModeSymlink != 0 || !openedAfter.Mode().IsRegular() ||
+		after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!os.SameFile(before, openedAfter) || !os.SameFile(openedAfter, after) ||
+		before.Size() != openedBefore.Size() || openedBefore.Size() != openedAfter.Size() ||
+		openedAfter.Size() != after.Size() ||
+		!before.ModTime().Equal(openedBefore.ModTime()) ||
+		!openedBefore.ModTime().Equal(openedAfter.ModTime()) ||
+		!openedAfter.ModTime().Equal(after.ModTime()) {
+		return nil, false
+	}
+	return data, true
+}
+
+func validLowerHexSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+type cachedAgentSignal struct {
+	Version    string `json:"version"`
+	BinaryPath string `json:"binary_path"`
+}
+
+func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {
+	if strings.TrimSpace(dataDir) == "" {
+		return cachedAgentSignal{}, false
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
+	if err != nil {
+		return cachedAgentSignal{}, false
+	}
+	var payload struct {
+		Agents map[string]cachedAgentSignal `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return cachedAgentSignal{}, false
+	}
+	if payload.Agents == nil {
+		return cachedAgentSignal{}, false
+	}
+	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	if !ok {
+		return cachedAgentSignal{}, false
+	}
+	return signal, true
 }
 
 func loadHookContractLock(dataDir string) hookContractLock {

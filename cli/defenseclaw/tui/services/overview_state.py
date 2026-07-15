@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from defenseclaw.connector_paths import hermes_config_path, hermes_home
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    connector_home,
+    hermes_config_path,
+    hermes_home,
+)
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.platform_support import (
     is_local_observability_stack_destination,
@@ -668,9 +673,7 @@ class OverviewPanelModel:
                 summary_parts=tuple(parts),
             )
 
-        rows = unique_ai_discovery_signals_for_overview(
-            sort_ai_discovery_signals_for_overview(agent_signals)
-        )
+        rows = unique_ai_discovery_signals_for_overview(sort_ai_discovery_signals_for_overview(agent_signals))
         overflow = max(len(rows) - MAX_AI_DISCOVERY_OVERVIEW_ROWS, 0)
         rendered = tuple(
             OverviewAIDiscoveryRow(
@@ -1038,9 +1041,7 @@ class OverviewPanelModel:
         if details.get("signals"):
             parts.append(str(details["signals"]))
         if details.get("endpoint"):
-            parts.append(
-                redact_endpoint_for_display(str(details["endpoint"]), hide_path=True)
-            )
+            parts.append(redact_endpoint_for_display(str(details["endpoint"]), hide_path=True))
         return ", ".join(parts)
 
     def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
@@ -1066,9 +1067,7 @@ class OverviewPanelModel:
                 kind = preset or "otlp"
                 local_unsupported = (
                     not local_observability_stack_supported()
-                    and is_local_observability_stack_destination(
-                        name=name, preset_id=preset, kind=kind
-                    )
+                    and is_local_observability_stack_destination(name=name, preset_id=preset, kind=kind)
                 )
                 signals = str(item.get("signals", "") or "none")
                 routing_label = ""
@@ -1123,7 +1122,9 @@ class OverviewPanelModel:
                         state=(
                             "unsupported"
                             if local_unsupported
-                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                            else "enabled"
+                            if bool(item.get("enabled", False))
+                            else "disabled"
                         ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals=signals,
@@ -1143,21 +1144,18 @@ class OverviewPanelModel:
                 )
                 raw_endpoint = str(item.get("endpoint") or item.get("url") or "")
                 local_unsupported = (
-                    (
-                        not local_observability_stack_supported()
-                        and is_local_observability_stack_destination(
-                            name=str(item.get("name", "")),
-                            kind=str(item.get("kind", "")),
-                            endpoint=raw_endpoint,
-                        )
+                    not local_observability_stack_supported()
+                    and is_local_observability_stack_destination(
+                        name=str(item.get("name", "")),
+                        kind=str(item.get("kind", "")),
+                        endpoint=raw_endpoint,
                     )
-                    or (
-                        not local_splunk_stack_supported()
-                        and is_local_splunk_stack_destination(
-                            kind=str(item.get("kind", "")),
-                            endpoint=raw_endpoint,
-                            preset_id=str(item.get("preset_id") or item.get("preset") or ""),
-                        )
+                ) or (
+                    not local_splunk_stack_supported()
+                    and is_local_splunk_stack_destination(
+                        kind=str(item.get("kind", "")),
+                        endpoint=raw_endpoint,
+                        preset_id=str(item.get("preset_id") or item.get("preset") or ""),
                     )
                 )
                 rows.append(
@@ -1169,7 +1167,9 @@ class OverviewPanelModel:
                         state=(
                             "unsupported"
                             if local_unsupported
-                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                            else "enabled"
+                            if bool(item.get("enabled", False))
+                            else "disabled"
                         ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals="audit-events",
@@ -1269,7 +1269,8 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
         case "codex":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
-                "normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists"
+                "normal until Codex emits a hook/notify event; verify "
+                f"{connector_config_files('codex')[0]} hooks if this persists"
             )
         case "claudecode":
             return (
@@ -1329,10 +1330,14 @@ def connector_source_label(connector: str, category: str) -> str:
     connector = (connector or "").strip().lower()
     hermes_root = hermes_home()
     hermes_config = hermes_config_path()
+    claude_root = connector_home("claudecode")
+    codex_root = connector_home("codex")
+    claude_config = connector_config_files("claudecode")[0]
+    codex_config = connector_config_files("codex")[0]
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
-        ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
-        ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
+        ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
+        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
         ("hermes", "skills"): (os.path.join(hermes_root, "skills"),),
         ("cursor", "skills"): ("./.cursor/skills", "./.agents/skills", "~/.cursor/skills", "~/.agents/skills"),
@@ -1348,8 +1353,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("opencode", "skills"): ("unsupported/hooks-only surface",),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
+        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
         ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
@@ -1365,8 +1370,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
-        ("claudecode", "plugins"): ("~/.claude/plugins",),
-        ("codex", "plugins"): ("~/.codex/plugins",),
+        ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
+        ("codex", "plugins"): (os.path.join(codex_root, "plugins"),),
         ("zeptoclaw", "plugins"): ("~/.zeptoclaw/plugins",),
         ("hermes", "plugins"): (
             os.path.join(hermes_root, "plugins"),
@@ -1385,8 +1390,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
-        ("claudecode", "config"): ("~/.claude/settings.json",),
-        ("codex", "config"): ("~/.codex/config.toml",),
+        ("claudecode", "config"): (claude_config,),
+        ("codex", "config"): (codex_config,),
         ("zeptoclaw", "config"): ("~/.zeptoclaw/config.json",),
         ("hermes", "config"): (hermes_config,),
         ("cursor", "config"): ("~/.cursor/hooks.json",),

@@ -30,7 +30,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf16"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -86,16 +89,13 @@ const nativeHookFlag = "hook --connector "
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
 const nativeWindowsInstallStateMaxBytes = 128 * 1024
+const nativeWindowsLayoutValidationAttempts = 50
+const nativeWindowsLayoutValidationRetryDelay = 10 * time.Millisecond
 
-// windowsSafePATHCommandPrefix disables cmd.exe's implicit current-directory
-// executable lookup before resolving a command through PATH. Codex runs hook
-// commands as a single `cmd.exe /C <command>` argument on Windows. A command
-// whose first token is a quoted absolute path is re-escaped by CreateProcess
-// and reaches cmd.exe as a literal `\"C:\\...\"`, so the hook never starts.
-//
-// Using the installer-provided PATH entry avoids that quoting failure. Setting
-// NoDefaultCurrentDirectoryInExePath prevents an untrusted repository from
-// shadowing defenseclaw-hook.exe in the session working directory.
+// windowsSafePATHCommandPrefix is retained only to recognize and remove hook
+// registrations written by older installers. Current native setup writes a
+// stable absolute LocalAppData launcher through an encoded system PowerShell
+// command and does not depend on a stale process PATH.
 const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
 
 // defenseclawHookBinaryOverride is a test seam for exercising generated
@@ -112,8 +112,9 @@ var defenseclawHookBinaryOverride string
 // On Windows there is no Bash/.cmd/jq/PATH-restore chain: the agent invokes the
 // DefenseClaw binary's hidden `hook` subcommand directly. The Windows command
 // deliberately carries no per-install volatile values — the gateway address,
-// token, and fail mode are resolved at runtime from the hook sidecar
-// (hooks/.hookcfg, hooks/.token) and the environment. Keeping the command
+// token, and fail mode are resolved at runtime from protected hook sidecars
+// (hooks/.hookcfg, hooks/.token). Packaged Windows hooks only honor inherited
+// environment when it tightens policy. Keeping the command
 // byte-identical across setup and teardown is required so Codex's trust-hash
 // recognition and the JSON/YAML hook removers (which match on the exact command
 // string) still find the entries DefenseClaw inserted.
@@ -128,14 +129,12 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if goos != "windows" {
 		return unixCommand
 	}
-	// Codex passes the full command as one argument to cmd.exe /C. A leading
-	// quoted executable path is escaped by Windows process argument encoding and
-	// becomes part of argv[0], so cmd.exe returns exit code 1 without launching
-	// the hook. Resolve the stable installer-provided binary name through
-	// PATH, with current-directory lookup disabled to prevent repository
-	// shadowing.
+	// Codex's generic command field can still be selected by older builds that
+	// do not understand command_windows. Use the same stable absolute launcher
+	// and shell-independent encoded system PowerShell boundary as the current
+	// command_windows field; never fall back to a session's stale PATH.
 	if connector == "codex" {
-		return windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + connector
+		return windowsNativePowerShellHookCommand(connector)
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
 	// characters through to direct exec. Put only tokenizer-safe arguments in
@@ -163,11 +162,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
 
-// defenseclawHookBinary returns the stable installed launcher path on Windows.
-// A native packaged gateway proves its own installer layout before selecting
-// the sibling launcher. Repository builds have no matching installer state and
-// retain the legacy ~/.local/bin fallback, so generated config never points at
-// a movable checkout merely because that checkout is currently running setup.
+// defenseclawHookBinary returns the stable native HookRuntime launcher on
+// Windows after the running gateway proves its installer-owned layout.
+// Repository builds have no matching installer state and retain the legacy
+// ~/.local/bin fallback, so generated config never points at a movable checkout
+// merely because that checkout is currently running setup.
 func defenseclawHookBinary() string {
 	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
 		return defenseclawHookBinaryOverride
@@ -203,7 +202,49 @@ func packagedWindowsHookBinary(executable string) string {
 	if strings.TrimSpace(expectedRoot) == "" {
 		return ""
 	}
-	return packagedWindowsHookBinaryAtRoot(executable, expectedRoot)
+	if packagedWindowsHookBinaryForRoot(executable, expectedRoot) == "" {
+		return ""
+	}
+	return canonicalNativeWindowsHookBinary()
+}
+
+// packagedWindowsHookBinaryForRoot verifies the launcher sibling for a native
+// packaged gateway whose fixed installation root has already been established
+// from the Windows Known Folder API. Production uses this proof before
+// registering the stable HookRuntime launcher; it must not fall back to a
+// synthetic USERPROFILE, a stale PATH entry, or the legacy ~/.local/bin layout.
+//
+// During uninstall the gateway runs briefly from the installer's verified
+// transaction trash tree. Return the original logical sibling path in that
+// case so connector teardown still recognizes the byte-identical command that
+// setup registered before the tree was moved.
+func packagedWindowsHookBinaryForRoot(executable, expectedRoot string) string {
+	if physicalHook := packagedWindowsRunningHookBinaryAtLayout(executable, expectedRoot, expectedRoot); physicalHook != "" {
+		return physicalHook
+	}
+	if physicalRoot := packagedWindowsUninstallPhysicalRoot(executable, expectedRoot); physicalRoot != "" &&
+		packagedWindowsRunningHookBinaryAtLayout(executable, physicalRoot, expectedRoot) != "" {
+		return filepath.Join(expectedRoot, "bin", windowsHookBinaryName)
+	}
+	return ""
+}
+
+func packagedWindowsRunningHookBinaryAtLayout(executable, physicalRoot, declaredRoot string) string {
+	expectedGateway := filepath.Join(physicalRoot, "bin", windowsGatewayBinaryName)
+	if !sameWindowsInstallPath(executable, expectedGateway) {
+		// Source builds and foreign layouts must retain the legacy behavior
+		// without paying a native-package validation retry budget.
+		return ""
+	}
+	for attempt := 0; attempt < nativeWindowsLayoutValidationAttempts; attempt++ {
+		if hook := packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot, true); hook != "" {
+			return hook
+		}
+		if attempt+1 < nativeWindowsLayoutValidationAttempts {
+			time.Sleep(nativeWindowsLayoutValidationRetryDelay)
+		}
+	}
+	return ""
 }
 
 // packagedWindowsHookBinaryAtRoot verifies a packaged gateway and returns its
@@ -212,23 +253,59 @@ func packagedWindowsHookBinary(executable string) string {
 // it as an argument here keeps arbitrary fixture roots available to tests
 // without weakening the production trust boundary.
 func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
+	return packagedWindowsHookBinaryAtLayout(executable, expectedRoot, expectedRoot, false)
+}
+
+func packagedWindowsUninstallPhysicalRoot(executable, expectedRoot string) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return ""
 	}
 	commandDir := filepath.Dir(executable)
-	installRoot := filepath.Dir(commandDir)
-	if strings.TrimSpace(expectedRoot) == "" || !sameWindowsInstallPath(installRoot, expectedRoot) {
+	physicalRoot := filepath.Dir(commandDir)
+	expectedRoot, err = filepath.Abs(expectedRoot)
+	if err != nil || strings.TrimSpace(expectedRoot) == "" ||
+		!sameWindowsInstallPath(filepath.Dir(physicalRoot), filepath.Dir(expectedRoot)) {
 		return ""
 	}
-	expectedGateway := filepath.Join(installRoot, "bin", windowsGatewayBinaryName)
-	hookBinary := filepath.Join(installRoot, "bin", windowsHookBinaryName)
-	if !sameWindowsInstallPath(executable, expectedGateway) ||
-		!stableNativeWindowsPE(executable) || !stableNativeWindowsPE(hookBinary) {
+	prefix := filepath.Base(expectedRoot) + ".uninstall."
+	physicalBase := filepath.Base(physicalRoot)
+	if !strings.HasPrefix(physicalBase, prefix) || !validNativeWindowsTransactionID(strings.TrimPrefix(physicalBase, prefix)) {
+		return ""
+	}
+	return physicalRoot
+}
+
+func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot string, runningImage bool) string {
+	executable, err := filepath.Abs(executable)
+	if err != nil {
+		return ""
+	}
+	physicalRoot, err = filepath.Abs(physicalRoot)
+	if err != nil || strings.TrimSpace(declaredRoot) == "" {
+		return ""
+	}
+	commandDir := filepath.Join(physicalRoot, "bin")
+	expectedGateway := filepath.Join(commandDir, windowsGatewayBinaryName)
+	hookBinary := filepath.Join(commandDir, windowsHookBinaryName)
+	var gatewayTrusted bool
+	if runningImage {
+		// Production passes os.Executable for the image Windows has already
+		// loaded. Reopening that live image to sample its PE header can lose a
+		// transient race with endpoint scanners and incorrectly send native setup
+		// into the legacy ~/.local/bin fallback. Exact canonical placement, a
+		// regular non-reparse image, and the installer state below are sufficient
+		// to bind the running process; the not-yet-loaded hook sibling retains the
+		// full stable PE validation.
+		gatewayTrusted = nativeWindowsRunningImagePath(executable)
+	} else {
+		gatewayTrusted = stableNativeWindowsPE(executable)
+	}
+	if !sameWindowsInstallPath(executable, expectedGateway) || !gatewayTrusted || !stableNativeWindowsPE(hookBinary) {
 		return ""
 	}
 
-	statePath := filepath.Join(installRoot, "installer", "install-state.json")
+	statePath := filepath.Join(physicalRoot, "installer", "install-state.json")
 	body, ok := readStableNativeWindowsFile(statePath, nativeWindowsInstallStateMaxBytes)
 	if !ok {
 		return ""
@@ -241,9 +318,9 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 		return ""
 	}
 	expectedPaths := [][2]string{
-		{state.InstallRoot, installRoot},
-		{state.CommandDir, commandDir},
-		{state.Runtime, filepath.Join(installRoot, "runtime", "python")},
+		{state.InstallRoot, declaredRoot},
+		{state.CommandDir, filepath.Join(declaredRoot, "bin")},
+		{state.Runtime, filepath.Join(declaredRoot, "runtime", "python")},
 	}
 	for _, pair := range expectedPaths {
 		if strings.TrimSpace(pair[0]) == "" || !sameWindowsInstallPath(pair[0], pair[1]) {
@@ -253,10 +330,28 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 	return hookBinary
 }
 
+func nativeWindowsRunningImagePath(path string) bool {
+	if !nativeWindowsPathHasNoReparsePoints(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
+}
+
+func validNativeWindowsTransactionID(value string) bool {
+	if len(value) != 32 || value != strings.ToLower(value) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func sameWindowsInstallPath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+	return pathidentity.Same(left, right)
 }
 
 func stableNativeWindowsPE(path string) bool {
@@ -344,24 +439,32 @@ func powershellQuoteLiteral(value string) string {
 }
 
 func windowsAntigravityHookCommand() string {
+	return windowsNativePowerShellHookCommand("antigravity")
+}
+
+func windowsNativeHookCommand(connector string) string {
+	return windowsNativePowerShellHookCommand(connector)
+}
+
+func windowsNativePowerShellHookCommand(connector string) string {
+	return windowsNativePowerShellHookCommandForBinary(connector, defenseclawHookBinary())
+}
+
+func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "antigravity",
+		"& " + powershellQuoteLiteral(hookBinary) + " " + nativeHookFlag + connector,
 		"exit $LASTEXITCODE",
 	}, "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
 func windowsSystemPowerShellExe() string {
-	root := strings.TrimSpace(os.Getenv("SystemRoot"))
-	if root == "" {
-		root = strings.TrimSpace(os.Getenv("WINDIR"))
-	}
-	if root == "" {
-		root = `C:\Windows`
-	}
-	return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	// The system directory is resolved by a Windows API, never by mutable
+	// SystemRoot/WINDIR values inherited from the project launching an agent.
+	// Build this as a Windows path even in OS-parameterized tests.
+	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
 }
 
 func powershellEncodedCommand(script string) string {
@@ -379,6 +482,31 @@ func powershellEncodedCommand(script string) string {
 // native (non-file) command does not carry.
 func isNativeHookCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
+	// Current Codex and Antigravity registrations use a system PowerShell
+	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
+	// without shell interpolation. Compare against the exact commands we emit;
+	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
+	hookBinaries := []string{defenseclawHookBinary()}
+	if runtime.GOOS == "windows" {
+		// A Setup-owned maintenance gateway runs outside the installed layout,
+		// and the installed payload may itself have been quarantined. The
+		// canonical launcher path is still authoritative because it comes from
+		// the Windows Known Folder API, not environment or PATH. Accept the exact
+		// encoded command Setup writes without making repository builds generate
+		// it.
+		hookBinaries = append(
+			hookBinaries,
+			canonicalNativeWindowsHookBinary(),
+			canonicalNativeWindowsInstalledHookBinary(),
+		)
+	}
+	for _, connectorName := range []string{"codex", "antigravity"} {
+		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
+			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
+				return true
+			}
+		}
+	}
 	// Codex's Windows command uses PATH with current-directory lookup disabled;
 	// strip only that exact hardening prefix before applying the existing strict
 	// executable and connector signature checks.
@@ -420,14 +548,15 @@ func isNativeHookCommand(cmd string) bool {
 
 func isDefenseClawHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
+	if isDefenseClawManagedHookExecutable(exe) {
+		return true
+	}
 	for _, owned := range []string{
-		defenseclawHookBinary(),
 		defenseclawGatewayBinary(), // legacy pre-launcher config
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	} {
-		if strings.TrimSpace(owned) != "" &&
-			strings.EqualFold(filepath.Clean(exe), filepath.Clean(owned)) {
+		if strings.TrimSpace(owned) != "" && pathidentity.Same(exe, owned) {
 			return true
 		}
 	}
@@ -443,6 +572,38 @@ func isDefenseClawHookExecutable(exe string) bool {
 		strings.EqualFold(normalized, "defenseclaw-hook") ||
 		strings.EqualFold(normalized, windowsGatewayBinaryName) ||
 		strings.EqualFold(normalized, "defenseclaw-gateway")
+}
+
+// isDefenseClawManagedHookExecutable recognizes only the exact current
+// launcher or native Setup's canonical installed launcher. Structured exec
+// hooks use this narrower predicate so a foreign absolute or PATH-resolved
+// command is never claimed merely because its basename resembles ours.
+func isDefenseClawManagedHookExecutable(exe string) bool {
+	exe = strings.TrimSpace(exe)
+	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
+		return false
+	}
+	for _, owned := range uniqueNonEmptyStrings([]string{
+		defenseclawHookBinary(),
+		canonicalNativeWindowsHookBinary(),
+		canonicalNativeWindowsInstalledHookBinary(),
+	}) {
+		if pathidentity.Same(exe, owned) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWindowsDriveAbsolutePath keeps host-independent connector tests faithful
+// to the Windows command contract. filepath.IsAbs deliberately follows the
+// current host, so it does not recognize C:\... while the same tests run on
+// Linux or macOS.
+func isWindowsDriveAbsolutePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' || (path[2] != '\\' && path[2] != '/') {
+		return false
+	}
+	return (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')
 }
 
 func validNativeHookConnector(connector string) bool {

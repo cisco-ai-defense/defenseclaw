@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -51,29 +52,36 @@ func managedFileBackupPath(dataDir, connectorName, logicalName string) string {
 
 func managedFileBackupTargetPath(dataDir, connectorName, logicalName, fallback string) string {
 	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
-	if err == nil && strings.TrimSpace(b.Path) != "" {
+	if err == nil && b.Connector == connectorName && b.LogicalName == logicalName && strings.TrimSpace(b.Path) != "" {
 		return b.Path
 	}
 	return fallback
 }
 
 func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath string) error {
+	boundPath, err := normalizeManagedTargetPath(targetPath)
+	if err != nil {
+		return fmt.Errorf("bind managed backup target: %w", err)
+	}
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
-	if _, err := os.Stat(backupPath); err == nil {
-		return nil
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("stat managed backup: %w", err)
+	existing, err := loadManagedFileBackupPath(backupPath)
+	if err == nil {
+		_, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath)
+		return err
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("load managed backup: %w", err)
 	}
 
 	b := managedFileBackup{
 		Version:     managedBackupVersion,
 		Connector:   connectorName,
 		LogicalName: logicalName,
-		Path:        targetPath,
+		Path:        boundPath,
 		CapturedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
 
-	data, info, err := readManagedTarget(targetPath)
+	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
 	}
@@ -97,13 +105,41 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 		}
 		return err
 	}
-	data, info, err := readManagedTarget(targetPath)
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
 	if err != nil {
 		return err
 	}
-	nextHash := managedBackupMissingHash
+	data, info, err := readManagedTarget(boundPath)
+	if err != nil {
+		return err
+	}
+	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
-		nextHash = sha256Hex(data)
+		nextHash = managedFileSnapshotHash(data, true)
+	}
+	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
+}
+
+// updateManagedFileBackupPostHashValue records the exact bytes the connector
+// committed, rather than re-reading a path that an external editor can change
+// between replacement and backup publication. If the path later drifts, its
+// hash no longer matches and teardown automatically uses surgical cleanup.
+func updateManagedFileBackupPostHashValue(
+	dataDir, connectorName, logicalName, targetPath, nextHash string,
+) error {
+	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
+	b, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+		return err
+	}
+	if nextHash == "" {
+		return fmt.Errorf("managed backup post hash is empty")
 	}
 	if b.PostSHA256 == nextHash {
 		return nil
@@ -111,6 +147,27 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	b.PostSHA256 = nextHash
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
+}
+
+func managedFileSnapshotHash(data []byte, exists bool) string {
+	if !exists {
+		return managedBackupMissingHash
+	}
+	return sha256Hex(data)
+}
+
+func managedFileBackupExpectedHash(b *managedFileBackup) string {
+	if b == nil {
+		return ""
+	}
+	if b.PostSHA256 != "" {
+		return b.PostSHA256
+	}
+	return b.PristineSHA256
+}
+
+func managedFileBackupMatchesSnapshot(b *managedFileBackup, data []byte, exists bool) bool {
+	return b != nil && managedFileBackupExpectedHash(b) == managedFileSnapshotHash(data, exists)
 }
 
 func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, targetPath string) (bool, error) {
@@ -122,8 +179,12 @@ func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, ta
 		}
 		return false, err
 	}
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
+		return false, err
+	}
 
-	data, info, err := readManagedTarget(targetPath)
+	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return false, err
 	}
@@ -144,16 +205,56 @@ func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, ta
 		if mode == 0 {
 			mode = 0o600
 		}
-		if err := atomicWriteFile(targetPath, b.PristineBytes, mode); err != nil {
+		if err := atomicWriteFile(boundPath, b.PristineBytes, mode); err != nil {
 			return false, err
 		}
-	} else if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+	} else if err := os.Remove(boundPath); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 	return true, nil
+}
+
+func normalizeManagedTargetPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("target path is empty")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve target path %q: %w", path, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+// validateManagedFileBackupTarget binds restore metadata to both its logical
+// owner and the exact lexical target captured during setup. It deliberately
+// does not resolve symlinks: following a retargeted link during teardown would
+// weaken the same-file invariant this check protects.
+func validateManagedFileBackupTarget(b managedFileBackup, connectorName, logicalName, targetPath string) (string, error) {
+	if b.Connector != connectorName || b.LogicalName != logicalName {
+		return "", fmt.Errorf(
+			"managed backup identity mismatch: captured %s/%s, requested %s/%s",
+			b.Connector, b.LogicalName, connectorName, logicalName,
+		)
+	}
+	captured, err := normalizeManagedTargetPath(b.Path)
+	if err != nil {
+		return "", fmt.Errorf("invalid managed backup target: %w", err)
+	}
+	requested, err := normalizeManagedTargetPath(targetPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid requested restore target: %w", err)
+	}
+	equal := captured == requested
+	if runtime.GOOS == "windows" {
+		equal = strings.EqualFold(captured, requested)
+	}
+	if !equal {
+		return "", fmt.Errorf("managed backup target mismatch: captured %q, requested %q", captured, requested)
+	}
+	return captured, nil
 }
 
 func discardManagedFileBackup(dataDir, connectorName, logicalName string) {

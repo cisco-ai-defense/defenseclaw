@@ -16,8 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -44,9 +46,16 @@ func TestHookContractResolution(t *testing.T) {
 		wantID     string
 		wantNorm   string
 	}{
-		{"codex_known", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
+		{"codex_six_event_minimum", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
+		{"codex_six_event_upper_boundary", "codex", "codex 0.128.99", HookCompatibilityKnown, "codex-hooks-v1", "0.128.99"},
+		{"codex_eight_event_minimum", "codex", "codex 0.129.0", HookCompatibilityKnown, "codex-hooks-v2", "0.129.0"},
+		{"codex_eight_event_upper_boundary", "codex", "codex 0.132.99", HookCompatibilityKnown, "codex-hooks-v2", "0.132.99"},
+		{"codex_ten_event_minimum", "codex", "codex 0.133.0", HookCompatibilityKnown, "codex-hooks-v3", "0.133.0"},
+		{"codex_current", "codex", "codex 0.144.3", HookCompatibilityKnown, "codex-hooks-v3", "0.144.3"},
+		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v3", ""},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
-		{"claude_alias_known", "claude-code", "Claude Code v2.1.144", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.144"},
+		{"claude_before_message_display", "claude-code", "Claude Code v2.1.151", HookCompatibilityUnknown, "", "2.1.151"},
+		{"claude_alias_known", "claude-code", "Claude Code v2.1.152", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.152"},
 		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
@@ -64,6 +73,55 @@ func TestHookContractResolution(t *testing.T) {
 			}
 			if got.NormalizedVersion != tc.wantNorm {
 				t.Fatalf("NormalizedVersion=%q want %q", got.NormalizedVersion, tc.wantNorm)
+			}
+		})
+	}
+}
+
+func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
+	tests := []struct {
+		version string
+		wantID  string
+		events  []string
+	}{
+		{
+			version: "0.124.0",
+			wantID:  "codex-hooks-v1",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "Stop",
+			},
+		},
+		{
+			version: "0.129.0",
+			wantID:  "codex-hooks-v2",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "PreCompact",
+				"PostCompact", "Stop",
+			},
+		},
+		{
+			version: "0.133.0",
+			wantID:  "codex-hooks-v3",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.version, func(t *testing.T) {
+			resolution := ResolveHookContract("codex", test.version)
+			if resolution.Status != HookCompatibilityKnown {
+				t.Fatalf("status = %q, want %q", resolution.Status, HookCompatibilityKnown)
+			}
+			if resolution.Contract.ContractID != test.wantID {
+				t.Fatalf("contract = %q, want %q", resolution.Contract.ContractID, test.wantID)
+			}
+			if !reflect.DeepEqual(resolution.Contract.Events, test.events) {
+				t.Fatalf("events = %#v, want %#v", resolution.Contract.Events, test.events)
 			}
 		})
 	}
@@ -344,7 +402,7 @@ func stringInSlice(values []string, want string) bool {
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Claude Code v2.1.144",
+		AgentVersion: "Claude Code v2.1.152",
 	})
 	if profile.ContractID != "claudecode-hooks-v1" {
 		t.Fatalf("ContractID=%q", profile.ContractID)
@@ -405,6 +463,39 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	changed.ContractID = "hermes-hooks-v0-other"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
+	}
+}
+
+func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{Connector: "codex", ContractID: "codex-hooks-v1"}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, hookContractLockFile)
+	old := time.Unix(1, 0)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Fatal("ordinary idempotent save unexpectedly rewrote the contract lock")
+	}
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().Equal(old) {
+		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
 	}
 }
 
@@ -847,22 +938,429 @@ func TestHookContractLockEntryUsesPinnedContractMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadCachedAgentVersion(t *testing.T) {
-	dir := t.TempDir()
+func TestCodexGenericDiscoveryCacheAuthorityIsWindowsScoped(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
 	payload := map[string]interface{}{
-		"version": 1,
+		"version": 3,
 		"agents": map[string]interface{}{
-			"codex": map[string]interface{}{"version": "codex 0.31.0"},
+			"codex": map[string]interface{}{
+				"installed":   true,
+				"version":     "codex 0.31.0",
+				"binary_path": `C:\Program Files\Codex\codex.exe`,
+				"error":       "",
+			},
 		},
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "agent_discovery.json"), b, 0o600); err != nil {
+	if err := atomicWriteFile(filepath.Join(dir, "agent_discovery.json"), b, 0o600); err != nil {
 		t.Fatalf("write discovery: %v", err)
 	}
-	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.31.0" {
-		t.Fatalf("LoadCachedAgentVersion=%q", got)
+	version := LoadCachedAgentVersion(dir, "codex")
+	executable := LoadCachedAgentExecutable(dir, "codex")
+	if runtime.GOOS == "windows" {
+		if version != "" || executable != "" {
+			t.Fatalf("Windows trusted generic cache: version=%q executable=%q", version, executable)
+		}
+		return
+	}
+	if version != "codex 0.31.0" || executable != `C:\Program Files\Codex\codex.exe` {
+		t.Fatalf("non-Windows discovery parity: version=%q executable=%q", version, executable)
+	}
+}
+
+func TestCodexSetupSelectionReceiptIsBoundAndSealed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("fixture-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not hash fixture executable")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"codex": {
+				Connector:         "codex",
+				Source:            "setup-selected",
+				Executable:        executable,
+				RawVersion:        "codex 0.144.3",
+				NormalizedVersion: "0.144.3",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.144.3" {
+		t.Fatalf("receipt version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("receipt executable = %q, want %q", got, executable)
+	}
+
+	entry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	if entry.AgentExecutableSource != "setup-selected" ||
+		!sameCodexExecutablePath(entry.AgentExecutable, executable) ||
+		entry.AgentExecutableSHA256 != digest {
+		t.Fatalf("sealed executable evidence = %+v", entry)
+	}
+}
+
+func writeCodexSetupSelectionForTest(
+	t *testing.T,
+	dir string,
+	executable string,
+	rawVersion string,
+	normalizedVersion string,
+	selectedAt time.Time,
+	expiresAt time.Time,
+) agentSelectionEvidence {
+	t.Helper()
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not hash fixture Codex executable")
+	}
+	selection := agentSelectionEvidence{
+		Connector:         "codex",
+		Source:            "setup-selected",
+		Executable:        executable,
+		RawVersion:        rawVersion,
+		NormalizedVersion: normalizedVersion,
+		SHA256:            digest,
+		SelectedAt:        selectedAt.Format(time.RFC3339),
+		ExpiresAt:         expiresAt.Format(time.RFC3339),
+	}
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     selectedAt.Format(time.RFC3339),
+		Selections:    map[string]agentSelectionEvidence{"codex": selection},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func writeCodexContractLockForTest(
+	t *testing.T,
+	dir string,
+	entry HookContractLockEntry,
+	updatedAt time.Time,
+) {
+	t.Helper()
+	entry.UpdatedAt = updatedAt.Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  updatedAt.Format(time.RFC3339),
+		Connectors: map[string]HookContractLockEntry{"codex": entry},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFreshCodexSetupSelectionRepairsLegacyLockAndBecomesAuthoritative(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("replacement-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	writeCodexContractLockForTest(t, dir, HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+		NormalizedAgentVersion: "0.144.0",
+		ContractID:             "codex-hooks-v3",
+		CompatibilityStatus:    HookCompatibilityKnown,
+	}, now.Add(-time.Minute))
+	selection := writeCodexSetupSelectionForTest(
+		t, dir, executable, "codex-cli 0.144.3", "0.144.3", now, now.Add(agentSelectionMaxLifetime),
+	)
+
+	if previous := LoadHookContractLockEntry(dir, "codex"); previous.Connector != "" {
+		t.Fatalf("fresh explicit repair exposed stale lock to drift gate: %+v", previous)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != selection.RawVersion {
+		t.Fatalf("repair version = %q, want %q", got, selection.RawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("repair executable = %q, want %q", got, executable)
+	}
+	opts := SetupOpts{DataDir: dir, AgentVersion: selection.RawVersion, AgentExecutable: executable}
+	if _, err := validateCodexPolicyExecutable(opts); err != nil {
+		t.Fatalf("fresh explicit repair evidence failed policy validation: %v", err)
+	}
+
+	entry := NewHookContractLockEntry(opts, NewCodexConnector(), "test-build")
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatalf("persist repaired Codex lock: %v", err)
+	}
+	sealed := LoadHookContractLockEntry(dir, "codex")
+	if !validCodexAgentExecutableEvidence(sealed) ||
+		sealed.RawAgentVersion != selection.RawVersion ||
+		!sameCodexExecutablePath(sealed.AgentExecutable, executable) ||
+		sealed.AgentExecutableSHA256 != selection.SHA256 {
+		t.Fatalf("repaired lock did not regain authority: %+v", sealed)
+	}
+}
+
+func TestNewerCodexSetupSelectionSupersedesOlderValidLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	lockedExecutable := filepath.Join(dir, "old", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(lockedExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(lockedExecutable, []byte("old-locked-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked := NewHookContractLockEntry(
+		SetupOpts{
+			DataDir:         dir,
+			AgentVersion:    "codex-cli 0.144.0-alpha.4",
+			AgentExecutable: lockedExecutable,
+		},
+		NewCodexConnector(),
+		"old-build",
+	)
+	writeCodexContractLockForTest(t, dir, locked, now.Add(-2*time.Minute))
+
+	selectedExecutable := filepath.Join(dir, "current", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(selectedExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(selectedExecutable, []byte("current-selected-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	selection := writeCodexSetupSelectionForTest(
+		t,
+		dir,
+		selectedExecutable,
+		"codex-cli 0.144.3",
+		"0.144.3",
+		now,
+		now.Add(agentSelectionMaxLifetime),
+	)
+
+	if previous := LoadHookContractLockEntry(dir, "codex"); previous.Connector != "" {
+		t.Fatalf("newer explicit selection did not supersede older valid lock: %+v", previous)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != selection.RawVersion {
+		t.Fatalf("selected version = %q, want %q", got, selection.RawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, selectedExecutable) {
+		t.Fatalf("selected executable = %q, want %q", got, selectedExecutable)
+	}
+	if _, err := validateCodexPolicyExecutable(SetupOpts{
+		DataDir:         dir,
+		AgentVersion:    selection.RawVersion,
+		AgentExecutable: selectedExecutable,
+	}); err != nil {
+		t.Fatalf("newer explicit selection failed policy validation: %v", err)
+	}
+}
+
+func TestNewerCodexLockRejectsStaleSetupSelection(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	lockedExecutable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(lockedExecutable, []byte("authoritative-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	locked := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex-cli 0.144.3", AgentExecutable: lockedExecutable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	writeCodexContractLockForTest(t, dir, locked, now.Add(-time.Minute))
+
+	staleExecutable := filepath.Join(dir, "stale", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(staleExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(staleExecutable, []byte("stale-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCodexSetupSelectionForTest(
+		t,
+		dir,
+		staleExecutable,
+		"codex-cli 0.144.0-alpha.4",
+		"0.144.0",
+		now.Add(-2*time.Minute),
+		now.Add(5*time.Minute),
+	)
+
+	if got := LoadCachedAgentVersion(dir, "codex"); got != locked.RawAgentVersion {
+		t.Fatalf("stale receipt replaced newer lock version: %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, lockedExecutable) {
+		t.Fatalf("stale receipt replaced newer lock executable: %q", got)
+	}
+	if got := LoadHookContractLockEntry(dir, "codex"); !validCodexAgentExecutableEvidence(got) {
+		t.Fatalf("stale receipt hid authoritative lock: %+v", got)
+	}
+}
+
+func TestInvalidCodexSetupSelectionsDoNotRepairLegacyLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	for _, test := range []struct {
+		name  string
+		write func(*testing.T, string, string, time.Time)
+	}{
+		{
+			name: "expired",
+			write: func(t *testing.T, dir, executable string, now time.Time) {
+				writeCodexSetupSelectionForTest(
+					t, dir, executable, "codex-cli 0.144.3", "0.144.3",
+					now.Add(-20*time.Minute), now.Add(-5*time.Minute),
+				)
+			},
+		},
+		{
+			name: "malformed",
+			write: func(t *testing.T, dir, _ string, _ time.Time) {
+				if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			executable := filepath.Join(dir, "codex.exe")
+			if err := atomicWriteFile(executable, []byte("fixture-codex-binary"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			writeCodexContractLockForTest(t, dir, HookContractLockEntry{
+				Connector:              "codex",
+				RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+				NormalizedAgentVersion: "0.144.0",
+				ContractID:             "codex-hooks-v3",
+				CompatibilityStatus:    HookCompatibilityKnown,
+			}, now.Add(-time.Minute))
+			test.write(t, dir, executable, now)
+
+			if got := LoadCachedAgentVersion(dir, "codex"); got != "" {
+				t.Fatalf("invalid receipt repaired legacy version: %q", got)
+			}
+			if got := LoadCachedAgentExecutable(dir, "codex"); got != "" {
+				t.Fatalf("invalid receipt repaired legacy executable: %q", got)
+			}
+			if got := LoadHookContractLockEntry(dir, "codex"); got.Connector != "codex" {
+				t.Fatalf("invalid receipt hid fail-closed legacy lock: %+v", got)
+			}
+		})
+	}
+}
+
+func TestExistingCodexLockWithoutExecutableEvidenceFailsClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex lock authority is native-Windows-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: now,
+		Connectors: map[string]HookContractLockEntry{
+			"codex": {
+				Connector:              "codex",
+				RawAgentVersion:        "codex 0.144.3",
+				NormalizedAgentVersion: "0.144.3",
+				ContractID:             "codex-hooks-v3",
+				CompatibilityStatus:    HookCompatibilityKnown,
+				UpdatedAt:              now,
+			},
+		},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "" {
+		t.Fatalf("legacy lock returned version %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); got != "" {
+		t.Fatalf("legacy lock returned executable %q", got)
+	}
+}
+
+func TestProtectedCodexLockIsRuntimeExecutableAuthority(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex lock authority is native-Windows-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("locked-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Connectors: map[string]HookContractLockEntry{"codex": entry},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.144.3" {
+		t.Fatalf("locked version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("locked executable = %q, want %q", got, executable)
 	}
 }
