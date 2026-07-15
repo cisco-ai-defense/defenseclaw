@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -937,6 +938,31 @@ func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
 	}
 	if !strings.Contains(snap.Guardrail.LastError, "missing [codex-hook.sh]") {
 		t.Errorf("Guardrail health LastError should surface the operator-visible cause, got: %q", snap.Guardrail.LastError)
+	}
+}
+
+func TestSaveSingleConnectorReadyState_LockFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "hook_contract_lock.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+
+	err := s.saveSingleConnectorReadyState(
+		context.Background(), connector.SetupOpts{DataDir: dir}, conn,
+	)
+	if err == nil || !strings.Contains(err.Error(), "hook contract lock save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want lock-save failure", err)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("lock-save failure did not roll the connector back")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector = %q, want rollback marker codex", got)
+	}
+	if got := s.health.Snapshot().Guardrail.State; got != StateError {
+		t.Fatalf("guardrail state = %q, want %q", got, StateError)
 	}
 }
 
@@ -6393,6 +6419,153 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("scoped token: status=%d want 200", rr.Code)
+	}
+}
+
+func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/claudecode/codex-scoped-token/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized || *called {
+		t.Fatalf("Codex token crossed into Claude namespace: status=%d called=%v", rr.Code, *called)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/codex-scoped-token/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("Codex token rejected from its own namespace: status=%d called=%v", rr.Code, *called)
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		if got := r.Header.Get(otelSourceHeader); got != "codex" {
+			t.Errorf("authenticated OTLP source = %q, want codex", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer codex-scoped-token")
+	req.Header.Set(otelSourceHeader, "codex")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("Codex scoped Authorization rejected: status=%d called=%v", rr.Code, *called)
+	}
+}
+
+func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
+	const scopedToken = "claude-scoped-token"
+	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: scopedToken,
+	})
+	if profile.NativeOTLP == nil {
+		t.Fatal("Claude profile has no native OTLP configuration")
+	}
+	env, err := profile.NativeOTLP.EnvBlock()
+	if err != nil {
+		t.Fatalf("render Claude OTLP environment: %v", err)
+	}
+
+	decodedHeaders := make(http.Header)
+	for _, pair := range strings.Split(env["OTEL_EXPORTER_OTLP_HEADERS"], ",") {
+		keyValue := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(keyValue) != 2 {
+			t.Fatalf("malformed rendered OTLP header pair %q", pair)
+		}
+		// OpenTelemetry JS uses decodeURIComponent for each key and value.
+		key, err := url.PathUnescape(keyValue[0])
+		if err != nil {
+			t.Fatalf("decode rendered OTLP header key %q: %v", keyValue[0], err)
+		}
+		value, err := url.PathUnescape(keyValue[1])
+		if err != nil {
+			t.Fatalf("decode rendered OTLP header value %q: %v", keyValue[1], err)
+		}
+		decodedHeaders.Set(key, value)
+	}
+	if got := decodedHeaders.Get("Authorization"); got != "Bearer "+scopedToken {
+		t.Fatalf("decoded Claude Authorization = %q, want scoped bearer", got)
+	}
+
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeClaude: scopedToken,
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header = decodedHeaders
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("gateway rejected Claude-rendered scoped Authorization: status=%d called=%v", rr.Code, *called)
+	}
+}
+
+func TestTokenAuth_OTLPScopedAuthorizationCannotEscapeScope(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		source     string
+		token      string
+		remoteAddr string
+	}{
+		{name: "cross connector", path: "/v1/logs", source: "claudecode", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "master rejected after provisioning", path: "/v1/logs", source: "codex", token: "master-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "missing source", path: "/v1/logs", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "management route", path: "/status", source: "codex", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "non loopback", path: "/v1/logs", source: "codex", token: "codex-scoped-token", remoteAddr: "192.0.2.10:54321"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			*called = false
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.source != "" {
+				req.Header.Set(otelSourceHeader, tc.source)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized || *called {
+				t.Fatalf("scoped credential escaped: status=%d called=%v", rr.Code, *called)
+			}
+		})
 	}
 }
 

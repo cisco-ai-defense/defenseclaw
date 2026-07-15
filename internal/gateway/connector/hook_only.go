@@ -403,8 +403,8 @@ func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 	// block; this duplicates the cheap lookup so callers that only
 	// want the descriptive spec (parity tests, doctor reports) see
 	// the resolved URL.
-	if opts.DataDir != "" {
-		if tok, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err == nil && tok != "" {
+	if opts.DataDir != "" || strings.TrimSpace(opts.OTLPPathToken) != "" {
+		if tok, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI, opts.OTLPPathToken); err == nil && tok != "" {
 			spec.PathToken = tok
 		}
 	}
@@ -1524,16 +1524,9 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 	if err != nil {
 		return err
 	}
-	pathToken := ""
-	if opts.DataDir != "" {
-		if tok, mintErr := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); mintErr == nil {
-			pathToken = tok
-		} else {
-			return fmt.Errorf("mint scoped Gemini CLI OTLP token: %w", mintErr)
-		}
-	}
-	if pathToken == "" {
-		return fmt.Errorf("mint scoped Gemini CLI OTLP token: data dir is required")
+	pathToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI, opts.OTLPPathToken)
+	if err != nil {
+		return fmt.Errorf("resolve scoped Gemini CLI OTLP token: %w", err)
 	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
 

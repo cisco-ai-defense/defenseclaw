@@ -64,7 +64,7 @@ from defenseclaw.config import (
     write_config_yaml_secure,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import replace_file_durable, set_file_mode
 from defenseclaw.observability import (
     PRESETS,
     Destination,
@@ -1366,7 +1366,7 @@ def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
             yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, cfg_path)
+        replace_file_durable(tmp, cfg_path)
         tmp = ""
     finally:
         if fd != -1:

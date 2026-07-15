@@ -19,6 +19,7 @@ package connector
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -50,12 +51,11 @@ import (
 type OTLPPathTokenScope string
 
 const (
-	// OTLPScopeGeminiCLI is the scope value for Gemini CLI's
-	// settings.json telemetry path-token. Any new hook-only
-	// connector that needs a path-token must add a new constant
-	// here so the allow-list in OTLPPathTokenScopes() rejects
-	// typos at compile time.
+	// Every hook-only connector that persists an OTLP credential in agent
+	// configuration gets a distinct namespace here.
 	OTLPScopeGeminiCLI OTLPPathTokenScope = "geminicli"
+	OTLPScopeCodex     OTLPPathTokenScope = "codex"
+	OTLPScopeClaude    OTLPPathTokenScope = "claudecode"
 )
 
 // OTLPPathTokenScopes returns the closed allow-list of scopes that
@@ -64,7 +64,23 @@ const (
 // guaranteeing that a new scope can never be added in one half of
 // the codebase without the other.
 func OTLPPathTokenScopes() []OTLPPathTokenScope {
-	return []OTLPPathTokenScope{OTLPScopeGeminiCLI}
+	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude}
+}
+
+// OTLPPathTokenScopeForConnector returns the path-token namespace owned by a
+// connector. Connectors without native OTLP support deliberately return
+// false so callers can leave OTLP provisioning disabled for them.
+func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, bool) {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "geminicli":
+		return OTLPScopeGeminiCLI, true
+	case "codex":
+		return OTLPScopeCodex, true
+	case "claudecode":
+		return OTLPScopeClaude, true
+	default:
+		return "", false
+	}
 }
 
 // otlpScopeRE prevents a future caller from sneaking a path traversal
@@ -145,6 +161,9 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
+	if err := validateOTLPPathTokenDirectory(tokenPath); err != nil {
+		return "", err
+	}
 
 	buf := make([]byte, otlpTokenLen)
 	if _, err := rand.Read(buf); err != nil {
@@ -188,6 +207,21 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	return tok, nil
 }
 
+// resolveSetupOTLPPathToken honors a caller-provisioned token when present.
+// Managed-enterprise setup uses this path because the gateway's root-owned
+// data directory, rather than the target user's data directory, is the source
+// of truth for accepted OTLP credentials. Ordinary per-user setup leaves the
+// value empty and mints the token beneath its own data directory.
+func resolveSetupOTLPPathToken(dataDir string, scope OTLPPathTokenScope, supplied string) (string, error) {
+	if token := strings.TrimSpace(supplied); token != "" {
+		if !otlpTokenHexRE.MatchString(token) {
+			return "", fmt.Errorf("invalid supplied OTLP path-token for scope %q", scope)
+		}
+		return token, nil
+	}
+	return EnsureOTLPPathToken(dataDir, scope)
+}
+
 // LoadOTLPPathToken reads the token for *scope* from disk if present.
 // Returns "" with no error when the file does not exist so the caller
 // can treat "not yet provisioned" as a non-fatal condition (the route
@@ -208,6 +242,50 @@ func LoadOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, error)
 		return "", err
 	}
 	return tok, nil
+}
+
+// RemoveOTLPPathToken revokes the connector-scoped capability after a clean
+// teardown. Each scope belongs to exactly one connector, so no cross-connector
+// reference count is required. The API server stats the file on every scoped
+// request and drops its cached token when the file disappears, making removal
+// an immediate revocation for already-running gateways as well as restarts.
+//
+// Removal is idempotent. Existing artifacts must still satisfy the protected
+// regular-file contract before they are unlinked; this prevents teardown from
+// following a redirected path supplied by a compromised data directory. The
+// temporary artifact is removed too so an interrupted mint cannot leave secret
+// material behind after connector removal.
+func RemoveOTLPPathToken(dataDir string, scope OTLPPathTokenScope) error {
+	if !validOTLPScope(scope) {
+		return fmt.Errorf("RemoveOTLPPathToken: invalid scope %q", scope)
+	}
+	if dataDir == "" {
+		return errors.New("RemoveOTLPPathToken: empty dataDir")
+	}
+	otlpTokenMu.Lock()
+	defer otlpTokenMu.Unlock()
+
+	tokenPath, err := OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return err
+	}
+	for _, path := range []string{tokenPath, tokenPath + ".tmp"} {
+		if _, err := validateSecureOTLPPathTokenFile(dataDir, path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("validate OTLP path-token removal %s: %w", path, err)
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove OTLP path-token %s: %w", path, err)
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("OTLP path-token still exists after removal: %s", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("verify OTLP path-token removal %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // LoadAllOTLPPathTokens loads every known scope into a single map.
@@ -252,23 +330,7 @@ func validOTLPScope(scope OTLPPathTokenScope) bool {
 }
 
 func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
-	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
-		return "", err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("OTLP path-token %s is a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("OTLP path-token %s is not a regular file", path)
-	}
-	if err := otlpValidatePerm(path, info); err != nil {
-		return "", err
-	}
-	if err := otlpValidateOwner(path, info); err != nil {
+	if _, err := validateSecureOTLPPathTokenFile(dataDir, path); err != nil {
 		return "", err
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
@@ -289,6 +351,40 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 		return "", fmt.Errorf("OTLP path-token %s is not a 64-character lowercase hex token", path)
 	}
 	return tok, nil
+}
+
+func validateSecureOTLPPathTokenFile(dataDir, path string) (os.FileInfo, error) {
+	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOTLPPathTokenDirectory(path); err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("OTLP path-token %s is a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("OTLP path-token %s is not a regular file", path)
+	}
+	if err := otlpValidatePerm(path, info); err != nil {
+		return nil, err
+	}
+	if err := otlpValidateOwner(path, info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func validateOTLPPathTokenDirectory(path string) error {
+	tokenDir := filepath.Dir(path)
+	if err := otlpValidateDirectory(tokenDir); err != nil {
+		return fmt.Errorf("OTLP path-token directory %s is not trusted: %w", tokenDir, err)
+	}
+	return nil
 }
 
 func validateOTLPPathTokenLocation(dataDir, path string) error {
