@@ -90,7 +90,9 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
 		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
 	}
-	if !strings.Contains(string(data), `authorization = "Bearer `+otlpToken+`"`) {
+	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
+	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
+	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
 		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
 	}
 	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)

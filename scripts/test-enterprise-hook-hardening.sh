@@ -394,7 +394,10 @@ if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
 fi
 case "$connector" in
     codex)
-        grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" || fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
+        if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
+            ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
+            fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
+        fi
         ;;
     claudecode)
         grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as an Authorization bearer"
