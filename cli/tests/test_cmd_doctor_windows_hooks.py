@@ -251,6 +251,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
             with (
                 contextlib.redirect_stdout(output),
                 patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+                patch(
+                    "defenseclaw.doctor_hooks._windows_known_folder_path",
+                    return_value=str(self.root / "Trusted Program Files"),
+                ),
                 patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock,
             ):
                 _check_hook_contract_lock(
@@ -1367,7 +1371,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self._lock(connector, config)
                 result = _DoctorResult()
                 config_before = config.read_bytes()
-                with patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock:
+                with (
+                    patch(
+                        "defenseclaw.doctor_hooks._windows_known_folder_path",
+                        return_value=str(self.root / "Trusted Program Files"),
+                    ),
+                    patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock,
+                ):
                     check_hooks(
                         self.cfg,
                         result,
