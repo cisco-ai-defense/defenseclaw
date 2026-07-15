@@ -8,10 +8,34 @@ package winfolders
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestUserProgramFilesIgnoresProcessEnvironmentOverrides(t *testing.T) {
+	want, err := UserProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignProfile := t.TempDir()
+	for name, value := range map[string]string{
+		"USERPROFILE":  foreignProfile,
+		"HOME":         foreignProfile,
+		"LOCALAPPDATA": filepath.Join(foreignProfile, "AppData", "Local"),
+		"APPDATA":      filepath.Join(foreignProfile, "AppData", "Roaming"),
+	} {
+		t.Setenv(name, value)
+	}
+	got, err := UserProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		t.Fatalf("token-bound UserProgramFiles changed with process environment: got %q, want %q", got, want)
+	}
+}
 
 func TestUserProgramFilesDoesNotRequireMaterializedFolder(t *testing.T) {
 	const local = `C:\Users\fixture\AppData\Local`

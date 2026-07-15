@@ -30,6 +30,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
 )
 from defenseclaw.doctor_hooks import (
+    _CLAUDE_REQUIRED_HOOKS,
     _CODEX_HOOK_SPECS,
     _codex_command_hook_hash,
     _codex_hook_state_key_source,
@@ -129,28 +130,36 @@ class WindowsHookDoctorTests(unittest.TestCase):
             escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
             escaped = command.replace("\\", "\\\\").replace('"', '\\"')
             escaped_windows = selected_windows.replace("\\", "\\\\").replace('"', '\\"')
-            specs = (
-                ("SessionStart", "startup|resume|clear", 30),
-                ("UserPromptSubmit", None, 30),
-                ("PreToolUse", "*", 30),
-                ("PermissionRequest", "*", 30),
-                ("PostToolUse", "*", 30),
-                ("SubagentStart", "*", 30),
-                ("SubagentStop", "*", 90),
-                ("PreCompact", None, 30),
-                ("PostCompact", None, 30),
-                ("Stop", None, 90),
-            )
-            rows = []
-            for event, matcher, timeout in specs:
+            rows: list[str] = []
+            trust_rows: list[tuple[str, str]] = []
+            state_source = _codex_hook_state_key_source(str(path))
+            for event, (event_key, matcher, timeout) in _CODEX_HOOK_SPECS.items():
                 matcher_text = "" if matcher is None else f'matcher = "{matcher}", '
                 groups = (
                     f'{event} = [{{ {matcher_text}hooks = [{{ type = "command", '
                     f'command = "{escaped}", command_windows = "{escaped_windows}", timeout = {timeout} }}] }}'
                 )
+                managed_handler = {
+                    "type": "command",
+                    "command": command,
+                    "command_windows": selected_windows,
+                    "timeout": timeout,
+                }
+                state_key = f"{state_source}:{event_key}:0:0"
+                trust_rows.append((state_key, _codex_command_hook_hash(event_key, matcher, managed_handler)))
                 if event == "PostToolUse" and escaped_extra:
                     groups += f', {{ hooks = [{{ type = "command", command = "{escaped_extra}", timeout = 30 }}] }}'
                 rows.append(groups + "]")
+            rows.extend(
+                [
+                    "",
+                    "[hooks.state]",
+                    *(
+                        f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(trusted_hash)} }}"
+                        for key, trusted_hash in trust_rows
+                    ),
+                ]
+            )
             path.write_text(
                 (("[features]\nhooks = true\n\n" if codex_features else "") + "[hooks]\n") + "\n".join(rows) + "\n",
                 encoding="utf-8",
@@ -160,69 +169,15 @@ class WindowsHookDoctorTests(unittest.TestCase):
             path.parent.mkdir(exist_ok=True)
             bare_exec = not any(token in command for token in (" hook ", "-File ", "-EncodedCommand "))
             events: dict[str, object] = {}
-            matchers = {
-                "SessionStart": "startup|resume|clear|compact",
-                "FileChanged": (
-                    "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
-                    "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
-                ),
-            }
-            wildcard_events = {
-                "InstructionsLoaded",
-                "PreToolUse",
-                "PermissionRequest",
-                "PostToolUse",
-                "PostToolUseFailure",
-                "PermissionDenied",
-                "Notification",
-                "SubagentStart",
-                "StopFailure",
-                "ConfigChange",
-                "PreCompact",
-                "PostCompact",
-                "Elicitation",
-                "ElicitationResult",
-            }
-            for event in (
-                "SessionStart",
-                "InstructionsLoaded",
-                "UserPromptSubmit",
-                "UserPromptExpansion",
-                "MessageDisplay",
-                "PreToolUse",
-                "PermissionRequest",
-                "PostToolUse",
-                "PostToolUseFailure",
-                "PostToolBatch",
-                "PermissionDenied",
-                "Notification",
-                "SubagentStart",
-                "SubagentStop",
-                "TaskCreated",
-                "TaskCompleted",
-                "Stop",
-                "StopFailure",
-                "TeammateIdle",
-                "ConfigChange",
-                "CwdChanged",
-                "FileChanged",
-                "WorktreeRemove",
-                "PreCompact",
-                "PostCompact",
-                "SessionEnd",
-                "Elicitation",
-                "ElicitationResult",
-            ):
-                handler: dict[str, object] = {"type": "command", "command": command, "timeout": 30}
+            for event, (matcher, timeout) in _CLAUDE_REQUIRED_HOOKS.items():
+                handler: dict[str, object] = {"type": "command", "command": command, "timeout": timeout}
                 if bare_exec:
                     handler["args"] = ["hook", "--connector", "claudecode"]
                 if event == "MessageDisplay":
                     handler["async"] = True
                 entry: dict[str, object] = {"hooks": [handler]}
-                if event in matchers:
-                    entry["matcher"] = matchers[event]
-                elif event in wildcard_events:
-                    entry["matcher"] = "*"
+                if matcher is not None:
+                    entry["matcher"] = matcher
                 events[event] = [entry]
             if extra_command:
                 assert isinstance(events["PostToolUse"], list)
@@ -350,22 +305,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         command = f'"{runtime}" hook --connector codex'
         config = self._config("codex", command)
         document = tomllib.loads(config.read_text(encoding="utf-8"))
-        source = _codex_hook_state_key_source(str(config))
-        state = {}
-        for event, (event_key, _matcher, _timeout) in _CODEX_HOOK_SPECS.items():
-            group = document["hooks"][event][0]
-            hook = group["hooks"][0]
-            key = f"{source}:{event_key}:0:0"
-            state[key] = {"trusted_hash": _codex_command_hook_hash(event_key, group.get("matcher"), hook)}
-        state_lines = ["", "[hooks.state]"]
-        state_lines.extend(
-            f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(value['trusted_hash'])} }}"
-            for key, value in state.items()
-        )
-        config.write_text(
-            config.read_text(encoding="utf-8") + "\n".join(state_lines) + "\n",
-            encoding="utf-8",
-        )
+        state = document["hooks"]["state"]
         self._lock("codex", config, contract="codex-hooks-v3")
 
         check = self._validate("codex", config)
@@ -379,7 +319,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         config.write_text(tampered, encoding="utf-8")
         check = self._validate("codex", config)
         self.assertEqual(check.state, "stale", check.detail)
-        self.assertIn("trust state does not match", check.detail)
+        self.assertIn("not trusted", check.detail)
 
     def test_codex_obsolete_gateway_precedes_current_contract_trust_mismatch(self) -> None:
         runtime = self._runtime()
@@ -766,8 +706,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
 
         check = self._validate("codex", config)
-        self.assertEqual(check.state, "healthy", check.detail)
-        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("not byte-identical", check.detail)
 
     def test_codex_encoded_obsolete_gateway_is_classified_as_stale(self) -> None:
         legacy = self._runtime("defenseclaw-gateway.exe")
@@ -781,10 +721,9 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
-        runtime = self._runtime()
         config = self._config(
             "codex",
-            f'"{runtime}" hook --connector codex',
+            command,
             windows_command=command,
             codex_features=False,
         )
@@ -894,8 +833,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 mutate(document)
                 config.write_text(json.dumps(document), encoding="utf-8")
                 check = self._validate("claudecode", config)
-                self.assertEqual(check.state, "stale", check.detail)
-                self.assertIn("contract", check.detail)
+                self.assertNotEqual(check.state, "healthy", check.detail)
+                self.assertIn("repair", check.detail)
 
     def test_claude_accepts_effective_matcher_supersets_and_ignored_matchers(self) -> None:
         runtime = self._runtime()

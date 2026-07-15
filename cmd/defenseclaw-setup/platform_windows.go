@@ -1475,11 +1475,11 @@ func unregisterInstalledAppOwned(installRoot string, previousState *installState
 const gatewayAutoStartValueName = "DefenseClawGateway"
 
 func gatewayAutoStartRegistryCommand(gatewayPath string) (string, error) {
-	localAppData, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
+	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		return "", fmt.Errorf("resolve LocalAppData for gateway auto-start: %w", err)
 	}
-	profile, err := windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT)
+	profile, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
 	if err != nil {
 		return "", fmt.Errorf("resolve user profile for gateway auto-start: %w", err)
 	}

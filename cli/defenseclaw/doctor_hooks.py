@@ -66,50 +66,6 @@ _CLAUDE_FILE_CHANGED_MATCHER = (
     "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
     "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
 )
-# Setup only observes initialization and cannot block. WorktreeCreate replaces
-# Claude's default git behavior and must create/print a worktree path, so the
-# generic security hook must not claim either event.
-_CLAUDE_HOOK_MATCHERS = {
-    "SessionStart": "startup|resume|clear|compact",
-    "InstructionsLoaded": "*",
-    "UserPromptSubmit": "",
-    "UserPromptExpansion": "",
-    "MessageDisplay": "",
-    "PreToolUse": "*",
-    "PermissionRequest": "*",
-    "PostToolUse": "*",
-    "PostToolUseFailure": "*",
-    "PostToolBatch": "",
-    "PermissionDenied": "*",
-    "Notification": "*",
-    "SubagentStart": "*",
-    "SubagentStop": "",
-    "TaskCreated": "",
-    "TaskCompleted": "",
-    "Stop": "",
-    "StopFailure": "*",
-    "TeammateIdle": "",
-    "ConfigChange": "*",
-    "CwdChanged": "",
-    "FileChanged": _CLAUDE_FILE_CHANGED_MATCHER,
-    "WorktreeRemove": "",
-    "PreCompact": "*",
-    "PostCompact": "*",
-    "SessionEnd": "",
-    "Elicitation": "*",
-    "ElicitationResult": "*",
-}
-_CLAUDE_EVENTS_WITHOUT_MATCHERS = {
-    "UserPromptSubmit",
-    "PostToolBatch",
-    "Stop",
-    "TeammateIdle",
-    "TaskCreated",
-    "TaskCompleted",
-    "WorktreeRemove",
-    "CwdChanged",
-}
-_CLAUDE_ASYNC_EVENTS = frozenset({"MessageDisplay"})
 _REPAIR = {
     "codex": "defenseclaw setup codex --yes --restart",
     "claudecode": "defenseclaw setup claude-code --yes --restart",
@@ -150,11 +106,7 @@ _CLAUDE_REQUIRED_HOOKS: dict[str, tuple[str | None, int]] = {
     "TeammateIdle": (None, 30),
     "ConfigChange": ("*", 30),
     "CwdChanged": (None, 30),
-    "FileChanged": (
-        "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
-        "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt",
-        30,
-    ),
+    "FileChanged": (_CLAUDE_FILE_CHANGED_MATCHER, 30),
     "WorktreeRemove": (None, 30),
     "PreCompact": ("*", 30),
     "PostCompact": ("*", 30),
@@ -1258,9 +1210,9 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
     return target
 
 
-def _matcher_covers(event: str, actual: Any, required: str) -> bool:
+def _matcher_covers(event: str, actual: Any, required: str | None) -> bool:
     """Report whether a configured matcher covers a required hook matcher."""
-    if event in _CLAUDE_EVENTS_WITHOUT_MATCHERS:
+    if required is None:
         return True
     if actual is None:
         actual = ""
@@ -1273,53 +1225,6 @@ def _matcher_covers(event: str, actual: Any, required: str) -> bool:
         # filenames broaden coverage without weakening the required set.
         return set(required.split("|")).issubset(actual.split("|"))
     return False
-
-
-def _validate_claude_hook_contract(
-    managed_entries: list[tuple[str, dict[str, Any], dict[str, Any], str]],
-) -> None:
-    """Require the exact execution mode and broad coverage for every Claude event."""
-    covered: set[str] = set()
-    rejected: dict[str, str] = {}
-    for event, entry, hook, _command in managed_entries:
-        required_matcher = _CLAUDE_HOOK_MATCHERS.get(event)
-        if required_matcher is None:
-            continue
-        if hook.get("type") != "command":
-            rejected[event] = "handler type is not command"
-            continue
-        async_value = hook.get("async", False)
-        expected_async = event in _CLAUDE_ASYNC_EVENTS
-        if type(async_value) is not bool or async_value != expected_async:
-            rejected[event] = (
-                "observational handler is not asynchronous" if expected_async else "enforcement handler is asynchronous"
-            )
-            continue
-        async_rewake = hook.get("asyncRewake", False)
-        if type(async_rewake) is not bool or async_rewake:
-            rejected[event] = "handler uses asynchronous rewake"
-            continue
-        condition = hook.get("if", "")
-        if not isinstance(condition, str) or condition:
-            rejected[event] = "handler has a narrowing if condition"
-            continue
-        if not _matcher_covers(event, entry.get("matcher"), required_matcher):
-            rejected[event] = f"matcher {entry.get('matcher')!r} is narrower than {required_matcher!r}"
-            continue
-        covered.add(event)
-
-    missing = [event for event in _CLAUDE_HOOK_MATCHERS if event not in covered]
-    if not missing:
-        return
-    detail = ", ".join(missing)
-    reasons = "; ".join(f"{event}: {rejected[event]}" for event in missing if event in rejected)
-    if reasons:
-        detail = f"{detail} ({reasons})"
-    raise _InspectionError(
-        "stale",
-        f"Claude Code hook contract is incomplete; missing broad DefenseClaw registrations "
-        f"with the expected execution mode for: {detail}",
-    )
 
 
 def _codex_hook_state_key_source(config_path: str) -> str:
@@ -1785,10 +1690,10 @@ def _validate_claude_hook_matrix(document: dict[str, Any]) -> int:
         if handler.get("type") != "command":
             raise _InspectionError("malformed", f"Claude Code event {event} handler type is not command")
         matcher = group.get("matcher") if "matcher" in group else None
-        if matcher != expected_matcher:
+        if not _matcher_covers(event, matcher, expected_matcher):
             raise _InspectionError(
                 "stale",
-                f"Claude Code event {event} matcher is {matcher!r}; expected {expected_matcher!r}",
+                f"Claude Code event {event} matcher {matcher!r} does not cover {expected_matcher!r}",
             )
         timeout = handler.get("timeout")
         if type(timeout) is not int or timeout != expected_timeout:
@@ -1809,6 +1714,12 @@ def _validate_claude_hook_matrix(document: dict[str, Any]) -> int:
                         "stale",
                         f"Claude Code event {event} {label} sets {key}=true and cannot enforce policy",
                     )
+            condition = container.get("if", "")
+            if not isinstance(condition, str) or condition:
+                raise _InspectionError(
+                    "stale",
+                    f"Claude Code event {event} {label} has a narrowing if condition",
+                )
         command = _handler_command_line(handler, "claudecode", windows=True)
         target, _args, _kind = _command_target(command, "claudecode")
         if ntpath.basename(target).casefold() not in {

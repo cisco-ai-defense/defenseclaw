@@ -50,9 +50,7 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         app.workers.cancel_all()
         await pilot.pause()
         bar = app.query_one(f"#{panel}-controls", Horizontal)
-        assert bar.has_class("hidden") is False, (
-            f"{panel}-controls should be visible while the {panel} panel is active"
-        )
+        assert bar.has_class("hidden") is False, f"{panel}-controls should be visible while the {panel} panel is active"
         # Switching to another catalog panel hides the previous bar.
         other = next(other for other in CATALOG_PANELS if other != panel)
         # Plugins is hidden when the active connector doesn't expose
@@ -64,9 +62,7 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         await pilot.pause()
         app.workers.cancel_all()
         await pilot.pause()
-        assert bar.has_class("hidden") is True, (
-            f"{panel}-controls must be hidden after switching to {other}"
-        )
+        assert bar.has_class("hidden") is True, f"{panel}-controls must be hidden after switching to {other}"
 
 
 @pytest.mark.asyncio
@@ -88,9 +84,7 @@ async def test_catalog_filter_input_mounted_and_constrained(panel: str) -> None:
         inp = app.query_one(f"#{panel}-filter", Input)
         # 24 is the CSS-set width; min-width 16 is the floor. Anything
         # above 32 means the constraint was dropped.
-        assert inp.region.width <= 32, (
-            f"{panel}-filter width={inp.region.width} — Input should be CSS-constrained"
-        )
+        assert inp.region.width <= 32, f"{panel}-filter width={inp.region.width} — Input should be CSS-constrained"
 
 
 @pytest.mark.asyncio
@@ -134,6 +128,8 @@ async def test_catalog_filter_clear_button_resets_model_and_input(panel: str) ->
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         app.action_switch_panel(panel)
+        await pilot.pause()
+        app.workers.cancel_all()
         await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
@@ -247,9 +243,7 @@ async def test_catalog_loader_does_not_render_after_shutdown_starts(
     app = DefenseClawTUI()
     load_started = asyncio.Event()
 
-    async def _finish_during_shutdown(
-        *_args: object, **_kwargs: object
-    ) -> tuple[int, bytes, bytes]:
+    async def _finish_during_shutdown(*_args: object, **_kwargs: object) -> tuple[int, bytes, bytes]:
         load_started.set()
         while app.is_running:
             await asyncio.sleep(0)
@@ -295,9 +289,7 @@ async def test_catalog_refresh_button_routes_to_reload_intent(panel: str, monkey
         loaded.clear()
         app._handle_catalog_control(panel, f"{panel}-refresh")  # noqa: SLF001
         await pilot.pause()
-        assert loaded == [panel], (
-            f"Refresh on {panel} bar should re-run _load_catalog_model({panel!r})"
-        )
+        assert loaded == [panel], f"Refresh on {panel} bar should re-run _load_catalog_model({panel!r})"
 
 
 @pytest.mark.asyncio
@@ -332,9 +324,7 @@ async def test_catalog_row_only_buttons_disabled_when_no_row(panel: str) -> None
         # Every catalog bar has at least these row-only suffixes.
         for suffix in ("detail", "menu"):
             btn = app.query_one(f"#{panel}-{suffix}", Button)
-            assert btn.disabled is True, (
-                f"{panel}-{suffix} should be disabled while the table is empty"
-            )
+            assert btn.disabled is True, f"{panel}-{suffix} should be disabled while the table is empty"
 
 
 @pytest.mark.asyncio

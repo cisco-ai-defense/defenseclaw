@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -26,7 +27,7 @@ type resolver func(*windows.KNOWNFOLDERID, uint32) (string, error)
 // fall back to the independently resolved LocalAppData Known Folder while
 // preserving the same non-environment trust boundary.
 func UserProgramFiles() (string, error) {
-	return userProgramFiles(windows.KnownFolderPath)
+	return userProgramFiles(winpath.CurrentUserKnownFolderPathWithFlags)
 }
 
 func userProgramFiles(resolve resolver) (string, error) {

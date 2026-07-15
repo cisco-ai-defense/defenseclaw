@@ -18,6 +18,13 @@ import (
 // for connector isolation, but they must never redirect Setup ownership or the
 // native hook trust boundary.
 func CurrentUserKnownFolderPath(folderID *windows.KNOWNFOLDERID) (string, error) {
+	return CurrentUserKnownFolderPathWithFlags(folderID, windows.KF_FLAG_DEFAULT)
+}
+
+// CurrentUserKnownFolderPathWithFlags resolves a Known Folder with the
+// requested SHGetKnownFolderPath flags while retaining the same explicit
+// current-process-token trust boundary as CurrentUserKnownFolderPath.
+func CurrentUserKnownFolderPathWithFlags(folderID *windows.KNOWNFOLDERID, flags uint32) (string, error) {
 	var token windows.Token
 	if err := windows.OpenProcessToken(
 		windows.CurrentProcess(),
@@ -26,7 +33,7 @@ func CurrentUserKnownFolderPath(folderID *windows.KNOWNFOLDERID) (string, error)
 	); err != nil {
 		return "", fmt.Errorf("open current process token: %w", err)
 	}
-	path, err := token.KnownFolderPath(folderID, windows.KF_FLAG_DEFAULT)
+	path, err := token.KnownFolderPath(folderID, flags)
 	closeErr := token.Close()
 	if err != nil {
 		return "", fmt.Errorf("resolve current user Known Folder: %w", err)
