@@ -29,7 +29,7 @@ jobs:
   windows-go:
     name: Windows x64 Go suite
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -61,11 +61,25 @@ jobs:
             'TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations',
             'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
             'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsReparsePointDirectory',
+            'TestHookAPITokenRejectsSymlinkedDataDirParent',
+            'TestLoadOTLPPathToken_RejectsUnsafeFiles',
             'TestLoadOTLPPathTokenWindowsRejectsWritableAncestor',
             'TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor'
           )
           $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
           Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
+      - name: Stress native single-flight and executable lifecycle contracts
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=10', '-run', '^TestRunScan_SingleFlight$', './internal/inventory'
+          ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-inventory-singleflight-stress.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
@@ -76,8 +90,7 @@ jobs:
           # private-DACL, and supported-connector coverage runs in this job.
           $windowsInapplicable = '^(' + (@(
             'TestAtomicWriteFile_PreservesSymlinkedDotfile',
-            'TestOpenHandsHookScript_BlockExitsTwo',
-            'TestLoadOTLPPathToken_RejectsUnsafeFiles'
+            'TestOpenHandsHookScript_BlockExitsTwo'
           ) -join '|') + ')$'
           # Keep package execution serial on the four-core hosted runner so
           # bounded discovery tests are not starved by concurrent packages.
@@ -124,6 +137,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('py-' + $env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD)
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Sync locked Python environment
@@ -203,6 +217,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Parse every PowerShell script
@@ -217,6 +232,8 @@ jobs:
           if ($failures.Count) { throw ($failures -join "`n") }
       - name: Parser, mock timeout, redaction, isolation, and workflow contracts
         run: ./scripts/live-connector-e2e/test-windows.ps1
+      - name: Native Setup bootstrap delegation and offline contract
+        run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -248,6 +265,7 @@ jobs:
           cache: true
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Build release-shaped Windows x64 zip and Python wheel
@@ -341,6 +359,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

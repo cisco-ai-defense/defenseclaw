@@ -44,6 +44,10 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 			t.Fatalf("resource tool failed: %v\n%s", err, output)
 		}
 	}
+	buildInfo := exec.Command("go", "version", "-m", executable)
+	if output, err := buildInfo.CombinedOutput(); err != nil {
+		t.Fatalf("manifested setup lost exact Go build information: %v\n%s", err, output)
+	}
 
 	module, err := windows.LoadLibraryEx(
 		executable,

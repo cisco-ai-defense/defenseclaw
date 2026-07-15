@@ -175,23 +175,50 @@ type options struct {
 }
 
 type payloadManifest struct {
-	SchemaVersion      int               `json:"schema_version"`
-	Version            string            `json:"version"`
-	SourceCommit       string            `json:"source_commit"`
-	DistributionFlavor string            `json:"distribution_flavor"`
-	PythonVersion      string            `json:"python_version"`
-	GatewayArchive     string            `json:"gateway_archive"`
-	Wheel              string            `json:"wheel"`
-	PythonEmbed        string            `json:"python_embed"`
-	YaraCompatWheel    string            `json:"yara_compat_wheel"`
-	UpgradeManifest    string            `json:"upgrade_manifest"`
-	SitePackages       string            `json:"site_packages"`
-	Launcher           string            `json:"launcher"`
-	StartupLauncher    string            `json:"startup_launcher"`
-	CosignVerifier     string            `json:"cosign_verifier"`
-	Unsigned           bool              `json:"unsigned"`
-	Toolchain          map[string]string `json:"toolchain"`
-	Files              map[string]string `json:"files"`
+	SchemaVersion      int                   `json:"schema_version"`
+	Version            string                `json:"version"`
+	SourceCommit       string                `json:"source_commit"`
+	DistributionFlavor string                `json:"distribution_flavor"`
+	PythonVersion      string                `json:"python_version"`
+	GatewayArchive     string                `json:"gateway_archive"`
+	Wheel              string                `json:"wheel"`
+	PythonEmbed        string                `json:"python_embed"`
+	YaraCompatWheel    string                `json:"yara_compat_wheel"`
+	UpgradeManifest    string                `json:"upgrade_manifest"`
+	SitePackages       string                `json:"site_packages"`
+	Launcher           string                `json:"launcher"`
+	StartupLauncher    string                `json:"startup_launcher"`
+	CosignVerifier     string                `json:"cosign_verifier"`
+	Unsigned           bool                  `json:"unsigned"`
+	Authenticode       authenticodeInventory `json:"authenticode"`
+	Toolchain          map[string]string     `json:"toolchain"`
+	Files              map[string]string     `json:"files"`
+}
+
+type authenticodeInventory struct {
+	SchemaVersion int                                 `json:"schema_version"`
+	Files         map[string]authenticodeFileEvidence `json:"files"`
+}
+
+type authenticodeFileEvidence struct {
+	SchemaVersion int                    `json:"schema_version"`
+	InstalledPath string                 `json:"installed_path"`
+	SBOMFileName  string                 `json:"sbom_file_name"`
+	SHA256        string                 `json:"sha256"`
+	Expected      authenticodeFilePolicy `json:"expected"`
+	Observed      json.RawMessage        `json:"observed"`
+}
+
+type authenticodeFilePolicy struct {
+	Policy                          string `json:"policy"`
+	Status                          string `json:"status"`
+	Publisher                       string `json:"publisher"`
+	SignatureType                   string `json:"signature_type"`
+	PlatformIdentityRequired        bool   `json:"platform_identity_required"`
+	TimestampRequired               bool   `json:"timestamp_required"`
+	SignerThumbprintSHA256          string `json:"signer_thumbprint_sha256"`
+	TimestampSignerThumbprintSHA256 string `json:"timestamp_signer_thumbprint_sha256"`
+	TimestampTokenSHA256            string `json:"timestamp_token_sha256"`
 }
 
 type installState struct {
@@ -259,6 +286,17 @@ func run(opts options) (int, error) {
 	// invocation without starting an installation transaction.
 	if opts.Action == "help" {
 		printUsage()
+		return 0, nil
+	}
+	if opts.Action == "verify" {
+		self, err := os.Executable()
+		if err != nil {
+			return 1, err
+		}
+		if err := verifySetupExecutablePolicyAt(self, false); err != nil {
+			return 1, fmt.Errorf("verify setup Authenticode policy: %w", err)
+		}
+		fmt.Println("DefenseClaw Setup Authenticode verification succeeded")
 		return 0, nil
 	}
 	// INS-32: this read-only token/session/desktop gate must remain the first
@@ -381,6 +419,13 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
 	}
+	self, err := os.Executable()
+	if err != nil {
+		return 1, err
+	}
+	if err := verifySetupExecutablePolicyAt(self, payload.Manifest.Unsigned); err != nil {
+		return 1, fmt.Errorf("verify running setup Authenticode policy: %w", err)
+	}
 
 	if !opts.Quiet {
 		status := "Installing"
@@ -496,7 +541,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := checkSetupContext(ctx); err != nil {
 		return tryRestore(err)
 	}
-	if err := publishMaintenanceCopyForTransaction(transaction); err != nil {
+	if err := publishMaintenanceCopyForTransaction(transaction, payload.Manifest.Unsigned); err != nil {
 		return tryRestore(err)
 	}
 	// Cancellation is honored through the last rollback-safe boundary. After
@@ -834,7 +879,7 @@ func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, va
 	return writeJSON(path, state)
 }
 
-func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
+func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsignedLocal bool) error {
 	target := transaction.MaintenancePath
 	self, err := os.Executable()
 	if err != nil {
@@ -855,7 +900,7 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
 		if !strings.EqualFold(digest, transaction.MaintenanceSHA256) {
 			return errors.New("running maintenance executable does not match the transaction digest")
 		}
-		return nil
+		return verifySetupExecutablePolicyAt(target, unsignedLocal)
 	}
 	root := filepath.Dir(target)
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -875,6 +920,10 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
 	}
 	if err := copyFile(self, staged); err != nil {
 		return err
+	}
+	if err := verifySetupExecutablePolicyAt(staged, unsignedLocal); err != nil {
+		_ = removeAllSafe(staged, root)
+		return fmt.Errorf("verify staged maintenance Authenticode policy: %w", err)
 	}
 	if err := validateMaintenanceSnapshot(
 		target,
@@ -904,6 +953,9 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction) error {
 			_ = renameInstallTree(backup, target)
 		}
 		return err
+	}
+	if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
+		return fmt.Errorf("verify published maintenance Authenticode policy: %w", err)
 	}
 	return nil
 }
@@ -960,6 +1012,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		filepath.Join(staging, "installer", "upgrade-manifest.json"),
 	); err != nil {
 		return fmt.Errorf("install upgrade manifest: %w", err)
+	}
+	if err := verifyInstalledPEInventory(staging, payload.Manifest); err != nil {
+		return fmt.Errorf("verify staged portable-executable inventory: %w", err)
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "payload-manifest.json"), payload.Manifest); err != nil {
 		return err
@@ -1047,6 +1102,16 @@ func validateInstall(root, version string) error {
 }
 
 func validateInstallContext(ctx context.Context, root, version string) error {
+	var manifest payloadManifest
+	if err := readJSON(filepath.Join(root, "installer", "payload-manifest.json"), &manifest); err != nil {
+		return fmt.Errorf("read installed payload manifest: %w", err)
+	}
+	if manifest.Version != version {
+		return fmt.Errorf("installed payload manifest version %q does not match %q", manifest.Version, version)
+	}
+	if err := verifyInstalledPEInventory(root, manifest); err != nil {
+		return fmt.Errorf("verify installed portable-executable inventory: %w", err)
+	}
 	cosign := filepath.Join(root, "runtime", "tools", "cosign.exe")
 	if info, err := os.Stat(cosign); err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("managed Sigstore verifier is missing or invalid: %s", cosign)
@@ -1057,7 +1122,7 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 	if err != nil {
 		return fmt.Errorf("managed CLI version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if err := validateMachineVersion(output, "defenseclaw-cli", version); err != nil {
+	if err := validateMachineVersion(output, "defenseclaw-cli", version, ""); err != nil {
 		return fmt.Errorf("managed CLI version check: %w", err)
 	}
 	gateway := filepath.Join(root, "bin", "defenseclaw-gateway.exe")
@@ -1065,8 +1130,16 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 	if err != nil {
 		return fmt.Errorf("gateway version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if err := validateMachineVersion(output, "defenseclaw-gateway", version); err != nil {
+	if err := validateMachineVersion(output, "defenseclaw-gateway", version, manifest.SourceCommit); err != nil {
 		return fmt.Errorf("gateway version check: %w", err)
+	}
+	hook := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	output, err = runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, hook, "--version-json")
+	if err != nil {
+		return fmt.Errorf("hook version check failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if err := validateMachineVersion(output, "defenseclaw-hook", version, manifest.SourceCommit); err != nil {
+		return fmt.Errorf("hook version check: %w", err)
 	}
 	return nil
 }
@@ -1079,7 +1152,7 @@ type machineVersionReport struct {
 	Built         string `json:"built,omitempty"`
 }
 
-func validateMachineVersion(output []byte, expectedName, expectedVersion string) error {
+func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
 	var report machineVersionReport
@@ -1095,6 +1168,14 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion string)
 	}
 	if !validPayloadVersion(report.Version) || report.Version != expectedVersion {
 		return fmt.Errorf("reported version %q does not exactly match packaged version %q", report.Version, expectedVersion)
+	}
+	if expectedCommit != "" {
+		if !validSourceCommit(report.Commit) {
+			return fmt.Errorf("reported source commit %q is invalid", report.Commit)
+		}
+		if report.Commit != expectedCommit {
+			return fmt.Errorf("reported source commit %q does not exactly match packaged source commit %q", report.Commit, expectedCommit)
+		}
 	}
 	return nil
 }
@@ -1341,7 +1422,7 @@ func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
 }
 
 func verifyPayloadManifest(root string, manifest payloadManifest) error {
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported payload schema version %d", manifest.SchemaVersion)
 	}
 	if !validPayloadVersion(manifest.Version) {
@@ -1394,7 +1475,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 			return fmt.Errorf("payload hash mismatch for %s", rel)
 		}
 	}
-	return nil
+	return validateAuthenticodeManifest(manifest)
 }
 
 func validSourceCommit(value string) bool {
@@ -1587,6 +1668,8 @@ func parseArgs(args []string) (options, error) {
 		switch lower {
 		case "/?", "-?", "/help", "--help":
 			opts.Action = "help"
+		case "/verify", "-verify", "--verify":
+			opts.Action = "verify"
 		case "/quiet", "-quiet", "--quiet", "/qn":
 			opts.Quiet = true
 		case "/norestart":
@@ -1679,7 +1762,7 @@ func normalizeConnector(value string) string {
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1]")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 
