@@ -68,7 +68,17 @@ def _preflight(
     repo: Path,
     install_dir: Path,
     mode: str,
+    *,
+    dev_reclaim: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+        "PATH": "/usr/bin:/bin",
+    }
+    if dev_reclaim:
+        environment["DEFENSECLAW_SOURCE_DEV_RECLAIM"] = "1"
     return subprocess.run(
         [
             "/bin/bash",
@@ -80,12 +90,7 @@ def _preflight(
             "defenseclaw",
             "defenseclaw-gateway",
         ],
-        env={
-            **os.environ,
-            "HOME": str(tmp_path / "home"),
-            "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
-            "PATH": "/usr/bin:/bin",
-        },
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -259,6 +264,74 @@ def test_markerless_source_with_managed_state_refuses_before_gateway_mutation(
     assert completed.returncode != 0
     assert "original release identity is unknowable" in completed.stdout + completed.stderr
     assert installed_gateway.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_admits_exact_markerless_source_checkout(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "check",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "source install refused" not in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    source_gateway.write_bytes(b"gateway-v2\n")
+    prior_marker = _marker_payload(repo, installed_gateway)
+    prior_marker.update(
+        {
+            "source_release": "0.8.4",
+            "source_install_compatibility_epoch": 1,
+            "runtime_config_version": 7,
+        }
+    )
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(prior_marker, sort_keys=True) + "\n", encoding="utf-8")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    published = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_gateway.read_bytes() == b"gateway-v2\n"
+
+    claimed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "claim",
+        dev_reclaim=True,
+    )
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    validated = source_release_identity.validate_marker(
+        marker,
+        checkout_root=repo,
+        source_release="0.8.5",
+        compatibility_epoch=2,
+        runtime_version=8,
+    )
+    assert validated[1] == hashlib.sha256(b"gateway-v2\n").hexdigest()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -505,8 +578,9 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
 
     assert main.index("source_install_ownership check") < main.index("check_os")
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
-    for target in ("all: _source-install-preflight", "install: _source-install-preflight"):
-        assert target in makefile
+    assert "all: _source-install-dev-preflight" in makefile
+    assert "$(MAKE) --no-print-directory install DEFENSECLAW_SOURCE_DEV_RECLAIM=1" in makefile
+    assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
     gateway_start = makefile.index("\ngateway-install:", cli_start) + 1
     plugin_start = makefile.index("\nplugin-install:", gateway_start) + 1

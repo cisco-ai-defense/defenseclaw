@@ -101,16 +101,16 @@ temporary verifier is never added to `PATH` or installed system-wide.
 ## Building from Source
 
 This section covers developer builds from the repository. Source targets and
-`scripts/install-dev.sh` are not an alternate upgrade mechanism: they refuse to
-overwrite a release-managed installation or one owned by another checkout
-before changing installed entry points or the gateway. Rebuilding from the same
-checkout is supported only while its reviewed release, source-install
-compatibility epoch, and runtime schema match the existing strict ownership
-marker. Legacy markers fail closed because an editable checkout may already
-have crossed a release boundary. A source-owned version transition has no
-tested in-place path: keep it in place, use an isolated fresh developer
-`HOME`/install directory, or contact support. The release-owned resolver is for
-release-managed layouts; it must not be presented as recovery for a source venv.
+`scripts/install-dev.sh` are not an alternate upgrade mechanism: direct install
+targets refuse to overwrite a release-managed installation or one owned by
+another checkout before changing installed entry points or the gateway.
+`make all` is the explicit developer-machine reinstall workflow. When the
+installed CLI already points exactly into the current checkout, it may reclaim
+markerless or prior-release source state and records a strict ownership marker
+after rebuilding. That workflow can run the checkout's current migrations
+against developer state and must not be used on a release-managed host. The
+release-owned resolver is for release-managed layouts; it must not be presented
+as recovery for a source venv.
 
 ### Prerequisites
 

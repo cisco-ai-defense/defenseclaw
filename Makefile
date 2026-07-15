@@ -51,7 +51,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight \
+        _bundle-data _source-install-preflight _source-install-dev-preflight \
         proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
@@ -103,8 +103,8 @@ check-version-sync:
 #
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
-all: _source-install-preflight
-	@$(MAKE) --no-print-directory install
+all: _source-install-dev-preflight
+	@$(MAKE) --no-print-directory install DEFENSECLAW_SOURCE_DEV_RECLAIM=1
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -434,6 +434,15 @@ plugin:
 # check admits same-checkout installs made before the marker existed.
 _source-install-preflight:
 	@./scripts/source-install-preflight.sh check \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+# `make all` is the explicit developer-machine reinstall workflow.  It may
+# reclaim markerless managed state only when the installed CLI is already the
+# exact symlink/copy owned by this checkout.  Direct install targets remain
+# fail-closed so they cannot become an alternate release upgrader.
+_source-install-dev-preflight:
+	@DEFENSECLAW_SOURCE_DEV_RECLAIM=1 ./scripts/source-install-preflight.sh check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 

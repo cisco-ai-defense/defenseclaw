@@ -105,14 +105,14 @@ make all
 ```
 
 The source targets and `scripts/install-dev.sh` are development tooling, not an
-upgrade path. They refuse to overwrite a release-managed installation or one
-owned by another checkout. Repeat builds are allowed only while the checkout's
-reviewed release, source-install compatibility epoch, and runtime schema still
-match its strict ownership marker. A source-owned version transition has no
-tested in-place path: keep that checkout and state unchanged, use an isolated
-fresh developer `HOME`/install directory, or contact support. Release-managed
-installations must use the release-owned `scripts/upgrade.sh` or
-`scripts/upgrade.ps1` resolver.
+upgrade path. Direct install targets refuse to overwrite a release-managed
+installation or one owned by another checkout. `make all` is the explicit
+developer-machine reinstall workflow: when the installed CLI already points
+exactly into the current checkout, it may reclaim markerless or prior-release
+source state and records a strict ownership marker after rebuilding. This can
+run the checkout's current migrations against developer state and must not be
+used as a release upgrade. Release-managed installations must use the
+release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver.
 
 ### Install with the release script
 

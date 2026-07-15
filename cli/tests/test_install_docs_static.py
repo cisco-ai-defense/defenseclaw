@@ -1360,21 +1360,31 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is unavailable")
+    tool_dirs = {
+        str(Path(tool).parent)
+        for name in ("go", "python3")
+        if (tool := shutil.which(name)) is not None
+    }
+    test_path = os.pathsep.join(sorted(tool_dirs) + ["/usr/bin", "/bin"])
 
-    def run(home: Path, install_dir: Path) -> subprocess.CompletedProcess[str]:
+    def run(
+        home: Path,
+        install_dir: Path,
+        target: str = "_source-install-preflight",
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update(
             {
                 "HOME": str(home),
                 "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
-                "PATH": "/usr/bin:/bin",
+                "PATH": test_path,
             }
         )
         return subprocess.run(
             [
                 make,
                 "--no-print-directory",
-                "_source-install-preflight",
+                target,
                 f"INSTALL_DIR={install_dir}",
             ],
             cwd=ROOT,
@@ -1420,16 +1430,24 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     assert "release-owned resolver" in refused_output
     assert (other_bin / "defenseclaw").readlink() == other_cli
 
+    refused = run(other_home, other_bin, "_source-install-dev-preflight")
+    assert refused.returncode != 0
+    assert "another installation" in (refused.stdout + refused.stderr)
+
     owner_home = tmp_path / "owner/home"
     owner_bin = owner_home / ".local/bin"
     owner_bin.mkdir(parents=True)
-    expected_cli = ROOT / ".venv/bin/defenseclaw"
+    expected_cli = ROOT.resolve() / ".venv/bin/defenseclaw"
     (owner_bin / "defenseclaw").symlink_to(expected_cli)
     (owner_home / ".defenseclaw").mkdir()
 
     refused = run(owner_home, owner_bin)
     assert refused.returncode != 0
     assert "managed state exists beside a markerless source CLI" in (refused.stdout + refused.stderr)
+
+    allowed = run(owner_home, owner_bin, "_source-install-dev-preflight")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert not (owner_bin / ".defenseclaw-source-root").exists()
 
     owner_gateway = owner_bin / "defenseclaw-gateway"
     owner_gateway.write_bytes(b"owned gateway\n")
