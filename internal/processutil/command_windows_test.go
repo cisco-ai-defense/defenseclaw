@@ -40,6 +40,8 @@ const (
 	processTreeMarkerEnv      = "DEFENSECLAW_PROCESS_TREE_MARKER"
 	managedBreakawayHelperEnv = "DEFENSECLAW_MANAGED_BREAKAWAY_HELPER"
 	managedBreakawayChildEnv  = "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD"
+	inheritedOutputHelperEnv  = "DEFENSECLAW_INHERITED_OUTPUT_HELPER"
+	inheritedOutputChildEnv   = "DEFENSECLAW_INHERITED_OUTPUT_CHILD"
 )
 
 func TestCommandContextPreventsConsoleAllocation(t *testing.T) {
@@ -134,6 +136,64 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 	}
 	if result != windows.WAIT_OBJECT_0 {
 		t.Fatalf("grandchild wait result = %#x, want terminated", result)
+	}
+}
+
+func TestCombinedOutputTreeCompletesWhenGrandchildInheritsOutput(t *testing.T) {
+	if os.Getenv(inheritedOutputChildEnv) == "1" {
+		_, _ = os.Stdout.WriteString("grandchild stdout\n")
+		_, _ = os.Stderr.WriteString("grandchild stderr\n")
+		if err := publishProcessTreeFixture(
+			os.Getenv(processTreeMarkerEnv),
+			[]byte("ready"),
+		); err != nil {
+			os.Exit(26)
+		}
+		time.Sleep(30 * time.Second)
+		return
+	}
+	if os.Getenv(inheritedOutputHelperEnv) == "1" {
+		grandchild := exec.Command(os.Args[0], "-test.run=^TestCombinedOutputTreeCompletesWhenGrandchildInheritsOutput$")
+		grandchild.Env = append(os.Environ(), inheritedOutputChildEnv+"=1")
+		grandchild.Stdout = os.Stdout
+		grandchild.Stderr = os.Stderr
+		if err := grandchild.Start(); err != nil {
+			os.Exit(25)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			data, err := os.ReadFile(os.Getenv(processTreeMarkerEnv))
+			if err == nil {
+				if string(data) != "ready" {
+					os.Exit(27)
+				}
+				break
+			}
+			if !processTreeFixtureNotReady(err) || time.Now().After(deadline) {
+				os.Exit(28)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_, _ = os.Stdout.WriteString("helper complete\n")
+		return
+	}
+
+	marker := filepath.Join(t.TempDir(), "inherited-output-ready")
+	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestCombinedOutputTreeCompletesWhenGrandchildInheritsOutput$")
+	cmd.Env = append(
+		os.Environ(),
+		inheritedOutputHelperEnv+"=1",
+		processTreeMarkerEnv+"="+marker,
+	)
+	cmd.WaitDelay = 250 * time.Millisecond
+	output, err := CombinedOutputTree(cmd, false)
+	if err != nil {
+		t.Fatalf("successful helper with inherited output handles failed: %v: %s", err, output)
+	}
+	for _, expected := range []string{"grandchild stdout", "grandchild stderr", "helper complete"} {
+		if !strings.Contains(string(output), expected) {
+			t.Fatalf("captured output %q is missing %q", output, expected)
+		}
 	}
 }
 

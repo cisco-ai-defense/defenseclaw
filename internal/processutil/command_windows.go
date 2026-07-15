@@ -172,11 +172,36 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 		return output.Bytes(), err
 	}
 
-	waitErr := cmd.Wait()
+	// Wait for the direct process handle rather than cmd.Wait so inherited pipe
+	// handles cannot delay tree cleanup. cmd.Wait can finish copying output once
+	// terminating the job closes every non-breakaway descendant's handles.
+	var directWaitErr error
+	handleErr := cmd.Process.WithHandle(func(handle uintptr) {
+		result, err := windows.WaitForSingleObject(windows.Handle(handle), windows.INFINITE)
+		if err != nil {
+			directWaitErr = err
+			return
+		}
+		if result != windows.WAIT_OBJECT_0 {
+			directWaitErr = fmt.Errorf("unexpected wait result %#x", result)
+		}
+	})
+	if handleErr != nil {
+		directWaitErr = errors.Join(directWaitErr, handleErr)
+	}
+
 	// Reap descendants that did not exit with the direct command. A managed
 	// daemon can survive only by explicitly breaking away from the permitted job.
-	if err := windows.TerminateJobObject(job, 1); err != nil {
-		return output.Bytes(), errors.Join(waitErr, fmt.Errorf("terminate captured process tree: %w", err))
+	jobErr := windows.TerminateJobObject(job, 1)
+	waitErr := cmd.Wait()
+	if directWaitErr != nil {
+		directWaitErr = fmt.Errorf("wait for captured process exit: %w", directWaitErr)
 	}
-	return output.Bytes(), waitErr
+	if jobErr != nil {
+		jobErr = fmt.Errorf("terminate captured process tree: %w", jobErr)
+	}
+	if directWaitErr == nil && jobErr == nil {
+		return output.Bytes(), waitErr
+	}
+	return output.Bytes(), errors.Join(waitErr, directWaitErr, jobErr)
 }
