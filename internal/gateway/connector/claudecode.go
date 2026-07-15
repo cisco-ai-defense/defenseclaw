@@ -346,9 +346,10 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 
 // HookProfile implements HookProfileProvider. The returned
 // NativeOTLPSpec is the declarative form of buildClaudeCodeOtelEnv:
-// an env-block targeting the gateway's connector-scoped loopback OTLP-HTTP
-// receiver, with source headers and a path token that has no general API
-// authority.
+// an env-block targeting the gateway's loopback OTLP-HTTP receiver. Claude
+// Code supports standard OTLP headers, so its connector-scoped credential is
+// carried as an Authorization bearer rather than appearing in the endpoint
+// URL. The receiver binds that narrow bearer to the claudecode source.
 // buildClaudeCodeOtelEnv renders this spec via spec.EnvBlock()
 // instead of computing the map by hand.
 //
@@ -365,6 +366,9 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	headers := map[string]string{
 		"x-defenseclaw-source": "claudecode",
 		"x-defenseclaw-client": "claudecode-otel/1.0",
+	}
+	if otlpToken != "" {
+		headers["authorization"] = "Bearer " + otlpToken
 	}
 	failMode := "open"
 	if strings.TrimSpace(opts.HookFailMode) != "" {
@@ -392,8 +396,6 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:           "http://" + opts.APIAddr,
 			Protocol:           "http/json",
 			Headers:            headers,
-			PathToken:          otlpToken,
-			PathScope:          OTLPScopeClaude,
 			PerSignal:          true,
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},

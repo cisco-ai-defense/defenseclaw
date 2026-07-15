@@ -3842,7 +3842,8 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // We assert log_user_prompt = false (privacy default; UserPromptSubmit
 // hook captures the prompt text with redaction control) and that the
 // otlp-http endpoint matches the gateway API address. Authentication uses a
-// connector-scoped path token so Codex never receives the master API bearer.
+// connector-scoped Authorization bearer so Codex never receives the master
+// API bearer and the credential never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -3899,8 +3900,8 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if err != nil || scoped == "" {
 		t.Fatalf("LoadOTLPPathToken(codex) = %q, %v", scoped, err)
 	}
-	if !strings.Contains(endpoint, "/otlp/codex/"+scoped+"/v1/logs") {
-		t.Errorf("otlp-http endpoint = %q, want connector-scoped Codex path", endpoint)
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/codex/") {
+		t.Errorf("otlp-http endpoint leaked connector-scoped Codex credential: %q", endpoint)
 	}
 	// protocol = "json" is REQUIRED by codex's deserializer
 	// (codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp). Omitting
@@ -3922,6 +3923,9 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	if _, leaked := headers["x-defenseclaw-token"]; leaked {
 		t.Errorf("Codex OTel headers leaked the general API token: %v", headers)
+	}
+	if got := headers["authorization"]; got != "Bearer "+scoped {
+		t.Errorf("Codex OTel Authorization = %q, want connector-scoped bearer", got)
 	}
 
 	traceExporter, _ := otelBlock["trace_exporter"].(map[string]interface{})
@@ -6668,8 +6672,8 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if err != nil || scoped == "" {
 		t.Fatalf("LoadOTLPPathToken(claudecode) = %q, %v", scoped, err)
 	}
-	if !strings.Contains(endpoint, "/otlp/claudecode/"+scoped) {
-		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want connector-scoped Claude path", endpoint)
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/claudecode/") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT leaked connector-scoped Claude credential: %q", endpoint)
 	}
 	headers, _ := env["OTEL_EXPORTER_OTLP_HEADERS"].(string)
 	if strings.Contains(headers, "x-defenseclaw-token=") || strings.Contains(headers, "test-token-claude-otel") {
@@ -6677,6 +6681,9 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	}
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
+	}
+	if !strings.Contains(headers, "authorization=Bearer+"+scoped) {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
 	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])

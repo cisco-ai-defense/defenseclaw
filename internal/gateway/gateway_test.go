@@ -6449,6 +6449,72 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 	}
 }
 
+func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		if got := r.Header.Get(otelSourceHeader); got != "codex" {
+			t.Errorf("authenticated OTLP source = %q, want codex", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer codex-scoped-token")
+	req.Header.Set(otelSourceHeader, "codex")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("Codex scoped Authorization rejected: status=%d called=%v", rr.Code, *called)
+	}
+}
+
+func TestTokenAuth_OTLPScopedAuthorizationCannotEscapeScope(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		source     string
+		token      string
+		remoteAddr string
+	}{
+		{name: "cross connector", path: "/v1/logs", source: "claudecode", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "master rejected after provisioning", path: "/v1/logs", source: "codex", token: "master-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "missing source", path: "/v1/logs", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "management route", path: "/status", source: "codex", token: "codex-scoped-token", remoteAddr: "127.0.0.1:54321"},
+		{name: "non loopback", path: "/v1/logs", source: "codex", token: "codex-scoped-token", remoteAddr: "192.0.2.10:54321"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			*called = false
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.source != "" {
+				req.Header.Set(otelSourceHeader, tc.source)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized || *called {
+				t.Fatalf("scoped credential escaped: status=%d called=%v", rr.Code, *called)
+			}
+		})
+	}
+}
+
 // TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
 // H-2 follow-up: the path-token branch of apiCSRFProtect skips the
 // X-DefenseClaw-Client header (OTLP exporters can't set arbitrary

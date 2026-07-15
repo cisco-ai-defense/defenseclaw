@@ -123,8 +123,11 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
 			t.Errorf("%s.otlp-http.endpoint = %q; want http://%s prefix", signal, ep, opts.APIAddr)
 		}
-		if !strings.Contains(ep, "/otlp/codex/"+opts.OTLPPathToken+"/v1/") {
-			t.Errorf("%s.otlp-http.endpoint = %q; want scoped Codex path", signal, ep)
+		if strings.Contains(ep, opts.OTLPPathToken) || strings.Contains(ep, "/otlp/codex/") {
+			t.Errorf("%s.otlp-http.endpoint leaked scoped Codex credential: %q", signal, ep)
+		}
+		if !strings.Contains(ep, "/v1/") {
+			t.Errorf("%s.otlp-http.endpoint = %q; want standard OTLP signal path", signal, ep)
 		}
 		hdrs := toStringMap(otlp["headers"])
 		if _, leaked := hdrs["x-defenseclaw-token"]; leaked {
@@ -135,6 +138,9 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		}
 		if hdrs["x-defenseclaw-client"] == "" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-client] missing (gateway CSRF gate would reject)", signal)
+		}
+		if got := hdrs["authorization"]; got != "Bearer "+opts.OTLPPathToken {
+			t.Errorf("%s.otlp-http.headers[authorization] = %q; want connector-scoped bearer", signal, got)
 		}
 	}
 }
@@ -195,14 +201,16 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
 			env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.APIAddr)
 	}
-	if !strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "/otlp/claudecode/"+opts.OTLPPathToken) {
-		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want scoped Claude path", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	if strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.OTLPPathToken) ||
+		strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "/otlp/claudecode/") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT leaked scoped Claude credential: %q", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
 
 	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
 	wantHeaders := map[string]bool{
-		"x-defenseclaw-source=claudecode":          true,
-		"x-defenseclaw-client=claudecode-otel/1.0": true,
+		"x-defenseclaw-source=claudecode":            true,
+		"x-defenseclaw-client=claudecode-otel/1.0":   true,
+		"authorization=Bearer " + opts.OTLPPathToken: true,
 	}
 	for _, h := range headers {
 		delete(wantHeaders, h)
