@@ -940,6 +940,31 @@ func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
 	}
 }
 
+func TestSaveSingleConnectorReadyState_LockFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "hook_contract_lock.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+
+	err := s.saveSingleConnectorReadyState(
+		context.Background(), connector.SetupOpts{DataDir: dir}, conn,
+	)
+	if err == nil || !strings.Contains(err.Error(), "hook contract lock save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want lock-save failure", err)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("lock-save failure did not roll the connector back")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector = %q, want rollback marker codex", got)
+	}
+	if got := s.health.Snapshot().Guardrail.State; got != StateError {
+		t.Fatalf("guardrail state = %q, want %q", got, StateError)
+	}
+}
+
 // failGuardrailWithRollback must be a no-op when given nil inputs so
 // the caller never has to guard the call site itself.
 func TestFailGuardrailWithRollback_NilInputs(t *testing.T) {

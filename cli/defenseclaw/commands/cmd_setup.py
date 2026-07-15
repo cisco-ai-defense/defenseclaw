@@ -8494,6 +8494,9 @@ def _restart_services(
     connector_state_before = (
         _active_connector_state_marker(data_dir) if wait_for_connector_ready and hook_targets else None
     )
+    hook_contract_lock_before = (
+        _hook_contract_lock_marker(data_dir) if wait_for_connector_ready and hook_targets else None
+    )
 
     gateway_restarted = _restart_defense_gateway(data_dir)
     if not gateway_restarted:
@@ -8501,7 +8504,12 @@ def _restart_services(
 
     if wait_for_connector_ready and hook_targets and gateway_restarted:
         click.echo("  connector runtime: waiting for verified setup...", nl=False)
-        if _wait_for_connector_runtime(data_dir, hook_targets, connector_state_before):
+        if _wait_for_connector_runtime(
+            data_dir,
+            hook_targets,
+            connector_state_before,
+            hook_contract_lock_before,
+        ):
             click.echo(" ✓")
         else:
             click.echo(" ✗")
@@ -8570,9 +8578,16 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
 
 
 def _active_connector_state_marker(data_dir: str) -> int | None:
-    state_path = os.path.join(data_dir, "active_connector.json")
+    return _regular_file_marker(os.path.join(data_dir, "active_connector.json"))
+
+
+def _hook_contract_lock_marker(data_dir: str) -> int | None:
+    return _regular_file_marker(os.path.join(data_dir, "hook_contract_lock.json"))
+
+
+def _regular_file_marker(path: str) -> int | None:
     try:
-        info = os.lstat(state_path)
+        info = os.lstat(path)
     except OSError:
         return None
     if not stat.S_ISREG(info.st_mode):
@@ -8580,42 +8595,67 @@ def _active_connector_state_marker(data_dir: str) -> int | None:
     return info.st_mtime_ns
 
 
+def _read_stable_regular_json(path: str) -> tuple[Any, int]:
+    fd: int | None = None
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        opened_info = os.fstat(fd)
+        if not stat.S_ISREG(opened_info.st_mode):
+            raise OSError(f"opened {path} is not a regular file")
+        if not os.path.samestat(info, opened_info):
+            raise OSError(f"{path} changed while opening")
+        opened_file = os.fdopen(fd, encoding="utf-8")
+        fd = None
+        with opened_file:
+            payload = _json.load(opened_file)
+        return payload, opened_info.st_mtime_ns
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _hook_contract_lock_covers(lock: Any, expected: set[str]) -> bool:
+    if not isinstance(lock, dict):
+        return False
+    version = lock.get("version")
+    entries = lock.get("connectors")
+    if type(version) is not int or version < 1 or version > 2 or not isinstance(entries, dict):
+        return False
+    for name in expected:
+        entry = entries.get(name)
+        if not isinstance(entry, dict):
+            return False
+        connector_name = entry.get("connector")
+        if not isinstance(connector_name, str) or normalize_connector(connector_name) != name:
+            return False
+    return True
+
+
 def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
-    previous_marker: int | None,
+    previous_state_marker: int | None,
+    previous_lock_marker: int | None,
     timeout: float = _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS,
 ) -> bool:
     expected = {normalize_connector(name) for name in connectors if name}
     if not expected:
         return True
     state_path = os.path.join(data_dir, "active_connector.json")
+    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        fd: int | None = None
         try:
-            info = os.lstat(state_path)
-            if not stat.S_ISREG(info.st_mode):
-                raise OSError("connector state is not a regular file")
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            fd = os.open(state_path, flags)
-            opened_info = os.fstat(fd)
-            if not stat.S_ISREG(opened_info.st_mode):
-                raise OSError("opened connector state is not a regular file")
-            if not os.path.samestat(info, opened_info):
-                raise OSError("connector state changed while opening")
-            state_file = os.fdopen(fd, encoding="utf-8")
-            fd = None
-            with state_file:
-                state = _json.load(state_file)
+            state, state_marker = _read_stable_regular_json(state_path)
+            lock, lock_marker = _read_stable_regular_json(lock_path)
         except (OSError, ValueError):
             time.sleep(0.2)
             continue
-        finally:
-            if fd is not None:
-                os.close(fd)
-        marker = opened_info.st_mtime_ns
         raw_names = state.get("names") if isinstance(state, dict) else None
         if isinstance(raw_names, list):
             active = {
@@ -8626,7 +8666,14 @@ def _wait_for_connector_runtime(
         else:
             name = state.get("name") if isinstance(state, dict) else None
             active = {normalize_connector(name)} if isinstance(name, str) and name.strip() else set()
-        if expected.issubset(active) and (previous_marker is None or marker != previous_marker):
+        state_fresh = previous_state_marker is None or state_marker != previous_state_marker
+        lock_fresh = previous_lock_marker is None or lock_marker != previous_lock_marker
+        if (
+            expected.issubset(active)
+            and state_fresh
+            and lock_fresh
+            and _hook_contract_lock_covers(lock, expected)
+        ):
             return True
         time.sleep(0.2)
     return False

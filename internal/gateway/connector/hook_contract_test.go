@@ -466,6 +466,39 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	}
 }
 
+func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{Connector: "codex", ContractID: "codex-hooks-v1"}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, hookContractLockFile)
+	old := time.Unix(1, 0)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Fatal("ordinary idempotent save unexpectedly rewrote the contract lock")
+	}
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().Equal(old) {
+		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
+	}
+}
+
 func TestSharedInspectScriptsAreConnectorIndependent(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	hookDir := filepath.Join(dir, "hooks")

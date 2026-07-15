@@ -2420,12 +2420,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
 			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
 		}
-		if err := connector.SaveActiveConnector(s.currentConfig().DataDir, conn.Name()); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
-		}
-		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock: %v\n", err)
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn); err != nil {
+			return err
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
@@ -3324,8 +3320,8 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
 	}
 	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock for %s: %v\n", conn.Name(), err)
+	if err := connector.SaveFreshHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
+		return fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 	}
 	return nil
 }
@@ -3697,6 +3693,18 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 	}
 	return err
+}
+
+func (s *Sidecar) saveSingleConnectorReadyState(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+	}
+	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveFreshHookContractLockEntry(opts.DataDir, lockEntry); err != nil {
+		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
+		return s.failGuardrailWithRollback(ctx, opts, conn, "hook contract lock", lockErr)
+	}
+	return nil
 }
 
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {

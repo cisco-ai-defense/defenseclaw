@@ -218,6 +218,18 @@ func LoadHookContractLockEntry(dataDir, connectorName string) HookContractLockEn
 }
 
 func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, false)
+}
+
+// SaveFreshHookContractLockEntry persists the same contract evidence as
+// SaveHookContractLockEntry but forces an atomic rewrite when the evidence is
+// otherwise unchanged. Gateway boot uses this narrow variant as its durable
+// readiness acknowledgement; ordinary callers retain idempotent no-op saves.
+func SaveFreshHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, true)
+}
+
+func saveHookContractLockEntry(dataDir string, entry HookContractLockEntry, forceRefresh bool) error {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
 	}
@@ -294,13 +306,21 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 				entry.UpdatedAt = previous.UpdatedAt
 			}
 		}
-		if !entryChanged && !lockChanged {
+		if !entryChanged && !lockChanged && !forceRefresh {
 			return nil
 		}
-		if entry.UpdatedAt == "" {
-			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		nowTime := time.Now().UTC()
+		now := nowTime.Format(time.RFC3339)
+		if forceRefresh {
+			now = nowTime.Format(time.RFC3339Nano)
+			if now == entry.UpdatedAt {
+				now = nowTime.Add(time.Nanosecond).Format(time.RFC3339Nano)
+			}
 		}
-		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if entry.UpdatedAt == "" || forceRefresh {
+			entry.UpdatedAt = now
+		}
+		lock.UpdatedAt = now
 		lock.Connectors[entry.Connector] = entry
 		data, err := json.MarshalIndent(lock, "", "  ")
 		if err != nil {
