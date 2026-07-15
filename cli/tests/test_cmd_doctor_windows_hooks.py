@@ -325,19 +325,6 @@ class WindowsHookDoctorTests(unittest.TestCase):
         runtime = self._runtime()
         command = f'"{runtime}" hook --connector codex'
         config = self._config("codex", command)
-        document = tomllib.loads(config.read_text(encoding="utf-8"))
-        source = _codex_hook_state_key_source(str(config))
-        state_lines = ["", "[hooks.state]"]
-        for event, (event_key, _matcher, _timeout) in _CODEX_HOOK_SPECS.items():
-            group = document["hooks"][event][0]
-            hook = group["hooks"][0]
-            key = f"{source}:{event_key}:0:0"
-            trusted_hash = _codex_command_hook_hash(event_key, group.get("matcher"), hook)
-            state_lines.append(f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(trusted_hash)} }}")
-        config.write_text(
-            config.read_text(encoding="utf-8") + "\n".join(state_lines) + "\n",
-            encoding="utf-8",
-        )
         self._lock("codex", config, contract="codex-hooks-v3")
 
         obsolete = self._runtime("defenseclaw-gateway.exe")

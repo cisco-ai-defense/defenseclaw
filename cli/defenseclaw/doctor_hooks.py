@@ -1917,7 +1917,6 @@ def validate_windows_hook_registration(
         policy_detail = ""
         if connector == "codex":
             policy_detail = _validate_codex_effective_policy(data_dir, config_path)
-            matrix_entries = _validate_codex_hook_matrix(document, config_path)
         else:
             matrix_entries = _validate_claude_hook_matrix(document)
         raw_target, _args, kind = _command_target(command, connector)
@@ -1931,6 +1930,7 @@ def validate_windows_hook_registration(
             _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
             raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
         if connector == "codex":
+            matrix_entries = _validate_codex_hook_matrix(document, config_path)
             _validate_codex_hook_contract(document, contract_id, config_path)
         if kind == "powershell":
             if not basename.endswith(".ps1") or basename not in {"defenseclaw-hook.ps1", "defenseclaw-gateway.ps1"}:
