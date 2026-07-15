@@ -985,6 +985,358 @@ func TestCleanupStalePayloadTempsKeepsUnrelatedEntries(t *testing.T) {
 	}
 }
 
+func TestPendingConnectorReconciliationQuiescesOwnedRuntimeBeforeJournalCompletes(t *testing.T) {
+	t.Parallel()
+	phase := setupPhaseCommitted
+	var calls []string
+	ops := installRuntimeConvergenceOps{
+		disableStableHook: func(transactionID string) error {
+			if transactionID != testCurrentTransactionID {
+				t.Fatalf("stable hook transaction = %q", transactionID)
+			}
+			calls = append(calls, "hook:disable")
+			return nil
+		},
+		configureAutoStart: func(_ string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
+			calls = append(calls, fmt.Sprintf("autostart:%v", enabled))
+			return gatewayAutoStartSnapshot{Existed: true, Value: "owned"}, true, nil
+		},
+		startServices: func(string, string, serviceState) (serviceState, error) {
+			calls = append(calls, "start")
+			return serviceState{}, nil
+		},
+		verifyServices: func(string, string, serviceState) error {
+			calls = append(calls, "verify-running")
+			return nil
+		},
+		stopServices: func(string, string) (serviceState, error) {
+			calls = append(calls, "stop:gateway+watchdog")
+			return serviceState{Gateway: true, Watchdog: true}, nil
+		},
+		verifyStopped: func(string, string) error {
+			calls = append(calls, "verify-stopped")
+			return nil
+		},
+	}
+	err := recoverSetupJournalPhase(setupJournal{
+		Phase:       setupPhaseCommitted,
+		Transaction: setupTransaction{Action: "install"},
+	}, setupRecoveryOps{
+		Converge: func(setupTransaction) error {
+			return convergeInstallRuntime(
+				testCurrentTransactionID,
+				true,
+				`C:\DefenseClaw\defenseclaw-gateway.exe`,
+				`C:\Users\test\.defenseclaw`,
+				serviceState{Gateway: true, Watchdog: true},
+				ops,
+			)
+		},
+		Cleanup: func(setupTransaction) error { return nil },
+		Transition: func(_ setupTransaction, from, to string) error {
+			if phase != from {
+				return fmt.Errorf("transition from %s while journal is %s", from, phase)
+			}
+			calls = append(calls, "journal:"+to)
+			phase = to
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase != setupPhaseComplete {
+		t.Fatalf("journal phase = %s, want %s", phase, setupPhaseComplete)
+	}
+	if got := strings.Join(calls, ","); got != "hook:disable,autostart:false,stop:gateway+watchdog,verify-stopped,journal:converged,journal:complete" {
+		t.Fatalf("pending-reconciliation runtime calls = %q", got)
+	}
+}
+
+func TestPendingConnectorReconciliationAttemptsEveryQuiesceBoundary(t *testing.T) {
+	t.Parallel()
+	hookErr := errors.New("disable stable hook")
+	autoStartErr := errors.New("disable auto-start")
+	stopErr := errors.New("stop runtime")
+	verifyErr := errors.New("runtime remains active")
+	var calls []string
+	ops := installRuntimeConvergenceOps{
+		disableStableHook: func(string) error {
+			calls = append(calls, "hook:disable")
+			return hookErr
+		},
+		configureAutoStart: func(_ string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
+			if enabled {
+				t.Fatal("pending reconciliation enabled auto-start")
+			}
+			calls = append(calls, "autostart:disable")
+			return gatewayAutoStartSnapshot{}, false, autoStartErr
+		},
+		stopServices: func(string, string) (serviceState, error) {
+			calls = append(calls, "runtime:stop")
+			return serviceState{}, stopErr
+		},
+		verifyStopped: func(string, string) error {
+			calls = append(calls, "runtime:verify-stopped")
+			return verifyErr
+		},
+	}
+
+	err := convergeInstallRuntime(
+		testCurrentTransactionID,
+		true,
+		"gateway.exe",
+		"data",
+		serviceState{Gateway: true, Watchdog: true},
+		ops,
+	)
+	for _, want := range []error{hookErr, autoStartErr, stopErr, verifyErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("quiesce error %v does not include %v", err, want)
+		}
+	}
+	if got := strings.Join(calls, ","); got != "hook:disable,autostart:disable,runtime:stop,runtime:verify-stopped" {
+		t.Fatalf("pending-reconciliation failure calls = %q", got)
+	}
+}
+
+func TestConnectorReconciliationStateFailuresQuiesceRuntime(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name            string
+		inMemoryPending bool
+		persistErr      error
+		summaryErr      error
+	}{
+		{name: "persist", persistErr: errors.New("persist failed")},
+		{name: "summary", summaryErr: errors.New("summary failed")},
+		{name: "in-memory", inMemoryPending: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			ops := installRuntimeConvergenceOps{
+				disableStableHook: func(string) error {
+					calls = append(calls, "hook:disable")
+					return nil
+				},
+				configureAutoStart: func(string, bool) (gatewayAutoStartSnapshot, bool, error) {
+					calls = append(calls, "autostart:disable")
+					return gatewayAutoStartSnapshot{}, false, nil
+				},
+				stopServices: func(string, string) (serviceState, error) {
+					calls = append(calls, "runtime:stop")
+					return serviceState{}, nil
+				},
+				verifyStopped: func(string, string) error {
+					calls = append(calls, "runtime:verify-stopped")
+					return nil
+				},
+			}
+			pending, err := settleInstallConnectorReconciliation(
+				testCurrentTransactionID,
+				"gateway.exe",
+				"data",
+				serviceState{Gateway: true},
+				test.inMemoryPending,
+				func() error { return test.persistErr },
+				func() (string, error) { return "", test.summaryErr },
+				ops,
+			)
+			if !pending {
+				t.Fatal("unsafe reconciliation state was reported as ready for activation")
+			}
+			wantErr := test.persistErr
+			if wantErr == nil {
+				wantErr = test.summaryErr
+			}
+			if wantErr != nil && !errors.Is(err, wantErr) {
+				t.Fatalf("settlement error = %v, want %v", err, wantErr)
+			}
+			if wantErr == nil && err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(calls, ","); got != "hook:disable,autostart:disable,runtime:stop,runtime:verify-stopped" {
+				t.Fatalf("fail-closed calls = %q", got)
+			}
+		})
+	}
+}
+
+func TestConvergeInstallRuntimeActivatesOnlyAfterReconciliation(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	wanted := serviceState{Gateway: true, Watchdog: true}
+	ops := installRuntimeConvergenceOps{
+		disableStableHook: func(string) error {
+			t.Fatal("successful reconciliation disabled the stable hook")
+			return nil
+		},
+		configureAutoStart: func(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
+			if gatewayPath != "gateway.exe" || !enabled {
+				t.Fatalf("configure auto-start arguments = %q, %v", gatewayPath, enabled)
+			}
+			calls = append(calls, "autostart")
+			return gatewayAutoStartSnapshot{}, true, nil
+		},
+		startServices: func(gatewayPath, dataRoot string, got serviceState) (serviceState, error) {
+			if gatewayPath != "gateway.exe" || dataRoot != "data" || got != wanted {
+				t.Fatalf("start arguments = %q, %q, %+v", gatewayPath, dataRoot, got)
+			}
+			calls = append(calls, "start")
+			return got, nil
+		},
+		verifyServices: func(gatewayPath, dataRoot string, got serviceState) error {
+			if gatewayPath != "gateway.exe" || dataRoot != "data" || got != wanted {
+				t.Fatalf("verify arguments = %q, %q, %+v", gatewayPath, dataRoot, got)
+			}
+			calls = append(calls, "verify")
+			return nil
+		},
+		stopServices: func(string, string) (serviceState, error) {
+			t.Fatal("successful reconciliation stopped services")
+			return serviceState{}, nil
+		},
+		verifyStopped: func(string, string) error {
+			t.Fatal("successful reconciliation verified stopped services")
+			return nil
+		},
+	}
+	if err := convergeInstallRuntime(testCurrentTransactionID, false, "gateway.exe", "data", wanted, ops); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "autostart,start,verify" {
+		t.Fatalf("runtime convergence calls = %q", got)
+	}
+}
+
+func TestUninstallHandoffSurvivesInjectedCrashAndResumesIntent(t *testing.T) {
+	t.Parallel()
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	source := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	next := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, nil)
+	path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+	sourceJournal := setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseCommitted,
+		Transaction:   source,
+	}
+	if err := writeDurableJournal(path, sourceJournal, false); err != nil {
+		t.Fatal(err)
+	}
+	expected := setupTransactionExpectations{
+		InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+	}
+	injectedCrash := errors.New("injected crash after durable handoff")
+	recoveryCalls := []string{}
+	ops := uninstallRecoveryOps{
+		prepareCommittedInstall: func(setupTransaction) error {
+			recoveryCalls = append(recoveryCalls, "validate-quiesce-cleanup")
+			return nil
+		},
+		buildHandoff: func(setupTransaction) (setupTransaction, error) { return next, nil },
+		replaceWithHandoff: func(source setupJournal, next setupTransaction) error {
+			return replaceSetupJournalWithUninstallIntentAt(path, expected, source, next)
+		},
+		afterHandoff: func() error { return injectedCrash },
+	}
+	if _, err := preparePendingSetupTransactionForUninstallAt(path, expected, ops); !errors.Is(err, injectedCrash) {
+		t.Fatalf("handoff error = %v", err)
+	}
+	journal, err := readSetupJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal == nil || journal.Phase != setupPhaseIntent || journal.Transaction.Action != "uninstall" ||
+		journal.Transaction.ID != next.ID {
+		t.Fatalf("journal after injected crash = %+v", journal)
+	}
+
+	ops = uninstallRecoveryOps{
+		resumeUninstall: func(transaction setupTransaction) error {
+			recoveryCalls = append(recoveryCalls, "resume-uninstall")
+			if transaction.ID != next.ID {
+				t.Fatalf("resumed transaction = %s, want %s", transaction.ID, next.ID)
+			}
+			return nil
+		},
+	}
+	resumed, err := preparePendingSetupTransactionForUninstallAt(path, expected, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed == nil || resumed.ID != next.ID {
+		t.Fatalf("resumed handoff = %+v", resumed)
+	}
+	if got := strings.Join(recoveryCalls, ","); got != "validate-quiesce-cleanup,resume-uninstall" {
+		t.Fatalf("handoff recovery calls = %q", got)
+	}
+}
+
+func TestInstallToUninstallHandoffBypassesFailingForwardConvergence(t *testing.T) {
+	t.Parallel()
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	source := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	next := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, nil)
+	path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+	journal := setupJournal{SchemaVersion: setupJournalSchemaVersion, Phase: setupPhaseCommitted, Transaction: source}
+	if err := writeDurableJournal(path, journal, false); err != nil {
+		t.Fatal(err)
+	}
+	expected := setupTransactionExpectations{
+		InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+	}
+	forwardCalls := 0
+	forwardFailure := errors.New("migration, PATH publication, and Apps & Features publication failed")
+	ops := uninstallRecoveryOps{
+		prepareCommittedInstall: func(setupTransaction) error { return nil },
+		buildHandoff:            func(setupTransaction) (setupTransaction, error) { return next, nil },
+		recoverUninstall: func(setupJournal) error {
+			forwardCalls++
+			return forwardFailure
+		},
+		replaceWithHandoff: func(source setupJournal, next setupTransaction) error {
+			return replaceSetupJournalWithUninstallIntentAt(path, expected, source, next)
+		},
+	}
+	prepared, err := preparePendingSetupTransactionForUninstallAt(path, expected, ops)
+	if err != nil {
+		t.Fatalf("explicit uninstall was blocked by forward convergence: %v", err)
+	}
+	if prepared == nil || prepared.Action != "uninstall" || forwardCalls != 0 {
+		t.Fatalf("handoff = %+v, forward convergence calls = %d", prepared, forwardCalls)
+	}
+}
+
+func TestUninstallHandoffAcceptsOnlySourceBoundPartialPathOwnership(t *testing.T) {
+	t.Parallel()
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	prior := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
+	published := testInstallState(installRoot, dataRoot, maintenancePath, testCurrentTransactionID, "1.1.0")
+	published.PathEntryOwned = false
+	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, &published)
+	transaction.HandoffFromInstall = testCurrentTransactionID
+	transaction.HandoffPreviousState = &prior
+	transaction.UninstallPathEntryOwned = true
+	transaction.UninstallPathValueCreated = true
+	expected := setupTransactionExpectations{
+		InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+	}
+	if err := validateSetupTransaction(transaction, expected); err != nil {
+		t.Fatalf("source-bound handoff ownership was rejected: %v", err)
+	}
+	owned, reusedSeparator, valueCreated := uninstallPathOwnership(transaction)
+	if !owned || reusedSeparator || !valueCreated {
+		t.Fatalf("handoff PATH ownership = %v, %v, %v", owned, reusedSeparator, valueCreated)
+	}
+
+	transaction.HandoffFromInstall = testPreviousTransactionID
+	if err := validateSetupTransaction(transaction, expected); err == nil {
+		t.Fatal("partial PATH ownership not bound to the published install transaction was accepted")
+	}
+}
+
 func testSetupTransactionForRoots(action, installRoot, dataRoot, maintenancePath string, previous *installState) setupTransaction {
 	staging, backup, trash, maintenanceNew, maintenanceBackup := transactionArtifactPaths(
 		installRoot,
@@ -997,25 +1349,31 @@ func testSetupTransactionForRoots(action, installRoot, dataRoot, maintenancePath
 		targetVersion = ""
 		maintenanceSHA256 = ""
 	}
+	uninstallPathOwned := action == "uninstall" && previous != nil && previous.PathEntryOwned
+	uninstallPathSeparatorReused := uninstallPathOwned && previous.PathSeparatorReused
+	uninstallPathValueCreated := uninstallPathOwned && previous.PathValueCreated
 	return setupTransaction{
-		SchemaVersion:     setupTransactionSchemaVersion,
-		ID:                testCurrentTransactionID,
-		Action:            action,
-		InstallRoot:       installRoot,
-		DataRoot:          dataRoot,
-		MaintenancePath:   maintenancePath,
-		StagingPath:       staging,
-		BackupPath:        backup,
-		TrashPath:         trash,
-		MaintenanceNew:    maintenanceNew,
-		MaintenanceBackup: maintenanceBackup,
-		HadInstall:        previous != nil,
-		PreviousState:     previous,
-		PreviousPath:      userPathSnapshot{},
-		TargetConnector:   "none",
-		TargetMode:        "observe",
-		TargetVersion:     targetVersion,
-		MaintenanceSHA256: maintenanceSHA256,
+		SchemaVersion:                setupTransactionSchemaVersion,
+		ID:                           testCurrentTransactionID,
+		Action:                       action,
+		InstallRoot:                  installRoot,
+		DataRoot:                     dataRoot,
+		MaintenancePath:              maintenancePath,
+		StagingPath:                  staging,
+		BackupPath:                   backup,
+		TrashPath:                    trash,
+		MaintenanceNew:               maintenanceNew,
+		MaintenanceBackup:            maintenanceBackup,
+		HadInstall:                   previous != nil,
+		PreviousState:                previous,
+		PreviousPath:                 userPathSnapshot{},
+		TargetConnector:              "none",
+		TargetMode:                   "observe",
+		TargetVersion:                targetVersion,
+		MaintenanceSHA256:            maintenanceSHA256,
+		UninstallPathEntryOwned:      uninstallPathOwned,
+		UninstallPathSeparatorReused: uninstallPathSeparatorReused,
+		UninstallPathValueCreated:    uninstallPathValueCreated,
 	}
 }
 

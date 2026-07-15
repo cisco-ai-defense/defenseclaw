@@ -33,6 +33,9 @@ func validateInstalledAppMutation(_ string, _ *installState) error {
 func registerInstalledAppOwned(_, _, _, _ string, _ bool, _ *installState) error {
 	return errors.New("windows-only operation")
 }
+func retireInstalledAppPendingOwned(_, _ string) error {
+	return errors.New("windows-only operation")
+}
 func unregisterInstalledAppOwned(_ string, _ *installState) error {
 	return errors.New("windows-only operation")
 }

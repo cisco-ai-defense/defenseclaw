@@ -43,36 +43,41 @@ type userPathSnapshot struct {
 }
 
 type setupTransaction struct {
-	SchemaVersion             int                      `json:"schema_version"`
-	ID                        string                   `json:"id"`
-	Action                    string                   `json:"action"`
-	InstallRoot               string                   `json:"install_root"`
-	DataRoot                  string                   `json:"data_root"`
-	MaintenancePath           string                   `json:"maintenance_path"`
-	StagingPath               string                   `json:"staging_path"`
-	BackupPath                string                   `json:"backup_path"`
-	TrashPath                 string                   `json:"trash_path"`
-	MaintenanceNew            string                   `json:"maintenance_new"`
-	MaintenanceBackup         string                   `json:"maintenance_backup"`
-	HadInstall                bool                     `json:"had_install"`
-	MaintenanceExisted        bool                     `json:"maintenance_existed"`
-	PreviousMaintenanceSHA256 string                   `json:"previous_maintenance_sha256,omitempty"`
-	PreviousState             *installState            `json:"previous_state,omitempty"`
-	PreviousPath              userPathSnapshot         `json:"previous_path"`
-	PreviousAutoStart         gatewayAutoStartSnapshot `json:"previous_auto_start"`
-	PreviousServices          serviceState             `json:"previous_services"`
-	PreviousConnectors        []string                 `json:"previous_connectors,omitempty"`
-	TargetConnector           string                   `json:"target_connector"`
-	TargetMode                string                   `json:"target_mode"`
-	TargetServices            serviceState             `json:"target_services"`
-	FromVersion               string                   `json:"from_version,omitempty"`
-	TargetVersion             string                   `json:"target_version,omitempty"`
-	PreviousCodexHome         string                   `json:"previous_codex_home,omitempty"`
-	PreviousClaudeConfigDir   string                   `json:"previous_claude_config_dir,omitempty"`
-	CodexHome                 string                   `json:"codex_home,omitempty"`
-	ClaudeConfigDir           string                   `json:"claude_config_dir,omitempty"`
-	MaintenanceSHA256         string                   `json:"maintenance_sha256,omitempty"`
-	DeleteUserData            bool                     `json:"delete_user_data,omitempty"`
+	SchemaVersion                int                      `json:"schema_version"`
+	ID                           string                   `json:"id"`
+	Action                       string                   `json:"action"`
+	InstallRoot                  string                   `json:"install_root"`
+	DataRoot                     string                   `json:"data_root"`
+	MaintenancePath              string                   `json:"maintenance_path"`
+	StagingPath                  string                   `json:"staging_path"`
+	BackupPath                   string                   `json:"backup_path"`
+	TrashPath                    string                   `json:"trash_path"`
+	MaintenanceNew               string                   `json:"maintenance_new"`
+	MaintenanceBackup            string                   `json:"maintenance_backup"`
+	HadInstall                   bool                     `json:"had_install"`
+	MaintenanceExisted           bool                     `json:"maintenance_existed"`
+	PreviousMaintenanceSHA256    string                   `json:"previous_maintenance_sha256,omitempty"`
+	PreviousState                *installState            `json:"previous_state,omitempty"`
+	PreviousPath                 userPathSnapshot         `json:"previous_path"`
+	PreviousAutoStart            gatewayAutoStartSnapshot `json:"previous_auto_start"`
+	PreviousServices             serviceState             `json:"previous_services"`
+	PreviousConnectors           []string                 `json:"previous_connectors,omitempty"`
+	TargetConnector              string                   `json:"target_connector"`
+	TargetMode                   string                   `json:"target_mode"`
+	TargetServices               serviceState             `json:"target_services"`
+	FromVersion                  string                   `json:"from_version,omitempty"`
+	TargetVersion                string                   `json:"target_version,omitempty"`
+	PreviousCodexHome            string                   `json:"previous_codex_home,omitempty"`
+	PreviousClaudeConfigDir      string                   `json:"previous_claude_config_dir,omitempty"`
+	CodexHome                    string                   `json:"codex_home,omitempty"`
+	ClaudeConfigDir              string                   `json:"claude_config_dir,omitempty"`
+	MaintenanceSHA256            string                   `json:"maintenance_sha256,omitempty"`
+	DeleteUserData               bool                     `json:"delete_user_data,omitempty"`
+	UninstallPathEntryOwned      bool                     `json:"uninstall_path_entry_owned,omitempty"`
+	UninstallPathSeparatorReused bool                     `json:"uninstall_path_separator_reused,omitempty"`
+	UninstallPathValueCreated    bool                     `json:"uninstall_path_value_created,omitempty"`
+	HandoffFromInstall           string                   `json:"handoff_from_install,omitempty"`
+	HandoffPreviousState         *installState            `json:"handoff_previous_state,omitempty"`
 }
 
 type setupTransactionPaths struct {
@@ -91,6 +96,25 @@ type setupRecoveryOps struct {
 	Converge   func(setupTransaction) error
 	Cleanup    func(setupTransaction) error
 	Transition func(setupTransaction, string, string) error
+}
+
+type installRuntimeConvergenceOps struct {
+	disableStableHook  func(string) error
+	configureAutoStart func(string, bool) (gatewayAutoStartSnapshot, bool, error)
+	startServices      func(string, string, serviceState) (serviceState, error)
+	verifyServices     func(string, string, serviceState) error
+	stopServices       func(string, string) (serviceState, error)
+	verifyStopped      func(string, string) error
+}
+
+type uninstallRecoveryOps struct {
+	rollbackInstall         func(setupTransaction) error
+	prepareCommittedInstall func(setupTransaction) error
+	buildHandoff            func(setupTransaction) (setupTransaction, error)
+	resumeUninstall         func(setupTransaction) error
+	recoverUninstall        func(setupJournal) error
+	replaceWithHandoff      func(setupJournal, setupTransaction) error
+	afterHandoff            func() error
 }
 
 type setupTransactionExpectations struct {
@@ -214,37 +238,160 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 			return setupTransaction{}, fmt.Errorf("hash setup executable: %w", err)
 		}
 	}
+	uninstallPathOwned := action == "uninstall" && previousState != nil && previousState.PathEntryOwned
+	uninstallPathSeparatorReused := uninstallPathOwned && previousState.PathSeparatorReused
+	uninstallPathValueCreated := uninstallPathOwned && previousState.PathValueCreated
 	return setupTransaction{
-		SchemaVersion:             setupTransactionSchemaVersion,
-		ID:                        id,
-		Action:                    action,
-		InstallRoot:               installRoot,
-		DataRoot:                  dataRoot,
-		MaintenancePath:           maintenancePath,
-		StagingPath:               staging,
-		BackupPath:                backup,
-		TrashPath:                 trash,
-		MaintenanceNew:            maintenanceNew,
-		MaintenanceBackup:         maintenanceBackup,
-		HadInstall:                oldState != nil,
-		MaintenanceExisted:        maintenanceExisted,
-		PreviousMaintenanceSHA256: previousMaintenanceSHA256,
-		PreviousState:             previousState,
-		PreviousPath:              pathSnapshot,
-		PreviousAutoStart:         autoStartSnapshot,
-		PreviousServices:          previousServices,
-		PreviousConnectors:        previousConnectors,
-		TargetConnector:           targetConnector,
-		TargetMode:                opts.Mode,
-		TargetServices:            targetServices,
-		FromVersion:               fromVersion,
-		TargetVersion:             targetVersion,
-		PreviousCodexHome:         previousCodexHome,
-		PreviousClaudeConfigDir:   previousClaudeConfigDir,
-		CodexHome:                 codexHome,
-		ClaudeConfigDir:           claudeConfigDir,
-		MaintenanceSHA256:         maintenanceSHA256,
-		DeleteUserData:            opts.DeleteUserData,
+		SchemaVersion:                setupTransactionSchemaVersion,
+		ID:                           id,
+		Action:                       action,
+		InstallRoot:                  installRoot,
+		DataRoot:                     dataRoot,
+		MaintenancePath:              maintenancePath,
+		StagingPath:                  staging,
+		BackupPath:                   backup,
+		TrashPath:                    trash,
+		MaintenanceNew:               maintenanceNew,
+		MaintenanceBackup:            maintenanceBackup,
+		HadInstall:                   oldState != nil,
+		MaintenanceExisted:           maintenanceExisted,
+		PreviousMaintenanceSHA256:    previousMaintenanceSHA256,
+		PreviousState:                previousState,
+		PreviousPath:                 pathSnapshot,
+		PreviousAutoStart:            autoStartSnapshot,
+		PreviousServices:             previousServices,
+		PreviousConnectors:           previousConnectors,
+		TargetConnector:              targetConnector,
+		TargetMode:                   opts.Mode,
+		TargetServices:               targetServices,
+		FromVersion:                  fromVersion,
+		TargetVersion:                targetVersion,
+		PreviousCodexHome:            previousCodexHome,
+		PreviousClaudeConfigDir:      previousClaudeConfigDir,
+		CodexHome:                    codexHome,
+		ClaudeConfigDir:              claudeConfigDir,
+		MaintenanceSHA256:            maintenanceSHA256,
+		DeleteUserData:               opts.DeleteUserData,
+		UninstallPathEntryOwned:      uninstallPathOwned,
+		UninstallPathSeparatorReused: uninstallPathSeparatorReused,
+		UninstallPathValueCreated:    uninstallPathValueCreated,
+	}, nil
+}
+
+func newUninstallHandoffTransaction(source setupTransaction, oldState *installState, opts options) (setupTransaction, error) {
+	if source.Action != "install" {
+		return setupTransaction{}, errors.New("uninstall handoff source is not an install transaction")
+	}
+	id, err := newSetupTransactionID()
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	staging, backup, trash, maintenanceNew, maintenanceBackup := transactionArtifactPaths(
+		source.InstallRoot,
+		source.MaintenancePath,
+		id,
+	)
+	maintenanceExisted, previousMaintenanceSHA256, err := snapshotMaintenanceFile(source.MaintenancePath)
+	if err != nil {
+		return setupTransaction{}, fmt.Errorf("snapshot maintenance executable for uninstall handoff: %w", err)
+	}
+	previousConnectors := normalizeStringSlice(connectorsForNativeUninstall(oldState, source.DataRoot))
+	defaultCodexHome, err := defaultConnectorConfigHome(".codex")
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	defaultClaudeConfigDir, err := defaultConnectorConfigHome(".claude")
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	configuredCodexHome, configuredClaudeHome := "", ""
+	if oldState != nil {
+		configuredCodexHome = oldState.CodexHome
+		configuredClaudeHome = oldState.ClaudeConfigDir
+	}
+	previousCodexHome, err := resolvePreviousConnectorHome(
+		configuredCodexHome,
+		previousConnectors,
+		source.DataRoot,
+		"codex",
+		"config.toml",
+		defaultCodexHome,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousClaudeConfigDir, err := resolvePreviousConnectorHome(
+		configuredClaudeHome,
+		previousConnectors,
+		source.DataRoot,
+		"claudecode",
+		"settings.json",
+		defaultClaudeConfigDir,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	var previousState *installState
+	if oldState != nil {
+		copyState := *oldState
+		previousState = &copyState
+	}
+	pathOwned, pathSeparatorReused, pathValueCreated := false, false, false
+	if oldState != nil && oldState.PathEntryOwned {
+		pathOwned = true
+		pathSeparatorReused = oldState.PathSeparatorReused
+		pathValueCreated = oldState.PathValueCreated
+	}
+	handoffFromInstall := ""
+	var handoffPreviousState *installState
+	if oldState != nil && oldState.TransactionID == source.ID {
+		handoffFromInstall = source.ID
+		if source.PreviousState != nil {
+			copyState := *source.PreviousState
+			handoffPreviousState = &copyState
+		}
+		if !pathOwned {
+			// A registry read failure must not replay forward PATH publication or
+			// block explicit uninstall. Claim only the exact mutation proven by
+			// the source transaction's durable pre-install snapshot.
+			if currentPath, captureErr := captureUserPath(); captureErr == nil {
+				pathOwned, pathSeparatorReused, pathValueCreated = replayedTransactionPathOwnership(
+					source.PreviousPath,
+					currentPath,
+					filepath.Join(source.InstallRoot, "bin"),
+				)
+			}
+		}
+	}
+	return setupTransaction{
+		SchemaVersion:                setupTransactionSchemaVersion,
+		ID:                           id,
+		Action:                       "uninstall",
+		InstallRoot:                  source.InstallRoot,
+		DataRoot:                     source.DataRoot,
+		MaintenancePath:              source.MaintenancePath,
+		StagingPath:                  staging,
+		BackupPath:                   backup,
+		TrashPath:                    trash,
+		MaintenanceNew:               maintenanceNew,
+		MaintenanceBackup:            maintenanceBackup,
+		HadInstall:                   previousState != nil,
+		MaintenanceExisted:           maintenanceExisted,
+		PreviousMaintenanceSHA256:    previousMaintenanceSHA256,
+		PreviousState:                previousState,
+		PreviousConnectors:           previousConnectors,
+		TargetConnector:              "none",
+		TargetMode:                   opts.Mode,
+		PreviousCodexHome:            previousCodexHome,
+		PreviousClaudeConfigDir:      previousClaudeConfigDir,
+		CodexHome:                    previousCodexHome,
+		ClaudeConfigDir:              previousClaudeConfigDir,
+		DeleteUserData:               opts.DeleteUserData,
+		UninstallPathEntryOwned:      pathOwned,
+		UninstallPathSeparatorReused: pathSeparatorReused,
+		UninstallPathValueCreated:    pathValueCreated,
+		HandoffFromInstall:           handoffFromInstall,
+		HandoffPreviousState:         handoffPreviousState,
 	}, nil
 }
 
@@ -496,6 +643,60 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		}
 	} else if transaction.TargetVersion != "" || transaction.FromVersion != "" || transaction.MaintenanceSHA256 != "" {
 		return errors.New("uninstall transaction unexpectedly records migration versions")
+	}
+	if transaction.Action == "install" {
+		if transaction.UninstallPathEntryOwned || transaction.UninstallPathSeparatorReused ||
+			transaction.UninstallPathValueCreated || transaction.HandoffFromInstall != "" ||
+			transaction.HandoffPreviousState != nil {
+			return errors.New("install transaction unexpectedly records uninstall handoff state")
+		}
+	} else {
+		if !transaction.UninstallPathEntryOwned &&
+			(transaction.UninstallPathSeparatorReused || transaction.UninstallPathValueCreated) {
+			return errors.New("uninstall transaction has inconsistent PATH ownership")
+		}
+		if transaction.UninstallPathSeparatorReused && transaction.UninstallPathValueCreated {
+			return errors.New("uninstall transaction has incompatible PATH ownership metadata")
+		}
+		previousOwned, previousSeparator, previousCreated := false, false, false
+		if transaction.PreviousState != nil && transaction.PreviousState.PathEntryOwned {
+			previousOwned = true
+			previousSeparator = transaction.PreviousState.PathSeparatorReused
+			previousCreated = transaction.PreviousState.PathValueCreated
+		}
+		if transaction.HandoffFromInstall == "" {
+			if transaction.HandoffPreviousState != nil {
+				return errors.New("ordinary uninstall transaction has unexpected handoff ownership state")
+			}
+			// Schema-1 uninstall intents written by older Setup builds do not
+			// contain the copied ownership fields. Accept their zero value and
+			// derive ownership from PreviousState during convergence.
+			if transaction.UninstallPathEntryOwned && (!previousOwned ||
+				transaction.UninstallPathSeparatorReused != previousSeparator ||
+				transaction.UninstallPathValueCreated != previousCreated) {
+				return errors.New("ordinary uninstall transaction changed recorded PATH ownership")
+			}
+		} else {
+			if !validSetupTransactionID(transaction.HandoffFromInstall) || transaction.PreviousState == nil ||
+				transaction.PreviousState.TransactionID != transaction.HandoffFromInstall {
+				return errors.New("uninstall handoff is not bound to its published install transaction")
+			}
+			if previousOwned && (transaction.UninstallPathEntryOwned != previousOwned ||
+				transaction.UninstallPathSeparatorReused != previousSeparator ||
+				transaction.UninstallPathValueCreated != previousCreated) {
+				return errors.New("uninstall handoff changed recorded PATH ownership")
+			}
+			if transaction.HandoffPreviousState != nil {
+				if err := validateInstallStateForRoots(
+					transaction.HandoffPreviousState,
+					expected.InstallRoot,
+					expected.DataRoot,
+					expected.MaintenancePath,
+				); err != nil {
+					return fmt.Errorf("uninstall handoff previous state: %w", err)
+				}
+			}
+		}
 	}
 	if transaction.MaintenanceExisted {
 		if len(transaction.PreviousMaintenanceSHA256) != 64 {
@@ -944,6 +1145,136 @@ func recoverPendingSetupTransaction(installRoot, dataRoot string) error {
 	})
 }
 
+func preparePendingSetupTransactionForUninstall(opts options, installRoot, dataRoot string) (*setupTransaction, error) {
+	expected, err := transactionExpectationsFromKnownFolders(installRoot, dataRoot)
+	if err != nil {
+		return nil, err
+	}
+	root, err := defaultTransactionRoot()
+	if err != nil {
+		return nil, err
+	}
+	path := journalPaths(root).Journal
+	return preparePendingSetupTransactionForUninstallAt(path, expected, uninstallRecoveryOps{
+		rollbackInstall:         rollbackInstallForUninstallHandoff,
+		prepareCommittedInstall: prepareCommittedInstallForUninstallHandoff,
+		buildHandoff: func(source setupTransaction) (setupTransaction, error) {
+			state, loadErr := loadExistingInstallState(installRoot)
+			if loadErr != nil {
+				return setupTransaction{}, loadErr
+			}
+			return newUninstallHandoffTransaction(source, state, opts)
+		},
+		resumeUninstall: resumeUninstallIntentWithoutActivation,
+		recoverUninstall: func(journal setupJournal) error {
+			return recoverSetupJournalPhase(journal, setupRecoveryOps{
+				Rollback: rollbackSetupTransaction,
+				Converge: convergeCommittedSetupTransaction,
+				Cleanup:  cleanupCommittedSetupTransaction,
+				Transition: func(transaction setupTransaction, fromPhase, toPhase string) error {
+					return transitionSetupJournal(transaction, fromPhase, toPhase)
+				},
+			})
+		},
+		replaceWithHandoff: func(source setupJournal, next setupTransaction) error {
+			return replaceSetupJournalWithUninstallIntentAt(path, expected, source, next)
+		},
+	})
+}
+
+func preparePendingSetupTransactionForUninstallAt(
+	path string,
+	expected setupTransactionExpectations,
+	ops uninstallRecoveryOps,
+) (*setupTransaction, error) {
+	journal, err := readSetupJournal(path)
+	if err != nil || journal == nil || journal.Phase == setupPhaseComplete {
+		return nil, err
+	}
+	if err := validateSetupTransaction(journal.Transaction, expected); err != nil {
+		return nil, fmt.Errorf("refusing unsafe setup transaction recovery: %w", err)
+	}
+	if journal.Transaction.Action == "uninstall" {
+		if journal.Phase == setupPhaseIntent {
+			if err := ops.resumeUninstall(journal.Transaction); err != nil {
+				return nil, fmt.Errorf("resume interrupted uninstall intent: %w", err)
+			}
+			transaction := journal.Transaction
+			return &transaction, nil
+		}
+		if err := ops.recoverUninstall(*journal); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	switch journal.Phase {
+	case setupPhaseIntent:
+		if err := ops.rollbackInstall(journal.Transaction); err != nil {
+			return nil, fmt.Errorf("prepare interrupted install for uninstall handoff: %w", err)
+		}
+	case setupPhaseCommitted, setupPhaseConverged:
+		if err := ops.prepareCommittedInstall(journal.Transaction); err != nil {
+			return nil, fmt.Errorf("prepare committed install for uninstall handoff: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported install-to-uninstall handoff phase %q", journal.Phase)
+	}
+	next, err := ops.buildHandoff(journal.Transaction)
+	if err != nil {
+		return nil, fmt.Errorf("build uninstall handoff: %w", err)
+	}
+	if err := ops.replaceWithHandoff(*journal, next); err != nil {
+		return nil, fmt.Errorf("publish uninstall handoff: %w", err)
+	}
+	if ops.afterHandoff != nil {
+		if err := ops.afterHandoff(); err != nil {
+			return nil, fmt.Errorf("after durable uninstall handoff: %w", err)
+		}
+	}
+	return &next, nil
+}
+
+func replaceSetupJournalWithUninstallIntentAt(
+	path string,
+	expected setupTransactionExpectations,
+	source setupJournal,
+	next setupTransaction,
+) error {
+	return replaceSetupJournalWithUninstallIntentAtWithWriter(path, expected, source, next, writeDurableValue)
+}
+
+func replaceSetupJournalWithUninstallIntentAtWithWriter(
+	path string,
+	expected setupTransactionExpectations,
+	source setupJournal,
+	next setupTransaction,
+	write durableValueWriter,
+) error {
+	current, err := readSetupJournal(path)
+	if err != nil {
+		return err
+	}
+	if current == nil || current.Phase != source.Phase ||
+		!setupTransactionsEqual(current.Transaction, source.Transaction) {
+		return errors.New("setup transaction changed before uninstall handoff")
+	}
+	if source.Transaction.Action != "install" || source.Phase == setupPhaseComplete {
+		return errors.New("uninstall handoff source is not a pending install transaction")
+	}
+	if next.Action != "uninstall" {
+		return errors.New("uninstall handoff target has the wrong action")
+	}
+	if err := validateSetupTransaction(next, expected); err != nil {
+		return fmt.Errorf("refusing unsafe uninstall handoff: %w", err)
+	}
+	return write(path, setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseIntent,
+		Transaction:   next,
+	}, true)
+}
+
 func recoverSetupTransactionAt(path string, expected setupTransactionExpectations, ops setupRecoveryOps) error {
 	journal, err := readSetupJournal(path)
 	if err != nil {
@@ -1034,6 +1365,104 @@ func rollbackSetupTransaction(transaction setupTransaction) error {
 	return errors.Join(restoreErrors...)
 }
 
+func nativeInstallRuntimeConvergenceOps() installRuntimeConvergenceOps {
+	return installRuntimeConvergenceOps{
+		disableStableHook:  disableStableHookRuntime,
+		configureAutoStart: configureGatewayAutoStart,
+		startServices:      startMissingServices,
+		verifyServices:     verifySelectedServices,
+		stopServices:       stopOwnedServices,
+		verifyStopped:      verifyOwnedServicesStopped,
+	}
+}
+
+func validateCommittedInstallForUninstallHandoff(transaction setupTransaction) error {
+	state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
+	if err != nil {
+		return err
+	}
+	if state == nil || state.TransactionID != transaction.ID || state.Version != transaction.TargetVersion ||
+		state.Connector != transaction.TargetConnector || state.Mode != transaction.TargetMode {
+		return errors.New("committed install transaction does not own the published install tree")
+	}
+	if err := validateInstall(transaction.InstallRoot, transaction.TargetVersion); err != nil {
+		return err
+	}
+	maintenanceDigest, err := fileSHA256(transaction.MaintenancePath)
+	if err != nil {
+		return fmt.Errorf("validate maintenance executable: %w", err)
+	}
+	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
+		return errors.New("maintenance executable does not match the committed installer transaction")
+	}
+	return nil
+}
+
+func prepareCommittedInstallForUninstallHandoff(transaction setupTransaction) error {
+	if err := validateCommittedInstallForUninstallHandoff(transaction); err != nil {
+		return err
+	}
+	if err := disableStableHookRuntime(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime: %w", err)
+	}
+	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	if err := quiesceOwnedInstallRuntime(gatewayPath, transaction.DataRoot, nativeInstallRuntimeConvergenceOps()); err != nil {
+		return err
+	}
+	if err := retireInstalledAppPendingOwned(transaction.InstallRoot, transaction.ID); err != nil {
+		return fmt.Errorf("retire transaction-owned Apps & Features staging: %w", err)
+	}
+	return cleanupCommittedSetupTransaction(transaction)
+}
+
+func rollbackInstallForUninstallHandoff(transaction setupTransaction) error {
+	if transaction.Action != "install" {
+		return errors.New("uninstall handoff rollback source is not an install transaction")
+	}
+	if err := disableStableHookRuntime(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime: %w", err)
+	}
+	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	if err := quiesceOwnedInstallRuntime(gatewayPath, transaction.DataRoot, nativeInstallRuntimeConvergenceOps()); err != nil {
+		return err
+	}
+	if err := rollbackTransactionFiles(transaction); err != nil {
+		return err
+	}
+	if err := rollbackMaintenancePublication(transaction); err != nil {
+		return err
+	}
+	// An interrupted upgrade may restore an older owned gateway at the same
+	// fixed path. Keep it quiescent rather than replaying PreviousServices.
+	return quiesceOwnedInstallRuntime(gatewayPath, transaction.DataRoot, nativeInstallRuntimeConvergenceOps())
+}
+
+func resumeUninstallIntentWithoutActivation(transaction setupTransaction) error {
+	if transaction.Action != "uninstall" {
+		return errors.New("resume target is not an uninstall transaction")
+	}
+	if err := disableStableHookRuntime(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime: %w", err)
+	}
+	trashGateway := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
+	if pathExists(trashGateway) {
+		if _, err := stopOwnedServices(trashGateway, transaction.DataRoot); err != nil {
+			return err
+		}
+		if err := verifyOwnedServicesStopped(trashGateway, transaction.DataRoot); err != nil {
+			return err
+		}
+	}
+	if err := rollbackUninstallFiles(transaction); err != nil {
+		return err
+	}
+	if err := rollbackMaintenancePublication(transaction); err != nil {
+		return err
+	}
+	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	return quiesceOwnedInstallRuntime(gatewayPath, transaction.DataRoot, nativeInstallRuntimeConvergenceOps())
+}
+
 func startMissingServices(gatewayPath, dataRoot string, wanted serviceState) (serviceState, error) {
 	current, err := inspectOwnedServices(gatewayPath, dataRoot)
 	if err != nil {
@@ -1089,15 +1518,19 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		if _, _, err := configureGatewayAutoStart(publishedGateway, false); err != nil {
 			return err
 		}
-		if transaction.PreviousState != nil && transaction.PreviousState.PathEntryOwned {
-			reusedSeparator := transaction.PreviousState.PathSeparatorReused
-			valueCreated := transaction.PreviousState.PathValueCreated
+		pathOwned, reusedSeparator, valueCreated := uninstallPathOwnership(transaction)
+		if pathOwned {
 			if err := removeUserPath(filepath.Join(transaction.InstallRoot, "bin"), reusedSeparator, valueCreated); err != nil {
 				return err
 			}
 		}
 		if err := unregisterInstalledAppOwned(transaction.InstallRoot, transaction.PreviousState); err != nil {
 			return err
+		}
+		if transaction.HandoffPreviousState != nil {
+			if err := unregisterInstalledAppOwned(transaction.InstallRoot, transaction.HandoffPreviousState); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -1132,6 +1565,7 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			return err
 		}
 	}
+	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	// Publish the signed no-console launcher outside both InstallRoot and
 	// DataRoot before connector configuration writes absolute commands. The
 	// publishing/active handshake makes this step idempotent under committed
@@ -1143,7 +1577,6 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	); err != nil {
 		return fmt.Errorf("publish stable hook runtime: %w", err)
 	}
-	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	reconciliation := connectorReconciliationRecorder{}
 	for _, connectorName := range transaction.PreviousConnectors {
 		if connectorName == transaction.TargetConnector && !connectorHomeChanged(transaction, connectorName) {
@@ -1188,8 +1621,18 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			})
 		}
 	}
-	if err := reconciliation.persist(); err != nil {
-		return fmt.Errorf("persist connector reconciliation residue: %w", err)
+	connectorReconciliationPending, err := settleInstallConnectorReconciliation(
+		transaction.ID,
+		gatewayPath,
+		transaction.DataRoot,
+		transaction.TargetServices,
+		len(reconciliation.failures) != 0,
+		reconciliation.persist,
+		connectorReconciliationSummary,
+		nativeInstallRuntimeConvergenceOps(),
+	)
+	if err != nil {
+		return err
 	}
 	pathAdded, reusedSeparator, valueCreated, pathMutationErr := addUserPath(
 		filepath.Join(transaction.InstallRoot, "bin"),
@@ -1229,14 +1672,116 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	); err != nil {
 		return err
 	}
-	if _, _, err := configureGatewayAutoStart(gatewayPath, transaction.TargetServices.Gateway); err != nil {
+	// PATH ownership and Apps & Features registration are durable core state.
+	// Once they converge, connector residue must not leave the transaction
+	// journal pending, and it must never enable or launch an unenforced gateway.
+	if connectorReconciliationPending {
+		return nil
+	}
+	return convergeInstallRuntime(
+		transaction.ID,
+		false,
+		gatewayPath,
+		transaction.DataRoot,
+		transaction.TargetServices,
+		nativeInstallRuntimeConvergenceOps(),
+	)
+}
+
+func uninstallPathOwnership(transaction setupTransaction) (owned, reusedSeparator, valueCreated bool) {
+	if transaction.UninstallPathEntryOwned {
+		return true, transaction.UninstallPathSeparatorReused, transaction.UninstallPathValueCreated
+	}
+	// Backward compatibility for schema-1 uninstall intents written before the
+	// handoff fields were introduced.
+	if transaction.PreviousState != nil && transaction.PreviousState.PathEntryOwned {
+		return true, transaction.PreviousState.PathSeparatorReused, transaction.PreviousState.PathValueCreated
+	}
+	return false, false, false
+}
+
+func settleInstallConnectorReconciliation(
+	transactionID, gatewayPath, dataRoot string,
+	wanted serviceState,
+	inMemoryPending bool,
+	persist func() error,
+	summary func() (string, error),
+	ops installRuntimeConvergenceOps,
+) (bool, error) {
+	quiesce := func(cause error) error {
+		return errors.Join(cause, convergeInstallRuntime(
+			transactionID,
+			true,
+			gatewayPath,
+			dataRoot,
+			wanted,
+			ops,
+		))
+	}
+	if err := persist(); err != nil {
+		return true, quiesce(fmt.Errorf("persist connector reconciliation residue: %w", err))
+	}
+	connectorSummary, err := summary()
+	if err != nil {
+		return true, quiesce(fmt.Errorf("read pending connector reconciliation before runtime activation: %w", err))
+	}
+	pending := inMemoryPending || connectorSummary != ""
+	if !pending {
+		return false, nil
+	}
+	// An upgrade can inherit both an owned Run value and live managed
+	// processes. Quiesce them before fallible PATH/ARP core convergence so a
+	// later registry failure cannot leave an unenforced runtime active.
+	return true, convergeInstallRuntime(transactionID, true, gatewayPath, dataRoot, wanted, ops)
+}
+
+func convergeInstallRuntime(
+	transactionID string,
+	connectorReconciliationPending bool,
+	gatewayPath, dataRoot string,
+	wanted serviceState,
+	ops installRuntimeConvergenceOps,
+) error {
+	if connectorReconciliationPending {
+		hookErr := ops.disableStableHook(transactionID)
+		if hookErr != nil {
+			hookErr = fmt.Errorf("disable stable hook runtime: %w", hookErr)
+		}
+		return errors.Join(hookErr, quiesceOwnedInstallRuntime(gatewayPath, dataRoot, ops))
+	}
+	if _, _, err := ops.configureAutoStart(gatewayPath, wanted.Gateway); err != nil {
 		return err
 	}
-	if _, err = startMissingServices(gatewayPath, transaction.DataRoot, transaction.TargetServices); err != nil {
+	if _, err := ops.startServices(gatewayPath, dataRoot, wanted); err != nil {
 		return err
 	}
-	if err := verifySelectedServices(gatewayPath, transaction.DataRoot, transaction.TargetServices); err != nil {
+	return ops.verifyServices(gatewayPath, dataRoot, wanted)
+}
+
+func quiesceOwnedInstallRuntime(
+	gatewayPath, dataRoot string,
+	ops installRuntimeConvergenceOps,
+) error {
+	var quiesceErrors []error
+	if _, _, err := ops.configureAutoStart(gatewayPath, false); err != nil {
+		quiesceErrors = append(quiesceErrors, fmt.Errorf("disable owned gateway auto-start: %w", err))
+	}
+	if _, err := ops.stopServices(gatewayPath, dataRoot); err != nil {
+		quiesceErrors = append(quiesceErrors, fmt.Errorf("stop owned gateway runtime: %w", err))
+	}
+	if err := ops.verifyStopped(gatewayPath, dataRoot); err != nil {
+		quiesceErrors = append(quiesceErrors, fmt.Errorf("verify owned gateway runtime stopped: %w", err))
+	}
+	return errors.Join(quiesceErrors...)
+}
+
+func verifyOwnedServicesStopped(gatewayPath, dataRoot string) error {
+	state, err := inspectOwnedServices(gatewayPath, dataRoot)
+	if err != nil {
 		return err
+	}
+	if state.any() {
+		return errors.New("owned gateway or watchdog process remains running")
 	}
 	return nil
 }

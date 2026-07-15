@@ -458,13 +458,21 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertFalse(popen.call_args.kwargs["shell"])
         self.assertEqual(popen.call_args.kwargs["env"]["CODEX_HOME"], str(config.parent))
         creationflags = popen.call_args.kwargs["creationflags"]
-        self.assertTrue(creationflags & getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        self.assertTrue(creationflags & getattr(subprocess, "CREATE_SUSPENDED", 0x00000004))
+        if os.name == "nt":
+            self.assertTrue(creationflags & getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.assertTrue(creationflags & getattr(subprocess, "CREATE_SUSPENDED", 0x00000004))
+        else:
+            self.assertEqual(creationflags, 0)
         process.terminate.assert_not_called()
         process.kill.assert_not_called()
-        job_type.assert_called_once_with(1234, allow_breakaway=False)
-        job.terminate_sync.assert_called_once_with(timeout=2)
-        job.close.assert_called_once()
+        if os.name == "nt":
+            job_type.assert_called_once_with(1234, allow_breakaway=False)
+            job.terminate_sync.assert_called_once_with(timeout=2)
+            job.close.assert_called_once()
+        else:
+            job_type.assert_not_called()
+            job.terminate_sync.assert_not_called()
+            job.close.assert_not_called()
         self.assertEqual(stderr.bytes_read, 96 * 1024)
 
     @unittest.skipUnless(os.name == "nt", "Windows Job Object cleanup contract")

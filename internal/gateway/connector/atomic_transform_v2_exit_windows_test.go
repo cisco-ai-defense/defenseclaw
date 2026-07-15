@@ -35,6 +35,20 @@ func atomicTransformV2HardExitPayload() []byte {
 	return bytes.Repeat([]byte("N"), atomicTransformMaxIntentBytes*3)
 }
 
+func atomicTransformV2HardExitEnv(overrides ...string) []string {
+	const controlPrefix = "DEFENSECLAW_V2_HARD_EXIT_"
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		name, _, found := strings.Cut(entry, "=")
+		if found && len(name) >= len(controlPrefix) &&
+			strings.EqualFold(name[:len(controlPrefix)], controlPrefix) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, overrides...)
+}
+
 func TestAtomicTransformWindowsDeleteOnCloseHardLinkProbe(t *testing.T) {
 	root := t.TempDir()
 	tempName := "delete-on-close-source"
@@ -1093,7 +1107,7 @@ func TestAtomicTransformV2FreshProcessExitMatrix(t *testing.T) {
 					}
 				}
 				command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-				command.Env = append(os.Environ(),
+				command.Env = atomicTransformV2HardExitEnv(
 					"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 					"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 					"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1106,11 +1120,14 @@ func TestAtomicTransformV2FreshProcessExitMatrix(t *testing.T) {
 				if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != atomicTransformV2HardExitCode {
 					t.Fatalf("helper exit = %v; want %d\n%s", runErr, atomicTransformV2HardExitCode, output)
 				}
+				committed, err := atomicTransformV2BoundaryCommittedAfterExit(path, stateDir, operation, point)
+				if err != nil {
+					t.Fatalf("classify fresh-process decision: %v", err)
+				}
 				if err := recoverAtomicTransformV2(path, stateDir); err != nil {
 					t.Fatalf("fresh-process recovery: %v", err)
 				}
 
-				committed := atomicTransformV2BoundaryCommitted(operation, point)
 				data, readErr := os.ReadFile(path)
 				switch {
 				case committed && operation == "remove":
@@ -1133,6 +1150,77 @@ func TestAtomicTransformV2FreshProcessExitMatrix(t *testing.T) {
 				assertAtomicTransformV2NoArtifacts(t, path, stateDir)
 			})
 		}
+	}
+}
+
+func TestAtomicTransformV2CompleteBootstrapDecisionAwareRecovery(t *testing.T) {
+	point := atomicTransformV2ExitBoundary{
+		phase: atomicTransformPhaseCompleteBootstrap, occurrence: 3,
+	}
+	for _, test := range []struct {
+		name           string
+		forceSafeAbort bool
+		wantCommitted  bool
+	}{
+		{name: "commit", wantCommitted: true},
+		{name: "safe-abort", forceSafeAbort: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			// A caller's test-control environment must never silently select the
+			// helper's abort path. The safe-abort case opts in again explicitly
+			// after atomicTransformV2HardExitEnv removes this inherited value.
+			t.Setenv("DEFENSECLAW_V2_HARD_EXIT_SAFE_ABORT", "1")
+			root := t.TempDir()
+			path := filepath.Join(root, "config", "settings.json")
+			stateDir := filepath.Join(root, "protected-state")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			initial := []byte(`{"old":true}`)
+			if err := os.WriteFile(path, initial, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			env := []string{
+				"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
+				"DEFENSECLAW_V2_HARD_EXIT_PATH=" + path,
+				"DEFENSECLAW_V2_HARD_EXIT_STATE=" + stateDir,
+				"DEFENSECLAW_V2_HARD_EXIT_OPERATION=update",
+				"DEFENSECLAW_V2_HARD_EXIT_PHASE=" + string(point.phase),
+				fmt.Sprintf("DEFENSECLAW_V2_HARD_EXIT_OCCURRENCE=%d", point.occurrence),
+			}
+			if test.forceSafeAbort {
+				env = append(env, "DEFENSECLAW_V2_HARD_EXIT_SAFE_ABORT=1")
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
+			command.Env = atomicTransformV2HardExitEnv(env...)
+			output, runErr := command.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != atomicTransformV2HardExitCode {
+				t.Fatalf("helper exit = %v; want %d\n%s", runErr, atomicTransformV2HardExitCode, output)
+			}
+
+			committed, err := atomicTransformV2BoundaryCommittedAfterExit(path, stateDir, "update", point)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if committed != test.wantCommitted {
+				t.Fatalf("durable decision committed = %t; want %t", committed, test.wantCommitted)
+			}
+			if err := recoverAtomicTransformV2(path, stateDir); err != nil {
+				t.Fatalf("fresh-process recovery: %v", err)
+			}
+			want := initial
+			if test.wantCommitted {
+				want = atomicTransformV2HardExitPayload()
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("recovered bytes = %d, %v; want %d", len(got), err, len(want))
+			}
+			assertAtomicTransformV2NoArtifacts(t, path, stateDir)
+		})
 	}
 }
 
@@ -1287,7 +1375,7 @@ func TestAtomicTransformV2TerminalRecoveryPreservesOperatorLive(t *testing.T) {
 						t.Fatal(err)
 					}
 					crash := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-					crash.Env = append(os.Environ(),
+					crash.Env = atomicTransformV2HardExitEnv(
 						"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 						"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 						"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1337,7 +1425,7 @@ func TestAtomicTransformV2TerminalRecoveryPreservesOperatorLive(t *testing.T) {
 					}
 					for recovery := 0; recovery < 2; recovery++ {
 						recoverProcess := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-						recoverProcess.Env = append(os.Environ(),
+						recoverProcess.Env = atomicTransformV2HardExitEnv(
 							"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 							"DEFENSECLAW_V2_HARD_EXIT_RECOVER=1",
 							"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
@@ -1425,7 +1513,7 @@ func TestAtomicTransformV2TerminalCleanupIgnoresPostPReparseLeaf(t *testing.T) {
 			}
 
 			crash := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-			crash.Env = append(os.Environ(),
+			crash.Env = atomicTransformV2HardExitEnv(
 				"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 				"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 				"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1529,7 +1617,7 @@ func TestAtomicTransformV2RecoversAcrossShortAndLongLeafAliases(t *testing.T) {
 			}
 
 			command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-			command.Env = append(os.Environ(),
+			command.Env = atomicTransformV2HardExitEnv(
 				"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 				"DEFENSECLAW_V2_HARD_EXIT_PATH="+shortPath,
 				"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1581,7 +1669,7 @@ func atomicTransformV2RunShortRepairCrashForTest(
 ) []byte {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-	command.Env = append(os.Environ(),
+	command.Env = atomicTransformV2HardExitEnv(
 		"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_PATH="+ownerPath,
 		"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1601,7 +1689,7 @@ func atomicTransformV2RunShortRepairCrashForTest(
 func atomicTransformV2RunFreshRecoveryForTest(t *testing.T, path, stateDir string) ([]byte, error) {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-	command.Env = append(os.Environ(),
+	command.Env = atomicTransformV2HardExitEnv(
 		"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_RECOVER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
@@ -1720,7 +1808,7 @@ func TestAtomicTransformV2EmptyOldShortNameFreshProcessRepair(t *testing.T) {
 				}
 
 				command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-				command.Env = append(os.Environ(),
+				command.Env = atomicTransformV2HardExitEnv(
 					"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 					"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 					"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -1988,7 +2076,7 @@ func TestAtomicTransformV21177RestoreFreshProcessMatrix(t *testing.T) {
 			t.Run(form+"/"+boundary, func(t *testing.T) {
 				fixture := prepareAtomicTransformV21177FixtureForTest(t, form == "known-merged", false)
 				command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-				command.Env = append(os.Environ(),
+				command.Env = atomicTransformV2HardExitEnv(
 					"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 					"DEFENSECLAW_V2_HARD_EXIT_RECOVER=1",
 					"DEFENSECLAW_V2_HARD_EXIT_PATH="+fixture.path,
@@ -2049,7 +2137,7 @@ func TestAtomicTransformV21177RestoreFreshProcessMatrix(t *testing.T) {
 func TestAtomicTransformV21177UnknownPartialMetadataRestoresOldThenRetains(t *testing.T) {
 	fixture := prepareAtomicTransformV21177FixtureForTest(t, false, true)
 	command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-	command.Env = append(os.Environ(),
+	command.Env = atomicTransformV2HardExitEnv(
 		"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_RECOVER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_PATH="+fixture.path,
@@ -2126,7 +2214,7 @@ func TestAtomicTransformV21177ForeignStageAndLiveRecreateFailClosed(t *testing.T
 		fixture := prepareAtomicTransformV21177FixtureForTest(t, false, false)
 		operatorData := "operator-live-at-1177-restore"
 		command := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-		command.Env = append(os.Environ(),
+		command.Env = atomicTransformV2HardExitEnv(
 			"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 			"DEFENSECLAW_V2_HARD_EXIT_RECOVER=1",
 			"DEFENSECLAW_V2_HARD_EXIT_PATH="+fixture.path,
@@ -2661,7 +2749,7 @@ func TestAtomicTransformV2AllocationArtifactWithADSIsNeverDeleted(t *testing.T) 
 		t.Fatal(err)
 	}
 	crash := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-	crash.Env = append(os.Environ(),
+	crash.Env = atomicTransformV2HardExitEnv(
 		"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 		"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -2729,7 +2817,7 @@ func TestAtomicTransformV2ReceiptSchemaRejectsMalformedStageWitnesses(t *testing
 		t.Fatal(err)
 	}
 	crash := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
-	crash.Env = append(os.Environ(),
+	crash.Env = atomicTransformV2HardExitEnv(
 		"DEFENSECLAW_V2_HARD_EXIT_HELPER=1",
 		"DEFENSECLAW_V2_HARD_EXIT_PATH="+path,
 		"DEFENSECLAW_V2_HARD_EXIT_STATE="+stateDir,
@@ -2910,6 +2998,66 @@ func atomicTransformV2BoundaryCommitted(operation string, point atomicTransformV
 		return true
 	default:
 		return false
+	}
+}
+
+func atomicTransformV2BoundaryCommittedAfterExit(
+	path, stateDir, operation string, point atomicTransformV2ExitBoundary,
+) (bool, error) {
+	committed := atomicTransformV2BoundaryCommitted(operation, point)
+	if !committed {
+		return false, nil
+	}
+	loaded, err := loadAtomicTransformV2(path, stateDir)
+	if err != nil {
+		return false, err
+	}
+	decision := ""
+	if loaded.complete.located {
+		decision = loaded.complete.receipt.Decision
+	} else if loaded.terminal.located {
+		decision = loaded.terminal.receipt.Decision
+	}
+	switch decision {
+	case atomicTransformV2DecisionCommit:
+		return true, nil
+	case atomicTransformV2DecisionAbort:
+		return false, nil
+	case "":
+		// The earliest terminal-bootstrap cut points precede durable receipt
+		// publication. At every boundary the matrix otherwise calls committed,
+		// live is already the validated terminal outcome, so it disambiguates a
+		// commit from an abort without changing production instrumentation.
+		data, readErr := os.ReadFile(path)
+		switch operation {
+		case "create":
+			switch {
+			case readErr == nil && bytes.Equal(data, atomicTransformV2HardExitPayload()):
+				return true, nil
+			case errors.Is(readErr, os.ErrNotExist):
+				return false, nil
+			}
+		case "update":
+			switch {
+			case readErr == nil && bytes.Equal(data, atomicTransformV2HardExitPayload()):
+				return true, nil
+			case readErr == nil && bytes.Equal(data, []byte(`{"old":true}`)):
+				return false, nil
+			}
+		case "remove":
+			switch {
+			case errors.Is(readErr, os.ErrNotExist):
+				return true, nil
+			case readErr == nil && bytes.Equal(data, []byte(`{"old":true}`)):
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf(
+			"shared terminal boundary has no durable decision and live outcome is unrecognized: operation=%s bytes=%d err=%v",
+			operation, len(data), readErr,
+		)
+	default:
+		return false, fmt.Errorf("unsupported durable V2 decision %q", decision)
 	}
 }
 

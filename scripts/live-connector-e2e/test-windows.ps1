@@ -657,6 +657,23 @@ try {
         $nativeHarnessText,
         '(?s)function Invoke-SetupAcceptance\b.*?(?=\r?\nfunction Invoke-Contract)'
     ).Value
+    $agentFixtureFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function New-WizardAgentFixtures\b.*?(?=\r?\nfunction Remove-WizardAgentFixtures)'
+    ).Value
+    Assert-True ($agentFixtureFunction -match "'OpenAI\\Codex\\bin'" -and
+        $agentFixtureFunction -match "'\.local\\bin'" -and
+        $agentFixtureFunction -match 'app-server' -and
+        $agentFixtureFunction -match 'configRequirements/read' -and
+        $agentFixtureFunction -match 'allowManagedHooksOnly.*false' -and
+        $agentFixtureFunction -match 'SearchPath = \$claudeBin' -and
+        $agentFixtureFunction -notmatch 'SearchPath = @\(\$codexBin' -and
+        $agentFixtureFunction -notmatch 'DEFENSECLAW_TRUSTED_BIN_PREFIXES') `
+        'Windows fixtures exercise Known-Folder Codex discovery and implement the policy RPC without PATH or env-only trust'
+    Assert-True ($setupAcceptanceFunction -match 'New-WizardAgentFixtures' -and
+        $setupAcceptanceFunction -match 'Remove-WizardAgentFixtures' -and
+        $setupAcceptanceFunction -notmatch 'DEFENSECLAW_TRUSTED_BIN_PREFIXES') `
+        'interactive Setup acceptance owns and cleans built-in-root fixtures without environment trust authority'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
         $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
@@ -666,6 +683,9 @@ try {
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
         $harnessText -match 'NativeDataRoot must be the current Windows user Known-Folder data root') `
         'packaged connector contract binds Doctor and hooks to the installed native data root'
+    Assert-True ($contractFunction -match 'New-WizardAgentFixtures' -and
+        $contractFunction -match 'Remove-WizardAgentFixtures') `
+        'packaged connector contracts use and clean deterministic production-shaped native agent fixtures'
     $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
     $stateProcessesFunction = [regex]::Match(
         $nativeHarnessText,

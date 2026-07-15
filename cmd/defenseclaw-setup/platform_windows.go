@@ -677,7 +677,17 @@ func removeOwnedUserPathEntry(current, commandDir string, reusedSeparator bool) 
 		next = append(next, "")
 		return strings.Join(next, ";"), nil
 	}
-	return current, errors.New("managed PATH entry was reordered or is no longer uniquely owned; refusing removal")
+	// A committed uninstall can be retried after the registry mutation was
+	// flushed but a later environment broadcast or Apps & Features operation
+	// failed. Absence is therefore an idempotent success. An occurrence that is
+	// still present away from its proven ownership endpoint remains a user or
+	// concurrent reorder and must continue to fail closed.
+	for _, entry := range entries {
+		if samePathEntry(entry, commandDir) {
+			return current, errors.New("managed PATH entry was reordered or is no longer uniquely owned; refusing removal")
+		}
+	}
+	return current, nil
 }
 
 func setRegistryPath(key registry.Key, value string, valueType uint32) error {
@@ -1288,6 +1298,106 @@ func flushInstalledAppParent(registryPath string) error {
 		return flushRegistryKey(parent)
 	}
 	return nil
+}
+
+func retireInstalledAppPendingOwned(installRoot, transactionID string) error {
+	return retireInstalledAppPendingOwnedAt(
+		uninstallRegistryPath,
+		installedAppRegistryKey,
+		installRoot,
+		transactionID,
+	)
+}
+
+func retireInstalledAppPendingOwnedAt(
+	registryPath, registryKey, installRoot, transactionID string,
+) error {
+	return retireInstalledAppPendingOwnedAtWithHook(
+		registryPath,
+		registryKey,
+		installRoot,
+		transactionID,
+		nil,
+	)
+}
+
+func retireInstalledAppPendingOwnedAtWithHook(
+	registryPath, registryKey, installRoot, transactionID string,
+	beforeDelete func(),
+) error {
+	if !validSetupTransactionID(transactionID) {
+		return errors.New("refusing to retire Apps & Features staging without a valid transaction identity")
+	}
+	stagingName := registryKey + ".pending." + transactionID
+	stagingPath := registryPath + `\` + stagingName
+	child, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		stagingPath,
+		registry.QUERY_VALUE|windows.DELETE,
+	)
+	if err == registry.ErrNotExist {
+		// Absence may mean a prior retirement reached NtDeleteKey before a crash.
+		// Flush the parent before the install journal loses the only durable proof
+		// that authorizes deletion of this random staging name.
+		flushErr := flushInstalledAppParent(registryPath)
+		return errors.Join(flushErr, verifyInstalledAppPendingAbsent(stagingPath))
+	}
+	if err != nil {
+		return err
+	}
+
+	owner, ownerType, ownerErr := child.GetStringValue(installedAppOwnerValue)
+	if ownerErr != nil && ownerErr != registry.ErrNotExist {
+		return errors.Join(ownerErr, child.Close())
+	}
+	if ownerErr == nil && (ownerType != registry.SZ || owner != transactionID) {
+		return errors.Join(
+			errors.New("refusing to retire Apps & Features staging owned by another transaction"),
+			child.Close(),
+		)
+	}
+	location, locationType, locationErr := child.GetStringValue("InstallLocation")
+	if locationErr != nil && locationErr != registry.ErrNotExist {
+		return errors.Join(locationErr, child.Close())
+	}
+	if locationErr == nil && (locationType != registry.SZ || !samePath(location, installRoot)) {
+		return errors.Join(
+			errors.New("refusing to retire Apps & Features staging for another install location"),
+			child.Close(),
+		)
+	}
+
+	parent, parentErr := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath,
+		registry.QUERY_VALUE,
+	)
+	if parentErr != nil {
+		return errors.Join(parentErr, child.Close())
+	}
+	if beforeDelete != nil {
+		beforeDelete()
+	}
+	deleteErr := deleteInstalledAppRegistryKeyHandle(child)
+	childCloseErr := child.Close()
+	flushErr := flushRegistryKey(parent)
+	parentCloseErr := parent.Close()
+	verifyErr := verifyInstalledAppPendingAbsent(stagingPath)
+	return errors.Join(deleteErr, childCloseErr, flushErr, parentCloseErr, verifyErr)
+}
+
+func verifyInstalledAppPendingAbsent(stagingPath string) error {
+	key, err := registry.OpenKey(registry.CURRENT_USER, stagingPath, registry.QUERY_VALUE)
+	if err == registry.ErrNotExist {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.Join(
+		errors.New("Apps & Features staging changed during exact-handle retirement"),
+		key.Close(),
+	)
 }
 
 func unregisterInstalledAppOwnedAt(

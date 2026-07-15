@@ -376,6 +376,207 @@ func TestInstalledAppFreshPublicationRejectsPartialSameTransactionDestination(t 
 	}
 }
 
+func TestUninstallHandoffRetiresOnlySourceTransactionPendingInstalledAppKey(t *testing.T) {
+	registryPath := newInstalledAppTestRegistry(t)
+	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
+	sourceTransaction := "77777777777777777777777777777777"
+	otherTransaction := "88888888888888888888888888888888"
+	sourceName := testInstalledAppKey + ".pending." + sourceTransaction
+	otherName := testInstalledAppKey + ".pending." + otherTransaction
+
+	for name, transactionID := range map[string]string{
+		sourceName: sourceTransaction,
+		otherName:  otherTransaction,
+	} {
+		key := createInstalledAppTestKeyNamed(t, registryPath, name)
+		if err := key.SetStringValue(installedAppOwnerValue, transactionID); err != nil {
+			_ = key.Close()
+			t.Fatal(err)
+		}
+		if err := key.SetStringValue("InstallLocation", installRoot); err != nil {
+			_ = key.Close()
+			t.Fatal(err)
+		}
+		if err := key.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := retireInstalledAppPendingOwnedAt(
+		registryPath,
+		testInstalledAppKey,
+		installRoot,
+		sourceTransaction,
+	); err != nil {
+		t.Fatalf("retire source transaction staging: %v", err)
+	}
+	if key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+sourceName,
+		registry.QUERY_VALUE,
+	); err != registry.ErrNotExist {
+		if err == nil {
+			_ = key.Close()
+		}
+		t.Fatalf("source transaction staging survived handoff: %v", err)
+	}
+	other, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+otherName,
+		registry.QUERY_VALUE,
+	)
+	if err != nil {
+		t.Fatalf("another transaction staging was removed: %v", err)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A crash after exact-handle deletion but before journal handoff must be
+	// recoverable: the retained source journal authorizes an idempotent retry.
+	if err := retireInstalledAppPendingOwnedAt(
+		registryPath,
+		testInstalledAppKey,
+		installRoot,
+		sourceTransaction,
+	); err != nil {
+		t.Fatalf("retry retirement after crash boundary: %v", err)
+	}
+}
+
+func TestUninstallHandoffRetiresEmptySourceTransactionPendingInstalledAppKey(t *testing.T) {
+	registryPath := newInstalledAppTestRegistry(t)
+	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
+	transactionID := "99999999999999999999999999999999"
+	stagingName := testInstalledAppKey + ".pending." + transactionID
+	key := createInstalledAppTestKeyNamed(t, registryPath, stagingName)
+	if err := key.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := retireInstalledAppPendingOwnedAt(
+		registryPath,
+		testInstalledAppKey,
+		installRoot,
+		transactionID,
+	); err != nil {
+		t.Fatalf("retire create-before-first-value staging key: %v", err)
+	}
+	if key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+stagingName,
+		registry.QUERY_VALUE,
+	); err != registry.ErrNotExist {
+		if err == nil {
+			_ = key.Close()
+		}
+		t.Fatalf("empty transaction staging survived handoff: %v", err)
+	}
+}
+
+func TestUninstallHandoffRejectsMismatchedSourceNamedPendingInstalledAppKey(t *testing.T) {
+	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
+	transactionID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, test := range []struct {
+		name     string
+		owner    string
+		location string
+	}{
+		{
+			name:     "foreign owner",
+			owner:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			location: installRoot,
+		},
+		{
+			name:     "foreign install location",
+			owner:    transactionID,
+			location: `C:\Foreign\DefenseClaw`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registryPath := newInstalledAppTestRegistry(t)
+			stagingName := testInstalledAppKey + ".pending." + transactionID
+			key := createInstalledAppTestKeyNamed(t, registryPath, stagingName)
+			if err := key.SetStringValue(installedAppOwnerValue, test.owner); err != nil {
+				_ = key.Close()
+				t.Fatal(err)
+			}
+			if err := key.SetStringValue("InstallLocation", test.location); err != nil {
+				_ = key.Close()
+				t.Fatal(err)
+			}
+			if err := key.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := retireInstalledAppPendingOwnedAt(
+				registryPath,
+				testInstalledAppKey,
+				installRoot,
+				transactionID,
+			); err == nil {
+				t.Fatal("mismatched source-named staging key was deleted")
+			}
+			preserved, err := registry.OpenKey(
+				registry.CURRENT_USER,
+				registryPath+`\`+stagingName,
+				registry.QUERY_VALUE,
+			)
+			if err != nil {
+				t.Fatalf("mismatched staging key was not preserved: %v", err)
+			}
+			if err := preserved.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestUninstallHandoffDoesNotClaimConcurrentPendingKeyReplacement(t *testing.T) {
+	registryPath := newInstalledAppTestRegistry(t)
+	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
+	transactionID := "cccccccccccccccccccccccccccccccc"
+	stagingName := testInstalledAppKey + ".pending." + transactionID
+	renamedName := stagingName + ".renamed"
+	key := createInstalledAppTestKeyNamed(t, registryPath, stagingName)
+	if err := key.SetStringValue(installedAppOwnerValue, transactionID); err != nil {
+		_ = key.Close()
+		t.Fatal(err)
+	}
+	if err := key.SetStringValue("InstallLocation", installRoot); err != nil {
+		_ = key.Close()
+		t.Fatal(err)
+	}
+	if err := key.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err := retireInstalledAppPendingOwnedAtWithHook(
+		registryPath,
+		testInstalledAppKey,
+		installRoot,
+		transactionID,
+		func() {
+			renameInstalledAppTestKey(t, registryPath, stagingName, renamedName)
+			writeForeignInstalledAppTestKey(t, registryPath, stagingName, "Concurrent pending replacement")
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "changed during exact-handle retirement") {
+		t.Fatalf("concurrent pending replacement was reported as retired: %v", err)
+	}
+	assertInstalledAppTestDisplayName(t, registryPath, stagingName, "Concurrent pending replacement")
+	if key, openErr := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+renamedName,
+		registry.QUERY_VALUE,
+	); openErr != registry.ErrNotExist {
+		if openErr == nil {
+			_ = key.Close()
+		}
+		t.Fatalf("validated source pending key survived exact-handle deletion: %v", openErr)
+	}
+}
+
 func newInstalledAppTestRegistry(t *testing.T) string {
 	t.Helper()
 	registryPath := fmt.Sprintf(

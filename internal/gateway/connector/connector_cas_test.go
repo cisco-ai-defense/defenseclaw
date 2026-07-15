@@ -298,7 +298,10 @@ func TestAtomicTransformRemovalCrashRecoveryMatrix(t *testing.T) {
 	}
 }
 
-func TestAtomicTransformCompleteReceiptIsRetainedUntilNextRecovery(t *testing.T) {
+func TestAtomicTransformSuccessfulCommitClearsCompleteReceipt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX V1 success cleanup; Windows production uses V2")
+	}
 	for _, remove := range []bool{false, true} {
 		t.Run(map[bool]string{false: "replace", true: "remove"}[remove], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "settings.json")
@@ -313,18 +316,15 @@ func TestAtomicTransformCompleteReceiptIsRetainedUntilNextRecovery(t *testing.T)
 			}); err != nil {
 				t.Fatalf("atomicTransformFile: %v", err)
 			}
-			intent, intentPath, _, exists, err := loadAtomicTransformIntent(path)
+			intentPath, _, err := atomicTransformIntentPath(path)
 			if err != nil {
-				t.Fatalf("load complete receipt: %v", err)
-			}
-			if !exists || intent.Phase != atomicTransformIntentComplete {
-				t.Fatalf("durable complete receipt = exists:%v phase:%q", exists, intent.Phase)
-			}
-			if err := recoverAtomicTransform(path); err != nil {
-				t.Fatalf("reconcile complete receipt: %v", err)
+				t.Fatalf("resolve completion receipt path: %v", err)
 			}
 			if _, err := os.Lstat(intentPath); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("complete receipt survived reconciliation: %v", err)
+				t.Fatalf("prepared receipt survived successful commit: %v", err)
+			}
+			if _, err := os.Lstat(atomicTransformCompleteReceiptPath(intentPath)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("completion witness survived successful commit: %v", err)
 			}
 			if remove {
 				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -401,11 +401,26 @@ func TestAtomicTransformCompleteReceiptCleanupCanResume(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := atomicTransformFile(path, 0o600, func([]byte, bool) (atomicTransformResult, error) {
+	var completedState atomicTransformPhaseState
+	stopAfterComplete := setAtomicTransformPhaseHookForTest(path, func(
+		phase atomicTransformPhase,
+		state atomicTransformPhaseState,
+	) error {
+		if phase != atomicTransformPhaseCompleted {
+			return nil
+		}
+		completedState = state
+		return errAtomicTransformSimulatedCrash
+	})
+	err := atomicTransformFile(path, 0o600, func([]byte, bool) (atomicTransformResult, error) {
 		return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
-	}); err != nil {
-		t.Fatal(err)
+	})
+	stopAfterComplete()
+	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+		t.Fatalf("atomicTransformFile error = %v, want completed-receipt crash", err)
 	}
+	assertCASPathExists(t, completedState.IntentPath)
+	assertCASPathExists(t, atomicTransformCompleteReceiptPath(completedState.IntentPath))
 	var cleanupState atomicTransformPhaseState
 	restoreHook := setAtomicTransformPhaseHookForTest(path, func(
 		phase atomicTransformPhase,
@@ -417,7 +432,7 @@ func TestAtomicTransformCompleteReceiptCleanupCanResume(t *testing.T) {
 		cleanupState = state
 		return errAtomicTransformSimulatedCrash
 	})
-	err := recoverAtomicTransform(path)
+	err = recoverAtomicTransform(path)
 	restoreHook()
 	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
 		t.Fatalf("receipt cleanup error = %v, want simulated crash", err)
@@ -430,7 +445,126 @@ func TestAtomicTransformCompleteReceiptCleanupCanResume(t *testing.T) {
 	assertCASArtifactsAbsent(t, cleanupState)
 }
 
+func TestAtomicTransformStandaloneCompleteReceiptCleanupCanResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var completedState atomicTransformPhaseState
+	stopAfterComplete := setAtomicTransformPhaseHookForTest(path, func(
+		phase atomicTransformPhase,
+		state atomicTransformPhaseState,
+	) error {
+		if phase != atomicTransformPhaseCompleted {
+			return nil
+		}
+		completedState = state
+		return errAtomicTransformSimulatedCrash
+	})
+	err := atomicTransformFileLegacy(path, 0o600, func([]byte, bool) (atomicTransformResult, error) {
+		return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
+	})
+	stopAfterComplete()
+	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+		t.Fatalf("atomicTransformFileLegacy error = %v, want completed-receipt crash", err)
+	}
+	completePath := atomicTransformCompleteReceiptPath(completedState.IntentPath)
+	assertCASPathExists(t, completedState.IntentPath)
+	assertCASPathExists(t, completePath)
+	if err := os.Remove(completedState.IntentPath); err != nil {
+		t.Fatalf("simulate crash after prepared-intent retirement: %v", err)
+	}
+	if err := recoverAtomicTransform(path); err != nil {
+		t.Fatalf("resume standalone completion-receipt cleanup: %v", err)
+	}
+	assertCASFileBytes(t, path, `{"new":true}`)
+	assertCASArtifactsAbsent(t, completedState)
+	if _, err := os.Lstat(completePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("standalone completion receipt survived cleanup: %v", err)
+	}
+}
+
+func TestAtomicTransformCompleteReceiptAcceptsPostCommitTargetRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var completedState atomicTransformPhaseState
+	stopAfterComplete := setAtomicTransformPhaseHookForTest(path, func(
+		phase atomicTransformPhase,
+		state atomicTransformPhaseState,
+	) error {
+		if phase != atomicTransformPhaseCompleted {
+			return nil
+		}
+		completedState = state
+		return errAtomicTransformSimulatedCrash
+	})
+	err := atomicTransformFileLegacy(path, 0o600, func([]byte, bool) (atomicTransformResult, error) {
+		return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
+	})
+	stopAfterComplete()
+	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+		t.Fatalf("atomicTransformFile error = %v, want completed-receipt crash", err)
+	}
+	assertCASPathExists(t, completedState.IntentPath)
+	assertCASPathExists(t, atomicTransformCompleteReceiptPath(completedState.IntentPath))
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove committed target before receipt recovery: %v", err)
+	}
+	if err := recoverAtomicTransform(path); err != nil {
+		t.Fatalf("recover completed receipt after later target removal: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery recreated later-removed target: %v", err)
+	}
+	assertCASArtifactsAbsent(t, completedState)
+}
+
+func TestAtomicTransformTerminalWitnessAcceptsPostCommitTargetRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var terminalState atomicTransformPhaseState
+	stopAfterTerminalWitness := setAtomicTransformPhaseHookForTest(path, func(
+		phase atomicTransformPhase,
+		state atomicTransformPhaseState,
+	) error {
+		if phase != atomicTransformPhaseTerminalWitnessed {
+			return nil
+		}
+		terminalState = state
+		return errAtomicTransformSimulatedCrash
+	})
+	err := atomicTransformFileLegacy(path, 0o600, func([]byte, bool) (atomicTransformResult, error) {
+		return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
+	})
+	stopAfterTerminalWitness()
+	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+		t.Fatalf("atomicTransformFile error = %v, want terminal-witness crash", err)
+	}
+	assertCASPathExists(t, terminalState.IntentPath)
+	assertCASPathExists(t, terminalState.Tombstone)
+	if _, err := os.Lstat(atomicTransformCompleteReceiptPath(terminalState.IntentPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal witness was already published as completion receipt: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove committed target before terminal-witness recovery: %v", err)
+	}
+	if err := recoverAtomicTransform(path); err != nil {
+		t.Fatalf("recover terminal witness after later target removal: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery recreated later-removed target: %v", err)
+	}
+	assertCASArtifactsAbsent(t, terminalState)
+}
+
 func TestAtomicTransformClearedCompleteReceiptLeavesStableNoMutationGap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX V1 success cleanup; Windows production uses V2")
+	}
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -440,15 +574,15 @@ func TestAtomicTransformClearedCompleteReceiptLeavesStableNoMutationGap(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, intentPath, _, exists, err := loadAtomicTransformIntent(path)
-	if err != nil || !exists {
-		t.Fatalf("load first complete receipt: exists=%v err=%v", exists, err)
-	}
-	if err := recoverAtomicTransform(path); err != nil {
+	intentPath, _, err := atomicTransformIntentPath(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(intentPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("complete receipt not cleared: %v", err)
+		t.Fatalf("successful transform retained prepared receipt: %v", err)
+	}
+	if _, err := os.Lstat(atomicTransformCompleteReceiptPath(intentPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful transform retained completion witness: %v", err)
 	}
 	assertCASFileBytes(t, path, `{"first":true}`)
 	// A process stop at this point has no detached target and therefore needs
@@ -460,13 +594,15 @@ func TestAtomicTransformClearedCompleteReceiptLeavesStableNoMutationGap(t *testi
 		t.Fatal(err)
 	}
 	assertCASFileBytes(t, path, `{"second":true}`)
-	intent, _, _, exists, err := loadAtomicTransformIntent(path)
-	if err != nil || !exists || intent.Phase != atomicTransformIntentComplete {
-		t.Fatalf("fresh complete receipt: exists=%v phase=%q err=%v", exists, intent.Phase, err)
+	if _, err := os.Lstat(intentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second transform retained prepared receipt: %v", err)
+	}
+	if _, err := os.Lstat(atomicTransformCompleteReceiptPath(intentPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second transform retained completion witness: %v", err)
 	}
 }
 
-func TestAtomicTransformRecoveryRejectsTamperedRecordedSize(t *testing.T) {
+func TestAtomicTransformRecoveryHandlesTamperedRecordedSizeSafely(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -505,12 +641,21 @@ func TestAtomicTransformRecoveryRejectsTamperedRecordedSize(t *testing.T) {
 	if err := os.WriteFile(crashState.IntentPath, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recoverAtomicTransform(path); err == nil {
-		t.Fatal("recovery accepted tombstone with size different from durable intent")
+	recoverErr := recoverAtomicTransform(path)
+	if runtime.GOOS == "windows" {
+		if recoverErr == nil {
+			t.Fatal("recovery accepted tombstone with size different from durable intent")
+		}
+		assertCASFileBytes(t, crashState.Tombstone, `{"old":true}`)
+		assertCASFileBytes(t, crashState.Staged, `{"new":true}`)
+		assertCASPathExists(t, crashState.IntentPath)
+		return
 	}
-	assertCASFileBytes(t, crashState.Tombstone, `{"old":true}`)
-	assertCASFileBytes(t, crashState.Staged, `{"new":true}`)
-	assertCASPathExists(t, crashState.IntentPath)
+	if recoverErr != nil {
+		t.Fatalf("POSIX recovery did not safely restore the detached target: %v", recoverErr)
+	}
+	assertCASFileBytes(t, path, `{"old":true}`)
+	assertCASArtifactsAbsent(t, crashState)
 }
 
 func TestAtomicTransformRecoveryRetainsPrePublishConflict(t *testing.T) {
@@ -922,15 +1067,27 @@ func TestAtomicTransformWindowsDiscoverySeparatesDistinctOwners(t *testing.T) {
 	if err := os.WriteFile(second, []byte(`{"old":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := atomicTransformFile(first, 0o600, func([]byte, bool) (atomicTransformResult, error) {
+	var firstState atomicTransformPhaseState
+	stopFirstAfterComplete := setAtomicTransformPhaseHookForTest(first, func(
+		phase atomicTransformPhase,
+		state atomicTransformPhaseState,
+	) error {
+		if phase != atomicTransformPhaseCompleted {
+			return nil
+		}
+		firstState = state
+		return errAtomicTransformSimulatedCrash
+	})
+	err := atomicTransformFile(first, 0o600, func([]byte, bool) (atomicTransformResult, error) {
 		return atomicTransformResult{Data: []byte("new = true\n")}, nil
-	}); err != nil {
-		t.Fatal(err)
+	})
+	stopFirstAfterComplete()
+	if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+		t.Fatalf("first transform error = %v, want completed-receipt crash", err)
 	}
-	_, firstIntentPath, _, firstExists, err := loadAtomicTransformIntent(first)
-	if err != nil || !firstExists {
-		t.Fatalf("load first complete receipt: exists=%v err=%v", firstExists, err)
-	}
+	firstIntentPath := firstState.IntentPath
+	assertCASPathExists(t, firstIntentPath)
+	assertCASPathExists(t, atomicTransformCompleteReceiptPath(firstIntentPath))
 
 	var secondState atomicTransformPhaseState
 	restoreHook := setAtomicTransformPhaseHookForTest(second, func(

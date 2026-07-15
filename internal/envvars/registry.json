@@ -1766,6 +1766,45 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_CLEANUP_JOURNAL",
+      "category": "hook_internal",
+      "purpose": "Protected native Setup transaction journal used to bind delayed directory cleanup to the uninstall transaction that scheduled it.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute setup-journal path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper re-reads and locks the journal before deleting its owned target"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_TRANSACTION_ID",
+      "category": "hook_internal",
+      "purpose": "Exact native Setup uninstall transaction identifier expected by the delayed directory cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["setup transaction identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper refuses deletion when the protected journal belongs to another transaction"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_WAIT_MS",
+      "category": "hook_internal",
+      "purpose": "Bounded parent-process wait duration for the native Setup delayed directory cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["non-negative decimal milliseconds", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper exits without deletion if the originating Setup process does not stop within this bound"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_CODEX_POLICY_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the isolated Codex effective-policy helper subprocess.",
@@ -1776,6 +1815,338 @@
       "consumers": [
         {"location": "internal/gateway/connector/codex_policy_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
       ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_ENTRY_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only marker path used by the Codex effective-policy subprocess fixture to record helper entry.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy timeout/process-tree test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_HANG_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy subprocess fixture that deliberately blocks for timeout coverage.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy timeout helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_TREE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy subprocess-tree fixture used to verify descendant cleanup.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy process-tree helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_GRANDCHILD_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy grandchild fixture used to verify process-tree containment.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy grandchild helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_READY_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only ready-signal path shared with the Codex policy process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy process-tree readiness fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_MARKER_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only descendant marker path used by the Codex policy process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy descendant-cleanup fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_CODEX_POLICY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded Codex app-server fixture used by native connector lifecycle E2E tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "test/e2e/codex_policy_fixture_windows_test.go", "description": "Native Windows E2E Codex policy fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_CODEX_APP_SERVER_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded Codex app-server fixture used by gateway package tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/codex_setup_fixture_windows_test.go", "description": "Native Windows gateway Codex policy fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the native CAS V2 hard-exit subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_PATH",
+      "category": "test_fixture",
+      "purpose": "Target path passed to the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit target"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_STATE",
+      "category": "test_fixture",
+      "purpose": "Recovery-state directory passed to the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test state path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit state fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_OPERATION",
+      "category": "test_fixture",
+      "purpose": "Mutation operation selected for the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined operation", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 operation selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_PHASE",
+      "category": "test_fixture",
+      "purpose": "Durability phase at which the native CAS V2 fixture terminates its subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined CAS phase", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit phase selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_OCCURRENCE",
+      "category": "test_fixture",
+      "purpose": "One-based phase occurrence at which the native CAS V2 fixture terminates its subprocess.",
+      "default": "1",
+      "accepted_values": ["positive decimal integer", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit occurrence selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_RECOVER",
+      "category": "test_fixture",
+      "purpose": "Requests recovery instead of a new mutation in the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 recovery selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_ABORT",
+      "category": "test_fixture",
+      "purpose": "Injects an abort decision into the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 abort fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_SAFE_ABORT",
+      "category": "test_fixture",
+      "purpose": "Injects a pre-publication safe abort into the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 safe-abort fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_POST_P_REPARSE_TARGET",
+      "category": "test_fixture",
+      "purpose": "Replacement reparse target injected after the CAS V2 publication point for fail-closed topology tests.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 post-publication reparse fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_1177_RECREATE_LIVE",
+      "category": "test_fixture",
+      "purpose": "Recreates a live target during the CAS V2 1177 hard-exit regression fixture.",
+      "default": "unset",
+      "accepted_values": ["test payload", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 recreated-live fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_FORCE_SHORT_REPAIR",
+      "category": "test_fixture",
+      "purpose": "Forces deterministic short-name repair paths in native CAS V2 tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 short-name repair fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_PATH",
+      "category": "test_fixture",
+      "purpose": "Target path passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock target"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_STATE",
+      "category": "test_fixture",
+      "purpose": "Recovery-state directory passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test state path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock state fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_PAYLOAD",
+      "category": "test_fixture",
+      "purpose": "Mutation payload passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["test payload", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock payload fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_READY",
+      "category": "test_fixture",
+      "purpose": "Ready-signal path shared with the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock readiness fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-signal path shared with the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock release fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_ONLY",
+      "category": "test_fixture",
+      "purpose": "Requests lock-only behavior from the native CAS V2 cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock-only selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HOLD_PHASE",
+      "category": "test_fixture",
+      "purpose": "CAS phase at which the native cross-process fixture holds its transaction lock.",
+      "default": "unset",
+      "accepted_values": ["test-defined CAS phase", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hold-phase selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HIDE_TARGET",
+      "category": "test_fixture",
+      "purpose": "Temporarily hides the live target in the native CAS V2 lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hidden-target fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_EXIT_HELD",
+      "category": "test_fixture",
+      "purpose": "Terminates the native CAS V2 lock fixture while the transaction lock remains held.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hard-exit fixture"}],
       "since": "0.8.0"
     },
     {

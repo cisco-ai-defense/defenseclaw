@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import uuid
 from collections.abc import Iterable
@@ -43,6 +44,10 @@ from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 SELECTION_FILENAME = "agent_selection.json"
 SELECTION_SCHEMA_VERSION = 1
 SELECTION_LIFETIME = timedelta(minutes=15)
+_CODEX_WINDOWS_PLATFORM_VARIANTS = (
+    ("codex-win32-x64", "x86_64-pc-windows-msvc"),
+    ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
+)
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
 _SUPPORTED_CONNECTORS = frozenset({"codex", "claudecode"})
 
@@ -177,9 +182,34 @@ def is_setup_trusted_binary(candidate: str, data_dir: str) -> bool:
 def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, ...]:
     """Enumerate PATH candidates plus exact names under trusted API roots."""
 
-    candidates = list(agent_discovery._binary_candidates_for_agent(connector, spec))
+    discovered = list(agent_discovery._binary_candidates_for_agent(connector, spec))
     _require, configured = agent_discovery._ai_discovery_trust_config(data_dir)
     roots = agent_discovery._expand_bin_prefixes((*_builtin_setup_trusted_prefixes(), *configured))
+    candidates: list[str] = []
+    paired_codex_root = ""
+    if connector == "codex" and discovered:
+        # `_binary_candidates_for_agent` preserves PATH precedence, so its
+        # first entry is the CLI the user actually launches.  When that entry
+        # is npm's CMD wrapper, prefer the native image from the same approved
+        # package root over an unrelated Codex Desktop image discovered later.
+        # The native candidate still passes the normal root, ACL, version, and
+        # digest admission checks before it can be selected.
+        path_candidate = os.path.realpath(os.path.abspath(discovered[0]))
+        if os.path.splitext(path_candidate)[1].casefold() != ".exe":
+            for root in roots:
+                if agent_discovery._path_is_within(path_candidate, root):
+                    recognized, paired = _codex_wrapper_native_candidates(
+                        root,
+                        path_candidate,
+                        _CODEX_WINDOWS_PLATFORM_VARIANTS,
+                    )
+                    if not recognized:
+                        paired = _codex_npm_native_candidates(root)
+                    if recognized or paired:
+                        candidates.extend(paired)
+                        paired_codex_root = os.path.normcase(os.path.abspath(root))
+                        break
+    candidates.extend(discovered)
     names = {
         "codex": ("codex.exe", "codex.cmd", "codex.bat", "codex.com"),
         "claudecode": ("claude.exe", "claude.cmd", "claude.bat", "claude.com"),
@@ -194,11 +224,17 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                 candidates.extend(str(path) for path in sorted(Path(root).glob("*/codex.exe")) if path.is_file())
             except OSError:
                 pass
+        if connector == "codex" and os.path.normcase(os.path.abspath(root)) != paired_codex_root:
+            candidates.extend(_codex_npm_native_candidates(root))
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
     # actually implements app-server when a native Codex install is present.
-    candidates.sort(key=lambda value: (os.path.splitext(value)[1].casefold() != ".exe", value.casefold()))
+    # Python's sort is stable: move native images ahead of wrappers while
+    # preserving PATH/discovery precedence within each class.  A stale package
+    # tree must not outrank the currently selected Codex executable merely
+    # because its absolute path sorts first.
+    candidates.sort(key=lambda value: os.path.splitext(value)[1].casefold() != ".exe")
     result: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -207,6 +243,194 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
+    """Return bounded native Codex images below an approved npm/pnpm root.
+
+    The Windows npm launcher is a mutable ``.cmd`` wrapper and cannot be the
+    executable identity sealed into the hook contract.  The official package
+    ships the real image at one of the fixed package-relative paths below.
+    Enumerating only those paths keeps the existing trusted-root, reparse, ACL,
+    version, and digest checks authoritative without recursively searching a
+    package-manager tree or granting the wrapper execution authority.
+    """
+
+    package_variants = (
+        ("node_modules", "@openai", "codex", "node_modules", "@openai"),
+        ("node_modules", "@openai"),
+    )
+    candidates: list[str] = []
+    for prefix in package_variants:
+        for package_name, target in _CODEX_WINDOWS_PLATFORM_VARIANTS:
+            candidate = os.path.join(
+                root,
+                *prefix,
+                package_name,
+                "vendor",
+                target,
+                "bin",
+                "codex.exe",
+            )
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
+    candidates.extend(_codex_pnpm_native_candidates(root, _CODEX_WINDOWS_PLATFORM_VARIANTS, ()))
+    return tuple(candidates)
+
+
+def _codex_wrapper_native_candidates(
+    root: str,
+    wrapper: str,
+    platform_variants: tuple[tuple[str, str], ...],
+) -> tuple[bool, tuple[str, ...]]:
+    """Pair an npm/pnpm PATH shim to the exact package-native executable."""
+
+    try:
+        root = os.path.realpath(os.path.abspath(root))
+        wrapper = os.path.realpath(os.path.abspath(wrapper))
+        if (
+            not agent_discovery._path_is_within(wrapper, root)
+            or os.path.splitext(wrapper)[1].casefold() not in {".cmd", ".bat"}
+        ):
+            return False, ()
+        with open(wrapper, "rb") as stream:
+            body = stream.read(65_537)
+        if len(body) > 65_536:
+            return False, ()
+        text = body.decode("utf-8-sig")
+    except (OSError, UnicodeError, ValueError):
+        return False, ()
+
+    package_roots: dict[str, tuple[Path, Path]] = {}
+    saw_target = False
+    target_pattern = re.compile(
+        r'"([^"\r\n]*node_modules[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js)"',
+        re.IGNORECASE,
+    )
+    for match in target_pattern.finditer(text):
+        saw_target = True
+        value = match.group(1)
+        folded = value.casefold()
+        if folded.startswith("%~dp0\\"):
+            target = os.path.join(os.path.dirname(wrapper), value[len("%~dp0\\") :])
+        elif folded.startswith("%dp0%\\"):
+            target = os.path.join(os.path.dirname(wrapper), value[len("%dp0%\\") :])
+        elif os.path.isabs(value):
+            target = value
+        else:
+            continue
+        lexical_target = os.path.abspath(target)
+        if not agent_discovery._path_is_within(lexical_target, root):
+            continue
+        if not os.path.isfile(lexical_target):
+            continue
+        resolved_target = os.path.realpath(lexical_target)
+        if not agent_discovery._path_is_within(resolved_target, root):
+            continue
+        target_path = Path(resolved_target)
+        if tuple(part.casefold() for part in target_path.parts[-5:]) != (
+            "node_modules",
+            "@openai",
+            "codex",
+            "bin",
+            "codex.js",
+        ):
+            continue
+        lexical_package_root = Path(lexical_target).parents[1]
+        resolved_package_root = target_path.parents[1]
+        package_roots[os.path.normcase(str(lexical_package_root))] = (
+            lexical_package_root,
+            resolved_package_root,
+        )
+    if len(package_roots) != 1:
+        return saw_target, ()
+
+    lexical_package_root, resolved_package_root = next(iter(package_roots.values()))
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for package_name, target in platform_variants:
+        bases = (
+            lexical_package_root,
+            lexical_package_root / "node_modules" / "@openai" / package_name,
+            lexical_package_root.parent / package_name,
+            lexical_package_root.parents[1] / ".pnpm" / "node_modules" / "@openai" / package_name,
+            resolved_package_root,
+            resolved_package_root / "node_modules" / "@openai" / package_name,
+            resolved_package_root.parent / package_name,
+            resolved_package_root.parents[1] / ".pnpm" / "node_modules" / "@openai" / package_name,
+        )
+        for base in bases:
+            candidate = os.path.realpath(base / "vendor" / target / "bin" / "codex.exe")
+            key = os.path.normcase(os.path.abspath(candidate))
+            if key in seen or not agent_discovery._path_is_within(candidate, root):
+                continue
+            if os.path.isfile(candidate):
+                seen.add(key)
+                candidates.append(candidate)
+    return True, tuple(candidates)
+
+
+def _codex_pnpm_native_candidates(
+    root: str,
+    platform_variants: tuple[tuple[str, str], ...],
+    generations: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Resolve the platform package paired with pnpm's active Codex link."""
+
+    root = os.path.realpath(os.path.abspath(root))
+    candidates: list[str] = []
+    seen: set[str] = set()
+    try:
+        if generations:
+            active_packages = [
+                Path(root) / "global" / generation / "node_modules" / "@openai" / "codex"
+                for generation in generations
+            ]
+        else:
+            # Generic root enumeration is allowed only when exactly one active
+            # pnpm generation exists. PATH-specific discovery above pairs the
+            # wrapper to its exact generation and therefore tolerates stale
+            # generations without selecting them.
+            active_packages = sorted(Path(root).glob("global/*/node_modules/@openai/codex"))
+            active_generations = {str(package.parents[2]) for package in active_packages}
+            if len(active_generations) > 1:
+                return ()
+    except (IndexError, OSError):
+        return ()
+    for active_package in active_packages:
+        if not active_package.is_dir():
+            continue
+        resolved_package = Path(os.path.realpath(active_package))
+        if not agent_discovery._path_is_within(str(resolved_package), root):
+            continue
+        try:
+            virtual_node_modules = resolved_package.parents[1]
+            generation_node_modules = active_package.parents[1]
+        except IndexError:
+            continue
+        dependency_roots = (
+            virtual_node_modules,
+            generation_node_modules / ".pnpm" / "node_modules",
+        )
+        for dependency_root in dependency_roots:
+            for package_name, target in platform_variants:
+                linked_candidate = (
+                    dependency_root
+                    / "@openai"
+                    / package_name
+                    / "vendor"
+                    / target
+                    / "bin"
+                    / "codex.exe"
+                )
+                candidate = os.path.realpath(linked_candidate)
+                key = os.path.normcase(os.path.abspath(candidate))
+                if key in seen or not agent_discovery._path_is_within(candidate, root):
+                    continue
+                if os.path.isfile(candidate):
+                    seen.add(key)
+                    candidates.append(candidate)
+    return tuple(candidates)
 
 
 def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:

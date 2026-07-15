@@ -1417,53 +1417,218 @@ function Assert-PackagedAntigravityPlatformGate(
 }
 
 function New-WizardAgentFixtures([string]$Root) {
-    $bin = Join-Path $Root 'wizard-agent-fixtures'
-    Protect-TestDirectory $bin
+    $sourceBin = Join-Path $Root 'wizard-agent-fixture-sources'
+    Protect-TestDirectory $sourceBin
     $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
         throw "Windows .NET Framework compiler is unavailable: $compiler"
     }
-    $fixtures = @(
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $codexTrustedRoot = Join-Path $localAppData 'OpenAI\Codex\bin'
+    $codexBin = Join-Path $codexTrustedRoot ("000-defenseclaw-ci-" + [guid]::NewGuid().ToString('N'))
+    $claudeBin = Join-Path $userProfile '.local\bin'
+    $codexPath = Join-Path $codexBin 'codex.exe'
+    $claudePath = Join-Path $claudeBin 'claude.exe'
+    if (Test-Path -LiteralPath $claudePath) {
+        throw "refusing to replace an existing Claude executable fixture target: $claudePath"
+    }
+    try {
+        foreach ($path in @($codexTrustedRoot, $codexBin, $claudeBin)) {
+            Protect-TestDirectory $path
+        }
+        $fixtures = @(
         [pscustomobject]@{
-            Name = 'codex.exe'
+            Path = $codexPath
             ClassName = 'CodexVersionFixture'
             # The wizard contract installs the complete ten-event matrix, whose
             # first truthful minimum is Codex 0.133.0. Older supported tiers are
             # covered independently by boundary and real-client compatibility
             # probes instead of being mislabeled as full-matrix certification.
-            Version = 'codex-cli 0.133.0'
-        },
-        [pscustomobject]@{
-            Name = 'claude.exe'
-            ClassName = 'ClaudeVersionFixture'
-            Version = 'claude 2.1.152'
-        }
-    )
-    foreach ($fixture in $fixtures) {
-        $path = Join-Path $bin $fixture.Name
-        $sourcePath = Join-Path $bin ($fixture.ClassName + '.cs')
-        $source = @"
+            Source = @"
 using System;
-public static class $($fixture.ClassName) {
+public static class CodexVersionFixture {
     public static int Main(string[] arguments) {
-        Console.WriteLine("$($fixture.Version)");
+        if (arguments.Length == 2 &&
+            String.Equals(arguments[0], "app-server", StringComparison.Ordinal) &&
+            String.Equals(arguments[1], "--stdio", StringComparison.Ordinal)) {
+            string line;
+            while ((line = Console.ReadLine()) != null) {
+                if (line.IndexOf("\"method\":\"initialize\"", StringComparison.Ordinal) >= 0) {
+                    Console.WriteLine("{\"id\":1,\"result\":{}}");
+                    Console.Out.Flush();
+                } else if (line.IndexOf("\"method\":\"configRequirements/read\"", StringComparison.Ordinal) >= 0) {
+                    Console.WriteLine("{\"id\":2,\"result\":{\"requirements\":{\"allowManagedHooksOnly\":false}}}");
+                    Console.Out.Flush();
+                }
+            }
+            return 0;
+        }
+        Console.WriteLine("codex-cli 0.133.0");
         return 0;
     }
 }
 "@
-        Write-BoundedText $sourcePath $source
-        try {
-            Invoke-WindowsNativeProcess $compiler @(
-                '/nologo', '/target:exe', "/out:$path", $sourcePath
-            ) -TimeoutSeconds 60 | Out-Null
-        } finally {
-            Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+        },
+        [pscustomobject]@{
+            Path = $claudePath
+            ClassName = 'ClaudeVersionFixture'
+            Source = @"
+using System;
+public static class ClaudeVersionFixture {
+    public static int Main(string[] arguments) {
+        Console.WriteLine("claude 2.1.152");
+        return 0;
+    }
+}
+"@
         }
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "compatible connector fixture was not built: $path"
+        )
+        foreach ($fixture in $fixtures) {
+            $sourcePath = Join-Path $sourceBin ($fixture.ClassName + '.cs')
+            Write-BoundedText $sourcePath $fixture.Source
+            try {
+                Invoke-WindowsNativeProcess $compiler @(
+                    '/nologo', '/target:exe', "/out:$($fixture.Path)", $sourcePath
+                ) -TimeoutSeconds 60 | Out-Null
+            } finally {
+                Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $fixture.Path -PathType Leaf)) {
+                throw "compatible connector fixture was not built: $($fixture.Path)"
+            }
+        }
+        $codexVersion = Invoke-WindowsNativeProcess $codexPath @('--version') -TimeoutSeconds 30
+        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.133.0') {
+            throw "Codex fixture returned an unexpected version: $($codexVersion.StdOut)"
+        }
+        $claudeVersion = Invoke-WindowsNativeProcess $claudePath @('--version') -TimeoutSeconds 30
+        if ($claudeVersion.StdOut.Trim() -ne 'claude 2.1.152') {
+            throw "Claude fixture returned an unexpected version: $($claudeVersion.StdOut)"
+        }
+        Assert-WizardCodexPolicyFixture $codexPath
+        return [pscustomobject]@{
+            CodexBin = $codexBin
+            ClaudeBin = $claudeBin
+            # Keep the nested Desktop fixture off PATH. Codex setup must find
+            # it through the production Known-Folder root, while Claude's
+            # exact native fixture remains directly launchable from PATH.
+            SearchPath = $claudeBin
+            CodexPath = $codexPath
+            ClaudePath = $claudePath
+            CodexTrustedRoot = $codexTrustedRoot
+        }
+    } catch {
+        foreach ($path in @($codexPath, $claudePath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $codexBin -PathType Container) {
+            $remaining = @(Get-ChildItem -LiteralPath $codexBin -Force -ErrorAction SilentlyContinue)
+            if ($remaining.Count -eq 0) {
+                Remove-Item -LiteralPath $codexBin -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    }
+}
+
+function Assert-WizardCodexPolicyFixture([string]$CodexPath) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $CodexPath
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    [void]$start.ArgumentList.Add('app-server')
+    [void]$start.ArgumentList.Add('--stdio')
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw "failed to start Codex policy fixture: $CodexPath"
+    }
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        foreach ($request in @(
+            '{"method":"initialize","id":1,"params":{}}',
+            '{"method":"initialized"}',
+            '{"method":"configRequirements/read","id":2,"params":{}}'
+        )) {
+            $process.StandardInput.WriteLine($request)
+        }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill($true) } catch { }
+            throw 'Codex policy fixture did not complete its bounded RPC self-test'
+        }
+        if (-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)) {
+            throw 'Codex policy fixture output did not drain after exit'
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "Codex policy fixture exited $($process.ExitCode): $($stderrTask.Result)"
+        }
+        $responses = @($stdoutTask.Result -split "`r?`n" | Where-Object { $_ })
+        if ($responses.Count -ne 2) {
+            throw "Codex policy fixture returned $($responses.Count) responses; expected two"
+        }
+        $initialize = $responses[0] | ConvertFrom-Json -ErrorAction Stop
+        $requirements = $responses[1] | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$initialize.id -ne 1 -or $null -eq $initialize.result) {
+            throw 'Codex policy fixture returned an invalid initialize response'
+        }
+        $managedOnly = if ($null -eq $requirements.result.requirements) {
+            $null
+        } else {
+            $requirements.result.requirements.PSObject.Properties['allowManagedHooksOnly']
+        }
+        if ([int]$requirements.id -ne 2 -or $null -eq $managedOnly -or [bool]$managedOnly.Value) {
+            throw 'Codex policy fixture returned invalid effective requirements'
+        }
+    } finally {
+        if (-not $process.HasExited) {
+            try { $process.Kill($true) } catch { }
+        }
+        $process.Dispose()
+    }
+}
+
+function Remove-WizardAgentFixtures([AllowNull()][object]$Fixtures) {
+    if ($null -eq $Fixtures) { return }
+    $owned = @(
+        [pscustomobject]@{ Path = [string]$Fixtures.CodexPath; Root = [string]$Fixtures.CodexTrustedRoot; Name = 'codex.exe' },
+        [pscustomobject]@{ Path = [string]$Fixtures.ClaudePath; Root = [string]$Fixtures.ClaudeBin; Name = 'claude.exe' }
+    )
+    foreach ($entry in $owned) {
+        $path = [IO.Path]::GetFullPath($entry.Path)
+        $root = [IO.Path]::GetFullPath($entry.Root)
+        if (-not (Test-PathWithin $path $root) -or
+            -not [IO.Path]::GetFileName($path).Equals($entry.Name, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refusing to clean an unexpected connector fixture path: $path"
+        }
+        if (Test-Path -LiteralPath $path) {
+            Assert-NoReparseAncestors $path
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to remove a reparse-point connector fixture: $path"
+            }
+            Remove-Item -LiteralPath $path -Force
         }
     }
-    return $bin
+    $codexBin = [IO.Path]::GetFullPath([string]$Fixtures.CodexBin)
+    $codexRoot = [IO.Path]::GetFullPath([string]$Fixtures.CodexTrustedRoot)
+    if (-not (Test-PathWithin $codexBin $codexRoot) -or
+        -not [IO.Path]::GetFileName($codexBin).StartsWith('000-defenseclaw-ci-', [StringComparison]::Ordinal)) {
+        throw "refusing to clean an unexpected Codex fixture directory: $codexBin"
+    }
+    if (Test-Path -LiteralPath $codexBin -PathType Container) {
+        $remaining = @(Get-ChildItem -LiteralPath $codexBin -Force)
+        if ($remaining.Count -ne 0) {
+            throw "Codex fixture directory is not empty after owned-file cleanup: $codexBin"
+        }
+        Remove-Item -LiteralPath $codexBin -Force
+    }
 }
 
 function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserProfile) {
@@ -2045,7 +2210,6 @@ function Invoke-SetupAcceptance {
     Assert-NoGatewayAutoStart
     $userPathBefore = Get-UserPathRegistrySnapshot
     $processPathBefore = $env:PATH
-    $trustedPrefixesBefore = [Environment]::GetEnvironmentVariable('DEFENSECLAW_TRUSTED_BIN_PREFIXES')
     $launcher = Join-Path $installRoot 'bin\defenseclaw.exe'
     $startup = Join-Path $installRoot 'bin\defenseclaw-startup.exe'
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
@@ -2054,7 +2218,8 @@ function Invoke-SetupAcceptance {
     $cosign = Join-Path $installRoot 'runtime\tools\cosign.exe'
     $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
         $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
-    $fixtureBin = ''
+    $agentFixtures = $null
+    $fixtureSearchPath = ''
     if ($disposableGithubRunner) {
         $belowRunnerTemp = -not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -and
             (Test-PathWithin $root $env:RUNNER_TEMP)
@@ -2067,13 +2232,12 @@ function Invoke-SetupAcceptance {
         }
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Set-CurrentUserAsDefaultOwner
-        $fixtureBin = New-WizardAgentFixtures $root
-        $env:DEFENSECLAW_TRUSTED_BIN_PREFIXES = if ([string]::IsNullOrWhiteSpace($trustedPrefixesBefore)) {
-            $fixtureBin
-        } else {
-            "$fixtureBin;$trustedPrefixesBefore"
-        }
-        $env:PATH = "$fixtureBin;$processPathBefore"
+        # Exercise the same zero-prompt built-in roots used by real Codex and
+        # Claude installations. Environment-only trust is deliberately ignored
+        # by product setup and must never authorize these fixtures.
+        $agentFixtures = New-WizardAgentFixtures $root
+        $fixtureSearchPath = [string]$agentFixtures.SearchPath
+        $env:PATH = "$fixtureSearchPath;$processPathBefore"
     }
     try {
         if ($disposableGithubRunner) {
@@ -2081,17 +2245,17 @@ function Invoke-SetupAcceptance {
                 $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
                 $connectorConfigPaths $userPathBefore
             Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureBin;$processPathBefore"
+            $env:PATH = "$fixtureSearchPath;$processPathBefore"
 
             Invoke-WizardConnectorAcceptance `
                 $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureBin $userPathBefore 'codex' 'observe'
+                $fixtureSearchPath $userPathBefore 'codex' 'observe'
             Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureBin;$processPathBefore"
+            $env:PATH = "$fixtureSearchPath;$processPathBefore"
 
             Invoke-WizardConnectorAcceptance `
                 $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureBin $userPathBefore 'claudecode' 'action'
+                $fixtureSearchPath $userPathBefore 'claudecode' 'action'
             Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
             $env:PATH = $processPathBefore
         }
@@ -2274,11 +2438,6 @@ function Invoke-SetupAcceptance {
     } finally {
         $env:PATH = $processPathBefore
         Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-        if ([string]::IsNullOrWhiteSpace($trustedPrefixesBefore)) {
-            Remove-Item Env:DEFENSECLAW_TRUSTED_BIN_PREFIXES -ErrorAction SilentlyContinue
-        } else {
-            $env:DEFENSECLAW_TRUSTED_BIN_PREFIXES = $trustedPrefixesBefore
-        }
         if (Test-Path -LiteralPath $gateway -PathType Leaf) {
             try { Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 | Out-Null }
             catch { Write-Warning "setup acceptance watchdog cleanup failed: $($_.Exception.Message)" }
@@ -2299,6 +2458,7 @@ function Invoke-SetupAcceptance {
                     -AllowedExitCodes @(0, 1603) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
             } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
         }
+        Remove-WizardAgentFixtures $agentFixtures
         for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
             Start-Sleep -Milliseconds 250
         }
@@ -2344,6 +2504,10 @@ function Invoke-Contract {
     }
     $installed = $false
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
+    $agentFixtures = $null
+    $fixtureSearchPath = ''
+    $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
+        $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
     try {
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
@@ -2351,6 +2515,11 @@ function Invoke-Contract {
             'AWS_SESSION_TOKEN', 'LLM_API_KEY'
         )) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
+        if ($disposableGithubRunner) {
+            Set-CurrentUserAsDefaultOwner
+            $agentFixtures = New-WizardAgentFixtures $root
+            $fixtureSearchPath = [string]$agentFixtures.SearchPath
         }
         # The connector contract consumes the same offline native Setup
         # artifact shipped to users. The legacy install.ps1/uv/wheel
@@ -2401,7 +2570,12 @@ function Invoke-Contract {
         $env:TMP = $env:TEMP
         $env:CODEX_HOME = $codexHome
         $env:CLAUDE_CONFIG_DIR = $claudeHome
-        $env:PATH = "$managedPython;$managedBin;$env:PATH"
+        $fixturePrefix = if ([string]::IsNullOrWhiteSpace($fixtureSearchPath)) {
+            ''
+        } else {
+            "$fixtureSearchPath;"
+        }
+        $env:PATH = "$fixturePrefix$managedPython;$managedBin;$env:PATH"
         $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
         & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
             -StateRoot $contractRoot -HomeRoot $contractHome -NativeDataRoot $dataRoot `
@@ -2436,6 +2610,11 @@ function Invoke-Contract {
                 Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
                     -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
             }
+        } catch {
+            $cleanupErrors.Add($_)
+        }
+        try {
+            Remove-WizardAgentFixtures $agentFixtures
         } catch {
             $cleanupErrors.Add($_)
         }

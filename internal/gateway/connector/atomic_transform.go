@@ -1566,12 +1566,11 @@ func recoverAtomicTransformOnce(path, stateDir string) error {
 				tombstoneIsSentinel, stagedMatches, intentPath,
 			)
 		}
-		if !intent.Remove && !targetState.exists {
-			return fmt.Errorf("completed replacement target is absent; retaining recovery receipt %s", intentPath)
-		}
 		// The complete receipt was published with MOVEFILE_WRITE_THROUGH after
-		// live-state cleanup. A visible target is always authoritative; cleanup
-		// only the receipt-owned random artifacts and the receipt itself.
+		// the replacement/removal and its parent sync committed. It is therefore
+		// authoritative even when a later lifecycle action legitimately removed
+		// the replacement before receipt cleanup resumed. Clean only receipt-owned
+		// random artifacts; never recreate or remove the current logical target.
 		if err := removeExpectedAtomicTransformArtifact(tombstone, tombstoneState); err != nil {
 			return err
 		}
@@ -1581,12 +1580,20 @@ func recoverAtomicTransformOnce(path, stateDir string) error {
 		if err := syncAtomicTransformParent(filepath.Dir(intent.TargetPath)); err != nil {
 			return err
 		}
-		// Remove the completion witness first. A crash here leaves the prepared
-		// intent, whose filesystem matrix can safely infer/republish completion.
-		if err := removeExpectedAtomicTransformArtifact(completePath, loaded.completeState); err != nil {
+		// Retire the prepared intent first. A crash before witness removal leaves
+		// a standalone durable completion receipt, which the loader recognizes as
+		// authoritative. Removing the witness first would leave only a prepared
+		// intent and lose the proof that the replacement already committed.
+		if err := removeExpectedAtomicTransformArtifact(intentPath, intentState); err != nil {
 			return err
 		}
-		if err := removeExpectedAtomicTransformArtifact(intentPath, intentState); err != nil {
+		// Persist that safe standalone-witness state before unlinking the last
+		// completion proof; otherwise a power loss could reorder the two directory
+		// updates and resurrect only the prepared intent.
+		if err := syncAtomicTransformParent(filepath.Dir(intentPath)); err != nil {
+			return err
+		}
+		if err := removeExpectedAtomicTransformArtifact(completePath, loaded.completeState); err != nil {
 			return err
 		}
 		return syncAtomicTransformIntentParents(intent, intentPath)
@@ -1594,9 +1601,6 @@ func recoverAtomicTransformOnce(path, stateDir string) error {
 	if atomicTransformStateMatchesCompletionSentinel(tombstoneState, intent) {
 		if stagedState.exists {
 			return fmt.Errorf("terminal completion sentinel coexists with staged config; retaining recovery artifacts")
-		}
-		if !intent.Remove && !targetState.exists {
-			return fmt.Errorf("terminal completion sentinel exists but replacement target is absent; retaining recovery artifacts")
 		}
 		if !intentState.exists {
 			return fmt.Errorf("terminal completion sentinel has no prepared intent: %s", intentPath)
@@ -1882,7 +1886,22 @@ func finishAtomicTransformIntent(
 	}); err != nil {
 		return err
 	}
-	return nil
+	// A successful POSIX caller must not inherit a terminal receipt into
+	// unrelated lifecycle work. In particular, connector setup can legitimately
+	// restore or remove the just-written target before its next CAS mutation;
+	// eagerly retire the completed transaction so that later work begins from a
+	// stable receipt-free state. Crash recovery also treats the durable completion
+	// witness as authoritative if that later lifecycle change happened first.
+	// Windows production uses the V2 engine and keeps the legacy V1 receipt
+	// behavior only for migration/recovery compatibility.
+	//
+	// The completion witness is already durable, so run the ordinary recovery
+	// cleanup before reporting success. Injected exits at Completed still retain
+	// the witness and exercise the exact crash-resume path.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	return recoverAtomicTransformOnce(intent.LogicalPath, intent.StateDir)
 }
 
 func recoverAfterAtomicTransformError(path, stateDir string, cause error) error {

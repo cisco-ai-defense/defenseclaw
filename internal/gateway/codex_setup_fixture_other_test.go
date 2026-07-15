@@ -20,22 +20,32 @@ func stageCodexDiscoveryAuthorityFixture(
 	entry connector.HookContractLockEntry,
 ) {
 	t.Helper()
-	payload := map[string]any{
-		"version": 3,
-		"agents": map[string]any{
-			"codex": map[string]any{
-				"installed":   true,
-				"version":     entry.RawAgentVersion,
-				"binary_path": entry.AgentExecutable,
-				"error":       "",
-			},
-		},
+	discoveryPath := filepath.Join(dataDir, "agent_discovery.json")
+	payload := map[string]any{}
+	if existing, err := os.ReadFile(discoveryPath); err == nil {
+		if err := json.Unmarshal(existing, &payload); err != nil {
+			t.Fatalf("parse existing non-Windows agent discovery fixture: %v", err)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read existing non-Windows agent discovery fixture: %v", err)
+	}
+	agents, ok := payload["agents"].(map[string]any)
+	if !ok {
+		agents = map[string]any{}
+	}
+	payload["version"] = 3
+	payload["agents"] = agents
+	agents["codex"] = map[string]any{
+		"installed":   true,
+		"version":     entry.RawAgentVersion,
+		"binary_path": entry.AgentExecutable,
+		"error":       "",
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal non-Windows Codex discovery fixture: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), body, 0o600); err != nil {
+	if err := os.WriteFile(discoveryPath, body, 0o600); err != nil {
 		t.Fatalf("write non-Windows Codex discovery fixture: %v", err)
 	}
 }

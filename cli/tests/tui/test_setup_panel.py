@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -2506,7 +2507,11 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
     assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (status:")
-    assert "policy-unverified" in fields["guardrail.connectors.codex.hook_fail_mode"].value
+    policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
+    if os.name == "nt":
+        assert "policy-unverified" in policy_status
+    else:
+        assert "policy-unverified" not in policy_status
     assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"

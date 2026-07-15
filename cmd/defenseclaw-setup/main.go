@@ -389,34 +389,38 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 }
 
 func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
-	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
+	maintenancePath, err := defaultMaintenancePath()
+	if err != nil {
+		return 1, err
+	}
+	transaction, err := preparePendingSetupTransactionForUninstall(opts, installRoot, dataRoot)
+	if err != nil {
 		return retryRequiredCode, err
 	}
 	if !opts.Quiet {
 		fmt.Printf("Uninstalling DefenseClaw from %s\n", installRoot)
 	}
-	oldState, err := loadExistingInstallState(installRoot)
-	if err != nil {
-		return 1, err
-	}
-	if pathExists(installRoot) && oldState == nil {
-		return 1, fmt.Errorf("refusing to remove an existing directory without valid DefenseClaw installer state: %s", installRoot)
-	}
-	maintenancePath, err := defaultMaintenancePath()
-	if err != nil {
-		return 1, err
-	}
-	transaction, err := newSetupTransaction("uninstall", installRoot, dataRoot, maintenancePath, "", "", oldState, opts)
-	if err != nil {
-		return 1, err
-	}
-	if err := beginSetupTransaction(transaction); err != nil {
-		return retryRequiredCode, err
+	if transaction == nil {
+		oldState, loadErr := loadExistingInstallState(installRoot)
+		if loadErr != nil {
+			return 1, loadErr
+		}
+		if pathExists(installRoot) && oldState == nil {
+			return 1, fmt.Errorf("refusing to remove an existing directory without valid DefenseClaw installer state: %s", installRoot)
+		}
+		prepared, transactionErr := newSetupTransaction("uninstall", installRoot, dataRoot, maintenancePath, "", "", oldState, opts)
+		if transactionErr != nil {
+			return 1, transactionErr
+		}
+		if err := beginSetupTransaction(prepared); err != nil {
+			return retryRequiredCode, err
+		}
+		transaction = &prepared
 	}
 	rollbackUninstall := func(cause error) (int, error) {
-		rollbackErr := rollbackSetupTransaction(transaction)
+		rollbackErr := rollbackSetupTransaction(*transaction)
 		if rollbackErr == nil {
-			rollbackErr = markSetupTransactionComplete(transaction, setupPhaseIntent)
+			rollbackErr = markSetupTransactionComplete(*transaction, setupPhaseIntent)
 		}
 		if rollbackErr != nil {
 			return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
@@ -446,13 +450,13 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 			return rollbackUninstall(err)
 		}
 	}
-	if err := markSetupTransactionCommitted(transaction); err != nil {
+	if err := markSetupTransactionCommitted(*transaction); err != nil {
 		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
 			return retryRequiredCode, fmt.Errorf("commit uninstall transaction; recovery is required before retrying: %w", err)
 		}
 		return rollbackUninstall(fmt.Errorf("commit uninstall transaction: %w", err))
 	}
-	deferred, err := finishCommittedSetupTransaction(transaction)
+	deferred, err := finishCommittedSetupTransaction(*transaction)
 	if err != nil {
 		return retryRequiredCode, fmt.Errorf("uninstall committed but convergence is pending: %w", err)
 	}

@@ -92,6 +92,22 @@ func TestOwnedUserPathRemovalRefusesReorderedEntry(t *testing.T) {
 	}
 }
 
+func TestOwnedUserPathRemovalRetryAcceptsOnlyAnAlreadyAbsentEntry(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	current := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
+
+	got, err := removeOwnedUserPathEntry(current, commandDir, false)
+	if err != nil || got != current {
+		t.Fatalf("already-removed PATH retry = %q, %v", got, err)
+	}
+
+	reordered := current + ";" + commandDir + `;C:\Users\runneradmin\bin`
+	got, err = removeOwnedUserPathEntry(reordered, commandDir, false)
+	if err == nil || got != reordered {
+		t.Fatalf("reordered PATH retry = %q, %v", got, err)
+	}
+}
+
 func TestOwnedUserPathRemovalPlanDeletesOnlySetupCreatedEmptyValue(t *testing.T) {
 	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
 	later := `C:\Users\runneradmin\bin`
@@ -211,6 +227,45 @@ func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
 				t.Fatalf("Path registry type = %d, want %d", gotType, wantType)
 			}
 		})
+	}
+}
+
+func TestOwnedUserPathRegistryRemovalRetriesAfterLaterFailures(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	later := `C:\Users\runneradmin\bin`
+	keyPath := fmt.Sprintf(
+		`Software\DefenseClawSetupTests\path-retry-%d-%d`,
+		os.Getpid(),
+		time.Now().UnixNano(),
+	)
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.ALL_ACCESS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = key.Close()
+		_ = registry.DeleteKey(registry.CURRENT_USER, keyPath)
+	})
+	if err := key.SetStringValue("Path", commandDir+";"+later); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first mutation can be durable even when the subsequent desktop
+	// broadcast fails. A committed retry must accept the already-absent entry.
+	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+		t.Fatalf("retry after post-mutation broadcast failure: %v", err)
+	}
+	// If Apps & Features removal then fails, the next committed retry reaches
+	// PATH removal once more and must remain idempotent.
+	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+		t.Fatalf("retry after later Apps & Features failure: %v", err)
+	}
+	got, _, err := key.GetStringValue("Path")
+	if err != nil || got != later {
+		t.Fatalf("PATH after committed retries = %q, %v; want %q", got, err, later)
 	}
 }
 

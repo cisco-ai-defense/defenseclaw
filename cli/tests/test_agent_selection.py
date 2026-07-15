@@ -166,3 +166,271 @@ def test_builtin_setup_roots_ignore_poisoned_profile_environment(
 
     assert any(str(trusted_local) in root for root in roots)
     assert all(str(poisoned_local) not in root for root in roots)
+
+
+def test_setup_candidates_include_official_nested_npm_native_codex(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    npm_root = tmp_path / "npm"
+    native = (
+        npm_root
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native-codex")
+    wrapper = npm_root / "codex.cmd"
+    wrapper.write_text("@echo wrapper", encoding="utf-8")
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (str(wrapper),),
+    )
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_ai_discovery_trust_config",
+        lambda _data_dir: (True, ()),
+    )
+    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(npm_root),))
+    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
+
+    candidates = agent_selection._setup_agent_candidates(
+        "codex",
+        agent_selection.agent_discovery._SPECS["codex"],
+        str(tmp_path / "state"),
+    )
+
+    assert candidates[0] == str(native)
+    assert str(wrapper) in candidates
+
+
+def test_setup_candidates_prefer_native_image_for_path_npm_wrapper_over_desktop(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    npm_root = tmp_path / "npm"
+    native = (
+        npm_root
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"active-npm-codex")
+    wrapper = npm_root / "codex.cmd"
+    wrapper.write_text("@echo wrapper", encoding="utf-8")
+
+    desktop = tmp_path / "OpenAI" / "Codex" / "bin" / "stale" / "codex.exe"
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"stale-desktop-codex")
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (str(wrapper), str(desktop)),
+    )
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_ai_discovery_trust_config",
+        lambda _data_dir: (True, ()),
+    )
+    monkeypatch.setattr(
+        agent_selection,
+        "_builtin_setup_trusted_prefixes",
+        lambda: (str(npm_root), str(desktop.parents[1])),
+    )
+    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
+
+    candidates = agent_selection._setup_agent_candidates(
+        "codex",
+        agent_selection.agent_discovery._SPECS["codex"],
+        str(tmp_path / "state"),
+    )
+
+    assert candidates[0] == str(native)
+    assert candidates.index(str(native)) < candidates.index(str(desktop))
+
+
+def test_setup_candidates_follow_active_pnpm_package_not_stale_store_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pnpm_root = tmp_path / "pnpm"
+    active_package = (
+        pnpm_root
+        / "global"
+        / "v11"
+        / "active-hash"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+    )
+    active_js = active_package / "bin" / "codex.js"
+    active_js.parent.mkdir(parents=True)
+    active_js.write_text("// active Codex", encoding="utf-8")
+    native = (
+        active_package.parents[1]
+        / ".pnpm"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"active-pnpm-codex")
+    stale = (
+        pnpm_root
+        / "global"
+        / "v10"
+        / "stale-hash"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale-pnpm-codex")
+    stale_direct = (
+        pnpm_root
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    stale_direct.parent.mkdir(parents=True)
+    stale_direct.write_bytes(b"stale-direct-codex")
+    wrapper = pnpm_root / "bin" / "codex.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        '@node "%~dp0\\..\\global\\v11\\active-hash\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+        encoding="utf-8",
+    )
+    desktop = tmp_path / "OpenAI" / "Codex" / "bin" / "stale" / "codex.exe"
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"stale-desktop-codex")
+
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (str(wrapper), str(desktop)),
+    )
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_ai_discovery_trust_config",
+        lambda _data_dir: (True, ()),
+    )
+    monkeypatch.setattr(
+        agent_selection,
+        "_builtin_setup_trusted_prefixes",
+        lambda: (str(pnpm_root), str(desktop.parents[1])),
+    )
+    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
+
+    candidates = agent_selection._setup_agent_candidates(
+        "codex",
+        agent_selection.agent_discovery._SPECS["codex"],
+        str(tmp_path / "state"),
+    )
+
+    assert candidates[0] == str(native)
+    assert str(stale) not in candidates
+    assert str(stale_direct) not in candidates
+    assert candidates.index(str(native)) < candidates.index(str(desktop))
+
+
+def test_codex_wrapper_missing_js_target_rejects_leftover_native(tmp_path: Path) -> None:
+    root = tmp_path / "pnpm"
+    wrapper = root / "codex.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        '@node "%~dp0\\global\\v11\\removed\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+        encoding="utf-8",
+    )
+    leftover = (
+        root
+        / "global"
+        / "v11"
+        / "removed"
+        / "node_modules"
+        / ".pnpm"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    leftover.parent.mkdir(parents=True)
+    leftover.write_bytes(b"leftover-native")
+
+    recognized, candidates = agent_selection._codex_wrapper_native_candidates(
+        str(root),
+        str(wrapper),
+        agent_selection._CODEX_WINDOWS_PLATFORM_VARIANTS,
+    )
+
+    assert recognized
+    assert candidates == ()
+
+
+def test_setup_candidates_do_not_recursively_accept_lookalike_npm_codex(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    npm_root = tmp_path / "npm"
+    lookalike = (
+        npm_root
+        / "node_modules"
+        / "unrelated"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    lookalike.parent.mkdir(parents=True)
+    lookalike.write_bytes(b"lookalike")
+    monkeypatch.setattr(agent_selection.agent_discovery, "_binary_candidates_for_agent", lambda *_args: ())
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_ai_discovery_trust_config",
+        lambda _data_dir: (True, ()),
+    )
+    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(npm_root),))
+    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
+
+    candidates = agent_selection._setup_agent_candidates(
+        "codex",
+        agent_selection.agent_discovery._SPECS["codex"],
+        str(tmp_path / "state"),
+    )
+
+    assert str(lookalike) not in candidates
