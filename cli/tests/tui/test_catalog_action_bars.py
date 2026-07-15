@@ -165,6 +165,7 @@ async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(pane
         await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
+        inp.focus()
         inp.value = "needle"
         await pilot.pause()
         assert model.filter_text == "needle"
@@ -173,6 +174,7 @@ async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(pane
         # remains unloaded while the old widget still temporarily displays its
         # previous bytes.  Since that widget is not focused, model state wins.
         app.set_focus(None)
+        await pilot.pause()
         model.loaded = False
         model.clear_filter()
         assert inp.value == "needle"
