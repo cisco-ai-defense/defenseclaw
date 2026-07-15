@@ -29,6 +29,13 @@ dependencies = [
     # resolving this package through /simple/.
     "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl#sha256=9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe",
     "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
+    # Declare MCP Scanner's YARA engine directly so uv can select the local,
+# Windows-Python-3.14-only source below. On every other target this remains
+# VirusTotal's upstream yara-python distribution from PyPI. The adapter is
+# not independently published, so native Setup and source-checkout uv are
+    # the supported Windows 3.14 install paths; plain pip is not advertised for
+    # that target (see the Windows install documentation).
+    "yara-python>=4.5.4; python_version>='3.11'",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
     # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
@@ -213,6 +220,15 @@ override-dependencies = [
     # used is SerializerFactory + SnapshotSession).
     "syrupy>=4.9.1",
 ]
+
+[tool.uv.sources]
+# VirusTotal's final published yara-python Windows wheel targets CPython 3.13.
+# The native Windows installer uses CPython 3.14, so uv selects this small,
+# API-scoped adapter there and continues to select the upstream distribution on
+# every other platform/runtime. The adapter delegates matching to VirusTotal's
+# supported YARA-X binary wheel and implements the API used by the managed MCP
+# scanner dependency.
+yara-python = { path = "packages/yara-python-compat", marker = "sys_platform == 'win32' and python_version >= '3.14'" }
 
 [tool.ruff]
 target-version = "py310"

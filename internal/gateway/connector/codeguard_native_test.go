@@ -26,6 +26,17 @@ import (
 	"testing"
 )
 
+func TestConnectorEnvHomeDirResolvesRelativeOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("CODEX_HOME", "relative-codex-home")
+
+	want := filepath.Join(root, "relative-codex-home")
+	if got := codexHomeDir(); got != want {
+		t.Fatalf("codexHomeDir() = %q, want %q", got, want)
+	}
+}
+
 func TestCodexCodeGuardSkillInstallCopiesSoftwareSecurity(t *testing.T) {
 	dir := t.TempDir()
 	repoDir := filepath.Join(dir, "project-codeguard")

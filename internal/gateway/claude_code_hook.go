@@ -176,7 +176,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
-	if rawAction == "block" && !claudeCodeCanEnforce(req.HookEventName) {
+	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
 	} else if mode != "action" && rawAction == "block" {
@@ -368,9 +368,16 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	return resp
 }
 
-func claudeCodeCanEnforce(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
+func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
+	// Claude Code reports ConfigChange for managed policy updates too, but
+	// explicitly ignores blocking decisions for policy_settings. Treating that
+	// response as enforced would create false-positive block telemetry.
+	if req.HookEventName == "ConfigChange" && strings.EqualFold(strings.TrimSpace(req.Source), "policy_settings") {
+		return false
+	}
+
+	switch req.HookEventName {
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
 		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true

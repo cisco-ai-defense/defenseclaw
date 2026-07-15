@@ -5556,8 +5556,15 @@ def _effective_guardrail_value(
         try:
             from defenseclaw.fail_mode import resolve_connector_fail_mode
 
-            state = resolve_connector_fail_mode(cfg, connector)
-            return state.runtime or state.desired
+            state = resolve_connector_fail_mode(
+                cfg,
+                connector,
+                inspect_effective_policy=False,
+            )
+            value = state.runtime or state.desired or "unknown"
+            if state.drift:
+                return f"{value} (status: {', '.join(state.drift)})"
+            return value
         except Exception:  # noqa: BLE001 - config editor must remain available during drift.
             pass
     resolver = getattr(guardrail, method_name, None) if guardrail is not None else None

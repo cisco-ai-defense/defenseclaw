@@ -2011,22 +2011,21 @@ class NotificationSourceFilter:
 def _default_notifications_enabled() -> bool:
     """Mirror Go's ``config.DefaultNotificationsEnabled``.
 
-    Darwin is the only platform with a consumer-grade desktop
-    notification surface that every user already has running, so it
-    opts in by default. Every other OS waits for an explicit
-    ``defenseclaw setup notifications on`` opt-in. Implemented as a
+    macOS and native Windows both have an attended consumer desktop
+    notification surface, so fresh installs opt in by default. Every other OS
+    waits for an explicit ``defenseclaw setup notifications on`` opt-in. Implemented as a
     free function (not a literal default) so the platform check is
     evaluated at config-construction time, not module-import time —
     important for unit tests that monkey-patch ``platform.system``.
     """
-    return platform.system() == "Darwin"
+    return platform.system() in {"Darwin", "Windows"}
 
 
 @dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
-    Master switch ``enabled`` defaults to ``True`` on darwin and
+    Master switch ``enabled`` defaults to ``True`` on macOS and Windows and
     ``False`` elsewhere — same matrix as Go's
     ``DefaultNotificationsEnabled``. ``defenseclaw setup
     notifications`` (the single-prompt onboarding wizard) is still
@@ -4764,7 +4763,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     """Build a :class:`NotificationsConfig` from the YAML ``notifications:`` block.
 
     Defaults are platform-conditional for the master switch (true on
-    darwin, false elsewhere — see :func:`_default_notifications_enabled`)
+    macOS and Windows, false elsewhere — see :func:`_default_notifications_enabled`)
     and on for every category and source so that once an operator
     opts in via ``defenseclaw setup notifications`` they immediately
     see every block surface; tuning down is then a matter of

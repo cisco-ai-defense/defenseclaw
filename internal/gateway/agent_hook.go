@@ -1629,7 +1629,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	profile := a.hookProfileForConnector(req.ConnectorName)
 	caps := profile.Capabilities
-	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile)
+	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
 	severity := verdict.Severity
 	reason := verdict.Reason
 	findings := verdict.Findings
@@ -1647,7 +1647,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile)
+			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile, req.Payload)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -1912,16 +1912,17 @@ func currentWorkingDir() string {
 }
 
 func mapHookAction(rawAction, mode, event string, caps connector.HookCapability) (string, bool) {
-	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{})
+	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{}, nil)
 }
 
-func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile) (string, bool) {
+func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {
 	if profile.MapVerdict != nil {
 		out := profile.MapVerdict(connector.HookVerdictInput{
 			RawAction: rawAction,
 			Event:     event,
 			Mode:      mode,
 			Caps:      caps,
+			Payload:   payload,
 		})
 		return out.Action, out.WouldBlock
 	}

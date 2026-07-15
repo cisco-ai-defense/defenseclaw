@@ -48,3 +48,18 @@ func TestLoadManifestAcceptsEmptyDocument(t *testing.T) {
 		t.Fatalf("manifest = %+v, want version 1 with no targets", manifest)
 	}
 }
+
+func TestLoadManifestAcceptsSIDOnlyTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	data := []byte("version: 1\ntargets:\n  - sid: S-1-5-21-111-222-333-1001\n    connector: claudecode\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("targets = %+v, want SID-only target", manifest.Targets)
+	}
+}

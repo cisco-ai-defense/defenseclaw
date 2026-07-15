@@ -12,8 +12,8 @@
 
 The resolver fixed a concrete UX bug where ``defenseclaw tui`` failed
 in the shell that just finished ``make all``.  These tests pin down
-the three-tier resolution order so a future refactor can't silently
-regress it.
+the resolution order, including the native Windows sibling boundary,
+so a future refactor can't silently regress it.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
 
         # Scrub the env override — real CI envs occasionally set it.
         self._env_backup = os.environ.pop("DEFENSECLAW_GATEWAY_BIN", None)
+        self._install_root_backup = os.environ.pop("DEFENSECLAW_INSTALL_ROOT", None)
         self.addCleanup(self._restore_env)
 
     def _restore_env(self) -> None:
@@ -54,12 +55,59 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
             os.environ["DEFENSECLAW_GATEWAY_BIN"] = self._env_backup
         else:
             os.environ.pop("DEFENSECLAW_GATEWAY_BIN", None)
+        if self._install_root_backup is not None:
+            os.environ["DEFENSECLAW_INSTALL_ROOT"] = self._install_root_backup
+        else:
+            os.environ.pop("DEFENSECLAW_INSTALL_ROOT", None)
 
     def _make_executable(self, path: str) -> None:
         """Create an empty file at *path* with the exec bit set."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write("#!/bin/sh\n")
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    def test_packaged_windows_sibling_wins_over_override_and_path(self):
+        root = os.path.join(self._tmp.name, "DefenseClaw")
+        python = os.path.join(root, "runtime", "python", "python.exe")
+        sibling = os.path.join(root, "bin", "defenseclaw-gateway.exe")
+        self._make_executable(python)
+        self._make_executable(sibling)
+        os.environ["DEFENSECLAW_INSTALL_ROOT"] = root
+        os.environ["DEFENSECLAW_GATEWAY_BIN"] = os.path.join(self._tmp.name, "override.exe")
+
+        with (
+            patch.object(gateway.sys, "executable", python),
+            patch.object(gateway.shutil, "which", return_value=os.path.join(self._tmp.name, "path.exe")),
+        ):
+            self.assertEqual(gateway.resolve_gateway_binary(), os.path.abspath(sibling))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    def test_packaged_windows_root_requires_matching_embedded_python(self):
+        root = os.path.join(self._tmp.name, "DefenseClaw")
+        sibling = os.path.join(root, "bin", "defenseclaw-gateway.exe")
+        self._make_executable(sibling)
+        override = os.path.join(self._tmp.name, "override.exe")
+        os.environ["DEFENSECLAW_INSTALL_ROOT"] = root
+        os.environ["DEFENSECLAW_GATEWAY_BIN"] = override
+
+        with patch.object(gateway.sys, "executable", os.path.join(self._tmp.name, "foreign-python.exe")):
+            self.assertEqual(gateway.resolve_gateway_binary(), override)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    def test_packaged_windows_missing_sibling_fails_closed(self):
+        root = os.path.join(self._tmp.name, "DefenseClaw")
+        python = os.path.join(root, "runtime", "python", "python.exe")
+        self._make_executable(python)
+        os.environ["DEFENSECLAW_INSTALL_ROOT"] = root
+        os.environ["DEFENSECLAW_GATEWAY_BIN"] = os.path.join(self._tmp.name, "override.exe")
+
+        with (
+            patch.object(gateway.sys, "executable", python),
+            patch.object(gateway.shutil, "which", return_value=os.path.join(self._tmp.name, "path.exe")),
+        ):
+            self.assertIsNone(gateway.resolve_gateway_binary())
 
     def test_env_override_wins_over_path_and_fallback(self):
         # Override wins even when the canonical path would also resolve:

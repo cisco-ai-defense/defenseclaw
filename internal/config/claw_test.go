@@ -142,6 +142,28 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 // when guardrail.connector is unset, SkillDirs() must keep returning
 // OpenClaw paths (workspace/skills + claw_home/skills) so existing
 // deployments don't drift.
+func TestConnectorHomesHonorClientOverrides(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	claudeHome := filepath.Join(root, "claude-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("codex"); got != codexHome {
+		t.Fatalf("Codex home = %q, want %q", got, codexHome)
+	}
+	if got := cfg.ConnectorHomeDir("claudecode"); got != claudeHome {
+		t.Fatalf("Claude config dir = %q, want %q", got, claudeHome)
+	}
+	if got := cfg.SkillDirsForConnector("codex")[0]; got != filepath.Join(codexHome, "skills") {
+		t.Fatalf("Codex skill dir = %q", got)
+	}
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins") {
+		t.Fatalf("Claude plugin dir = %q", got)
+	}
+}
+
 func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}

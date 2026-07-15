@@ -182,3 +182,15 @@ def test_posix_install_and_upgrade_validate_tui_before_launcher_publication() ->
     launcher = upgrade_text.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', install_start)
     upgrade_install = upgrade_text[install_start:launcher]
     assert upgrade_install.index("pip check") < upgrade_install.index("app.run_test(size=(80, 24))")
+
+
+def test_posix_upgrade_binds_sigstore_to_exact_release_workflow() -> None:
+    text = UPGRADE_SH.read_text(encoding="utf-8")
+
+    assert 'sed \'s/\\./\\\\./g\'' in text
+    assert (
+        r"^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/"
+        r"release\\.yaml@refs/(tags/${escaped_release_version}|heads/main)$"
+        in text
+    )
+    assert '"^https://github.com/${REPO}/.+"' not in text

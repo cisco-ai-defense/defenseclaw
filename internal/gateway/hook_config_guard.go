@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +45,11 @@ const (
 	// Sized to comfortably cover a teardown+Setup cycle plus a debounce
 	// tick; Repoint at the end of the swap re-targets the guard.
 	hookGuardSwitchSuppressWindow = 5 * time.Second
+
+	// defaultHookGuardPolicyAuditInterval catches effective-policy changes
+	// that do not produce a filesystem event (notably Windows registry policy)
+	// and retries watches for policy directories created after startup.
+	defaultHookGuardPolicyAuditInterval = 30 * time.Second
 )
 
 // HookConfigGuard watches the active connector's agent config file(s) and
@@ -63,6 +69,9 @@ type HookConfigGuard struct {
 	logger        *audit.Logger
 	observability hookLifecycleMetricV8Runtime
 	debounce      time.Duration
+	// policyAudit is separate from debounce so tests can shorten effective-
+	// policy polling without changing filesystem event coalescing.
+	policyAudit time.Duration
 
 	// onHealed is an optional fan-out hook (webhook / desktop
 	// notification) invoked after a successful re-install. nil is safe.
@@ -79,7 +88,10 @@ type HookConfigGuard struct {
 	watchedDirs   map[string]struct{} // cleaned absolute parent dirs added to fsw
 	pending       map[string]time.Time
 	suppressUntil time.Time
-	done          chan struct{}
+	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
+	// every audit tick while still reporting a changed failure immediately.
+	lastPolicyFailure string
+	done              chan struct{}
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
@@ -96,6 +108,7 @@ func NewHookConfigGuard(
 		logger:        logger,
 		observability: observability,
 		debounce:      debounce,
+		policyAudit:   defaultHookGuardPolicyAuditInterval,
 		targets:       map[string]struct{}{},
 		watchedDirs:   map[string]struct{}{},
 		pending:       map[string]time.Time{},
@@ -237,7 +250,7 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 
 	newTargets := map[string]struct{}{}
 	newDirs := map[string]struct{}{}
-	for _, p := range connector.HookConfigPathsForConnector(conn, opts) {
+	for _, p := range connector.HookPolicyWatchPathsForConnector(conn, opts) {
 		clean := filepath.Clean(p)
 		newTargets[clean] = struct{}{}
 		newDirs[filepath.Dir(clean)] = struct{}{}
@@ -254,7 +267,12 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 			continue
 		}
 		if err := g.fsw.Add(dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[hook-guard] watch %s: %v (skipping)\n", dir, err)
+			// Optional project/managed policy directories commonly do not exist
+			// yet. Their nearest existing parent remains watched and the periodic
+			// audit retries them after creation; absence is not a degraded state.
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "[hook-guard] watch %s: %v (skipping)\n", dir, err)
+			}
 			continue
 		}
 		g.watchedDirs[dir] = struct{}{}
@@ -267,6 +285,30 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 		_ = g.fsw.Remove(dir)
 		delete(g.watchedDirs, dir)
 	}
+}
+
+// resyncTargetsLocked force-refreshes directory watches after Setup. A
+// directory watch is tied to the underlying directory object, so a path that
+// Setup recreated can look unchanged in watchedDirs while fsnotify still
+// references the deleted object. Rebuilding the watcher avoids inode/file-ID
+// reuse making a remove/add cycle silently retain the stale OS handle. Caller
+// must hold g.mu.
+func (g *HookConfigGuard) resyncTargetsLocked(conn connector.Connector, opts connector.SetupOpts) {
+	if g.fsw == nil {
+		g.applyTargetsLocked(conn, opts)
+		return
+	}
+
+	fresh, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guard] refresh fsnotify watcher: %v (keeping existing watcher)\n", err)
+		return
+	}
+	previous := g.fsw
+	g.fsw = fresh
+	g.watchedDirs = map[string]struct{}{}
+	g.applyTargetsLocked(conn, opts)
+	_ = previous.Close()
 }
 
 func (g *HookConfigGuard) run() {
@@ -282,14 +324,31 @@ func (g *HookConfigGuard) run() {
 
 	ticker := time.NewTicker(g.debounce)
 	defer ticker.Stop()
+	var policyTicker *time.Ticker
+	var policyAudit <-chan time.Time
+	if g.policyAudit > 0 {
+		policyTicker = time.NewTicker(g.policyAudit)
+		policyAudit = policyTicker.C
+		defer policyTicker.Stop()
+	}
 
 	for {
+		g.mu.Lock()
+		ctx := g.ctx
+		watcher := g.fsw
+		g.mu.Unlock()
+		if ctx == nil || watcher == nil {
+			return
+		}
 		select {
-		case <-g.ctx.Done():
+		case <-ctx.Done():
 			return
 
-		case event, ok := <-g.fsw.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
@@ -298,15 +357,23 @@ func (g *HookConfigGuard) run() {
 			name := filepath.Clean(event.Name)
 			g.mu.Lock()
 			_, isTarget := g.targets[name]
-			if isTarget {
+			_, isWatchedDir := g.watchedDirs[name]
+			// A Windows directory watch remains attached to the deleted file
+			// identity after the path is removed and recreated. Queue the watched
+			// directory itself so the normal debounced processing path rebuilds
+			// the watcher after the replacement has settled.
+			if isTarget || (isWatchedDir && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0) {
 				if _, exists := g.pending[name]; !exists {
 					g.pending[name] = time.Now()
 				}
 			}
 			g.mu.Unlock()
 
-		case err, ok := <-g.fsw.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
 			recordWatcherErrorV8(g.ctx, g.observabilityV8Runtime())
@@ -314,8 +381,19 @@ func (g *HookConfigGuard) run() {
 
 		case <-ticker.C:
 			g.processPending()
+
+		case <-policyAudit:
+			g.processPolicyAudit()
 		}
 	}
+}
+
+// watcherWasReplaced distinguishes the expected channel closure caused by a
+// resync from a terminal closure of the active watcher.
+func (g *HookConfigGuard) watcherWasReplaced(observed *fsnotify.Watcher) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started && g.fsw != nil && g.fsw != observed
 }
 
 // processPending evaluates debounced events: if any guarded config file no
@@ -347,12 +425,19 @@ func (g *HookConfigGuard) processPending() {
 		// reinstall hooks a moment later.
 		return
 	}
+	// A policy event can be the first creation of a previously absent .claude
+	// or managed-settings.d directory. Rebind before evaluating so later files
+	// inside that directory cannot escape the effective-policy guardian.
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[hook-guard] presence check for %s: %v\n", conn.Name(), err)
+		g.reportPolicyFailure(conn, err)
 		return
 	}
+	g.clearPolicyFailure()
 	if present {
 		// The owned hook still exists — the operator edited unrelated
 		// keys, or a previous heal already restored it. Do not fight
@@ -361,6 +446,66 @@ func (g *HookConfigGuard) processPending() {
 	}
 
 	g.heal(conn, opts, ready)
+}
+
+// processPolicyAudit re-evaluates Claude's full effective settings chain even
+// when no file event occurs. Windows registry policy and administrator-created
+// policy roots otherwise remain invisible to fsnotify until an unrelated edit.
+func (g *HookConfigGuard) processPolicyAudit() {
+	g.mu.Lock()
+	conn := g.conn
+	opts := g.opts
+	suppressed := time.Now().Before(g.suppressUntil)
+	if !suppressed && conn != nil && conn.Name() == "claudecode" {
+		// Recompute targets so newly created managed/project directories and
+		// drop-ins join the watcher without replacing its live OS handle.
+		g.applyTargetsLocked(conn, opts)
+	}
+	g.mu.Unlock()
+	if suppressed || conn == nil || conn.Name() != "claudecode" {
+		return
+	}
+
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		g.reportPolicyFailure(conn, err)
+		return
+	}
+	g.clearPolicyFailure()
+	if !present {
+		g.heal(conn, opts, []string{"periodic effective-policy audit"})
+	}
+}
+
+func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {
+	message := err.Error()
+	g.mu.Lock()
+	if g.lastPolicyFailure == message {
+		g.mu.Unlock()
+		return
+	}
+	g.lastPolicyFailure = message
+	logger := g.logger
+	baseCtx := g.ctx
+	g.mu.Unlock()
+
+	connName := conn.Name()
+	fmt.Fprintf(os.Stderr, "[hook-guard] effective-policy check for %s: %v\n", connName, err)
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	emitErrorConnector(baseCtx, "hook_guard", "effective-policy-blocked", connName,
+		fmt.Sprintf("%s effective hook policy is not enforcing", connName), err)
+	if logger != nil {
+		_ = logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+			fmt.Sprintf("effective hook policy is not enforcing: %v", err), "", connName)
+	}
+}
+
+func (g *HookConfigGuard) clearPolicyFailure() {
+	g.mu.Lock()
+	g.lastPolicyFailure = ""
+	g.mu.Unlock()
 }
 
 // heal re-runs the connector Setup to re-install the hook block, emits audit
@@ -394,7 +539,17 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	if err := conn.Setup(hctx, opts); err != nil {
+	setupErr := conn.Setup(hctx, opts)
+
+	// Setup may have recreated a deleted parent directory even when a later
+	// verification step fails. Rebind before handling its result so the guard
+	// never remains attached to the deleted inode.
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
+
+	if setupErr != nil {
+		err := setupErr
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
@@ -406,11 +561,20 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 		return
 	}
 
-	// A whole-directory deletion would have dropped our fsnotify watch;
-	// Setup recreates the parent dirs, so re-sync the watch set.
-	g.mu.Lock()
-	g.applyTargetsLocked(conn, opts)
-	g.mu.Unlock()
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil || !present {
+		if err == nil {
+			err = fmt.Errorf("effective hook contract is still inactive")
+		}
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v\n", connName, err)
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+			fmt.Sprintf("re-installed %s hook config but enforcement is still inactive", connName), err)
+		if g.logger != nil {
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
+		}
+		return
+	}
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
 	recordWatcherEventV8(baseCtx, g.observabilityV8Runtime(), "hook-heal", connName, connName)

@@ -23,9 +23,9 @@ _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 _MAX_DIGEST_FILE = 128 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
-_EXPECTED_CONTRACT = {
-    "claudecode": "claudecode-hooks-v1",
-    "codex": "codex-hooks-v1",
+_EXPECTED_CONTRACTS = {
+    "claudecode": frozenset({"claudecode-hooks-v1"}),
+    "codex": frozenset({"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3"}),
 }
 _SHARED_HOOK_SCRIPTS = frozenset(
     {
@@ -62,7 +62,12 @@ class ConnectorFailModeState:
         return not self.drift and self.runtime == self.desired
 
 
-def resolve_connector_fail_mode(cfg: Any, connector: str) -> ConnectorFailModeState:
+def resolve_connector_fail_mode(
+    cfg: Any,
+    connector: str,
+    *,
+    inspect_effective_policy: bool = True,
+) -> ConnectorFailModeState:
     """Resolve desired, installed, and effective runtime fail mode for one connector."""
 
     name = normalize(connector)
@@ -88,14 +93,15 @@ def resolve_connector_fail_mode(cfg: Any, connector: str) -> ConnectorFailModeSt
         sources.append(("process-env", process_env))
         runtime = process_env
 
+    workspace = _connector_workspace(cfg)
     if name == "claudecode":
-        claude_env, registered = _claude_registration_state()
+        claude_env, registered = _claude_registration_state(workspace)
         sources.append(("claude-env", claude_env))
         if claude_env is not None:
             runtime = claude_env
         if not registered:
             drift.append("registration-missing")
-    elif name == "codex" and not _codex_registration_current():
+    elif name == "codex" and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
@@ -104,11 +110,20 @@ def resolve_connector_fail_mode(cfg: Any, connector: str) -> ConnectorFailModeSt
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
-    if _is_windows() and name in _EXPECTED_CONTRACT:
-        windows_registration = _windows_registration_freshness(cfg, name)
+    if _is_windows() and name in _EXPECTED_CONTRACTS:
+        if inspect_effective_policy:
+            windows_registration = _windows_registration_freshness(cfg, name)
+        else:
+            windows_registration = _windows_registration_freshness(
+                cfg,
+                name,
+                inspect_effective_policy=False,
+            )
         if windows_registration:
             drift.append(windows_registration)
-    elif name in _EXPECTED_CONTRACT:
+        if name == "codex" and not inspect_effective_policy:
+            drift.append("policy-unverified")
+    elif name in _EXPECTED_CONTRACTS:
         unix_registration = _unix_registration_freshness(cfg, name)
         if unix_registration:
             drift.append(unix_registration)
@@ -176,8 +191,16 @@ def _read_baked_hook_mode(path: Path) -> str | None:
     return match.group(1) if match else None
 
 
-def _claude_registration_state() -> tuple[str | None, bool]:
-    data = _read_small_file(Path.home() / ".claude" / "settings.json")
+def _connector_workspace(cfg: Any) -> str:
+    resolver = getattr(cfg, "connector_workspace_dir", None)
+    return str(resolver() or "") if callable(resolver) else ""
+
+
+def _claude_registration_state(workspace: str = "") -> tuple[str | None, bool]:
+    paths = connector_config_files("claudecode", workspace_dir=workspace)
+    if not paths:
+        return None, False
+    data = _read_small_file(Path(paths[0]))
     if data is None:
         return None, False
     try:
@@ -200,8 +223,11 @@ def _claude_registration_state() -> tuple[str | None, bool]:
     return (mode if mode in _VALID_MODES else None), registered
 
 
-def _codex_registration_current() -> bool:
-    data = _read_small_file(Path.home() / ".codex" / "config.toml")
+def _codex_registration_current(workspace: str = "") -> bool:
+    paths = connector_config_files("codex", workspace_dir=workspace)
+    if not paths:
+        return False
+    data = _read_small_file(Path(paths[0]))
     if data is None:
         return False
     return "[hooks]" in data and "defenseclaw" in data.lower()
@@ -222,13 +248,13 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
     value = entry.get("hook_fail_mode") if isinstance(entry, dict) else None
     raw = str(value or "").strip().lower()
     mode = raw if raw in _VALID_MODES else None
-    expected_contract = _EXPECTED_CONTRACT.get(connector)
-    if expected_contract and str(entry.get("contract_id") or "") != expected_contract:
+    expected_contracts = _EXPECTED_CONTRACTS.get(connector)
+    if expected_contracts and str(entry.get("contract_id") or "") not in expected_contracts:
         return mode, "registration-contract-stale"
-    if expected_contract and not str(entry.get("hook_script_version") or "").strip():
+    if expected_contracts and not str(entry.get("hook_script_version") or "").strip():
         return mode, "registration-version-stale"
     digests = entry.get("hook_script_digests")
-    if expected_contract and not isinstance(digests, dict):
+    if expected_contracts and not isinstance(digests, dict):
         return mode, "registration-digests-missing"
     locations = entry.get("locations")
     configured_paths = locations.get("hook_script_paths") if isinstance(locations, dict) else None
@@ -237,7 +263,7 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
         for item in (configured_paths if isinstance(configured_paths, list) else [])
         if str(item or "").strip()
     }
-    if expected_contract and not digests:
+    if expected_contracts and not digests:
         return mode, "registration-digests-missing"
 
     raw_lock_version = payload.get("version", 1)
@@ -258,7 +284,7 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
         # connector happens to match disk; require controlled setup to render
         # canonical bytes and atomically migrate the whole lock to v2.
         legacy_shared = False
-        if expected_contract and not _LEGACY_SHARED_HOOK_SCRIPTS.issubset(digests):
+        if expected_contracts and not _LEGACY_SHARED_HOOK_SCRIPTS.issubset(digests):
             return mode, "registration-shared-digests-missing"
         for filename in _SHARED_HOOK_SCRIPTS:
             expected_values = {
@@ -273,7 +299,7 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
                 return mode, "registration-shared-digest-divergent"
         if legacy_shared and len(connectors or {}) > 1:
             return mode, "registration-shared-lock-legacy"
-    if _is_windows() and expected_contract:
+    if _is_windows() and expected_contracts:
         digest_names = {str(filename).casefold() for filename in digests}
         if "defenseclaw-hook.exe" not in digest_names:
             return mode, "registration-launcher-digest-missing"
@@ -287,9 +313,9 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
                 # lingering legacy duplicate until the next locked save strips
                 # it; never let the duplicate override the root digest.
                 continue
-            if expected_contract and Path(str(filename)).name != str(filename):
+            if expected_contracts and Path(str(filename)).name != str(filename):
                 return mode, "registration-digest-path-stale"
-            if expected_contract:
+            if expected_contracts:
                 # Prefer the exact setup-time location recorded by the lock.
                 # The Windows launcher can live outside the current process's
                 # notion of HOME (service accounts and isolated installs are
@@ -309,28 +335,37 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
     return mode, None
 
 
-def _windows_registration_freshness(cfg: Any, connector: str) -> str | None:
+def _windows_registration_freshness(
+    cfg: Any,
+    connector: str,
+    *,
+    inspect_effective_policy: bool = True,
+) -> str | None:
     """Return drift when the live Windows command/launcher is not current."""
 
-    from defenseclaw.doctor_hooks import validate_windows_hook_registration
+    from defenseclaw.doctor_hooks import (
+        _packaged_windows_install_root,
+        validate_windows_hook_registration,
+    )
 
-    workspace = ""
-    workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
-    if callable(workspace_resolver):
-        workspace = str(workspace_resolver() or "")
+    workspace = _connector_workspace(cfg)
     paths = connector_config_files(connector, workspace_dir=workspace)
     config_path = (
         paths[0]
         if paths
         else str(Path.home() / (".codex/config.toml" if connector == "codex" else ".claude/settings.json"))
     )
+    install_root = _packaged_windows_install_root(str(cfg.data_dir))
+    if install_root is None:
+        install_root = str(Path.home() / ".local" / "bin")
     check = validate_windows_hook_registration(
         connector=connector,
         config_path=config_path,
         data_dir=str(cfg.data_dir),
-        install_root=str(Path.home() / ".local" / "bin"),
+        install_root=install_root,
         search_path=os.environ.get("PATH", ""),
         pathext=os.environ.get("PATHEXT", ""),
+        inspect_effective_policy=inspect_effective_policy,
     )
     return None if check.healthy else f"registration-{check.state}"
 
@@ -338,11 +373,14 @@ def _windows_registration_freshness(cfg: Any, connector: str) -> str | None:
 def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     """Verify the live Unix agent registration points at this data dir's hook."""
 
+    paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
+    if not paths:
+        return "registration-missing"
     if connector == "claudecode":
-        registration_path = Path.home() / ".claude" / "settings.json"
+        registration_path = Path(paths[0])
         script_name = "claude-code-hook.sh"
     else:
-        registration_path = Path.home() / ".codex" / "config.toml"
+        registration_path = Path(paths[0])
         script_name = "codex-hook.sh"
     registration = _read_small_file(registration_path)
     if registration is None:
@@ -468,10 +506,7 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
             hook_dir / "_hardening.sh",
         }
     )
-    workspace = ""
-    workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
-    if callable(workspace_resolver):
-        workspace = str(workspace_resolver() or "")
+    workspace = _connector_workspace(cfg)
     for raw_name in connectors:
         name = normalize(raw_name)
         paths.add(hook_dir / f".hook-{name}.token")
@@ -488,7 +523,6 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         if name == "claudecode":
             paths.update(
                 {
-                    Path.home() / ".claude" / "settings.json",
                     hook_dir / "claude-code-hook.sh",
                     Path(cfg.data_dir) / "claudecode_backup.json",
                     Path(cfg.data_dir) / "connector_backups" / "claudecode" / "settings.json.json",
@@ -497,7 +531,6 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         elif name == "codex":
             paths.update(
                 {
-                    Path.home() / ".codex" / "config.toml",
                     hook_dir / "codex-hook.sh",
                     Path(cfg.data_dir) / "codex_config_backup.json",
                     Path(cfg.data_dir) / "codex_backup.json",

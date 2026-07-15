@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestRunAIDiscoveryClosesStoreAfterWorkerStops(t *testing.T) {
@@ -92,7 +93,7 @@ func TestResolveActiveConnector_EmptyDefaultsToOpenClaw(t *testing.T) {
 }
 
 func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(dir, "codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir codex config dir: %v", err)
@@ -111,6 +112,7 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "tok-test",
 	}
+	prepareCodexSetupPolicyFixture(t, dir, &opts)
 	codex := connector.NewCodexConnector()
 	if err := codex.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("codex setup: %v", err)

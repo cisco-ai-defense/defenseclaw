@@ -79,8 +79,8 @@ class RotateTokenFileWriteTests(unittest.TestCase):
 
     def test_atomic_via_replace(self) -> None:
         """A failure mid-write must NOT leave the original .env truncated.
-        We simulate this by patching os.replace to fail; the original
-        contents must remain intact.
+        We simulate this by failing the shared durable-replacement primitive;
+        the original contents must remain intact.
         """
         from tempfile import TemporaryDirectory
 
@@ -90,8 +90,10 @@ class RotateTokenFileWriteTests(unittest.TestCase):
             with open(dotenv, "w") as fh:
                 fh.write(original)
 
-            with mock.patch("defenseclaw.commands.cmd_setup.os.replace",
-                            side_effect=OSError("simulated rename failure")):
+            with mock.patch(
+                "defenseclaw.file_permissions.replace_file_durable",
+                side_effect=OSError("simulated rename failure"),
+            ):
                 with self.assertRaises(OSError):
                     _rotate_token_atomic_write(dotenv, "ignored" * 8)
 

@@ -37,8 +37,9 @@ Schema-evolution contract:
   unknown schemas to force the operator into ``defenseclaw doctor
   migration-state --reset`` rather than letting us downgrade their
   state silently.
-* Atomic writes: every save goes through the shared private-file writer,
-  which stages and flushes beside the target before ``os.replace``.
+* Durable atomic writes: every save uses a same-directory staging file plus
+  a write-through native replacement so a crash leaves the previous good
+  copy or the fully persisted new cursor.
 * Mode 0o600: the file logs upgrade timestamps. Not strictly secret,
   but tightening permissions matches the rest of ``~/.defenseclaw/``
   and stops accidental world-readable installs.
@@ -246,9 +247,10 @@ def save(data_dir: str, state: MigrationState) -> None:
 
     Atomicity contract:
     1. Write to a sibling temp file in the same directory (so
-       ``os.replace`` is a same-filesystem rename).
-    2. ``os.replace`` is atomic on POSIX and Windows; a crash either
-       leaves the old file or the new one, never half-written.
+       replacement is a same-filesystem rename).
+    2. The replacement is atomic on POSIX and Windows; a crash either leaves
+       the old file or the new one, never half-written. Windows explicitly
+       requests ``MOVEFILE_WRITE_THROUGH`` and POSIX fsyncs the directory.
     3. ``os.fsync`` on the temp file flushes data before the rename
        so a power loss after rename still has the bytes on disk.
 
@@ -426,5 +428,7 @@ def reset(data_dir: str) -> bool:
     path = state_path(data_dir)
     if not os.path.exists(path):
         return False
-    os.remove(path)
+    from defenseclaw.file_permissions import delete_file_durable
+
+    delete_file_durable(path)
     return True
