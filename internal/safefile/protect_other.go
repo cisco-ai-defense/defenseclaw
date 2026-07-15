@@ -5,7 +5,10 @@
 
 package safefile
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 func protectFile(_ string, file *os.File) error { return file.Chmod(0o600) }
 
@@ -18,6 +21,24 @@ func protectDirectory(path string) error {
 		return nil
 	}
 	return os.Chmod(path, 0o700)
+}
+
+func validatePrivateProtection(path string, wantDirectory bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
+		(!wantDirectory && !info.Mode().IsRegular()) {
+		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	if wantDirectory && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("safefile: private directory permissions are too broad: %s", path)
+	}
+	if !wantDirectory && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("safefile: private file permissions are too broad: %s", path)
+	}
+	return nil
 }
 
 func rejectReparsePath(_ string) error { return nil }

@@ -476,7 +476,7 @@ notification dispatcher.
 
 ```yaml
 notifications:
-  enabled: true              # master switch (default: true on darwin, false elsewhere)
+  enabled: true              # master switch (default: true on macOS/Windows, false elsewhere)
   block_enforced: true       # action-mode block events
   block_would_block: false   # observe-mode "would have blocked / would have asked" events
                              # (off by default; opt in while tuning policy in observe mode)
@@ -491,7 +491,7 @@ notifications:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` on darwin, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
+| `enabled` | bool | `true` on macOS and Windows, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
 | `block_enforced` | bool | `true` | Surface a toast for action-mode blocks (`action == "block"`). |
 | `block_would_block` | bool | `false` | Surface a toast for observe-mode would-block events (verdict was a block but the runtime mode degraded it to alert) AND for "would-ask" events where a `confirm` verdict never reached the chat surface (observe mode, or the connector cannot natively ask — see `BlockEvent.WouldAsk`). Off by default so a fresh install only notifies for things that actually happened. |
 | `hitl_approval` | bool | `true` | Surface an **informational** toast at the start of the OpenClaw `HILTApprovalManager.Request` flow. The notification has no buttons; the operator replies in the OpenClaw chat-origin session. |
@@ -505,4 +505,4 @@ notifications:
 |---|---|
 | **Set by** | `defenseclaw setup notifications` (preferred) or operator via `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()` → `notifier.New(cfg.Notifications)` (wired into hooks, proxy, asset runtime, and `HILTApprovalManager`). **Python CLI** via `config.load()` for round-trip preservation; the Python side does not emit notifications itself. |
-| **Effect** | The dispatcher fires `internal/notify.SendNotification` in a goroutine so request latency is unaffected. On macOS this calls `osascript` (`display notification … with title …`); on Linux it calls `notify-send`; on unsupported platforms it falls back to a structured stderr log line. State (dedup LRU + token bucket) is per-process and resets on gateway restart. |
+| **Effect** | The dispatcher fires `internal/notify.SendNotification` in a goroutine so request latency is unaffected. On macOS this calls `osascript` (`display notification … with title …`); on Linux it calls `notify-send`; on Windows the signed gateway owns an in-process `Shell_NotifyIconW` broker. Native-delivery failures and unsupported platforms fall back to a structured stderr log line. State (dedup LRU + token bucket) is per-process and resets on gateway restart. |

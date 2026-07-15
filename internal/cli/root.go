@@ -18,7 +18,9 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +42,9 @@ var (
 	auditLog     *audit.Logger
 	otelProvider *telemetry.Provider
 	appVersion   string
+	appCommit    string
+	appBuildDate string
+	versionJSON  bool
 )
 
 func SetVersion(v string) {
@@ -48,12 +53,35 @@ func SetVersion(v string) {
 }
 
 func SetBuildInfo(commit, date string) {
+	appCommit = commit
+	appBuildDate = date
 	rootCmd.SetVersionTemplate(
 		fmt.Sprintf("{{.Name}} version {{.Version}} (commit=%s, built=%s)\n", commit, date),
 	)
 }
 
+type machineVersionReport struct {
+	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit,omitempty"`
+	Built         string `json:"built,omitempty"`
+}
+
+func writeMachineVersion(w io.Writer) error {
+	return json.NewEncoder(w).Encode(machineVersionReport{
+		SchemaVersion: 1,
+		Name:          "defenseclaw-gateway",
+		Version:       appVersion,
+		Commit:        appCommit,
+		Built:         appBuildDate,
+	})
+}
+
 func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
 	// A Windows daemon may explicitly break away from the TUI's Job Object.
 	// Claim its strong PID identity before any fallible/slow initialization so
 	// an abruptly cancelled launcher cannot leave an unmanaged live sidecar.
@@ -147,8 +175,17 @@ Run without arguments to start the sidecar daemon.`,
 			auditStore.Close()
 		}
 	},
-	RunE:         runSidecar,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if versionJSON {
+			return writeMachineVersion(cmd.OutOrStdout())
+		}
+		return runSidecar(cmd, args)
+	},
 	SilenceUsage: true,
+}
+
+func init() {
+	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
 }
 
 // Execute runs the root command and returns the exit code. The actual

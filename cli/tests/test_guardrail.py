@@ -1995,6 +1995,37 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_packaged_restart_uses_verified_sibling_from_hostile_working_directory(self, mock_run):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir, "installed")
+            python = root / "runtime" / "python" / "python.exe"
+            gateway = root / "bin" / "defenseclaw-gateway.exe"
+            hostile = Path(tmpdir, "hostile")
+            python.parent.mkdir(parents=True)
+            gateway.parent.mkdir(parents=True)
+            hostile.mkdir()
+            python.write_bytes(b"python")
+            gateway.write_bytes(b"gateway")
+            (hostile / "defenseclaw-gateway.exe").write_bytes(b"shadow")
+
+            previous = os.getcwd()
+            try:
+                os.chdir(hostile)
+                with (
+                    patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": str(root)}),
+                    patch.object(sys, "executable", str(python)),
+                ):
+                    self.assertTrue(_restart_defense_gateway(tmpdir))
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(mock_run.call_args.args[0], [str(gateway.resolve()), "start"])
+
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     def test_starts_when_not_running(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
@@ -2164,7 +2195,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
-        mock_wait.assert_called_once_with(tmpdir, ["codex"], None)
+        mock_wait.assert_called_once_with(tmpdir, ["codex"], None, None)
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=False)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
@@ -2180,17 +2211,52 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
             _active_connector_state_marker,
+            _hook_contract_lock_marker,
             _wait_for_connector_runtime,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = os.path.join(tmpdir, "active_connector.json")
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
             with open(state_path, "w", encoding="utf-8") as state_file:
                 json.dump({"version": 2, "name": "codex", "names": ["codex"]}, state_file)
-            marker = _active_connector_state_marker(tmpdir)
-            self.assertIsNotNone(marker)
-            self.assertFalse(_wait_for_connector_runtime(tmpdir, ["codex"], marker, timeout=0.01))
-            self.assertTrue(_wait_for_connector_runtime(tmpdir, ["codex"], marker - 1, timeout=0.01))
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {"version": 2, "connectors": {"codex": {"connector": "codex"}}},
+                    lock_file,
+                )
+            state_marker = _active_connector_state_marker(tmpdir)
+            lock_marker = _hook_contract_lock_marker(tmpdir)
+            self.assertIsNotNone(state_marker)
+            self.assertIsNotNone(lock_marker)
+
+            # A rollback refreshes active_connector.json but deliberately
+            # preserves the last good lock. That must never look ready.
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    tmpdir, ["codex"], state_marker - 1, lock_marker, timeout=0.01
+                )
+            )
+            self.assertTrue(
+                _wait_for_connector_runtime(
+                    tmpdir, ["codex"], state_marker - 1, lock_marker - 1, timeout=0.01
+                )
+            )
+
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {"version": 2, "connectors": {"codex": {"connector": "codex"}}},
+                    lock_file,
+                )
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    tmpdir,
+                    ["codex", "claudecode"],
+                    state_marker - 1,
+                    lock_marker - 1,
+                    timeout=0.01,
+                )
+            )
 
 
 class TestCheckOpenclawGateway(unittest.TestCase):

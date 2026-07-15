@@ -23,10 +23,13 @@ import locale
 import ntpath
 import os
 import shutil
+import stat
 import subprocess
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from io import StringIO
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -45,6 +48,7 @@ from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     _expand,
+    connector_config_files,
     hermes_config_path,
     omnigent_config_path,
 )
@@ -65,6 +69,7 @@ CACHE_SCHEMA_VERSION = 3
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
+PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 
 # Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
@@ -112,6 +117,513 @@ _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX: tuple[str, ...] = (
 )
 
 
+def _windows_package_manager_bin_prefixes(
+    *,
+    local_app_data: str,
+    roaming_app_data: str,
+    home: str,
+) -> tuple[str, ...]:
+    """Return documented per-user JavaScript package-manager bin roots.
+
+    Only the package managers' documented locations below OS account roots are
+    admitted automatically. Ambient package-manager prefix variables are not
+    execution authority; operators can add a custom root through DefenseClaw's
+    protected trusted-prefix configuration instead.
+    """
+
+    candidates: list[str] = []
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "pnpm"))
+    if roaming_app_data:
+        candidates.append(os.path.join(roaming_app_data, "npm"))
+    if home:
+        candidates.extend(
+            (
+                os.path.join(home, ".bun", "bin"),
+                os.path.join(home, ".volta", "bin"),
+            )
+        )
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        # This helper runs while module-level trusted defaults are initialized,
+        # before the shared _path_key helper is defined below.
+        key = os.path.normcase(os.path.normpath(os.path.abspath(candidate)))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
+
+
+class _WindowsPackageManagerFolders(NamedTuple):
+    profile: str
+    local_app_data: str
+    roaming_app_data: str
+    program_files: str
+    program_files_x86: str
+    system_directory: str
+
+
+def _windows_current_user_known_folder(identifier: str) -> str:
+    """Resolve a Known Folder against the current process token."""
+
+    if os.name != "nt":  # pragma: no cover - native Windows boundary
+        return ""
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    guid = _GUID.from_buffer_copy(uuid.UUID(identifier).bytes_le)
+    token = wintypes.HANDLE()
+    result_path = ctypes.c_wchar_p()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(_GUID),
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+
+    # Supplying the actual token prevents inherited HOME/USERPROFILE or
+    # process-level Known Folder overrides from redirecting discovery.
+    token_query = 0x0008
+    token_impersonate = 0x0004
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        token_query | token_impersonate,
+        ctypes.byref(token),
+    ):
+        return ""
+    try:
+        status = shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid),
+            0,
+            token,
+            ctypes.byref(result_path),
+        )
+        if status != 0 or not result_path.value:
+            return ""
+        return os.path.abspath(result_path.value)
+    finally:
+        if result_path:
+            ole32.CoTaskMemFree(ctypes.cast(result_path, ctypes.c_void_p))
+        kernel32.CloseHandle(token)
+
+
+def _windows_native_system_directory() -> str:
+    if os.name != "nt":  # pragma: no cover - native Windows boundary
+        return ""
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    kernel32.GetSystemDirectoryW.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        return ""
+    return os.path.abspath(buffer.value)
+
+
+def _windows_package_manager_folders() -> _WindowsPackageManagerFolders:
+    """Return token-bound roots used by npm/pnpm discovery."""
+
+    if os.name != "nt":
+        return _WindowsPackageManagerFolders("", "", "", "", "", "")
+    return _WindowsPackageManagerFolders(
+        profile=_windows_current_user_known_folder("5E6C858F-0E22-4760-9AFE-EA3317B67173"),
+        local_app_data=_windows_current_user_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),
+        roaming_app_data=_windows_current_user_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),
+        program_files=_windows_current_user_known_folder("6D809377-6AF0-444B-8957-A3773F02200E"),
+        program_files_x86=_windows_current_user_known_folder("7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E"),
+        system_directory=_windows_native_system_directory(),
+    )
+
+
+def _windows_package_manager_static_roots(
+    manager: str,
+    folders: _WindowsPackageManagerFolders | None = None,
+) -> tuple[str, ...]:
+    folders = folders or _windows_package_manager_folders()
+    node_roots = [os.path.join(root, "nodejs") for root in (folders.program_files, folders.program_files_x86) if root]
+    if folders.local_app_data:
+        node_roots.extend(
+            (
+                os.path.join(folders.local_app_data, "Programs", "nodejs"),
+                # The native Windows development bootstrap installs Node and
+                # its npm shims in this product-specific root.
+                os.path.join(folders.local_app_data, "Programs", "DevTools", "node"),
+            )
+        )
+    if manager == "npm":
+        roots = node_roots
+    elif manager == "pnpm":
+        roots = list(node_roots)
+        if folders.local_app_data:
+            roots.append(os.path.join(folders.local_app_data, "pnpm"))
+        if folders.roaming_app_data:
+            roots.append(os.path.join(folders.roaming_app_data, "npm"))
+    else:
+        return ()
+    return tuple(dict.fromkeys(os.path.abspath(root) for root in roots if root))
+
+
+def _windows_package_manager_executable_candidates(manager: str) -> tuple[str, ...]:
+    """Return exact, documented Windows locations for ``npm`` or ``pnpm``.
+
+    A PATH result is only a candidate.  The caller independently verifies the
+    executable and its complete ACL chain before running a configuration
+    query, so a planted current-directory or PATH shim is never authoritative.
+    """
+
+    if manager not in {"npm", "pnpm"}:
+        return ()
+    candidates: list[str] = []
+    resolved = shutil.which(manager)
+    if resolved:
+        candidates.append(os.path.abspath(resolved))
+
+    for root in _windows_package_manager_static_roots(manager):
+        for extension in (".exe", ".cmd", ".com", ".bat"):
+            candidate = os.path.join(root, manager + extension)
+            if os.path.isfile(candidate):
+                candidates.append(os.path.abspath(candidate))
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.normpath(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
+
+
+def _trusted_windows_package_manager_path(manager: str, binary_path: str) -> bool:
+    """Admit a manager without recursing through manager-derived prefixes."""
+
+    if os.name != "nt" or manager not in {"npm", "pnpm"} or not binary_path:
+        return False
+    try:
+        lexical = os.path.abspath(binary_path)
+        resolved = os.path.realpath(lexical)
+    except (OSError, ValueError):
+        return False
+    if not os.path.isabs(resolved) or not os.path.isfile(resolved):
+        return False
+    if os.path.splitext(resolved)[1].lower() not in _WINDOWS_EXECUTABLE_EXTENSIONS:
+        return False
+    if _binary_command_name(resolved) != manager:
+        return False
+
+    # Deliberately use only token-bound static manager roots here. The normal
+    # trusted-prefix resolver also includes these query results and would
+    # otherwise recurse while deciding whether npm/pnpm is safe to execute.
+    for lexical_prefix in _windows_package_manager_static_roots(manager):
+        lexical_prefix = os.path.abspath(lexical_prefix)
+        if not _path_is_within(lexical, lexical_prefix):
+            continue
+        if not _windows_path_chain_has_no_reparse_points(lexical, lexical_prefix):
+            continue
+        try:
+            prefix = os.path.realpath(lexical_prefix)
+        except (OSError, ValueError):
+            continue
+        if not _path_is_within(resolved, prefix):
+            continue
+        if _windows_acl_chain_is_safe(resolved, prefix):
+            return True
+    return False
+
+
+def _windows_path_chain_has_no_reparse_points(path: str, prefix: str) -> bool:
+    """Reject links/junctions from *path* through the configured root."""
+
+    current = os.path.abspath(path)
+    prefix_key = _path_key(os.path.abspath(prefix))
+    seen: set[str] = set()
+    while current:
+        key = _path_key(current)
+        if key in seen:
+            return False
+        seen.add(key)
+        try:
+            stat_result = os.lstat(current)
+        except OSError:
+            return False
+        if stat.S_ISLNK(stat_result.st_mode):
+            return False
+        if getattr(stat_result, "st_file_attributes", 0) & 0x400:
+            return False
+        if key == prefix_key:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
+
+
+def _validated_windows_configured_bin_prefix(path: str) -> str:
+    """Return a safe configured root or an empty refusal."""
+
+    if os.name != "nt" or not path or not os.path.isabs(path):
+        return ""
+    try:
+        lexical = os.path.abspath(path)
+        if _is_filesystem_root(lexical) or not os.path.isdir(lexical):
+            return ""
+        if not _windows_path_chain_has_no_reparse_points(lexical, lexical):
+            return ""
+        resolved = os.path.realpath(lexical)
+    except (OSError, ValueError):
+        return ""
+    if _is_filesystem_root(resolved) or not os.path.isdir(resolved):
+        return ""
+    if not _windows_acl_chain_is_safe(resolved, resolved):
+        return ""
+    return resolved
+
+
+def _trusted_windows_configured_binary_path(binary_path: str, prefix: str) -> bool:
+    """Validate a client below a manager-reported root before any launch."""
+
+    validated_prefix = _validated_windows_configured_bin_prefix(prefix)
+    if not validated_prefix:
+        return False
+    try:
+        lexical_prefix = os.path.abspath(prefix)
+        lexical = os.path.abspath(binary_path)
+        if not _path_is_within(lexical, lexical_prefix):
+            return False
+        if not _windows_path_chain_has_no_reparse_points(lexical, lexical_prefix):
+            return False
+        resolved = os.path.realpath(lexical)
+    except (OSError, ValueError):
+        return False
+    if not os.path.isabs(resolved) or not os.path.isfile(resolved):
+        return False
+    if os.path.splitext(resolved)[1].lower() not in _WINDOWS_EXECUTABLE_EXTENSIONS:
+        return False
+    if not _path_is_within(resolved, validated_prefix):
+        return False
+    return _windows_acl_chain_is_safe(resolved, validated_prefix)
+
+
+def _configured_manager_prefix_from_output(output: bytes | str | None) -> str:
+    """Parse one absolute manager prefix, rejecting ambiguous output."""
+
+    if output is None or len(output) > 32_767:
+        return ""
+    decoded = _decode_version_probe_output(output)
+    lines = [line.strip() for line in decoded.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return ""
+    raw = lines[0].strip('"')
+    if not raw or "\x00" in raw or len(raw) > 32_767:
+        return ""
+    # npm/pnpm must report an already-absolute path. Expanding variables or a
+    # tilde here would reintroduce inherited HOME/USERPROFILE as authority.
+    if not os.path.isabs(raw):
+        return ""
+    absolute = os.path.abspath(raw)
+    if _is_filesystem_root(absolute):
+        return ""
+    return absolute
+
+
+def _windows_manager_probe_environment(
+    executable: str,
+    folders: _WindowsPackageManagerFolders,
+) -> dict[str, str]:
+    """Build a minimal token-bound environment for a config-only query."""
+
+    profile = folders.profile
+    local = folders.local_app_data
+    roaming = folders.roaming_app_data
+    system_directory = folders.system_directory
+    windows_root = ntpath.dirname(system_directory) if system_directory else ""
+    drive, tail = ntpath.splitdrive(profile)
+    path_entries = [
+        os.path.dirname(executable),
+        *_windows_package_manager_static_roots("npm", folders),
+        system_directory,
+        windows_root,
+    ]
+    path_value = ";".join(dict.fromkeys(path for path in path_entries if path))
+    environment = {
+        "NO_COLOR": "1",
+        "FORCE_COLOR": "0",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "PATH": path_value,
+    }
+    if profile:
+        environment.update(
+            {
+                "HOME": profile,
+                "USERPROFILE": profile,
+                "NPM_CONFIG_USERCONFIG": os.path.join(profile, ".npmrc"),
+            }
+        )
+        if drive:
+            environment["HOMEDRIVE"] = drive
+        if tail:
+            environment["HOMEPATH"] = tail
+    if local:
+        environment.update(
+            {
+                "LOCALAPPDATA": local,
+                "TEMP": os.path.join(local, "Temp"),
+                "TMP": os.path.join(local, "Temp"),
+            }
+        )
+    if roaming:
+        environment["APPDATA"] = roaming
+    if system_directory:
+        environment["COMSPEC"] = os.path.join(system_directory, "cmd.exe")
+    if windows_root:
+        environment["SYSTEMROOT"] = windows_root
+        environment["WINDIR"] = windows_root
+    return environment
+
+
+def _probe_windows_configured_package_manager_bin_prefixes() -> tuple[str, ...]:
+    """Query trusted npm/pnpm user configuration for off-PATH bin roots."""
+
+    if not _is_windows_host():
+        return ()
+    queries = {
+        "npm": ("config", "get", "prefix", "--location=user"),
+        "pnpm": ("config", "get", "global-bin-dir", "--location=user"),
+    }
+    folders = _windows_package_manager_folders()
+    cwd = next(
+        (path for path in (folders.profile, folders.local_app_data) if path and os.path.isdir(path)),
+        "",
+    )
+    if not cwd:
+        return ()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    prefixes: list[str] = []
+
+    for manager, query in queries.items():
+        for executable in _windows_package_manager_executable_candidates(manager):
+            if not _trusted_windows_package_manager_path(manager, executable):
+                continue
+            try:
+                result = subprocess.run(
+                    [executable, *query],
+                    shell=False,
+                    timeout=PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS,
+                    capture_output=True,
+                    text=False,
+                    stdin=subprocess.DEVNULL,
+                    cwd=cwd,
+                    env=_windows_manager_probe_environment(executable, folders),
+                    creationflags=creationflags,
+                    close_fds=True,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode != 0:
+                continue
+            prefix = _configured_manager_prefix_from_output(result.stdout)
+            prefix = _validated_windows_configured_bin_prefix(prefix)
+            if prefix:
+                prefixes.append(prefix)
+                # PATH precedence selected this trusted manager.  Do not mix
+                # configuration from a second installation of the same tool.
+                break
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for prefix in prefixes:
+        key = _path_key(prefix)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(prefix)
+    return tuple(deduplicated)
+
+
+def _windows_manager_probe_signature() -> tuple[str, ...]:
+    """Return a cache key that changes with manager/config identity."""
+
+    folders = _windows_package_manager_folders()
+    folder_identity = tuple(f"folder|{value}" for value in folders)
+    config_candidates: set[str] = set()
+    if folders.profile:
+        config_candidates.add(os.path.join(folders.profile, ".npmrc"))
+    for root in (folders.local_app_data, folders.roaming_app_data):
+        if root:
+            config_candidates.add(os.path.join(root, "pnpm", "config", "rc"))
+
+    config_identity: list[str] = []
+    for path in sorted(config_candidates, key=_path_key):
+        path = os.path.abspath(path)
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            config_identity.append(f"{path}|missing")
+        else:
+            config_identity.append(f"{path}|{stat_result.st_mtime_ns}|{stat_result.st_size}")
+
+    manager_identity: list[str] = []
+    for manager in ("npm", "pnpm"):
+        for path in _windows_package_manager_executable_candidates(manager):
+            if not _trusted_windows_package_manager_path(manager, path):
+                continue
+            try:
+                stat_result = os.stat(path)
+            except OSError:
+                manager_identity.append(f"{manager}|{path}|missing")
+            else:
+                manager_identity.append(f"{manager}|{path}|{stat_result.st_mtime_ns}|{stat_result.st_size}")
+    return (*folder_identity, *config_identity, *manager_identity)
+
+
+@lru_cache(maxsize=8)
+def _cached_windows_configured_manager_prefixes(
+    _signature: tuple[str, ...],
+) -> tuple[str, ...]:
+    return _probe_windows_configured_package_manager_bin_prefixes()
+
+
+def _windows_configured_package_manager_bin_prefixes() -> tuple[str, ...]:
+    """Return cached, configuration-derived roots without import-time I/O."""
+
+    if not _is_windows_host():
+        return ()
+    return _cached_windows_configured_manager_prefixes(_windows_manager_probe_signature())
+
+
 def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     """Return narrow, documented Windows CLI installation roots.
 
@@ -138,6 +650,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(local_app_data, "OpenAI", "Codex", "bin"),
                 # Codex Desktop installs its bundled native MCP executables
                 # below this product-specific runtime root.  Never trust all
                 # of LOCALAPPDATA; executable admission still validates the
@@ -158,11 +671,15 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
                 os.path.join(local_app_data, "Programs", "Windsurf", "bin"),
                 os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
-                os.path.join(local_app_data, "pnpm"),
             )
         )
-    if roaming_app_data:
-        candidates.append(os.path.join(roaming_app_data, "npm"))
+    candidates.extend(
+        _windows_package_manager_bin_prefixes(
+            local_app_data=local_app_data,
+            roaming_app_data=roaming_app_data,
+            home=home,
+        )
+    )
     if home:
         candidates.extend(
             (
@@ -192,9 +709,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
 
 
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
-    _windows_default_trusted_bin_prefixes()
-    if os.name == "nt"
-    else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
+    _windows_default_trusted_bin_prefixes() if os.name == "nt" else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
 )
 
 
@@ -353,6 +868,11 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
+    # Prime manager-derived Windows roots before worker threads request the
+    # trusted-prefix set. functools.lru_cache does not coalesce concurrent
+    # misses, so warming here prevents duplicate npm/pnpm subprocesses.
+    if _is_windows_host():
+        _windows_configured_package_manager_bin_prefixes()
     with ThreadPoolExecutor(max_workers=4) as pool:
         signals = list(
             pool.map(
@@ -398,11 +918,7 @@ def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
     and their effective observe/action modes.
     """
     try:
-        active = {
-            _normalize_connector(str(name))
-            for name in cfg.active_connectors()
-            if str(name).strip()
-        }
+        active = {_normalize_connector(str(name)) for name in cfg.active_connectors() if str(name).strip()}
     except (AttributeError, TypeError):
         active = set()
 
@@ -467,26 +983,46 @@ def _scan_agent(
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
-    if name == "hermes":
+    if name == "codex":
+        config_candidates = (connector_config_files("codex")[0],)
+    elif name == "claudecode":
+        config_candidates = (
+            connector_config_files("claudecode")[0],
+            "~/.claude.json",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+        )
+    elif name == "hermes":
         config_candidates = (hermes_config_path(),)
     elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
     config_path = _first_existing_file(config_candidates)
-    binary_path = _binary_path_for_agent(name, spec)
+    binary_candidates = _binary_candidates_for_agent(name, spec)
+    binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
     error = ""
     version_ok = False
 
-    if binary_path:
-        version, error = _version_for_agent_binary(
+    probe_errors: list[str] = []
+    for candidate in binary_candidates:
+        candidate_version, candidate_error = _version_for_agent_binary(
             name,
-            binary_path,
+            candidate,
             spec.version_args,
             require_trusted_binary_paths=require_trusted_binary_paths,
             data_dir=data_dir,
         )
-        version_ok = bool(version) and not error
+        if candidate_version and not candidate_error:
+            binary_path = candidate
+            version = candidate_version
+            error = ""
+            version_ok = True
+            break
+        if candidate_error:
+            probe_errors.append(f"{candidate}: {candidate_error}")
+    if not version_ok and probe_errors:
+        error = "; ".join(probe_errors)
 
     installed = bool(binary_path) and version_ok
     return AgentSignal(
@@ -540,7 +1076,10 @@ def _trusted_bin_prefixes(
         piece = piece.strip()
         if piece:
             extras.append(piece)
-    return tuple(_expand_bin_prefixes((*_builtin_trusted_bin_prefixes(), *extras)))
+    builtins = list(_builtin_trusted_bin_prefixes())
+    if _is_windows_host():
+        builtins.extend(_windows_configured_package_manager_bin_prefixes())
+    return tuple(_expand_bin_prefixes((*builtins, *extras)))
 
 
 def _path_key(path: str) -> str:
@@ -598,7 +1137,10 @@ def _default_trusted_bin_prefixes() -> frozenset[str]:
     opting in via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``. They get a stricter
     ownership requirement (see ``_is_trusted_binary_path``).
     """
-    return frozenset(_expand_bin_prefixes(_builtin_trusted_bin_prefixes()))
+    builtins = list(_builtin_trusted_bin_prefixes())
+    if _is_windows_host():
+        builtins.extend(_windows_configured_package_manager_bin_prefixes())
+    return frozenset(_expand_bin_prefixes(tuple(builtins)))
 
 
 def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
@@ -748,11 +1290,7 @@ def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, in
             # GetExplicitEntriesFromAcl normally returns SID trustees.  An
             # unknown form with write rights is retained as an empty identity
             # and rejected conservatively by the caller.
-            sid = (
-                _sid_string(entry.Trustee.ptstrName)
-                if entry.Trustee.TrusteeForm == 0
-                else ""
-            )
+            sid = _sid_string(entry.Trustee.ptstrName) if entry.Trustee.TrusteeForm == 0 else ""
             entries.append(
                 (
                     int(entry.grfAccessPermissions),
@@ -904,11 +1442,7 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = (
-        _windows_acl_write_error(resolved)
-        if os.name == "nt"
-        else _trusted_prefix_dir_mode_error(st)
-    )
+    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st)
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -1227,29 +1761,61 @@ def _which(binary_name: str) -> str:
 def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     """Resolve PATH first, then narrow documented connector locations."""
 
+    candidates = _binary_candidates_for_agent(name, spec)
+    return candidates[0] if candidates else ""
+
+
+def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]:
+    """Enumerate launchable-location candidates without trusting the first alias.
+
+    Windows App Execution Aliases can exist on PATH while being protected or
+    otherwise nonlaunchable. Version validation is deliberately performed by
+    the caller for every candidate until one succeeds.
+    """
+
     if not spec.binary_name:
-        return ""
+        return ()
+    candidates: list[str] = []
     path = _which(spec.binary_name)
-    if path or not _is_windows_host():
-        return path
+    if path:
+        candidates.append(path)
+    if not _is_windows_host():
+        return tuple(candidates)
 
     for candidate in _windows_binary_candidates(name, spec.binary_name):
         if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+            candidates.append(os.path.abspath(candidate))
 
-    if name != "antigravity":
-        return ""
+    if name == "codex":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+            # Codex Desktop stores versioned native CLIs one directory below
+            # the product bin root. Prefer a stable lexical order; the version
+            # probe, not directory naming, decides whether a candidate works.
+            for candidate in sorted(desktop_bin.glob("*/codex.exe")):
+                if candidate.is_file():
+                    candidates.append(os.path.abspath(candidate))
 
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    if not local_app_data:
-        return ""
-    for candidate in (
-        os.path.join(local_app_data, "agy", "bin", "agy.exe"),
-        os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
-    ):
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
-    return ""
+    if name == "antigravity":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            for candidate in (
+                os.path.join(local_app_data, "agy", "bin", "agy.exe"),
+                os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
+            ):
+                if os.path.isfile(candidate):
+                    candidates.append(os.path.abspath(candidate))
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _path_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
 
 
 def _is_windows_host() -> bool:
@@ -1272,21 +1838,20 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
     roaming_app_data = os.environ.get("APPDATA", "")
     home = os.path.expanduser("~")
     program_roots = [
-        root
-        for root in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", ""))
-        if root
+        root for root in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")) if root
     ]
 
     prefixes: list[str] = []
     if local_app_data:
-        prefixes.extend(
-            (
-                os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
-                os.path.join(local_app_data, "pnpm"),
-            )
+        prefixes.append(os.path.join(local_app_data, "Microsoft", "WinGet", "Links"))
+    prefixes.extend(
+        _windows_package_manager_bin_prefixes(
+            local_app_data=local_app_data,
+            roaming_app_data=roaming_app_data,
+            home=home,
         )
-    if roaming_app_data:
-        prefixes.append(os.path.join(roaming_app_data, "npm"))
+    )
+    configured_prefixes = _windows_configured_package_manager_bin_prefixes()
     if home:
         prefixes.extend((os.path.join(home, ".local", "bin"), os.path.join(home, "scoop", "shims")))
 
@@ -1324,6 +1889,11 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
     for prefix in prefixes:
         for name in names:
             candidates.append(os.path.join(prefix, name))
+    for prefix in configured_prefixes:
+        for name in names:
+            candidate = os.path.join(prefix, name)
+            if _trusted_windows_configured_binary_path(candidate, prefix):
+                candidates.append(candidate)
     return tuple(candidates)
 
 
@@ -1442,9 +2012,7 @@ def _display_path(path: str) -> str:
 
 def _render_plain_table(disc: AgentDiscovery) -> str:
     lines = ["Agent discovery (cached)" if disc.cache_hit else "Agent discovery"]
-    lines.append(
-        "connector | installed | configured | active/mode | config | binary | version/error"
-    )
+    lines.append("connector | installed | configured | active/mode | config | binary | version/error")
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
         lines.append(

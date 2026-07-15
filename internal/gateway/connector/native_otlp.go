@@ -186,6 +186,33 @@ func (s NativeOTLPSpec) signalEndpoint(signal NativeOTLPSignal) string {
 	return strings.TrimRight(strings.TrimSpace(s.Endpoint), "/") + path
 }
 
+func isScopedOTLPEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope, signal NativeOTLPSignal) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 5 && parts[0] == "otlp" && parts[1] == string(scope) &&
+		parts[2] != "" && parts[3] == "v1" && parts[4] == string(signal)
+}
+
+func isScopedOTLPBaseEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 3 && parts[0] == "otlp" && parts[1] == string(scope) && parts[2] != ""
+}
+
 // pathTokenBaseEndpoint returns the path-token endpoint WITHOUT a
 // signal suffix. Vendor exporters that auto-append /v1/<signal> to
 // their configured base (Gemini CLI's settings.json otlpEndpoint
@@ -208,9 +235,10 @@ func (s NativeOTLPSpec) pathTokenBaseEndpoint() string {
 // ~/.config/goose/config.yaml, etc. The returned map is a fresh copy.
 //
 // When PerSignal is true the renderer emits the three per-signal exporter
-// vars AND OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT vars in addition to the
-// combined endpoint. This matches what Claude Code, Copilot CLI, and
-// Goose all accept.
+// vars and the higher-precedence OTEL_EXPORTER_OTLP_<SIGNAL>_{ENDPOINT,
+// PROTOCOL,HEADERS} vars in addition to the combined values. Emitting the
+// complete signal tuple prevents an inherited or previously configured
+// per-signal value from silently overriding the managed collector.
 //
 // Returns an error if the spec is not an env-block. Callers that want a
 // non-strict renderer (e.g. tests that check parity across kinds) should
@@ -225,6 +253,9 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 	out := map[string]string{}
 
 	endpoint := strings.TrimRight(strings.TrimSpace(s.Endpoint), "/")
+	if strings.TrimSpace(s.PathToken) != "" {
+		endpoint = s.pathTokenBaseEndpoint()
+	}
 	if endpoint != "" {
 		out["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
 	}
@@ -238,13 +269,20 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 		out["OTEL_METRICS_EXPORTER"] = "otlp"
 		out["OTEL_LOGS_EXPORTER"] = "otlp"
 		out["OTEL_TRACES_EXPORTER"] = "otlp"
+		serializedHeaders := ""
+		if len(s.Headers) > 0 {
+			serializedHeaders = serializeOTLPHeaders(s.Headers)
+		}
 		for _, signal := range AllNativeOTLPSignals() {
+			prefix := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal))
 			ep := s.signalEndpoint(signal)
-			if ep == "" {
-				continue
+			if ep != "" {
+				out[prefix+"_ENDPOINT"] = ep
 			}
-			key := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal)) + "_ENDPOINT"
-			out[key] = ep
+			out[prefix+"_PROTOCOL"] = s.normalizedProtocol()
+			if serializedHeaders != "" {
+				out[prefix+"_HEADERS"] = serializedHeaders
+			}
 		}
 	}
 
@@ -339,10 +377,12 @@ func (s NativeOTLPSpec) FileSinkPath() (string, error) {
 }
 
 // serializeOTLPHeaders renders Headers as the comma-separated key=value
-// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Sorted
-// by lowercase key so the output is deterministic across runs (env
-// blocks are written into agent config files that operators read and
-// diff).
+// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Header
+// components use URI percent-encoding because OpenTelemetry JS parses
+// them with decodeURIComponent; query/form encoding would turn a space
+// into '+', which that parser preserves as a literal plus. Sorted by
+// lowercase key so the output is deterministic across runs (env blocks
+// are written into agent config files that operators read and diff).
 func serializeOTLPHeaders(h map[string]string) string {
 	keys := make([]string, 0, len(h))
 	for k := range h {
@@ -358,7 +398,7 @@ func serializeOTLPHeaders(h map[string]string) string {
 		// for the value; only the key is canonicalized to lower-case.
 		for origKey, v := range h {
 			if strings.ToLower(origKey) == k {
-				parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+				parts = append(parts, url.PathEscape(k)+"="+url.PathEscape(v))
 				break
 			}
 		}
