@@ -242,6 +242,12 @@ func run(opts options) (int, error) {
 	if err := validateManagedRoot(installRoot); err != nil {
 		return 1, err
 	}
+	if err := preflightInstalledClients(installRoot); err != nil {
+		if errors.Is(err, errInstalledProcessRunning) {
+			return retryRequiredCode, err
+		}
+		return 1, err
+	}
 	if opts.Action == "uninstall" {
 		if !opts.Quiet {
 			return runInteractiveWizard(opts, installRoot, dataRoot)
@@ -263,24 +269,6 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		return 1, err
 	}
 	hadInstall := pathExists(installRoot)
-	if hadInstall {
-		// Recovery can rename or remove an interrupted staging tree. Reject an
-		// active CLI/TUI before recovery so a locked installed executable cannot
-		// turn safe journal rollback into a partial service outage.
-		gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot, gatewayPath)
-		if processErr != nil {
-			return 1, fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
-		}
-		if pid != 0 {
-			return retryRequiredCode, fmt.Errorf(
-				"%w (PID %d, %s); close running DefenseClaw terminals and retry",
-				errInstalledProcessRunning,
-				pid,
-				imagePath,
-			)
-		}
-	}
 	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
 		return retryRequiredCode, err
 	}
@@ -458,6 +446,26 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		fmt.Println("Open a new terminal and run: defenseclaw")
 	}
 	return 0, nil
+}
+
+func preflightInstalledClients(installRoot string) error {
+	if !pathExists(installRoot) {
+		return nil
+	}
+	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	pid, imagePath, err := liveProcessWithinInstallRoot(installRoot, gatewayPath)
+	if err != nil {
+		return fmt.Errorf("inspect running DefenseClaw processes: %w", err)
+	}
+	if pid == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w (PID %d, %s); close running DefenseClaw terminals and retry",
+		errInstalledProcessRunning,
+		pid,
+		imagePath,
+	)
 }
 
 func runUninstall(opts options, installRoot, dataRoot string) (int, error) {

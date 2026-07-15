@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -71,6 +72,59 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 	}
 	if pid != 0 || imagePath != "" {
 		t.Fatalf("ignored installed process = (%d, %q), want no match", pid, imagePath)
+	}
+}
+
+func TestPreflightInstalledClientsRejectsForegroundAndIgnoresGateway(t *testing.T) {
+	installRoot := t.TempDir()
+	binDir := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startHelper := func(target string) *exec.Cmd {
+		t.Helper()
+		copyExecutable(t, source, target)
+		ready := filepath.Join(t.TempDir(), "ready")
+		cmd := exec.Command(target, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_SETUP_PROCESS_HELPER=1",
+			"GO_SETUP_PROCESS_READY="+ready,
+		)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start installed process helper: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				return cmd
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("inspect helper readiness: %v", err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("installed process helper did not become ready")
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+
+	startHelper(filepath.Join(binDir, "defenseclaw-gateway.exe"))
+	if err := preflightInstalledClients(installRoot); err != nil {
+		t.Fatalf("gateway-only preflight: %v", err)
+	}
+	clientPath := filepath.Join(binDir, "defenseclaw.exe")
+	startHelper(clientPath)
+	if err := preflightInstalledClients(installRoot); !errors.Is(err, errInstalledProcessRunning) {
+		t.Fatalf("foreground client preflight error = %v, want %v", err, errInstalledProcessRunning)
+	} else if !strings.Contains(err.Error(), clientPath) {
+		t.Fatalf("foreground client preflight error %q does not name %q", err, clientPath)
 	}
 }
 
