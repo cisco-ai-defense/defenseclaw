@@ -245,7 +245,7 @@ class TestSingleTargetJsonMode(_SkillScanUXBase):
         mock_scanner = MagicMock()
         mock_scanner.scan.side_effect = scan_impl
         mock_cls.return_value = mock_scanner
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
 
         result = runner.invoke(
             skill,

@@ -63,7 +63,7 @@ High-risk deployments should pair DefenseClaw with human review, least-privilege
 |-------|-------------|
 | [Quick Start](docs/QUICKSTART.md) | First successful local setup and scan flow |
 | [Install](docs/INSTALL.md) | Windows, macOS, Linux, DGX Spark, source builds, and release installation |
-| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | PowerShell install, native connectors, verification, and troubleshooting |
+| [Native Windows](docs/WINDOWS-NATIVE-INSTALLER.md) | PowerShell install, native connectors, verification, and troubleshooting |
 | [CLI Reference](docs/CLI.md) | Python CLI commands and operator workflows |
 | [API Reference](docs/API.md) | Gateway REST API and sidecar endpoints |
 | [Architecture](docs/ARCHITECTURE.md) | Component model, data flow, and responsibilities |
@@ -116,8 +116,8 @@ defenseclaw init --enable-guardrail
 
 For platform-specific steps, see [docs/INSTALL.md](docs/INSTALL.md).
 
-On native Windows x64, use the PowerShell installer and hook-only connector path in
-the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/).
+On native Windows x64, use the signed native Setup EXE and hook-only connector path in
+the [Native Windows guide](docs/WINDOWS-NATIVE-INSTALLER.md).
 WSL is unsupported. Codex CLI and Claude Code are the only certified Windows connectors.
 
 ---

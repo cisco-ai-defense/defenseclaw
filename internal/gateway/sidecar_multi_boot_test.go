@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // bootStubConnector embeds stubConnector (full connector.Connector) and lets a
@@ -245,6 +246,7 @@ func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *tes
 // agent contract changed.
 func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *testing.T) {
 	s := multiBootSidecar(t)
+	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"codex": {Mode: "action"},
@@ -253,7 +255,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	discovery := map[string]any{
 		"agents": map[string]any{
 			"codex":      map[string]any{"version": "codex-cli 0.142.4"},
-			"claudecode": map[string]any{"version": "Claude Code v2.1.144"},
+			"claudecode": map[string]any{"version": "Claude Code v2.1.152"},
 		},
 	}
 	raw, err := json.Marshal(discovery)
@@ -271,12 +273,9 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	if err := os.WriteFile(artifact, []byte("stale generated hook"), 0o600); err != nil {
 		t.Fatalf("write stale hook: %v", err)
 	}
-	previous := connector.HookContractLockEntry{
-		Connector:              "codex",
-		RawAgentVersion:        "codex-cli 0.142.4",
-		NormalizedAgentVersion: "0.142.4",
-		ContractID:             "codex-hooks-v1",
-		HookScriptDigests:      map[string]string{"codex-hook.sh": "sha256:previous-generated-build"},
+	previous := stageCodexExecutableEvidenceFixture(t, s.cfg.DataDir)
+	previous.HookScriptDigests = map[string]string{
+		"codex-hook.sh": "sha256:previous-generated-build",
 	}
 	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, previous); err != nil {
 		t.Fatalf("save previous lock: %v", err)
@@ -323,6 +322,31 @@ func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
 	want := []string{"codex", "claudecode"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("succeeded=%v, want %v", got, want)
+	}
+}
+
+func TestSetupConnectorsIsolated_LockFailureRollsBackAndSkips(t *testing.T) {
+	s := multiBootSidecar(t)
+	if err := os.Mkdir(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+
+	got, err := s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{conn}, "tok", "a", "b", "master",
+		guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("succeeded = %v, want lock-save failure skipped", got)
+	}
+	if conn.teardownCalls != 1 {
+		t.Fatalf("teardownCalls = %d, want 1 rollback", conn.teardownCalls)
+	}
+	if active := connector.LoadActiveConnector(s.cfg.DataDir); active != "codex" {
+		t.Fatalf("active connector = %q, want rollback marker codex", active)
 	}
 }
 

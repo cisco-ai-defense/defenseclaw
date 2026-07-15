@@ -267,6 +267,87 @@ DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 
 The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `LogsDirectoryMode=0750`; do not rely on systemd's default directory modes for secret-bearing runtime state. It enables a restrictive service sandbox (`ProtectSystem=strict`, `ProtectHome=true`, private devices/tmp, kernel and control-group protections, hidden non-service `/proc` entries, the `@system-service` syscall allow-list, no realtime scheduling, no SUID/namespace escalation, and an empty capability bounding set). If your deployment needs host-wide user discovery or hook repair, run that as the enterprise guardian component rather than widening the gateway service sandbox.
 
+## Native Windows Claude Code managed hooks
+
+Native Windows supports administrator-managed Claude Code hooks without
+writing `~/.claude/settings.json`. Run the installed gateway from an elevated
+PowerShell window (or as LocalSystem) for each approved interactive user:
+
+The gateway and sibling `defenseclaw-hook.exe` must first be deployed in an
+Administrator-, LocalSystem-, or TrustedInstaller-owned machine path (normally
+under `C:\Program Files`) with no standard-user write ACEs. The per-user public
+installer under `%LOCALAPPDATA%` is deliberately rejected as an enterprise
+policy command source; elevating a user-writable executable would make the
+machine policy unsafe.
+
+```powershell
+defenseclaw-gateway enterprise hooks install `
+  --user alice `
+  --connector claudecode `
+  --agent-version "2.1.187 (Claude Code)" `
+  --json
+```
+
+The command validates the target profile's exact SID, rejects service/system
+identities, unsafe DACLs, foreign owners, symlinks, junctions, and other
+reparse points, then writes the user's scoped runtime beneath
+`<profile>\.defenseclaw`. The native hook resolves that runtime from the
+invoking process SID; it does not use the administrator account's install data
+root or project-controlled environment. The administrator policy is published
+atomically as:
+
+```text
+C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json
+```
+
+The adjacent protected `.defenseclaw-managed-hooks.state` binds the exact
+policy digest, native hook executable, and allow-listed target SIDs. Claude
+loads hooks from this tier when `allowManagedHooksOnly: true`; no manual hook
+trust prompt is required. Users not present in the protected SID allow-list
+receive a verified no-op from the shared machine hook. Invalid or tampered
+ownership metadata fails closed for registered hook invocations.
+
+Native Windows managed hooks deliberately pin their per-user runtime to
+`<profile>\.defenseclaw`. `--data-dir` may only repeat that exact path; custom
+DefenseClaw data directories are rejected because a standard-user hook cannot
+securely discover an administrator-selected redirect. The managed hook also
+ignores inherited `DEFENSECLAW_HOME` and `CLAUDE_CONFIG_DIR`. The latter may
+relocate Claude's user configuration, but it does not relocate the machine
+policy under `C:\Program Files\ClaudeCode`, so no user or project environment
+can redirect this managed registration.
+
+DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
+a file policy superseded by `policyHelper`. It also refuses installation when
+an HKLM `Settings` policy has higher precedence. In those environments, merge
+the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
+local file installation cannot override it. Remotely delivered policy is an
+external management boundary and must likewise include the hook matrix at its
+authoritative source.
+
+Remove one owned target registration with the same elevated identity:
+
+```powershell
+defenseclaw-gateway enterprise hooks uninstall `
+  --user alice `
+  --connector claudecode `
+  --json
+```
+
+If the account and profile have already been removed, pass the recorded
+`--sid S-1-5-21-...` without `--user` or `--user-home` to remove the stale
+allow-list entry.
+
+Cleanup verifies the protected digest and ownership metadata before mutation.
+It removes the machine drop-in after the last target and otherwise updates the
+SID allow-list atomically. Per-user runtime files remain as inert repair and
+forensic evidence; a removed SID is no longer activated by the shared policy.
+Re-running install repairs those files and re-registers the SID.
+
+This endpoint hook-policy support does not turn the public Windows package
+into the private `managed-enterprise` distribution flavor or provide private
+CMID credentials; those release/provider boundaries remain unchanged.
+
 ## Per-user hook guardian
 
 The managed gateway service must not write directly to `/home`. To install or repair hook-native connectors for real interactive users, run the short-lived guardian command as an administrator:
@@ -370,7 +451,7 @@ targets:
     agent_version: "2.1.187 (Claude Code)"
   - user: alice
     connector: claudecode
-    agent_version: "Claude Code v2.1.144"
+    agent_version: "Claude Code v2.1.152"
   - user: disabled-user
     connector: codex
     enabled: false
