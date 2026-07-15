@@ -894,7 +894,13 @@ function Assert-DoctorWindowsHookRegistration {
         $tamperedChecks = @($tamperedReport.checks | Where-Object { [string]::Equals([string]$_.label, $label, [StringComparison]::Ordinal) })
         if ($tamperedChecks.Count -ne 1) { throw "Tampered Doctor run returned $($tamperedChecks.Count) '$label' checks, expected one" }
         $tamperedCheck = $tamperedChecks[0]
-        if ($tamperedCheck.status -ne 'fail' -or $tamperedCheck.detail -notmatch 'obsolete gateway launcher') {
+        $expectedTamperDetail = if ($Connector -eq 'codex') {
+            'obsolete gateway launcher'
+        } else {
+            'does not use the native hook runtime'
+        }
+        if ($tamperedCheck.status -ne 'fail' -or
+            $tamperedCheck.detail -notmatch [regex]::Escape($expectedTamperDetail)) {
             throw "Doctor did not reject the tampered $Connector hook command: $($tamperedCheck.status) $($tamperedCheck.detail)"
         }
         if ($tamperedCheck.detail -notmatch "setup $(if ($Connector -eq 'codex') { 'codex' } else { 'claude-code' }) --yes --restart") {
@@ -903,7 +909,7 @@ function Assert-DoctorWindowsHookRegistration {
         if ($tamperedCheck.detail -match '(?i)\x2esh\b|\bbash\b|\bwsl\b|\bchmod\b|\bunset\b|hook script') {
             throw "Doctor tamper result returned obsolete shell-hook guidance: $($tamperedCheck.detail)"
         }
-        Write-Result 'doctor:windows-hook-tamper' pass 'exit=1 obsolete-gateway-launcher=rejected obsolete-shell-guidance=absent'
+        Write-Result 'doctor:windows-hook-tamper' pass 'exit=1 non-native-gateway-launcher=rejected obsolete-shell-guidance=absent'
     } finally {
         [IO.File]::WriteAllBytes($configPath, $originalConfig)
     }
@@ -1369,6 +1375,15 @@ function Stop-IsolatedProcessTree {
 
     $root = [IO.Path]::GetFullPath($StateRoot)
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ancestorIds = [Collections.Generic.HashSet[int]]::new()
+    $ancestorId = [int]$PID
+    while ($ancestorId -gt 0 -and $ancestorIds.Add($ancestorId)) {
+        $ancestor = @($processes | Where-Object {
+            [int]$_.ProcessId -eq $ancestorId
+        } | Select-Object -First 1)
+        if ($ancestor.Count -ne 1) { break }
+        $ancestorId = [int]$ancestor[0].ParentProcessId
+    }
     $descendantIds = @{}
     $frontier = @([int]$PID)
     while ($frontier.Count -gt 0) {
@@ -1384,7 +1399,8 @@ function Stop-IsolatedProcessTree {
         $processId = [int]$process.ProcessId
         $matchesRoot = $process.CommandLine -and
             $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        if ($processId -ne $PID -and ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
+        if (-not $ancestorIds.Contains($processId) -and
+            ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
             $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }

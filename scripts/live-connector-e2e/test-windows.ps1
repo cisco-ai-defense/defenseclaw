@@ -1042,7 +1042,16 @@ try {
         'unversioned fixture override is scoped to the post-Doctor gateway restart'
     Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
     Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
-    Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'
+    $isolatedCleanup = [regex]::Match($harnessText, '(?s)function Stop-IsolatedProcessTree\b.*?\n\}').Value
+    Assert-True ($isolatedCleanup -match 'HashSet\[int\]' -and
+        $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
+        $isolatedCleanup -match '-not \$ancestorIds\.Contains\(\$processId\)') `
+        'isolated process cleanup excludes the complete ancestor wrapper chain'
+    Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and
+        $harnessText -match 'obsolete gateway launcher' -and
+        $harnessText -match 'does not use the native hook runtime' -and
+        $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) `
+        'Doctor connector contract rejects connector-specific tampered hook commands with exit 1'
     Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome' -and
         $harnessText -match 'HomeRoot must be contained by StateRoot') `
