@@ -853,6 +853,8 @@ try {
         $standardUserCIText -match 'Get-DisposableProcessIdentityKey' -and
         $sameLiveProcessFunction -match '\$processId = \[int\]\$Process\.ProcessId' -and
         $sameLiveProcessFunction -match 'if \(\$processId -le 0\) \{ return \$null \}' -and
+        $sameLiveProcessFunction -match '(?s)catch \{.*?Get-CimInstance Win32_Process -ErrorAction Stop.*?Where-Object' -and
+        $standardUserCIText -match '(?s)Stop-AndVerifyDisposableSidProcesses.*?Get-SameLiveProcess \$process' -and
         $standardUserSafetyText -match 'Assert-UnverifiableProcessWasBaselined' -and
         $standardUserCIText -match 'owner SID became unverifiable for exact-SID process') `
         'process teardown baselines exact PID/CreationDate unknowns before launch and fails closed on reuse or second-check errors'
@@ -1002,10 +1004,10 @@ try {
     }
     Assert-True ($harnessText -match "Invoke-DangerousCommandCorpus observe" -and $harnessText -match "Invoke-DangerousCommandCorpus action") 'connector contract executes dangerous-command corpus in observe and action modes'
     Assert-True ($harnessText -match 'raw_action' -and $harnessText -match 'would_block' -and $harnessText -match 'enforced') 'dangerous-command contract asserts raw and enforced decisions'
-    foreach ($enterpriseOperation in @('install', 'reconcile', 'watch')) {
-        Assert-True ($harnessText -match 'enterprise-hooks:\$\(\$command\.Name\):native-rejection' -and $harnessText.Contains("Name = '$enterpriseOperation'")) "built enterprise hooks $enterpriseOperation rejection is required"
-    }
-    Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks rejection is bounded, exit 1, and checks an unchanged tree'
+    Assert-True ($harnessText -match 'enterprise-hooks:install:elevation-required' -and
+        $harnessText -match 'requires an elevated administrator or LocalSystem token') `
+        'native enterprise hooks require elevation in the standard-user connector contract'
+    Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
     Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
@@ -1065,6 +1067,19 @@ try {
         $codexHomeCapture -ge 0 -and $codexHomeCapture -lt $contractInstall -and
         $claudeHomeCapture -ge 0 -and $claudeHomeCapture -lt $contractInstall) `
         'connector contract captures pairwise disjoint Codex and Claude homes during native Setup'
+    $contractCleanupTry = $contractFunction.IndexOf('    try {', [StringComparison]::Ordinal)
+    $contractProfileCreate = $contractFunction.IndexOf(
+        '[IO.Directory]::CreateDirectory($path)',
+        [StringComparison]::Ordinal
+    )
+    $contractProfileCleanup = $contractFunction.LastIndexOf(
+        'Remove-SafeDisposableTree $contractProfileRoot',
+        [StringComparison]::Ordinal
+    )
+    Assert-True ($contractCleanupTry -ge 0 -and
+        $contractCleanupTry -lt $contractProfileCreate -and
+        $contractProfileCleanup -gt $contractProfileCreate) `
+        'connector contract profile creation is covered by its cleanup finally block'
     Assert-True ($nativeHarnessText -match '\$originalEnvironment = @\{\}' -and
         $nativeHarnessText -match 'GetEnvironmentVariables\(''Process''\)' -and
         $nativeHarnessText -match 'SetEnvironmentVariable\(\s*\[string\]\$name,\s*\[string\]\$originalEnvironment\[\$name\],\s*''Process''') `

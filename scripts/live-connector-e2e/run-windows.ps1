@@ -924,29 +924,23 @@ function Assert-DoctorWindowsHookRegistration {
     Wait-Gateway
 }
 
-function Assert-NativeEnterpriseHooksRejected {
-    $root = Join-Path $StateRoot 'enterprise-hooks-native-rejection'
+function Assert-NativeEnterpriseHooksRequireElevation {
+    $root = Join-Path $StateRoot 'enterprise-hooks-elevation-required'
     $targetHome = Join-Path $root 'target-home'
     $dataDir = Join-Path $targetHome '.defenseclaw'
     [IO.Directory]::CreateDirectory($dataDir) | Out-Null
     [IO.File]::WriteAllText((Join-Path $targetHome 'preserve.txt'), 'preserve')
-    $manifest = Join-Path $root 'targets.yaml'
-    [IO.File]::WriteAllText($manifest, "version: 1`ntargets: []`n", [Text.UTF8Encoding]::new($false))
     $gateway = (Get-Command 'defenseclaw-gateway' -ErrorAction Stop).Source
-    $commands = @(
-        [pscustomobject]@{ Name = 'install'; Args = @('enterprise', 'hooks', 'install', '--connector', $Connector, '--user-home', $targetHome, '--data-dir', $dataDir) },
-        [pscustomobject]@{ Name = 'reconcile'; Args = @('enterprise', 'hooks', 'reconcile', '--manifest', $manifest) },
-        [pscustomobject]@{ Name = 'watch'; Args = @('enterprise', 'hooks', 'watch', '--manifest', $manifest, '--interval', '1s', '--debounce', '100ms') }
-    )
-    foreach ($command in $commands) {
-        $before = Get-TreeFingerprint $root
-        $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList $command.Args -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot "enterprise-hooks-$($command.Name).log")
-        $after = Get-TreeFingerprint $root
-        if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw "enterprise hooks $($command.Name) did not return bounded exit 1" }
-        if (($result.StdOut + $result.StdErr) -notmatch 'enterprise hooks are unsupported on native Windows') { throw "enterprise hooks $($command.Name) did not report native Windows rejection" }
-        if ($before -ne $after) { throw "enterprise hooks $($command.Name) modified the disposable target tree" }
-        Write-Result "enterprise-hooks:$($command.Name):native-rejection" pass 'exit=1 bounded=true target-tree=unchanged'
-    }
+    $before = Get-TreeFingerprint $root
+    $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList @(
+        'enterprise', 'hooks', 'install', '--connector', $Connector,
+        '--user-home', $targetHome, '--data-dir', $dataDir
+    ) -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot 'enterprise-hooks-install.log')
+    $after = Get-TreeFingerprint $root
+    if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw 'enterprise hooks install did not return bounded exit 1' }
+    if (($result.StdOut + $result.StdErr) -notmatch 'requires an elevated administrator or LocalSystem token') { throw 'enterprise hooks install did not require native Windows elevation' }
+    if ($before -ne $after) { throw 'enterprise hooks install modified the disposable target tree' }
+    Write-Result 'enterprise-hooks:install:elevation-required' pass 'exit=1 bounded=true target-tree=unchanged'
 }
 
 function Install-Agent {
@@ -1287,7 +1281,7 @@ function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
     Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     Assert-TimeoutHandling
-    Assert-NativeEnterpriseHooksRejected
+    Assert-NativeEnterpriseHooksRequireElevation
     Initialize-DefenseClawEnv
     Invoke-Tool 'defenseclaw' @(
         'init', '--skip-install', '--non-interactive', '--yes', '--connector', $Connector,

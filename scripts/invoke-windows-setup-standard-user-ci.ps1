@@ -427,8 +427,19 @@ function New-RandomSecurePassword {
 function Get-SameLiveProcess([object]$Process) {
     $processId = [int]$Process.ProcessId
     if ($processId -le 0) { return $null }
-    $current = @(Get-CimInstance Win32_Process `
-        -Filter "ProcessId = $processId" -ErrorAction Stop)
+    try {
+        $current = @(Get-CimInstance Win32_Process `
+            -Filter "ProcessId = $processId" -ErrorAction Stop)
+    } catch {
+        # A process can exit between the all-process snapshot and this exact-PID
+        # lookup. Some Windows CIM providers report that normal race as "Not
+        # found" instead of returning an empty set. Re-enumeration distinguishes
+        # an exited or reused PID from a provider failure without weakening the
+        # creation-time identity check below.
+        $current = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            [int]$_.ProcessId -eq $processId
+        })
+    }
     if ($current.Count -ne 1) { return $null }
     if ((Get-DisposableProcessIdentityKey $current[0]) -cne
         (Get-DisposableProcessIdentityKey $Process)) {
@@ -498,24 +509,31 @@ function Stop-AndVerifyDisposableSidProcesses(
         $owned = @(Get-DisposableSidProcesses $Sid $UnverifiableBaseline)
         if ($owned.Count -eq 0) { return @($terminated) }
         foreach ($process in $owned) {
-            $current = @(Get-CimInstance Win32_Process `
-                -Filter "ProcessId = $([int]$process.ProcessId)" -ErrorAction Stop)
-            if ($current.Count -ne 1 -or
-                (Get-DisposableProcessIdentityKey $current[0]) -cne
-                    (Get-DisposableProcessIdentityKey $process)) {
-                continue
+            $current = Get-SameLiveProcess $process
+            if ($null -eq $current) { continue }
+            try {
+                $owner = Invoke-CimMethod -InputObject $current -MethodName GetOwnerSid `
+                    -ErrorAction Stop
+            } catch {
+                if ($null -eq (Get-SameLiveProcess $process)) { continue }
+                throw
             }
-            $owner = Invoke-CimMethod -InputObject $current[0] -MethodName GetOwnerSid `
-                -ErrorAction Stop
             if ([uint32]$owner.ReturnValue -ne 0) {
+                if ($null -eq (Get-SameLiveProcess $process)) { continue }
                 throw "owner SID became unverifiable for exact-SID process $($process.ProcessId)"
             }
             if ([string]$owner.Sid -cne $Sid) {
                 throw "owner SID changed for exact-SID process $($process.ProcessId)"
             }
-            $termination = Invoke-CimMethod -InputObject $current[0] -MethodName Terminate `
-                -Arguments @{ Reason = [uint32]1603 } -ErrorAction Stop
+            try {
+                $termination = Invoke-CimMethod -InputObject $current -MethodName Terminate `
+                    -Arguments @{ Reason = [uint32]1603 } -ErrorAction Stop
+            } catch {
+                if ($null -eq (Get-SameLiveProcess $process)) { continue }
+                throw
+            }
             if ([uint32]$termination.ReturnValue -ne 0) {
+                if ($null -eq (Get-SameLiveProcess $process)) { continue }
                 throw "could not terminate disposable-SID process $($process.ProcessId): $($termination.ReturnValue)"
             }
             [void]$terminated.Add([int]$process.ProcessId)

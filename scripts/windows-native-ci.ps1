@@ -2948,20 +2948,20 @@ function Invoke-Contract {
     $codexHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'codex-home')).TrimEnd('\')
     $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'claude-home')).TrimEnd('\')
     $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
-    foreach ($path in @(
-        $contractHome,
-        (Join-Path $contractHome 'AppData\Roaming'),
-        (Join-Path $contractHome 'AppData\Local'),
-        (Join-Path $contractRoot 'temp'),
-        $codexHome,
-        $claudeHome
-    )) {
-        [IO.Directory]::CreateDirectory($path) | Out-Null
-        Protect-TestDirectory $path
-    }
     $defaultCodexHome = Join-Path $contractHome '.codex'
     $defaultClaudeHome = Join-Path $contractHome '.claude'
     try {
+        foreach ($path in @(
+            $contractHome,
+            (Join-Path $contractHome 'AppData\Roaming'),
+            (Join-Path $contractHome 'AppData\Local'),
+            (Join-Path $contractRoot 'temp'),
+            $codexHome,
+            $claudeHome
+        )) {
+            [IO.Directory]::CreateDirectory($path) | Out-Null
+            Protect-TestDirectory $path
+        }
         # Setup records the trusted connector homes in installed state. The
         # launcher intentionally rejects later ambient overrides.
         $env:CODEX_HOME = $codexHome
