@@ -283,8 +283,9 @@ Those installations must be serviced by the enterprise deployment channel.
 
 ## Release and certification gate
 
-The release workflow builds setup on `windows-latest`, requires real signing
-credentials, runs the full native install/repair/connector/uninstall acceptance
+Starting with 0.8.6, the release workflow builds setup on `windows-latest`,
+requires real signing credentials, and runs the full native
+install/repair/connector/uninstall acceptance
 suite against that exact signed EXE (including installed-publisher validation),
 uploads the staging bundle, and passes its immutable artifact ID and SHA-256
 digest to a separate non-advisory real-client job. That job downloads the exact
@@ -304,6 +305,25 @@ release before publication. The workflow emits SHA-256, merged SPDX SBOM,
 provenance, and `DefenseClawSetup-x64.exe.certification.json`, then adds every
 artifact to the final checksum manifest before the immutable release is created.
 macOS and Linux artifacts continue through their existing build path.
+
+The Windows chain transfers each intermediate by immutable GitHub Actions
+artifact ID and digest; assembly rejects a missing or malformed certification
+artifact digest before processing its exact-ID download. Certification emits
+exactly five release assets:
+`DefenseClawSetup-x64.exe`, its `.sha256`, `.provenance.json`, `.sbom.json`, and
+`.certification.json` sidecars. Assembly consumes that directory explicitly via
+`--windows-dir`, seals all five bytes into the candidate, and signs
+`checksums.txt` with an offline-verifiable `checksums.txt.bundle` under the
+exact `release.yaml@refs/heads/main` Sigstore identity. The protected
+`publish-release` job is the only job granted `contents: write`.
+
+The sealed Setup must pass the standard-user `windows-fresh-install` gate.
+The separate historical Windows upgrade matrix remains skipped for 0.8.6
+because 0.8.5 did not publish a native Setup baseline; the fresh gate still
+exercises install, repair, same-version servicing, and uninstall. Both publish
+selection and post-publish custody verification retain
+`--omit-windows-binaries` to exclude legacy raw Windows archives only. They do
+not exclude the signed Setup or its four certified sidecars.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the
 disposable GitHub Actions user. Local setup acceptance refuses to mutate the

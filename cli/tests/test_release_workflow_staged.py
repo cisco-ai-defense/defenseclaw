@@ -10,6 +10,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -78,7 +79,7 @@ def test_release_is_manual_and_default_permissions_are_read_only() -> None:
 def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
-    assert 'repos/$GITHUB_REPOSITORY/immutable-releases' not in text
+    assert "repos/$GITHUB_REPOSITORY/immutable-releases" not in text
     assert "IMMUTABLE_RELEASES_CONFIRMED" in text
     assert "inputs.immutable_releases_confirmed" in text
     assert "Immutable Releases confirmation required" in text
@@ -91,9 +92,7 @@ def test_release_automation_never_publishes_runtime_to_python_package_indexes() 
         *sorted((ROOT / ".github/workflows").glob("*.y*ml")),
         ROOT / "Makefile",
         *sorted(
-            path
-            for path in (ROOT / "scripts").rglob("*")
-            if path.is_file() and path.suffix in {".py", ".ps1", ".sh"}
+            path for path in (ROOT / "scripts").rglob("*") if path.is_file() and path.suffix in {".py", ".ps1", ".sh"}
         ),
     ]
     automation = "\n".join(path.read_text(encoding="utf-8") for path in surfaces).lower()
@@ -132,6 +131,8 @@ def test_release_requires_current_main_without_prescribing_repository_governance
     jobs = _workflow()["jobs"]
     assert {name for name, job in jobs.items() if job.get("environment") == "release"} == {
         "macos-app",
+        "windows-installer",
+        "windows-real-client-certification",
         "publish-release",
     }
 
@@ -149,6 +150,7 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
     publish = jobs["publish-release"]
     assert set(publish["needs"]) == {
         "release-preflight",
+        "windows-real-client-certification",
         "assemble-release-candidate",
         "posix-fresh-install",
         "windows-fresh-install",
@@ -166,17 +168,19 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
             assert job.get("permissions") != {"contents": "write"}
 
 
-def test_windows_release_binaries_are_disabled_and_omitted() -> None:
+def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() -> None:
     jobs = _workflow()["jobs"]
-    for name in ("windows-fresh-install", "windows-upgrade"):
-        assert jobs[name]["if"] == "${{ false }}"
+    assert "if" not in jobs["windows-fresh-install"]
+    assert jobs["windows-upgrade"]["if"] == "${{ false }}"
 
     publish_condition = jobs["publish-release"]["if"]
     assert "always()" in publish_condition
     for required in (
         "release-preflight",
+        "windows-real-client-certification",
         "assemble-release-candidate",
         "posix-fresh-install",
+        "windows-fresh-install",
         "linux-upgrade",
         "macos-upgrade",
         "historical-baseline-canary",
@@ -184,13 +188,86 @@ def test_windows_release_binaries_are_disabled_and_omitted() -> None:
         "live-continuity",
     ):
         assert f"needs.{required}.result == 'success'" in publish_condition
-    assert "needs.windows-fresh-install.result == 'skipped'" in publish_condition
     assert "needs.windows-upgrade.result == 'skipped'" in publish_condition
 
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
     assert workflow_text.count("--omit-windows-binaries") == 2
     assert "publish_windows_binaries" not in workflow_text
-    assert "Windows-specific binaries and SBOMs will not be published" in workflow_text
+    assert "Legacy raw Windows archives remain omitted" in workflow_text
+    assert "signed, certified DefenseClawSetup-x64.exe is published" in workflow_text
+
+
+def test_native_windows_setup_has_immutable_artifact_custody() -> None:
+    jobs = _workflow()["jobs"]
+    runtime = jobs["build-runtime-candidate"]
+    installer = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
+    assemble = jobs["assemble-release-candidate"]
+
+    assert runtime["outputs"]["artifact_id"] == ("${{ steps.runtime-artifact.outputs.artifact-id }}")
+    assert runtime["outputs"]["artifact_digest"] == ("${{ steps.runtime-artifact.outputs.artifact-digest }}")
+    assert installer["outputs"] == {
+        "artifact_id": "${{ steps.windows-installer-artifact.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.windows-installer-artifact.outputs.artifact-digest }}",
+    }
+    assert certification["outputs"] == {
+        "artifact_id": "${{ steps.windows-certified-artifact.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.windows-certified-artifact.outputs.artifact-digest }}",
+    }
+
+    for job in (installer, certification):
+        assert job["environment"] == "release"
+        assert job["permissions"] == {"contents": "read"}
+        assert "continue-on-error" not in str(job)
+        assert job.get("if") != "${{ false }}"
+
+    installer_download = next(
+        step for step in installer["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
+    assert installer_download["with"]["merge-multiple"] == "true"
+    assert "needs.build-runtime-candidate.outputs.artifact_digest" in str(installer)
+
+    certification_download = next(
+        step for step in certification["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert certification_download["with"]["artifact-ids"] == ("${{ needs.windows-installer.outputs.artifact_id }}")
+    assert certification_download["with"]["merge-multiple"] == "true"
+    assert "needs.windows-installer.outputs.artifact_digest" in str(certification)
+
+    certified_upload = next(step for step in certification["steps"] if step.get("id") == "windows-certified-artifact")
+    assert certified_upload["with"]["path"].splitlines() == [
+        "windows-certified/DefenseClawSetup-x64.exe",
+        "windows-certified/DefenseClawSetup-x64.exe.sha256",
+        "windows-certified/DefenseClawSetup-x64.exe.provenance.json",
+        "windows-certified/DefenseClawSetup-x64.exe.sbom.json",
+        "windows-certified/DefenseClawSetup-x64.exe.certification.json",
+    ]
+
+    assert set(assemble["needs"]) == {
+        "release-preflight",
+        "build-runtime-candidate",
+        "macos-app",
+        "windows-real-client-certification",
+    }
+    windows_download = next(
+        step for step in assemble["steps"] if step.get("with", {}).get("path") == "candidate-input/windows"
+    )
+    assert windows_download["with"]["artifact-ids"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_id }}"
+    )
+    assert windows_download["with"]["merge-multiple"] == "true"
+    custody_step = next(
+        step
+        for step in assemble["steps"]
+        if step.get("name") == "Require immutable certified Windows artifact identity"
+    )
+    assert custody_step["env"]["WINDOWS_CERTIFIED_ARTIFACT_DIGEST"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_digest }}"
+    )
+    assert "^(sha256:)?[0-9a-f]{64}$" in custody_step["run"]
+    assemble_step = next(step for step in assemble["steps"] if "release_candidate.py assemble" in step.get("run", ""))
+    assert "--windows-dir candidate-input/windows" in assemble_step["run"]
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
@@ -268,31 +345,39 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
         if step.get("name") == "Sign and authenticate public checksum manifest"
     )
     seal_index, seal_step = next(
-        (index, step)
-        for index, step in enumerate(steps)
-        if step.get("name") == "Seal all candidate bytes"
+        (index, step) for index, step in enumerate(steps) if step.get("name") == "Seal all candidate bytes"
     )
     sign_script = sign_step["run"]
     seal_script = seal_step["run"]
 
     sign = sign_script.index("cosign sign-blob")
-    canonicalize = sign_script.index(
-        "scripts/release_candidate.py canonicalize-certificate"
-    )
+    canonicalize = sign_script.index("scripts/release_candidate.py canonicalize-certificate")
     authenticate = sign_script.index("cosign verify-blob")
     assert sign < canonicalize < authenticate
     assert sign_index + 1 == seal_index
     assert sign_script.count("canonicalize-certificate") == 1
+    assert "--bundle=release-candidate/dist/checksums.txt.bundle" in sign_script
+    assert "--offline" in sign_script
     assert "--certificate release-candidate/dist/checksums.txt.pem" in sign_script
     assert (
-        '--certificate-identity "https://github.com/$GITHUB_REPOSITORY/'
-        '.github/workflows/release.yaml@refs/heads/main"'
+        '--certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"'
     ) in sign_script
-    assert (
-        '--certificate-oidc-issuer "https://token.actions.githubusercontent.com"'
-    ) in sign_script
+    assert ('--certificate-oidc-issuer "https://token.actions.githubusercontent.com"') in sign_script
     assert "--certificate-identity-regexp" not in sign_script
     assert "scripts/release_candidate.py seal" in seal_script
+
+    candidate_verifications = []
+    for job in _workflow()["jobs"].values():
+        for step in job.get("steps", []):
+            script = step.get("run", "")
+            if "cosign verify-blob" in script and "release-candidate/dist/checksums.txt" in script:
+                candidate_verifications.append(script)
+    assert len(candidate_verifications) >= 8
+    for script in candidate_verifications:
+        assert "--bundle=release-candidate/dist/checksums.txt.bundle" in script
+        assert "--offline" in script
+        assert ".github/workflows/release.yaml@refs/heads/main" in script
+        assert "--certificate-identity-regexp" not in script
 
 
 def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal() -> None:
@@ -305,7 +390,11 @@ def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal(
         "macos-15",
     ]
     assert "scripts/test-fresh-install-release.sh" in posix
-    assert "scripts/test-fresh-install-release-windows.ps1" in windows
+    assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in windows
+    assert "-Mode setup-acceptance" in windows
+    assert "-ArtifactRoot" in windows
+    assert "-TimeoutSeconds 4500" in windows
+    assert "if" not in jobs["windows-fresh-install"]
     for rendered in (posix, windows):
         assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
         assert "scripts/release_candidate.py verify" in rendered
@@ -320,19 +409,19 @@ def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None
     assert 'readonly BOOTSTRAP_PATH="${BOOTSTRAP_HOME}/.local/bin:${BASE_TOOL_PATH}"' in text
     assert 'PATH="${BOOTSTRAP_PATH}" command -v cosign' in text
     assert '$(dirname "$(command -v cosign)")' not in text
-    assert 'Cosign was not found; authenticating temporary Cosign 2.6.3' in text
+    assert "Cosign was not found; authenticating temporary Cosign 2.6.3" in text
     assert 'mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy.XXXXXX"' in installer
     assert "assert_bootstrap_retired_privately" in text
-    assert 'not retired into bounded custody' in text
-    assert 'BOOTSTRAP_HOME}/.local/bin/cosign' in text
+    assert "not retired into bounded custody" in text
+    assert "BOOTSTRAP_HOME}/.local/bin/cosign" in text
 
     # A second isolated installation must still exercise an explicit external
     # verifier and prove the installer did not mutate or replace that binary.
-    assert 'EXTERNAL_TOOL_BIN}/cosign' in text
-    assert 'external Cosign wrapper was not invoked' in text
-    assert 'external-Cosign case unexpectedly used the bootstrap verifier' in text
+    assert "EXTERNAL_TOOL_BIN}/cosign" in text
+    assert "external Cosign wrapper was not invoked" in text
+    assert "external-Cosign case unexpectedly used the bootstrap verifier" in text
     assert '$(sha256_file "${EXTERNAL_COSIGN}")' in text
-    assert 'the ambient Cosign binary changed during fresh-install testing' in text
+    assert "the ambient Cosign binary changed during fresh-install testing" in text
 
 
 def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
@@ -364,17 +453,11 @@ def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
 def test_release_conditionally_notarizes_or_publishes_explicit_unverified_assets() -> None:
     workflow = _workflow()
     macos_job = workflow["jobs"]["macos-app"]
-    setup_uv_step = next(
-        step
-        for step in macos_job["steps"]
-        if step.get("uses", "").startswith("astral-sh/setup-uv@")
-    )
+    setup_uv_step = next(step for step in macos_job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
     assert setup_uv_step["with"]["enable-cache"] == "false"
 
     build_step = next(
-        step
-        for step in macos_job["steps"]
-        if step.get("name") == "Build, sign, notarize, and package app"
+        step for step in macos_job["steps"] if step.get("name") == "Build, sign, notarize, and package app"
     )
     assert build_step["env"]["MACOS_REQUIRE_NOTARIZATION"] == "false"
 
@@ -543,18 +626,15 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     assert 'target_version = "{force_latest_version}"' in smoke
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link permission contract")
 def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
     tmp_path: Path,
 ) -> None:
     smoke_home = tmp_path / "home"
-    installed = (
-        smoke_home
-        / ".defenseclaw/.venv/lib/python3.13/site-packages/defenseclaw/commands/cmd_upgrade.py"
-    )
+    installed = smoke_home / ".defenseclaw/.venv/lib/python3.13/site-packages/defenseclaw/commands/cmd_upgrade.py"
     installed.parent.mkdir(parents=True)
     original = (
-        'GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"\n'
-        "target_version = _fetch_latest_version()\n"
+        'GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"\ntarget_version = _fetch_latest_version()\n'
     )
     installed.write_text(original, encoding="utf-8")
     installed.chmod(0o640)
@@ -566,10 +646,7 @@ def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
         [
             "bash",
             "-c",
-            (
-                'source "$1"; SMOKE_HOME="$2"; RELEASE_URL="$3"; '
-                'patch_installed_upgrade_endpoint "$4"'
-            ),
+            ('source "$1"; SMOKE_HOME="$2"; RELEASE_URL="$3"; patch_installed_upgrade_endpoint "$4"'),
             "historical-endpoint-patch-test",
             str(ROOT / "scripts/test-upgrade-release.sh"),
             str(smoke_home),
@@ -588,8 +665,7 @@ def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
     assert (cached.stat().st_dev, cached.stat().st_ino) == shared_identity
     assert cached.stat().st_nlink == 1
     assert installed.read_text(encoding="utf-8") == (
-        'GITHUB_DL = "http://127.0.0.1:43123/releases/download"\n'
-        'target_version = "0.8.5"\n'
+        'GITHUB_DL = "http://127.0.0.1:43123/releases/download"\ntarget_version = "0.8.5"\n'
     )
     assert (installed.stat().st_dev, installed.stat().st_ino) != shared_identity
     assert installed.stat().st_nlink == 1
