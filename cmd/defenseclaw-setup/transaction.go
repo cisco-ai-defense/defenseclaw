@@ -1708,13 +1708,25 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			}
 		}
 	}
+	persistReconciliation := func() error {
+		if err := retryPendingConnectorReconciliation(
+			transaction,
+			gatewayPath,
+			&reconciliation,
+			readConnectorReconciliation,
+			runConnectorLifecycleWithEnv,
+		); err != nil {
+			return fmt.Errorf("retry pending connector reconciliation: %w", err)
+		}
+		return reconciliation.persist()
+	}
 	connectorReconciliationPending, err := settleInstallConnectorReconciliation(
 		transaction.ID,
 		gatewayPath,
 		transaction.DataRoot,
 		transaction.TargetServices,
 		len(reconciliation.failures) != 0,
-		reconciliation.persist,
+		persistReconciliation,
 		connectorReconciliationSummary,
 		nativeInstallRuntimeConvergenceOps(),
 	)
