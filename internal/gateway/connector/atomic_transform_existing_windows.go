@@ -397,15 +397,59 @@ func atomicTransformProtectionDigest(file *os.File) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Hash the canonical SDDL representation. Hashing the raw self-relative
-	// descriptor also includes alignment bytes that Windows does not promise to
-	// initialize deterministically, which made unchanged hard links appear to
-	// have different protection metadata during recovery.
+	// Hash exact owner/group SIDs plus the canonical DACL. Windows can toggle the
+	// DACL's auto-inherited/auto-inherit-requested bookkeeping during a
+	// same-directory rename while retaining the protected flag and the exact
+	// ordered ACE list. The shared DACL canonicalizer removes only those two
+	// non-access-control flags; owner, group, protection, ACE order, inheritance
+	// flags, trustees, and access masks remain part of this witness.
 	sddl := descriptor.String()
 	if sddl == "" {
 		return "", fmt.Errorf("convert Windows security descriptor to SDDL")
 	}
-	return atomicTransformDigest([]byte(sddl)), nil
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return "", fmt.Errorf("query Windows protection owner: %w", err)
+	}
+	if owner == nil {
+		return "", fmt.Errorf("query Windows protection owner: missing SID")
+	}
+	group, _, err := descriptor.Group()
+	if err != nil {
+		return "", fmt.Errorf("query Windows protection group: %w", err)
+	}
+	if group == nil {
+		return "", fmt.Errorf("query Windows protection group: missing SID")
+	}
+	dacl, err := atomicTransformV2WindowsCanonicalDACLFromSDDL(sddl)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize Windows protection DACL: %w", err)
+	}
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("resolve current Windows user for protection witness: %w", err)
+	}
+	if currentUser == nil || currentUser.User.Sid == nil {
+		return "", fmt.Errorf("resolve current Windows user for protection witness: missing SID")
+	}
+	if owner.Equals(currentUser.User.Sid) {
+		dacl = atomicTransformCanonicalPrivateDACLOrder(dacl, currentUser.User.Sid.String())
+	}
+	canonical := "O:" + owner.String() + "G:" + group.String() + dacl
+	return atomicTransformDigest([]byte(canonical)), nil
+}
+
+func atomicTransformCanonicalPrivateDACLOrder(dacl, currentUserSID string) string {
+	// Windows can reorder the two equivalent allow ACEs on DefenseClaw's exact
+	// protected private-file DACL during rename. Canonicalize only that known
+	// two-ACE form; every custom mask, flag, trustee, extra ACE, missing P flag,
+	// and order remains part of the protection witness.
+	userFirst := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)", currentUserSID)
+	systemFirst := fmt.Sprintf("D:P(A;;FA;;;SY)(A;;FA;;;%s)", currentUserSID)
+	if dacl == userFirst {
+		return systemFirst
+	}
+	return dacl
 }
 
 func syncAtomicTransformPlatformParent(string) error {
