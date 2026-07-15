@@ -72,7 +72,7 @@ def _status_row(key: str, value: str) -> None:
     """
     label_padded = (key + ":").ljust(_STATUS_LABEL_WIDTH)
     rendered_value = ux.dim("—") if not value else value
-    click.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
+    ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
 def _openshell_available(cfg) -> bool:
@@ -122,9 +122,9 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Title block — `═` divider matches the legacy double-line look
     # but now scales to the title length and renders cyan-bold.
-    click.echo()
-    click.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
-    click.echo(ux._style("══════════════════", fg="cyan"))
+    ux.echo()
+    ux.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
+    ux.echo(ux._style("══════════════════", fg="cyan"))
 
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
@@ -133,7 +133,7 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Config", str(config_path()))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
-    click.echo()
+    ux.echo()
 
     # Sandbox
     if _openshell_available(cfg):
@@ -153,11 +153,11 @@ def status(app: AppContext, as_json: bool) -> None:
     ]
     for name, binary in scanner_bins:
         if binary == "built-in":
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux.dim('built-in')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux.dim('built-in')}")
         elif resolve_scanner_binary(binary):
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('installed', fg='green')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('installed', fg='green')}")
         else:
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
     # N3: surface the active policy's scanner action overrides (data.json).
     # Only `policy show` exposed these before, so `status` was blind to a
@@ -165,7 +165,7 @@ def status(app: AppContext, as_json: bool) -> None:
     # policy that declares none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
-        click.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
+        ux.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
 
     # Counts from DB. The numeric labels stay tight-aligned to match
     # the legacy 16-char column; we color the labels and leave the
@@ -194,9 +194,9 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Blocked MCPs", counts.blocked_mcps),
                 ("Allowed MCPs", counts.allowed_mcps),
             ):
-                click.echo(f"    {_label((label + ':').ljust(16))} {val}")
+                ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
         ux.section("Activity")
         if counts is not None:
@@ -204,15 +204,15 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
             ):
-                click.echo(f"    {_label((label + ':').ljust(16))} {val}")
+                ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     # Observability destinations (OTel exporter + audit sinks)
     _print_observability_status(cfg)
 
     # Sidecar status
-    click.echo()
+    ux.echo()
     from defenseclaw.gateway import OrchestratorClient
 
     bind = "127.0.0.1"
@@ -383,17 +383,17 @@ def _print_agents(
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
             disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}")
-            click.echo(f"                {disabled_text} — {disabled_label}")
+            ux.echo(f"                {disabled_text} — {disabled_label}")
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
         if hc:
             suffix = _connector_state_verb(str(hc.get("state") or ""))
-            click.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{source_suffix}{suffix}")
+            ux.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{source_suffix}{suffix}")
             _print_agent_counters(hc, indent="                  ")
         else:
             dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{source_suffix}")
-            click.echo(f"                {dim_text}")
+            ux.echo(f"                {dim_text}")
 
 
 def _fetch_health(host: str | None, port: int | None) -> dict | None:
@@ -486,7 +486,7 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
     tool_mode = str(conn.get("tool_inspection_mode") or "").strip()
     sub_policy = str(conn.get("subprocess_policy") or "").strip()
     if tool_mode or sub_policy:
-        click.echo(
+        ux.echo(
             f"{indent}{ux.dim('tool inspection:')} {tool_mode or 'n/a'}    "
             f"{ux.dim('subprocess:')} {sub_policy or 'n/a'}"
         )
@@ -506,7 +506,7 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
         if sub_blocks
         else ux.dim(f"subprocess blocks: {sub_blocks}")
     )
-    click.echo(
+    ux.echo(
         f"{indent}{ux.dim(f'requests: {requests}')}  {err_text}  "
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
         f"{block_text_sub}"
@@ -524,7 +524,7 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     guardrail_mode = str(state.get("guardrail_mode") or "observe")
     asset_mode = str(state.get("asset_policy_mode") or "observe")
     trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"
-    click.echo(
+    ux.echo(
         "                "
         + ux.dim(f"auto guardrail={guardrail_mode} asset_policy={asset_mode} trusted-path-check={trust_check}")
     )
@@ -534,38 +534,38 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     skipped = [r for r in state.get("skipped") or [] if isinstance(r, dict)]
     errors = state.get("last_activation_errors") or {}
     if not discovered and not active and not skipped and not errors:
-        click.echo("                " + ux.dim("(awaiting discovery scan)"))
+        ux.echo("                " + ux.dim("(awaiting discovery scan)"))
         return
 
     if discovered:
-        click.echo("                " + ux.bold("discovered"))
+        ux.echo("                " + ux.bold("discovered"))
         for row in discovered[:8]:
             conn = str(row.get("connector") or "").strip()
             conf = row.get("confidence")
             conf_text = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
             state_text = str(row.get("state") or "active")
-            click.echo(
+            ux.echo(
                 f"                  {_friendly_connector_name(conn)} ({conn}) — "
                 f"confidence={conf_text} state={state_text}"
             )
     if active:
-        click.echo("                " + ux.bold("auto-protected"))
+        ux.echo("                " + ux.bold("auto-protected"))
         for row in active:
             conn = str(row.get("connector") or "").strip()
             source = str(row.get("source") or "automatic")
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — source={source}")
+            ux.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — source={source}")
     if skipped:
-        click.echo("                " + ux.bold("skipped"))
+        ux.echo("                " + ux.bold("skipped"))
         for row in skipped[:8]:
             conn = str(row.get("connector") or "").strip()
             reason = str(row.get("reason") or "unknown")
             detail = str(row.get("detail") or "")
             suffix = f" — {detail}" if detail else ""
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {reason}{ux.dim(suffix)}")
+            ux.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {reason}{ux.dim(suffix)}")
     if isinstance(errors, dict) and errors:
-        click.echo("                " + ux.bold("last activation errors"))
+        ux.echo("                " + ux.bold("last activation errors"))
         for conn, err in sorted(errors.items()):
-            click.echo(
+            ux.echo(
                 f"                  {_friendly_connector_name(conn)} ({conn}) — {ux._style(str(err), fg='yellow')}"
             )
 
@@ -656,7 +656,7 @@ def _print_hook_guardian(cfg) -> None:
 
     if not state.get("configured"):
         _status_row("Hook guardian", ux._style("not reconciled", fg="yellow"))
-        click.echo("                " + ux.dim("(no hook_guardian_state.json yet)"))
+        ux.echo("                " + ux.dim("(no hook_guardian_state.json yet)"))
         return
 
     ok = bool(state.get("ok"))
@@ -677,7 +677,7 @@ def _print_hook_guardian(cfg) -> None:
             detail.append(f"last run: {updated}")
         if manifest:
             detail.append(f"manifest: {manifest}")
-        click.echo("                " + ux.dim("  ".join(detail)))
+        ux.echo("                " + ux.dim("  ".join(detail)))
 
     results = [r for r in state.get("results") or [] if isinstance(r, dict)]
     for row in results[:8]:
@@ -687,10 +687,10 @@ def _print_hook_guardian(cfg) -> None:
         if user:
             label += f" for {user}"
         if row.get("ok"):
-            click.echo(f"                  {label} — ok")
+            ux.echo(f"                  {label} — ok")
         else:
             err = str(row.get("error") or "failed")
-            click.echo(f"                  {label} — {ux._style(err, fg='yellow')}")
+            ux.echo(f"                  {label} — {ux._style(err, fg='yellow')}")
 
 
 def _hook_guardian_status(cfg) -> dict:
@@ -736,7 +736,7 @@ def _print_observability_status(cfg) -> None:
     ux.section("Observability")
 
     if not destinations:
-        click.echo("    " + ux.dim("(none configured — run `defenseclaw setup observability add <preset>`)"))
+        ux.echo("    " + ux.dim("(none configured — run `defenseclaw setup observability add <preset>`)"))
         return
 
     for d in destinations:
@@ -752,16 +752,16 @@ def _print_observability_status(cfg) -> None:
         else:
             state = ux._style("enabled", fg="green") if d.enabled else ux._style("disabled", fg="bright_black")
         target_tag = "otel" if d.target == "otel" else "sink"
-        click.echo(f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}  {ux.dim('—')} {label}")
+        ux.echo(f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}  {ux.dim('—')} {label}")
 
         if d.target == "otel" and d.enabled and not local_unsupported:
             enabled_signals = [s for s, on in d.signals.items() if on]
             if enabled_signals:
-                click.echo(f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}")
+                ux.echo(f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}")
             if d.endpoint:
-                click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
+                ux.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
         elif d.enabled and d.endpoint and not local_unsupported:
-            click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
+            ux.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
 
 
 def _scanner_overrides_summary(cfg) -> str:

@@ -87,11 +87,11 @@ def _doctor_subsection(title: str) -> None:
     The legacy uncolored layout so cron logs and log shippers see
     the same byte stream they always have.
     """
-    click.echo()
+    ux.echo()
     if ux._color_enabled():
-        click.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
+        ux.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
     else:
-        click.echo(f"  ── {title} ──")
+        ux.echo(f"  ── {title} ──")
 
 
 def _doctor_marker(tag: str) -> str:
@@ -197,7 +197,7 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         os.replace(tmp_path, path)
         tmp_path = ""
     except OSError as exc:
-        click.echo(
+        ux.echo(
             f"warning: could not write doctor cache at {path}: {exc}",
             err=True,
         )
@@ -273,7 +273,7 @@ def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = N
             # the bold label and the detail value without losing the
             # connection between the two halves.
             line += "  " + ux.dim("—") + f"  {detail}"
-        click.echo(line)
+        ux.echo(line)
     if r is not None:
         r.record(tag, label, detail)
 
@@ -290,7 +290,7 @@ def _emit_hint(text: str, *, indent: str = "      ") -> None:
     """
     if _json_mode:
         return
-    click.echo(f"{indent}{ux.dim('↪ ' + text)}")
+    ux.echo(f"{indent}{ux.dim('↪ ' + text)}")
 
 
 def _emit_aid_hint(text: str) -> None:
@@ -3695,10 +3695,10 @@ def doctor(
     _json_mode = json_out
 
     if not json_out:
-        click.echo()
-        click.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
-        click.echo(ux._style("══════════════════", fg="cyan"))
-        click.echo()
+        ux.echo()
+        ux.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
+        ux.echo(ux._style("══════════════════", fg="cyan"))
+        ux.echo()
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
@@ -3870,8 +3870,8 @@ def doctor(
             parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
-        click.echo("  " + ", ".join(parts))
-        click.echo()
+        ux.echo("  " + ", ".join(parts))
+        ux.echo()
 
     if r.failed:
         if not json_out:
@@ -3880,7 +3880,7 @@ def doctor(
             # ``ux.warn`` rather than ``ux.err`` because the line
             # itself isn't a failure; the failures above are.
             ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
-            click.echo()
+            ux.echo()
         raise SystemExit(1)
 
     if app.logger:

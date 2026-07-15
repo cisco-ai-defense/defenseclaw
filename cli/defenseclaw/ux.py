@@ -40,6 +40,144 @@ from dataclasses import dataclass
 
 import click
 
+TUI_UNAVAILABLE_MESSAGE = (
+    "The interactive dashboard needs a UTF-8 capable terminal. "
+    "On Windows, open Windows Terminal or PowerShell 7 and run 'defenseclaw' again. "
+    "This terminal can still run 'defenseclaw status' and 'defenseclaw doctor'."
+)
+
+# ``main()`` snapshots this before it reconfigures Python's streams to UTF-8.
+# Without the snapshot, a legacy cp1252/OEM stream would look capable after the
+# reconfigure even though its terminal host still cannot render these glyphs.
+_configured_unicode_output: bool | None = None
+
+_UNICODE_PROBE = "✓✗⚠─═└—↪"
+_ASCII_PRESENTATION_TRANSLATION = str.maketrans(
+    {
+        "✓": "OK",
+        "✔": "OK",
+        "✗": "X",
+        "✘": "X",
+        "⚠": "!",
+        "─": "-",
+        "━": "-",
+        "═": "=",
+        "│": "|",
+        "║": "|",
+        "┌": "+",
+        "┐": "+",
+        "└": "\\",
+        "┘": "+",
+        "├": "+",
+        "┤": "+",
+        "┬": "+",
+        "┴": "+",
+        "┼": "+",
+        "╭": "+",
+        "╮": "+",
+        "╯": "+",
+        "╰": "+",
+        "—": "-",
+        "–": "-",
+        "→": "->",
+        "←": "<-",
+        "↪": "->",
+        "…": "...",
+        "•": "*",
+        "·": "-",
+        "●": "*",
+        "○": "o",
+    }
+)
+
+
+def _stream_is_tty(stream: object) -> bool:
+    try:
+        return bool(stream.isatty())  # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _stream_supports_unicode(stream: object) -> bool:
+    """Return whether an interactive stream can encode CLI presentation glyphs."""
+
+    if not _stream_is_tty(stream):
+        # Redirected output is deliberately stable ASCII even when the target
+        # file happens to use UTF-8. Machine-readable JSON bypasses this layer.
+        return False
+    try:
+        encoding = getattr(stream, "encoding", None)
+    except (AttributeError, OSError, ValueError):
+        return False
+    if not isinstance(encoding, str) or not encoding:
+        return False
+    try:
+        _UNICODE_PROBE.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+def configure_console_output(stream: object | None = None) -> bool:
+    """Snapshot whether human CLI output may use rich Unicode presentation.
+
+    ``TERM=dumb`` is the explicit native-launch fallback. Otherwise stdout must
+    be an interactive stream whose original encoding supports the complete
+    presentation-glyph set. Call this before any UTF-8 stream reconfiguration.
+    """
+
+    global _configured_unicode_output
+    target = sys.stdout if stream is None else stream
+    _configured_unicode_output = (
+        os.environ.get("TERM", "").strip().lower() != "dumb"
+        and _stream_supports_unicode(target)
+    )
+    return _configured_unicode_output
+
+
+def unicode_output_enabled() -> bool:
+    """Return the policy snapshot, preserving rich output before configuration.
+
+    The default keeps direct library/Click-test use backward-compatible. The
+    shipped entrypoint always calls :func:`configure_console_output` first.
+    """
+
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return False
+    if _configured_unicode_output is None:
+        return True
+    return _configured_unicode_output
+
+
+def console_text(text: str) -> str:
+    """Downgrade presentation glyphs while preserving ordinary Unicode text."""
+
+    if unicode_output_enabled():
+        return text
+    return text.translate(_ASCII_PRESENTATION_TRANSLATION)
+
+
+def echo(message: object | None = None, **kwargs: object) -> None:
+    """Call :func:`click.echo` with presentation-safe human output."""
+
+    if isinstance(message, str):
+        message = console_text(message)
+    click.echo(message, **kwargs)
+
+
+def terminal_supports_tui(
+    *, stdin: object | None = None, stdout: object | None = None
+) -> bool:
+    """Return whether both streams and the rendering policy can host Textual."""
+
+    input_stream = sys.stdin if stdin is None else stdin
+    output_stream = sys.stdout if stdout is None else stdout
+    return (
+        unicode_output_enabled()
+        and _stream_is_tty(input_stream)
+        and _stream_is_tty(output_stream)
+    )
+
 
 @dataclass
 class CLIRenderer:
@@ -50,12 +188,16 @@ class CLIRenderer:
 
     def __post_init__(self) -> None:
         if self.color is None:
-            self.color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+            self.color = (
+                unicode_output_enabled()
+                and sys.stdout.isatty()
+                and "NO_COLOR" not in os.environ
+            )
 
     def echo(self, text: str = "", *, err: bool = False) -> None:
         if self.quiet:
             return
-        click.echo(text, err=err)
+        echo(text, err=err)
 
     def title(self, text: str, subtitle: str = "") -> None:
         if self.quiet:
@@ -93,6 +235,7 @@ class CLIRenderer:
         self.echo(line)
 
     def _style(self, text: str, **kwargs) -> str:
+        text = console_text(text)
         if not self.color:
             return text
         return click.style(text, **kwargs)
@@ -114,9 +257,8 @@ class CLIRenderer:
 #       - ``NO_COLOR`` env var (any value) disables colors.
 #         See https://no-color.org for the cross-vendor spec.
 #       - Non-TTY stdout disables colors.
-#       - ``CLICOLOR_FORCE`` / ``FORCE_COLOR`` env vars override
-#         non-TTY downgrade so CI pipelines that scrape logs with a
-#         color-aware viewer can opt back in.
+#       - ``CLICOLOR_FORCE`` / ``FORCE_COLOR`` can opt back into color only
+#         when the snapshotted rendering policy is Unicode-capable.
 #   * Returns plain strings (no side-effects) so callers can compose
 #     them inside ``f"…"`` and ``click.echo``. A separate helper
 #     (:func:`section`) emits two lines for headings; that one prints
@@ -134,14 +276,18 @@ def _color_enabled() -> bool:
     Recomputed on every call so monkey-patched stdout / env vars in
     tests take effect immediately. Order:
 
-      1. ``CLICOLOR_FORCE`` / ``FORCE_COLOR`` truthy → True (force
+      1. ASCII-safe / ``TERM=dumb`` rendering → False. ANSI controls are not
+         safe to inject into the final legacy fallback.
+      2. ``CLICOLOR_FORCE`` / ``FORCE_COLOR`` truthy → True (force
          colors even when not a TTY; the standard "yes I really
          want colors in my piped log" escape hatch).
-      2. ``NO_COLOR`` set (any value) → False. Per
+      3. ``NO_COLOR`` set (any value) → False. Per
          https://no-color.org any presence — including empty — means
          "no color".
-      3. ``sys.stdout.isatty()`` → use that.
+      4. ``sys.stdout.isatty()`` → use that.
     """
+    if not unicode_output_enabled():
+        return False
     if os.environ.get("CLICOLOR_FORCE", "").strip() or os.environ.get(
         "FORCE_COLOR", ""
     ).strip():
@@ -163,6 +309,7 @@ def _style(text: str, **kwargs: object) -> str:
     Centralized so every helper picks up policy changes (NO_COLOR,
     forced color, TTY downgrade) from a single check.
     """
+    text = console_text(text)
     if not _color_enabled():
         return text
     return click.style(text, **kwargs)
@@ -202,9 +349,9 @@ def section(title: str, *, indent: str = "  ", divider_char: str = "─") -> Non
     ``Hook fail mode``, ``Human Approval``, etc.). For inline
     emphasis use :func:`accent` instead.
     """
-    click.echo()
-    click.echo(f"{indent}{_style(title, fg='cyan', bold=True)}")
-    click.echo(f"{indent}{_style(divider_char * len(title), fg='cyan')}")
+    echo()
+    echo(f"{indent}{_style(title, fg='cyan', bold=True)}")
+    echo(f"{indent}{_style(divider_char * len(title), fg='cyan')}")
 
 
 def banner(
@@ -230,13 +377,13 @@ def banner(
     making the dashes shouty.
     """
     if leading_blank:
-        click.echo()
+        echo()
     label = f" {title} "
     side = max(2, (width - len(label)) // 2)
     left = divider_char * side
     right = divider_char * (width - side - len(label))
     if _color_enabled():
-        click.echo(
+        echo(
             f"{indent}{_style(left, fg='bright_black')}"
             f" {_style(title, fg='cyan', bold=True)} "
             f"{_style(right, fg='bright_black')}"
@@ -246,8 +393,8 @@ def banner(
         # format exactly so any test or screen scraper that
         # grep-substrings on ``"── Environment ──"`` keeps
         # matching.
-        click.echo(f"{indent}{left}{label}{right}")
-    click.echo()
+        echo(f"{indent}{left}{label}{right}")
+    echo()
 
 
 def subhead(text: str, *, indent: str = "  ") -> None:
@@ -256,12 +403,12 @@ def subhead(text: str, *, indent: str = "  ") -> None:
     Mirrors :meth:`CLIRenderer.section` color — bright_black so it
     visually recedes below the cyan heading without disappearing.
     """
-    click.echo(f"{indent}{dim(text)}")
+    echo(f"{indent}{dim(text)}")
 
 
 def ok(text: str, *, indent: str = "  ", marker: str = "✓") -> None:
     """Print a green success line: ``  ✓ {text}``."""
-    click.echo(f"{indent}{_style(marker, fg='green', bold=True)} {text}")
+    echo(f"{indent}{_style(marker, fg='green', bold=True)} {text}")
 
 
 def warn(text: str, *, indent: str = "  ", marker: str = "⚠") -> None:
@@ -271,7 +418,7 @@ def warn(text: str, *, indent: str = "  ", marker: str = "⚠") -> None:
     "redaction is OFF in shared deployments"). Reserve :func:`err`
     for genuinely failed operations.
     """
-    click.echo(f"{indent}{_style(marker, fg='yellow', bold=True)} {_style(text, fg='yellow')}")
+    echo(f"{indent}{_style(marker, fg='yellow', bold=True)} {_style(text, fg='yellow')}")
 
 
 def err(text: str, *, indent: str = "  ", marker: str = "✗") -> None:
@@ -283,7 +430,7 @@ def err(text: str, *, indent: str = "  ", marker: str = "✗") -> None:
     Callers that genuinely need stderr should use
     :func:`click.echo` with ``err=True`` directly.
     """
-    click.echo(f"{indent}{_style(marker, fg='red', bold=True)} {_style(text, fg='red')}")
+    echo(f"{indent}{_style(marker, fg='red', bold=True)} {_style(text, fg='red')}")
 
 
 def kv(
@@ -310,6 +457,6 @@ def kv(
     text_value = "" if value is None else str(value)
     rendered_value = dim("—") if not text_value else text_value
     label = (key + ":").ljust(key_width)
-    click.echo(
+    echo(
         f"{indent}{_style(label, fg='bright_black', bold=True)} {rendered_value}"
     )

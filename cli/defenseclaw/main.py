@@ -27,7 +27,7 @@ import sys
 
 import click
 
-from defenseclaw import __version__
+from defenseclaw import __version__, ux
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
@@ -148,7 +148,7 @@ def cli(ctx: click.Context) -> None:
     # some recovery workflows, so check the durable initialization marker
     # before loading and before Store.init() can recreate audit.db.
     if invoked == "status" and not cfg_mod.config_path().is_file():
-        click.echo(
+        ux.echo(
             "DefenseClaw initialization required — run 'defenseclaw init' first.",
             err=True,
         )
@@ -157,7 +157,7 @@ def cli(ctx: click.Context) -> None:
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
-        click.echo(
+        ux.echo(
             f"Failed to load config — run 'defenseclaw init' first: {exc}",
             err=True,
         )
@@ -172,12 +172,12 @@ def cli(ctx: click.Context) -> None:
 
         result = validate_config()
         if not result.ok:
-            click.echo("Config validation failed:", err=True)
+            ux.echo("Config validation failed:", err=True)
             if result.parse_error:
-                click.echo(f"  ✗ {result.parse_error}", err=True)
+                ux.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
-                click.echo(f"  ✗ {issue}", err=True)
-            click.echo(
+                ux.echo(f"  ✗ {issue}", err=True)
+            ux.echo(
                 "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
                 err=True,
             )
@@ -187,7 +187,7 @@ def cli(ctx: click.Context) -> None:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        click.echo(f"Failed to open audit store: {exc}", err=True)
+        ux.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
     app.logger = Logger(app.store, app.cfg.splunk)
@@ -255,6 +255,10 @@ def _try_launch_tui() -> bool:
     if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
         return False
 
+    if not ux.terminal_supports_tui():
+        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        return True
+
     from defenseclaw.tui import run_textual_tui
 
     run_textual_tui()
@@ -284,6 +288,7 @@ def _force_utf8_io() -> None:
 
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    ux.configure_console_output()
     _force_utf8_io()
     if not _try_launch_tui():
         cli()
