@@ -1052,8 +1052,8 @@ function Invoke-BuildArtifacts {
     try {
         $env:CGO_ENABLED = '0'
         foreach ($binary in @(
-            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion", 'gateway'),
-            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion", 'hook')
+            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
+            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
         )) {
             foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
                 $target = Join-Path $targetRoot $binary[0]

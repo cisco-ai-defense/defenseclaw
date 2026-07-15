@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
 BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
+BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
 assert SPEC and SPEC.loader
 artifacts = importlib.util.module_from_spec(SPEC)
@@ -294,6 +295,85 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
     assert "'--authenticode-inventory', $authenticodeInventoryPath" in build
     assert "function Get-DefenseClawTimestampEvidence" in helper
     assert "ExpectedSignerThumbprintSha256" in helper
+
+
+def test_builder_checks_distroot_gateway_and_hook_identity_before_signing() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    assert ". $WindowsBinaryIdentityHelper" in build
+    gateway_check = (
+        "-Path $gatewayBinary -ExpectedName 'defenseclaw-gateway' `\n"
+        "    -ExpectedVersion $Version -ExpectedCommit $sourceCommit"
+    )
+    hook_check = (
+        "-Path $hookBinary -ExpectedName 'defenseclaw-hook' `\n"
+        "    -ExpectedVersion $Version -ExpectedCommit $sourceCommit"
+    )
+    assert gateway_check in build
+    assert hook_check in build
+    signing_call = "$payloadSigned = Set-FileSignaturesIfConfigured"
+    assert build.index(gateway_check) < build.index(signing_call)
+    assert build.index(hook_check) < build.index(signing_call)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
+def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    pwsh = shutil.which("pwsh")
+    if not go or not pwsh:
+        pytest.skip("Go and PowerShell are required for the binary identity regression test")
+
+    source = tmp_path / "main.go"
+    source.write_text(
+        "package main\n"
+        "import (\"encoding/json\"; \"os\")\n"
+        "func main() { _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"
+        "\"schema_version\": 1, \"name\": os.Getenv(\"DC_IDENTITY_NAME\"), "
+        "\"version\": os.Getenv(\"DC_IDENTITY_VERSION\"), "
+        "\"commit\": os.Getenv(\"DC_IDENTITY_COMMIT\")}) }\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "distroot-binary.exe"
+    build_env = os.environ.copy()
+    build_env["CGO_ENABLED"] = "0"
+    subprocess.run(
+        [go, "build", "-o", executable, source],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=build_env,
+    )
+    expected_commit = "a" * 40
+    command = (
+        ". $env:DC_IDENTITY_HELPER; "
+        "Assert-DefenseClawBinaryIdentity -Path $env:DC_IDENTITY_BINARY "
+        "-ExpectedName defenseclaw-gateway -ExpectedVersion 1.2.3 "
+        "-ExpectedCommit $env:DC_EXPECTED_COMMIT | Out-Null"
+    )
+    base_env = os.environ.copy()
+    base_env.update(
+        {
+            "DC_IDENTITY_HELPER": str(BINARY_IDENTITY_PS1),
+            "DC_IDENTITY_BINARY": str(executable),
+            "DC_IDENTITY_NAME": "defenseclaw-gateway",
+            "DC_EXPECTED_COMMIT": expected_commit,
+        }
+    )
+    cases = (
+        ("1.2.2", expected_commit, "binary version mismatch"),
+        ("1.2.3", "b" * 40, "binary source commit mismatch"),
+    )
+    for version, commit, diagnostic in cases:
+        env = base_env.copy()
+        env["DC_IDENTITY_VERSION"] = version
+        env["DC_IDENTITY_COMMIT"] = commit
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0
+        assert diagnostic in (result.stdout + result.stderr)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")

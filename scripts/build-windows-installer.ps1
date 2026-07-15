@@ -48,6 +48,7 @@ $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersi
 $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
 $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
 $WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
+$WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -392,7 +393,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 $resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
 foreach ($requiredSetupInput in @(
-    $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper
+    $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper,
+    $WindowsBinaryIdentityHelper
 )) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
         throw "Required Windows installer input is missing: $requiredSetupInput"
@@ -648,6 +650,13 @@ $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
 Set-WindowsExecutableResource $gatewayBinary 'gateway' -VerifyOnly
 Set-WindowsExecutableResource $hookBinary 'hook' -VerifyOnly
+. $WindowsBinaryIdentityHelper
+Assert-DefenseClawBinaryIdentity `
+    -Path $gatewayBinary -ExpectedName 'defenseclaw-gateway' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
+Assert-DefenseClawBinaryIdentity `
+    -Path $hookBinary -ExpectedName 'defenseclaw-hook' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
 $payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
 foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $launcher; Component = 'launcher' },

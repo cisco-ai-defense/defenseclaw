@@ -560,21 +560,30 @@ func TestValidPayloadVersion(t *testing.T) {
 }
 
 func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
-	valid := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"abc","built":"now"}`)
-	if err := validateMachineVersion(valid, "defenseclaw-gateway", "1.2.3-rc.1"); err != nil {
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	valid := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now"}`)
+	if err := validateMachineVersion(valid, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
 		t.Fatalf("validateMachineVersion valid report: %v", err)
 	}
 	for name, body := range map[string][]byte{
-		"substring": []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"11.2.30"}`),
-		"identity":  []byte(`{"schema_version":1,"name":"foreign-gateway","version":"1.2.3-rc.1"}`),
-		"trailing":  append(append([]byte(nil), valid...), []byte(` {}`)...),
-		"unknown":   []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
+		"substring":        []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"11.2.30"}`),
+		"identity":         []byte(`{"schema_version":1,"name":"foreign-gateway","version":"1.2.3-rc.1"}`),
+		"commit missing":   []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1"}`),
+		"commit short":     []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456"}`),
+		"commit uppercase": []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789ABCDEF0123456789ABCDEF01234567"}`),
+		"commit mismatch":  []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"1123456789abcdef0123456789abcdef01234567"}`),
+		"trailing":         append(append([]byte(nil), valid...), []byte(` {}`)...),
+		"unknown":          []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1"); err == nil {
+			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1", commit); err == nil {
 				t.Fatal("validateMachineVersion accepted invalid report")
 			}
 		})
+	}
+	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
+	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {
+		t.Fatalf("version-only CLI identity: %v", err)
 	}
 }
 

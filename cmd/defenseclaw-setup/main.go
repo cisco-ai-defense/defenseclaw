@@ -1111,7 +1111,7 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 	if err != nil {
 		return fmt.Errorf("managed CLI version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if err := validateMachineVersion(output, "defenseclaw-cli", version); err != nil {
+	if err := validateMachineVersion(output, "defenseclaw-cli", version, ""); err != nil {
 		return fmt.Errorf("managed CLI version check: %w", err)
 	}
 	gateway := filepath.Join(root, "bin", "defenseclaw-gateway.exe")
@@ -1119,8 +1119,16 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 	if err != nil {
 		return fmt.Errorf("gateway version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if err := validateMachineVersion(output, "defenseclaw-gateway", version); err != nil {
+	if err := validateMachineVersion(output, "defenseclaw-gateway", version, manifest.SourceCommit); err != nil {
 		return fmt.Errorf("gateway version check: %w", err)
+	}
+	hook := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	output, err = runCapturedSetupCommand(setupValidationTimeout, childEnv, hook, "--version-json")
+	if err != nil {
+		return fmt.Errorf("hook version check failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if err := validateMachineVersion(output, "defenseclaw-hook", version, manifest.SourceCommit); err != nil {
+		return fmt.Errorf("hook version check: %w", err)
 	}
 	return nil
 }
@@ -1133,7 +1141,7 @@ type machineVersionReport struct {
 	Built         string `json:"built,omitempty"`
 }
 
-func validateMachineVersion(output []byte, expectedName, expectedVersion string) error {
+func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
 	var report machineVersionReport
@@ -1149,6 +1157,14 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion string)
 	}
 	if !validPayloadVersion(report.Version) || report.Version != expectedVersion {
 		return fmt.Errorf("reported version %q does not exactly match packaged version %q", report.Version, expectedVersion)
+	}
+	if expectedCommit != "" {
+		if !validSourceCommit(report.Commit) {
+			return fmt.Errorf("reported source commit %q is invalid", report.Commit)
+		}
+		if report.Commit != expectedCommit {
+			return fmt.Errorf("reported source commit %q does not exactly match packaged source commit %q", report.Commit, expectedCommit)
+		}
 	}
 	return nil
 }
