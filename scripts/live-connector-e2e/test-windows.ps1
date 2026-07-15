@@ -783,6 +783,8 @@ try {
         $standardUserCIText -match 'Stop-AndVerifyDisposableSidProcesses' -and
         $standardUserCIText -match 'Remove-AndVerifyDisposableScheduledTasks' -and
         $standardUserCIText -match 'WMI escape fixture' -and
+        $standardUserCIText -match '-OperationTimeoutSec 30' -and
+        $standardUserCIText -match "(?s)if \(\`$Mode -eq 'setup-acceptance'\) \{\s*\`$arguments \+= '-ExerciseWmiEscape'" -and
         $standardUserCIText -match 'wmi-escape-pid\.txt' -and
         $standardUserCIText -match 'Complete-DisposableExecutionBoundary' -and
         $standardUserCIText -notmatch 'Copy-Item[^\r\n]*-Recurse') `

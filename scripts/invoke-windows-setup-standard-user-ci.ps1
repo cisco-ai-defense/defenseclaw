@@ -225,7 +225,7 @@ function Invoke-ChildMode {
             )
         $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
             -Arguments @{ CommandLine = $commandLine; CurrentDirectory = $expectedResults } `
-            -ErrorAction Stop
+            -OperationTimeoutSec 30 -ErrorAction Stop
         if ([uint32]$created.ReturnValue -ne 0 -or [uint32]$created.ProcessId -eq 0) {
             throw "WMI escape fixture creation failed: $($created.ReturnValue)"
         }
@@ -711,10 +711,12 @@ try {
         '-ArtifactRoot', $childArtifacts,
         '-StateRoot', $childState,
         '-DiagnosticsRoot', $childDiagnostics,
-        '-ResultPath', $result,
-        '-ExerciseWmiEscape',
-        '-ExpectedSetupSha256', $expectedSetupHash
+        '-ResultPath', $result
     )
+    if ($Mode -eq 'setup-acceptance') {
+        $arguments += '-ExerciseWmiEscape'
+    }
+    $arguments += @('-ExpectedSetupSha256', $expectedSetupHash)
     # Refresh immediately before the untrusted logon. Only exact PID and
     # CreationDate pairs that are already unverifiable at this point may remain
     # unverifiable during teardown; PID reuse and every new unknown fail closed.
@@ -758,11 +760,13 @@ try {
         $childHashAfter -cne $expectedSetupHash) {
         throw 'exact Setup artifact hash changed during disposable-user lifecycle acceptance'
     }
-    $fixturePidText = Read-BoundedDisposableResult $wmiFixtureRecord $childResults 4096
-    $fixturePid = 0
-    if (-not [int]::TryParse($fixturePidText.Trim(), [ref]$fixturePid) -or
-        $fixturePid -le 0 -or $fixturePid -notin $terminatedSidProcessIds) {
-        throw 'WMI escape fixture was not terminated by the exact disposable-SID process sweep'
+    if ($Mode -eq 'setup-acceptance') {
+        $fixturePidText = Read-BoundedDisposableResult $wmiFixtureRecord $childResults 4096
+        $fixturePid = 0
+        if (-not [int]::TryParse($fixturePidText.Trim(), [ref]$fixturePid) -or
+            $fixturePid -le 0 -or $fixturePid -notin $terminatedSidProcessIds) {
+            throw 'WMI escape fixture was not terminated by the exact disposable-SID process sweep'
+        }
     }
     $observed = (Read-BoundedDisposableResult $result $childResults) | ConvertFrom-Json
     if ([string]$observed.user_sid -ne $accountSid -or [bool]$observed.elevated) {
