@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -39,11 +40,22 @@ func canonicalNativeWindowsInstallRoot() string {
 	return filepath.Join(programs, "DefenseClaw")
 }
 
-// canonicalNativeWindowsHookBinary is the exact logical launcher path native
-// Setup owns. Maintenance teardown uses this Known-Folder-derived path to
-// recognize registrations after the installed payload itself was removed or
-// quarantined; it never accepts an environment-selected or arbitrary path.
+// canonicalNativeWindowsHookBinary is the stable launcher path native Setup
+// publishes outside both the replaceable install tree and the user data tree.
+// Only this path is authorized by hookruntime to cold-start the exact installed
+// gateway or become a disabled no-op during maintenance.
 func canonicalNativeWindowsHookBinary() string {
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(paths.Launcher)
+}
+
+// canonicalNativeWindowsInstalledHookBinary is the legacy install-tree
+// launcher path emitted by earlier native builds. It remains an owned teardown
+// target, but new registrations use canonicalNativeWindowsHookBinary.
+func canonicalNativeWindowsInstalledHookBinary() string {
 	root := canonicalNativeWindowsInstallRoot()
 	if strings.TrimSpace(root) == "" {
 		return ""

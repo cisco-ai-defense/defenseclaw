@@ -162,11 +162,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
 
-// defenseclawHookBinary returns the stable installed launcher path on Windows.
-// A native packaged gateway proves its own installer layout before selecting
-// the sibling launcher. Repository builds have no matching installer state and
-// retain the legacy ~/.local/bin fallback, so generated config never points at
-// a movable checkout merely because that checkout is currently running setup.
+// defenseclawHookBinary returns the stable native HookRuntime launcher on
+// Windows after the running gateway proves its installer-owned layout.
+// Repository builds have no matching installer state and retain the legacy
+// ~/.local/bin fallback, so generated config never points at a movable checkout
+// merely because that checkout is currently running setup.
 func defenseclawHookBinary() string {
 	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
 		return defenseclawHookBinaryOverride
@@ -202,15 +202,17 @@ func packagedWindowsHookBinary(executable string) string {
 	if strings.TrimSpace(expectedRoot) == "" {
 		return ""
 	}
-	return packagedWindowsHookBinaryForRoot(executable, expectedRoot)
+	if packagedWindowsHookBinaryForRoot(executable, expectedRoot) == "" {
+		return ""
+	}
+	return canonicalNativeWindowsHookBinary()
 }
 
-// packagedWindowsHookBinaryForRoot resolves the launcher command for a native
+// packagedWindowsHookBinaryForRoot verifies the launcher sibling for a native
 // packaged gateway whose fixed installation root has already been established
-// from the Windows Known Folder API. A live installation always registers the
-// exact signed sibling in <InstallRoot>\bin; it must not fall back to a
-// synthetic USERPROFILE, a stale PATH entry, or the legacy ~/.local/bin
-// layout.
+// from the Windows Known Folder API. Production uses this proof before
+// registering the stable HookRuntime launcher; it must not fall back to a
+// synthetic USERPROFILE, a stale PATH entry, or the legacy ~/.local/bin layout.
 //
 // During uninstall the gateway runs briefly from the installer's verified
 // transaction trash tree. Return the original logical sibling path in that
@@ -492,7 +494,11 @@ func isNativeHookCommand(cmd string) bool {
 		// the Windows Known Folder API, not environment or PATH. Accept the exact
 		// encoded command Setup writes without making repository builds generate
 		// it.
-		hookBinaries = append(hookBinaries, canonicalNativeWindowsHookBinary())
+		hookBinaries = append(
+			hookBinaries,
+			canonicalNativeWindowsHookBinary(),
+			canonicalNativeWindowsInstalledHookBinary(),
+		)
 	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
@@ -580,6 +586,7 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 	for _, owned := range uniqueNonEmptyStrings([]string{
 		defenseclawHookBinary(),
 		canonicalNativeWindowsHookBinary(),
+		canonicalNativeWindowsInstalledHookBinary(),
 	}) {
 		if pathidentity.Same(exe, owned) {
 			return true

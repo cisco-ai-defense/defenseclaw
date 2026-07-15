@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/windows"
@@ -47,6 +48,20 @@ func TestCanonicalNativeWindowsInstallRootIgnoresConnectorEnvironmentOverrides(t
 	got := canonicalNativeWindowsInstallRoot()
 	if !sameWindowsInstallPath(got, want) {
 		t.Fatalf("token-bound native install root changed with connector environment: got %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalNativeWindowsHookBinaryUsesStableRuntime(t *testing.T) {
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalNativeWindowsHookBinary(); !sameWindowsInstallPath(got, paths.Launcher) {
+		t.Fatalf("canonical hook launcher = %q, want stable runtime %q", got, paths.Launcher)
+	}
+	installed := canonicalNativeWindowsInstalledHookBinary()
+	if installed == "" || sameWindowsInstallPath(installed, paths.Launcher) {
+		t.Fatalf("legacy installed launcher = %q, want distinct owned teardown path", installed)
 	}
 }
 

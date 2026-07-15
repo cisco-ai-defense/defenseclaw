@@ -345,7 +345,12 @@ func (g *HookConfigGuard) run() {
 			name := filepath.Clean(event.Name)
 			g.mu.Lock()
 			_, isTarget := g.targets[name]
-			if isTarget {
+			_, isWatchedDir := g.watchedDirs[name]
+			// A Windows directory watch remains attached to the deleted file
+			// identity after the path is removed and recreated. Queue the watched
+			// directory itself so the normal debounced processing path rebuilds
+			// the watcher after the replacement has settled.
+			if isTarget || (isWatchedDir && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0) {
 				if _, exists := g.pending[name]; !exists {
 					g.pending[name] = time.Now()
 				}
