@@ -105,16 +105,20 @@ make all
 defenseclaw init
 ```
 
-`make all` runs the Python install, builds the Go gateway, builds the OpenClaw plugin, and runs a quick smoke test. The artifacts land in `bin/` and on your `PATH`. Then `defenseclaw init` walks you through the first-run setup (or run `defenseclaw quickstart --connector <x>` for the zero-prompt path).
+`make all` installs the editable Python CLI, builds and installs the Go gateway,
+updates your PATH, and runs quickstart. The OpenClaw plugin is installed when
+`CONNECTOR=openclaw` is selected. Then `defenseclaw init` walks you through
+first-run setup (or run `defenseclaw quickstart --connector <x>` for the
+zero-prompt path).
 
-Source builds are development tooling, not an upgrade path. A repeat install is
-accepted only for the same checkout and the same reviewed release,
-source-install compatibility epoch, and runtime schema. Source-owned version
-transitions have no tested in-place path and cannot use the release resolver's
-managed-venv rollback flow. Keep the existing source checkout/state unchanged,
-use an isolated fresh developer `HOME` and install directory, or contact
-support. Do not aim a raw `pip`, `uv`, or editable install at a
-release-managed host or its managed virtual environment.
+Source builds are development tooling, not a packaged upgrade path. `make all`
+is the explicit developer reinstall workflow: it may reclaim markerless or
+older source state only when the installed CLI belongs to this exact checkout.
+It validates marker ownership, rejects foreign and newer source identities,
+and records the current strict marker after a successful rebuild. Direct
+`make install`, `scripts/install-dev.sh`, and release-managed hosts remain
+fail-closed. Release installations must use `defenseclaw upgrade`; do not aim a
+raw `pip`, `uv`, or editable install at a release-managed virtual environment.
 
 </Tab>
 

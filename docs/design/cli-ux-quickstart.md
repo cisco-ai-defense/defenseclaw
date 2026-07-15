@@ -33,8 +33,9 @@ reset, and self-check-with-auto-repair were left as manual
 ## Goals
 
 1. A single command, `make all`, takes a fresh clone to a working
-   guardrail with one PATH prompt. All subsequent invocations are
-   idempotent.
+   guardrail with one PATH prompt. Subsequent invocations are idempotent,
+   including an explicitly developer-owned transition from an older source
+   release when the installed CLI belongs to that exact checkout.
 2. API-key handling is registry-driven: new features declare their
    credential needs in one place and `doctor`, `keys`, `quickstart`,
    and the TUI all pick them up automatically.
@@ -129,7 +130,10 @@ already picked).
 source) both accept `--quickstart` / `--quickstart-mode`. The
 top-level `Makefile` adds five new targets:
 
-- `make all` → `install` + `path` + `quickstart`
+- `make all` → developer source publication + `path` + `quickstart`. The
+  developer publication may reclaim markerless or older source state only
+  when the installed CLI belongs to the exact checkout; `make install` and
+  `scripts/install-dev.sh` retain the strict release/different-checkout guard.
 - `make path` → run `scripts/add-to-path.sh` (honours `YES=1`)
 - `make doctor`, `make uninstall`, `make quickstart` — thin
   wrappers over the CLI that fall through to the venv binary if
