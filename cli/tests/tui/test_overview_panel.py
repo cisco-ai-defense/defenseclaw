@@ -637,7 +637,11 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
 
 def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:
     hermes_home = tmp_path / "hermes-home"
+    claude_home = tmp_path / "claude-home"
+    codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
@@ -652,6 +656,8 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "config")
     assert str(hermes_home / "skills") in connector_source_label("hermes", "skills")
     assert str(hermes_home / "plugins") in connector_source_label("hermes", "plugins")
+    assert str(claude_home / "settings.json") in connector_source_label("claudecode", "config")
+    assert str(codex_home / "config.toml") in connector_source_label("codex", "config")
     assert ".cursor/skills" in connector_source_label("cursor", "skills")
     assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
     assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")

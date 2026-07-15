@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -56,6 +57,18 @@ var (
 	ErrNotRunning     = errors.New("daemon is not running")
 	ErrStopTimeout    = errors.New("daemon did not stop within timeout")
 )
+
+const (
+	childPIDRegistrationTimeout = 5 * time.Second
+	childPIDRegistrationPoll    = 5 * time.Millisecond
+	forcedStopWait              = 2 * time.Second
+)
+
+// GracefulStopRequest asks the authenticated gateway control plane to stop the
+// exact managed PID. Returning nil means the request was accepted; Daemon then
+// waits on that original process before using OS-level termination as a bounded
+// compatibility fallback.
+type GracefulStopRequest func(pid int) error
 
 type Daemon struct {
 	dataDir string
@@ -136,7 +149,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	if !processExists(info.PID) {
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
 	if !d.verifyProcess(info) {
@@ -144,7 +157,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
 		// and remove it so the next operation gets a clean slate.
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
 	return true, info.PID
@@ -217,7 +230,7 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 		if err != nil {
 			return false
 		}
-		if info.Executable != "" && !strings.EqualFold(filepath.Clean(exePath), filepath.Clean(info.Executable)) {
+		if info.Executable != "" && !pathidentity.Same(exePath, info.Executable) {
 			return false
 		}
 		return true
@@ -375,19 +388,36 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// the legacy behavior on platforms without /proc.
 	startIdentity, _ := processStartIdentity(pid)
 
-	// On Windows the breakaway child also writes this same strong identity at
-	// its earliest sidecar pre-run hook. That closes the launcher-cancellation
-	// window between CreateProcess and this parent-side write: a surviving
-	// breakaway child is always PID-file-managed. Keep the parent write as the
-	// authoritative handoff/error check and to preserve the existing Unix path.
-	if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
-		_ = cmd.Process.Kill()
-		<-exitCh // reap the child so it doesn't become a zombie
-		devNull.Close()
-		_ = logFile.Close()
-		return 0, fmt.Errorf("daemon: write pid: %w", err)
+	if daemonChildRegistersPID() {
+		// A Windows breakaway child publishes its strong identity before any
+		// fallible sidecar initialization. The parent used to publish the same
+		// file concurrently. ReplaceFileW can temporarily move the destination
+		// aside while merging metadata, so those two writers could strand an
+		// internal gateway.pid~RF*.TMP file and leave no canonical PID record.
+		// Treat the child as the sole writer and verify its exact handoff here.
+		registered, childExited, err := d.waitForChildPIDRegistration(
+			pid, executable, startIdentity, exitCh, childPIDRegistrationTimeout,
+		)
+		if err != nil {
+			if !childExited {
+				_ = cmd.Process.Kill()
+				<-exitCh // reap the child so it doesn't become a zombie
+			}
+			devNull.Close()
+			_ = logFile.Close()
+			return 0, err
+		}
+		d.started = registered
+	} else {
+		if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
+			_ = cmd.Process.Kill()
+			<-exitCh // reap the child so it doesn't become a zombie
+			devNull.Close()
+			_ = logFile.Close()
+			return 0, fmt.Errorf("daemon: write pid: %w", err)
+		}
+		d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 	}
-	d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
 	// fds now, and keeping these open in the parent only delays GC once the
@@ -404,7 +434,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// left a stale PID file ().
 	select {
 	case waitErr := <-exitCh:
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(d.started)
 		if waitErr != nil {
 			return 0, fmt.Errorf("daemon: process exited immediately (check %s for errors): %w", d.logFile, waitErr)
 		}
@@ -417,6 +447,68 @@ func (d *Daemon) Start(args []string) (int, error) {
 	}
 
 	return pid, nil
+}
+
+// waitForChildPIDRegistration waits for the Windows daemon child to publish
+// the one authoritative strong PID record. childExited reports whether this
+// function consumed exitCh, so the caller never waits twice while rolling back
+// a failed launch.
+func (d *Daemon) waitForChildPIDRegistration(
+	pid int,
+	executable string,
+	startIdentity string,
+	exitCh <-chan error,
+	timeout time.Duration,
+) (pidInfo, bool, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(childPIDRegistrationPoll)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		info, err := d.readPIDInfo()
+		if err == nil {
+			switch {
+			case info.PID != pid:
+				lastErr = fmt.Errorf("pid file contains process %d, want %d", info.PID, pid)
+			case info.Executable == "":
+				lastErr = errors.New("pid file executable is empty")
+			case !strings.EqualFold(filepath.Clean(info.Executable), filepath.Clean(executable)):
+				lastErr = fmt.Errorf("pid file executable %q does not match %q", info.Executable, executable)
+			case info.StartIdentity == "":
+				lastErr = errors.New("pid file start identity is empty")
+			case startIdentity != "" && info.StartIdentity != startIdentity:
+				lastErr = errors.New("pid file start identity does not match the spawned process")
+			case !d.verifyProcess(info):
+				lastErr = errors.New("pid file does not identify the spawned process")
+			default:
+				return info, false, nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case waitErr := <-exitCh:
+			d.removePIDFileIfStarted(pidInfo{PID: pid, StartIdentity: startIdentity})
+			if waitErr != nil {
+				return pidInfo{}, true, fmt.Errorf(
+					"daemon: process exited before PID registration (check %s for errors): %w",
+					d.logFile, waitErr,
+				)
+			}
+			return pidInfo{}, true, fmt.Errorf(
+				"daemon: process exited before PID registration with status 0 (check %s for errors)",
+				d.logFile,
+			)
+		case <-deadline.C:
+			return pidInfo{}, false, fmt.Errorf(
+				"daemon: timed out waiting for child PID registration: %w", lastErr,
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *Daemon) childEnv(parentEnv []string) []string {
@@ -488,8 +580,30 @@ func readGatewayTokenDotenv(path string) map[string]string {
 }
 
 func (d *Daemon) Stop(timeout time.Duration) error {
+	return d.stop(timeout, nil)
+}
+
+// StopGracefully first asks the running gateway to drain itself through its
+// authenticated control plane. If the control plane is unavailable (for
+// example, while replacing an older binary) or the process misses the bounded
+// deadline, stop falls back to the platform termination signal and finally a
+// force kill. PID state is cleared only after the original process handle has
+// confirmed exit.
+func (d *Daemon) StopGracefully(timeout time.Duration, request GracefulStopRequest) error {
+	return d.stop(timeout, request)
+}
+
+func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error {
 	running, pid := d.IsRunning()
 	if !running {
+		return ErrNotRunning
+	}
+	// Bind every cleanup decision to the exact process identity observed before
+	// signalling. A concurrent restart can publish a new gateway.pid while the
+	// old process is still exiting; unconditionally removing the pathname here
+	// would orphan the healthy replacement daemon.
+	started, err := d.readPIDInfo()
+	if err != nil || started.PID != pid || !d.verifyProcess(started) {
 		return ErrNotRunning
 	}
 
@@ -497,11 +611,24 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon: find process %d: %w", pid, err)
 	}
+	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
-	// Send termination signal for graceful shutdown
+	if request != nil {
+		if requestErr := request(pid); requestErr == nil {
+			if waitForProcessExit(proc, pid, timeout) {
+				d.removePIDFileIfStarted(started)
+				return nil
+			}
+		}
+	}
+
+	// Compatibility fallback for old/unhealthy gateways. On Unix this is
+	// SIGTERM; on Windows a detached process has no signal channel, so this is
+	// TerminateProcess. The authenticated request above is the normal Windows
+	// graceful path.
 	if err := sendTermSignal(proc); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
-			_ = os.Remove(d.pidFile)
+			d.removePIDFileIfStarted(started)
 			return nil
 		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
@@ -511,17 +638,19 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	// asynchronous, and reopening the PID can report "gone" before the
 	// original kernel object is signaled and its listener is released.
 	if waitForProcessExit(proc, pid, timeout) {
-		_ = os.Remove(d.pidFile)
+		d.removePIDFileIfStarted(started)
 		return nil
 	}
 
 	// Force kill if still running
-	_ = sendKillSignal(proc)
-	if !waitForProcessExit(proc, pid, 100*time.Millisecond) {
+	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("daemon: force kill process %d: %w", pid, err)
+	}
+	if !waitForProcessExit(proc, pid, forcedStopWait) {
 		return ErrStopTimeout
 	}
 
-	_ = os.Remove(d.pidFile)
+	d.removePIDFileIfStarted(started)
 	return nil
 }
 
@@ -537,6 +666,7 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon: find started process %d: %w", pid, err)
 	}
+	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("daemon: stop started process: %w", err)
 	}
@@ -548,8 +678,10 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	_ = sendKillSignal(proc)
-	if !waitForProcessExit(proc, pid, 100*time.Millisecond) && d.verifyProcess(info) {
+	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) && d.verifyProcess(info) {
+		return fmt.Errorf("daemon: force kill started process %d: %w", pid, err)
+	}
+	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcess(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)
@@ -557,14 +689,26 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 }
 
 func (d *Daemon) removePIDFileIfStarted(started pidInfo) {
-	current, err := d.readPIDInfo()
-	if err != nil || current.PID != started.PID {
-		return
+	_ = removePIDFileIf(d.pidFile, func(data []byte) bool {
+		current, err := parsePIDInfo(data)
+		return err == nil && pidInfoMatchesStarted(current, started)
+	})
+}
+
+func pidInfoMatchesStarted(current, started pidInfo) bool {
+	if current.PID != started.PID {
+		return false
 	}
-	if started.StartIdentity != "" && current.StartIdentity != started.StartIdentity {
-		return
+	if started.StartIdentity != "" {
+		return current.StartIdentity == started.StartIdentity
 	}
-	_ = os.Remove(d.pidFile)
+	// A legacy bare-PID observation is weaker than a subsequently published
+	// strong identity. Even when the numeric PID matches, preserve the strong
+	// record because it may belong to a replacement process after PID reuse.
+	if current.StartIdentity != "" {
+		return false
+	}
+	return started.Executable == "" || current.Executable == started.Executable
 }
 
 func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
@@ -581,7 +725,10 @@ func (d *Daemon) readPIDInfo() (pidInfo, error) {
 	if err != nil {
 		return pidInfo{}, err
 	}
+	return parsePIDInfo(data)
+}
 
+func parsePIDInfo(data []byte) (pidInfo, error) {
 	var info pidInfo
 	if err := json.Unmarshal(data, &info); err != nil {
 		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))

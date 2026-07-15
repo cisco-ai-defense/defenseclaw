@@ -7,6 +7,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -18,6 +19,18 @@ import (
 )
 
 var errEnterpriseHooksUnsupportedWindows error
+
+func platformInstall(context.Context, InstallOptions) (InstallResult, bool, error) {
+	return InstallResult{}, false, nil
+}
+
+func platformWatchDirs(InstallOptions) ([]string, bool, error) {
+	return nil, false, nil
+}
+
+func platformRemoveManagedPolicy(context.Context, InstallOptions) error {
+	return fmt.Errorf("enterprise hooks: managed policy removal is supported only on native Windows")
+}
 
 func resolveOwner(home string, uid, gid int) (int, int, error) {
 	if uid < 0 || gid < 0 {

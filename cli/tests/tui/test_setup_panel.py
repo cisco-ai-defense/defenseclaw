@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -143,17 +144,17 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.max_per_minute"].kind == "int"
 
 
-def test_windows_notifications_enabled_field_is_visible_but_read_only() -> None:
+def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
     section = _section(
         build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
         "Notifications",
     )
     fields = {field.key: field for field in section.fields if field.key}
     enabled = fields["notifications.enabled"]
-    assert enabled.interactive is False
-    assert "unsupported" in enabled.label.lower()
-    assert "inactive" in enabled.hint.lower()
-    assert "unsupported" in section.summary.lower()
+    assert enabled.interactive is True
+    assert enabled.kind == "bool"
+    assert "unsupported" not in enabled.label.lower()
+    assert "desktop toasts" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:
@@ -2505,7 +2506,12 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (status:")
+    policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
+    if os.name == "nt":
+        assert "policy-unverified" in policy_status
+    else:
+        assert "policy-unverified" not in policy_status
     assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
@@ -2576,11 +2582,34 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
 def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _multi_connector_cfg()
     cfg.data_dir = "runtime-state"
-    state = SimpleNamespace(runtime="open", desired="closed")
-    monkeypatch.setattr("defenseclaw.fail_mode.resolve_connector_fail_mode", lambda *_args: state)
+    state = SimpleNamespace(runtime="open", desired="closed", drift=())
+    calls: list[dict[str, object]] = []
+
+    def resolve(*_args, **kwargs):
+        calls.append(kwargs)
+        return state
+
+    monkeypatch.setattr("defenseclaw.fail_mode.resolve_connector_fail_mode", resolve)
 
     fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
     assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "open"
+    assert calls and all(call == {"inspect_effective_policy": False} for call in calls)
+
+
+def test_guardrail_editor_surfaces_passive_policy_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    state = SimpleNamespace(runtime="closed", desired="closed", drift=("policy-unverified",))
+    monkeypatch.setattr(
+        "defenseclaw.fail_mode.resolve_connector_fail_mode",
+        lambda *_args, **_kwargs: state,
+    )
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "closed (status: policy-unverified)"
+    )
 
 
 def test_per_connector_block_message_writes_string() -> None:

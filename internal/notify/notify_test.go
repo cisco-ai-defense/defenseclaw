@@ -31,7 +31,7 @@ func TestDesktopCapabilityForGOOS(t *testing.T) {
 	}{
 		{goos: "darwin", supported: true, provider: "osascript"},
 		{goos: "linux", supported: true, provider: "notify-send"},
-		{goos: "windows", supported: false},
+		{goos: "windows", supported: true, provider: "Shell_NotifyIconW"},
 		{goos: "plan9", supported: false},
 	}
 	for _, tc := range tests {
@@ -56,7 +56,7 @@ func TestUnsupportedPlatformSkipsNativeSenderAndLabelsTerminalFallback(t *testin
 	called := false
 	err := sendNotification(
 		Notification{Title: "DefenseClaw", Subtitle: "guardrail · HIGH", Body: "阻止 <redacted>"},
-		DesktopCapabilityForGOOS("windows"),
+		DesktopCapabilityForGOOS("plan9"),
 		func(Notification) error {
 			called = true
 			return nil
@@ -66,7 +66,7 @@ func TestUnsupportedPlatformSkipsNativeSenderAndLabelsTerminalFallback(t *testin
 		t.Fatalf("error = %v, want ErrDesktopUnsupported", err)
 	}
 	if called {
-		t.Fatal("unsupported Windows capability invoked native sender")
+		t.Fatal("unsupported capability invoked native sender")
 	}
 	got := buf.String()
 	for _, want := range []string{"[defenseclaw terminal fallback]", "guardrail · HIGH", "阻止 <redacted>"} {

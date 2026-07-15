@@ -10,12 +10,16 @@ parallel DefenseClaw distribution:
 - The Python CLI/TUI is `defenseclaw-<version>-py3-none-any.whl`.
 - `upgrade-manifest.json`, `checksums.txt`, signatures, SBOMs, and provenance are
   produced by the existing atomic release pipeline.
-- `scripts/install.ps1` remains the legacy release-asset installer. Its
-  per-user state, connector, repair, rollback, and lifecycle behavior is the
-  compatibility reference for native setup.
+- `scripts/install.ps1` is a compatibility bootstrap only. On Windows it
+  authenticates the signed release checksum manifest and offline Sigstore
+  proof, verifies the schema-1 provenance binding for the exact Setup SHA-256
+  and Cisco Authenticode publisher, and delegates to
+  `DefenseClawSetup-x64.exe`. It never resolves or installs Python, `uv`,
+  wheels, or individual gateway artifacts.
 - `scripts/windows-native-ci.ps1` remains the native Windows package and
-  lifecycle acceptance harness. Setup acceptance extends that harness instead
-  of cloning the whole suite.
+  lifecycle acceptance harness. Required lifecycle and connector contracts
+  install the exact native Setup artifact; a separate no-network test proves
+  local bootstrap delegation and legacy argument mapping.
 
 ## Delivery decision
 
@@ -29,6 +33,10 @@ The installed product is intentionally mixed-runtime:
 - `bin\defenseclaw.exe` and the scanner launchers are small native Go launchers.
 - `bin\defenseclaw-gateway.exe` and `bin\defenseclaw-hook.exe` remain the
   existing native Go programs.
+- `bin\defenseclaw-startup.exe` is a console-free native logon helper. It
+  launches the adjacent gateway hidden and pins its data home to the current
+  Windows user's `.defenseclaw` directory instead of trusting inherited
+  process environment.
 - The existing Python CLI/TUI runs from an embedded, managed CPython runtime
   under `runtime\python`. The installer does not claim to turn the CLI/TUI into
   a native GUI application.
@@ -56,14 +64,23 @@ builder then embeds:
 
 - the GoReleaser Windows archive;
 - the DefenseClaw wheel used for provenance;
-- CPython 3.12.10 embeddable x64, pinned by URL and SHA-256
-  `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`;
+- CPython 3.14.6 embeddable x64, pinned by URL and SHA-256
+  `df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c`;
 - cosign 2.6.2 for offline availability of release-manifest verification,
   pinned to the official Windows x64 release SHA-256
   `dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d40feb07be`;
 - the locked installed Python dependency tree;
 - the signed release `upgrade-manifest.json`; and
 - the native managed-command launcher.
+
+The release also publishes `checksums.txt.bundle` beside the detached
+signature and certificate. The compatibility bootstrap passes that bundled
+transparency-log proof to pinned Cosign with `--offline`. The authenticated
+checksum root must contain exactly one entry each for Setup, its provenance,
+and the upgrade manifest. The provenance must describe a signed schema-1 OSS
+artifact and repeat Setup's exact authenticated SHA-256. Local mode requires
+the complete release bundle plus the pinned Cosign executable and performs no
+network access.
 
 An internal manifest hashes every embedded file with SHA-256. Setup validates
 that manifest before staging, bounds ZIP entry count and expanded size, rejects
@@ -72,6 +89,33 @@ staging directory. The manifest, external provenance record, and installed
 state also carry the exact 40-character Git source commit and distribution
 flavor, so an installer cannot silently lose its build identity between the
 release inputs and the installed product.
+
+Every generated ZIP is ordered by its UTF-8 archive path and uses the source
+commit timestamp, normalized permissions, and a fixed compression level. The
+builder creates each archive twice and requires byte-for-byte equality. Native
+Go launchers and Setup use `-trimpath`, disable ambient VCS stamping, pin a
+component- and commit-specific Go build ID, and are also built twice before
+signing. The unsigned provenance
+timestamp is the source commit timestamp, so local unsigned outputs do not gain
+a wall-clock difference. Before archiving Python, the builder removes optional
+bytecode caches, local `file://` installation origins, and uv's wall-clock cache
+metadata, then repairs the affected wheel `RECORD` files. Release CI pins Go
+through `go.mod`, pins `uv`, and executes ZIP generation with the pinned
+embedded CPython runtime.
+
+The Setup SBOM is one merged SPDX 2.3 JSON document generated after the outer
+EXE is signed. It describes the exact outer checksum and exact embedded payload
+archive, records every payload digest, and expands the CPython standard
+library, complete `site-packages.zip`, project and YARA compatibility wheels,
+and signed gateway archive. Python distribution metadata, dependencies,
+licenses, and every embedded file are included alongside the gateway, hook,
+launchers, and pinned Cosign verifier. Go build information is read from the
+exact signed Setup, gateway, hook, launchers, and Cosign bytes; their runtime
+and transitive modules are emitted with purls and Go module sums. Generation
+fails closed if the staged payload differs from its manifest, an expected
+component is absent, a Python distribution lacks metadata, a Go binary digest
+does not match its component, or any relationship/digest is missing from the
+SPDX inventory.
 
 The public Windows build is explicitly the `oss` distribution flavor. Passing
 `-DistributionFlavor managed-enterprise` fails before artifact processing or
@@ -85,21 +129,64 @@ treated as a managed release. An OSS Windows install configured as
 requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
-Apps. Release builds require real Authenticode credentials. The build imports
+Apps. Release builds require real Authenticode credentials. Before the payload
+manifest is hashed, the builder signs the native CLI launcher, console-free
+startup helper, gateway, and hook entry point; the installed scanner launchers
+are byte-identical copies of that signed CLI launcher. It then signs the outer
+setup executable. The build imports
 the PFX temporarily into the current-user certificate store, invokes SignTool
 by certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint,
-verifies the exact publisher `Cisco Systems, Inc.`, and removes the certificate
-and private build directory in a `finally` path. No development certificate or
-fabricated Cisco signature is generated.
+verifies the exact publisher `Cisco Systems, Inc.` on every signed executable,
+and removes the certificate and private build directory in a `finally` path. No
+development certificate or fabricated Cisco signature is generated.
+
+### Native executable resources
+
+Every project-built Windows executable is resource-complete before signing:
+the gateway, agent hook, CLI/scanner launcher, logon startup helper, and setup
+bootstrapper. Their PE resource directories contain the project-owned
+DefenseClaw shield icon, an exact `Cisco Systems, Inc.` / `Cisco DefenseClaw`
+`VERSIONINFO` record for the release version, and a component-specific
+application manifest. The manifest declares an `amd64` assembly identity,
+`asInvoker` with `uiAccess=false`, Windows 10/11 compatibility, Per-Monitor-v2
+DPI awareness with a Per-Monitor fallback, and `longPathAware=true`. Setup also
+activates Common Controls v6 because its Win32 wizard uses those controls.
+
+The installed `skill-scanner.exe`, `mcp-scanner.exe`, and
+`defenseclaw-observability.exe` commands are byte-identical aliases of the
+generic signed command launcher and therefore carry the same resource set.
+Bundled CPython and cosign are upstream-built dependencies and retain their
+upstream PE identity rather than being relabeled as Cisco-built executables.
+
+`internal/windowsresources` constructs resources without timestamps, replaces
+the complete PE resource directory, recomputes the PE checksum, and parses the
+result back before the artifact can reach signing. Verification requires an
+exact byte match for the manifest, all five icon sizes, and version data; it
+also rejects a non-amd64 PE or any attempt to patch an already signed file.
+GoReleaser applies the same contract to the standalone Windows ZIP, so the
+archive and native setup do not diverge.
+
+The builder also inventories every PE that Setup installs, including native
+Python extensions and the explicitly unsigned pinned Cosign binary. The
+schema-2 payload manifest and external provenance bind each installed path to
+its exact SHA-256, expected trust policy, observed signer/certificate/timestamp
+evidence, and SPDX file identity. The merged SBOM carries the same canonical
+evidence on the corresponding file records and fails if any evidence digest or
+file identity does not match.
 
 ## Install and maintenance layout
 
 Setup resolves Windows Known Folders rather than trusting profile environment
 variables:
 
-- application: `%LOCALAPPDATA%\Programs\DefenseClaw`;
+- application: `FOLDERID_UserProgramFiles\DefenseClaw` (normally
+  `%LOCALAPPDATA%\Programs\DefenseClaw`, including Known Folder redirection);
 - maintenance setup cache:
   `%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe`;
+- durable setup transaction state:
+  `%LOCALAPPDATA%\DefenseClaw\InstallerState`;
+- crash-cleaned payload extraction:
+  `%LOCALAPPDATA%\DefenseClaw\InstallerTemp`;
 - operator state: `%USERPROFILE%\.defenseclaw`.
 
 The application tree is transactionally replaced. The maintenance cache is a
@@ -115,16 +202,71 @@ unnecessary quoting and command-injection boundary.
 
 ## Lifecycle and rollback
 
+Setup serializes install, repair, upgrade, and uninstall with a per-user global
+Windows mutex. A concurrent invocation exits with code 1618 before reading or
+mutating product state, including when the same user has sessions on multiple
+desktops.
+
+Immediately before an install or uninstall mutation, setup recovers any prior
+interrupted transaction while it still owns that mutex. A private, current-user
+owned Windows-DACL journal advances atomically and with write-through ordering
+through `intent`, `committed`, `converged`, and `complete`. The journal contains
+a random operation identity; every destructive application/cache path is
+derived from Windows Known Folders. It also records the explicitly selected
+Codex and Claude configuration homes and the observed user PATH. Recovery
+rejects an altered destructive path, an unrelated install-state identity, an
+untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
+configuration symlinks remain supported by the connector's target-aware writer.
+A durable `complete` tombstone is atomically replaced by the next operation;
+markers are not unlinked in an order that could resurrect a stale intent after
+power loss.
+
+Before `committed`, setup mutates only transaction-owned application and
+maintenance-cache paths and may stop owned services. An interrupted install can
+therefore restore the exact old trees and services without overwriting a PATH,
+Run-key, or Apps-registration edit made by another process. An interrupted
+uninstall restores its exact transaction-ID-bearing trash tree. Setup never
+treats a state-less directory at the fixed install path as transaction-owned.
+
+The forward-commit boundary is crossed before packaged migrations, connector
+configuration, PATH, Apps registration, gateway auto-start, or hook teardown.
+Those changes are replayed idempotently toward the requested target after a
+crash; old binaries are never restored against already-migrated configuration.
+The journal records the source/target versions and effective `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR`, and convergence reruns migrations/configuration, validates
+the installed and maintenance executables, requires atomic durable connector
+writes, flushes mutated Registry keys, and verifies selected services before
+advancing to `converged`. Backup,
+trash, user-data, and installer-cache cleanup happens only afterwards. When an
+uninstaller is running from its own cache, it leaves the `converged` tombstone
+until a later setup verifies that asynchronous self-deletion succeeded. Unsafe
+or incomplete recovery keeps the journal and returns 1603 for a bounded retry.
+
 Before mutation, setup validates gateway and watchdog PID records against the
-live executable path and process creation identity. It stops the watchdog and
-gateway, probes installed executables, DLLs, and Python extensions for file
-locks, and returns exit code 3010 without publishing a partial tree when files
-remain in use.
+live executable path and process creation identity. It asks the gateway through
+its authenticated loopback API to drain and close audit, telemetry, stores, and
+sidecars, and signals the watchdog through its user-private named event. It
+waits on the exact process handles and uses bounded force termination only as a
+legacy/unhealthy fallback. Stop and status never report success while either
+owned process remains live. The transaction-owned whole-tree rename is the
+authoritative file-lock check; a sharing violation returns fatal-install code
+1603 and rolls back without publishing a partial tree.
 
 The new tree is validated with both CLI and gateway version commands. Repair
-and upgrade preserve connector/mode state and never rerun connector setup over
-an existing roster. A fresh explicit connector selection may initialize only
-when no prior application or user-data tree exists.
+and upgrade preserve connector/mode state, then idempotently reconcile the
+recorded connector so interrupted or drifted setup can converge without adding
+duplicate registrations. A fresh explicit connector selection initializes the
+chosen integration during the same committed transaction.
+
+Before the private staging tree can be published, Setup requires an exact
+one-to-one match between its Authenticode inventory and every extracted PE,
+checks each file digest, and enforces the recorded Windows trust policy. Signed
+DefenseClaw executables must retain the Cisco publisher, signer identity, and
+RFC 3161 timestamp; unsigned PR/local builds are accepted only when the
+manifest explicitly declares the unsigned policy. Setup repeats inventory
+verification after publication and verifies the maintenance and stable-hook
+copies so extraction or copy-time tampering cannot silently cross the install
+boundary.
 
 On upgrade, the CLI uses the installer-owned cosign binary (never an
 environment-selected verifier) to verify the signed checksums and the upgrade
@@ -142,8 +284,25 @@ Those installations must be serviced by the enterprise deployment channel.
 ## Release and certification gate
 
 The release workflow builds setup on `windows-latest`, requires real signing
-credentials, emits SHA-256, SBOM, and provenance outputs, and adds the signed
-EXE to the final checksum manifest before the immutable release is created.
+credentials, runs the full native install/repair/connector/uninstall acceptance
+suite against that exact signed EXE (including installed-publisher validation),
+uploads the staging bundle, and passes its immutable artifact ID and SHA-256
+digest to a separate non-advisory real-client job. That job downloads the exact
+bundle by ID, verifies the Cisco signature plus installer sidecar/provenance
+digests, requires provenance and installed payload state to match the exact
+workflow `GITHUB_SHA`, and installs that same EXE. The gate installs
+exact official Codex CLI `0.144.3` and Claude Code `2.1.208` packages, requires
+both provider credentials, verifies automatic Codex hook trust without a manual
+`/hooks` approval, and requires lifecycle, tool allow/block, gateway JSONL,
+SQLite audit correlation, and connector-tagged OTLP evidence from both clients.
+It then runs repair and same-version upgrade with the same signed Setup bytes and
+requires uninstall itself to remove both connectors, user data, Installed Apps,
+and the user PATH entry while preserving a seeded unrelated `~/.codex/hooks.json`
+handler byte-for-byte. Missing secrets, either skipped connector, an unsigned
+or non-Cisco executable, a client-version mismatch, or missing evidence fails the
+release before publication. The workflow emits SHA-256, merged SPDX SBOM,
+provenance, and `DefenseClawSetup-x64.exe.certification.json`, then adds every
+artifact to the final checksum manifest before the immutable release is created.
 macOS and Linux artifacts continue through their existing build path.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the

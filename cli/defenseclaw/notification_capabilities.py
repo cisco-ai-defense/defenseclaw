@@ -38,11 +38,7 @@ def desktop_notification_capability(system: str | None = None) -> DesktopNotific
     if resolved == "linux":
         return DesktopNotificationCapability(resolved, True, provider="notify-send")
     if resolved == "windows":
-        return DesktopNotificationCapability(
-            resolved,
-            False,
-            unsupported_reason="Native Windows desktop/toast notifications are unsupported in this release.",
-        )
+        return DesktopNotificationCapability(resolved, True, provider="Shell_NotifyIconW")
     return DesktopNotificationCapability(
         resolved,
         False,

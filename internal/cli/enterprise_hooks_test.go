@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -85,6 +86,9 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -299,5 +303,65 @@ func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
 	err := validateEnterpriseHookManagedRuntime()
 	if err == nil || !strings.Contains(err.Error(), "data_dir trust check failed") {
 		t.Fatalf("validateEnterpriseHookManagedRuntime error = %v, want data_dir trust check failure", err)
+	}
+}
+
+func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
+	originalConnector := enterpriseHookConnector
+	originalUser := enterpriseHookUser
+	originalHome := enterpriseHookUserHome
+	originalSID := enterpriseHookSID
+	originalDataDir := enterpriseHookDataDir
+	originalJSON := enterpriseHookJSON
+	originalRemove := enterpriseHooksRemoveManagedPolicy
+	t.Cleanup(func() {
+		enterpriseHookConnector = originalConnector
+		enterpriseHookUser = originalUser
+		enterpriseHookUserHome = originalHome
+		enterpriseHookSID = originalSID
+		enterpriseHookDataDir = originalDataDir
+		enterpriseHookJSON = originalJSON
+		enterpriseHooksRemoveManagedPolicy = originalRemove
+	})
+
+	enterpriseHookConnector = "claudecode"
+	enterpriseHookUser = ""
+	enterpriseHookUserHome = ""
+	enterpriseHookSID = "S-1-5-21-111-222-333-1001"
+	enterpriseHookDataDir = ""
+	enterpriseHookJSON = false
+	called := false
+	enterpriseHooksRemoveManagedPolicy = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		called = true
+		if opts.OwnerSID != enterpriseHookSID || opts.UserHome != "" || opts.ConnectorName != "claudecode" {
+			t.Fatalf("RemoveManagedPolicy opts = %+v", opts)
+		}
+		return nil
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+	if err := runEnterpriseHooksUninstall(cmd, nil); err != nil {
+		t.Fatalf("runEnterpriseHooksUninstall: %v", err)
+	}
+	if !called {
+		t.Fatal("RemoveManagedPolicy was not called")
+	}
+}
+
+func TestResolveEnterpriseHookTargetValuesResolvesSIDOnlyProfile(t *testing.T) {
+	original := enterpriseHookSIDProfilePath
+	t.Cleanup(func() { enterpriseHookSIDProfilePath = original })
+	enterpriseHookSIDProfilePath = func(sid string) (string, error) {
+		if sid != "S-1-5-21-111-222-333-1001" {
+			t.Fatalf("resolver SID = %q", sid)
+		}
+		return `C:\Users\alice`, nil
+	}
+	target, err := resolveEnterpriseHookTargetValues("", "", -1, -1, "S-1-5-21-111-222-333-1001", "")
+	if err != nil {
+		t.Fatalf("resolveEnterpriseHookTargetValues: %v", err)
+	}
+	if target.home != `C:\Users\alice` || target.sid != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("target = %+v, want resolved SID-only profile", target)
 	}
 }
