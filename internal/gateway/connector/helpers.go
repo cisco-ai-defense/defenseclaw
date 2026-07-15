@@ -580,7 +580,7 @@ func isDefenseClawHookExecutable(exe string) bool {
 // command is never claimed merely because its basename resembles ours.
 func isDefenseClawManagedHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
-	if exe == "" || !filepath.IsAbs(exe) {
+	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
 		return false
 	}
 	for _, owned := range uniqueNonEmptyStrings([]string{
@@ -593,6 +593,17 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 		}
 	}
 	return false
+}
+
+// isWindowsDriveAbsolutePath keeps host-independent connector tests faithful
+// to the Windows command contract. filepath.IsAbs deliberately follows the
+// current host, so it does not recognize C:\... while the same tests run on
+// Linux or macOS.
+func isWindowsDriveAbsolutePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' || (path[2] != '\\' && path[2] != '/') {
+		return false
+	}
+	return (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')
 }
 
 func validNativeHookConnector(connector string) bool {

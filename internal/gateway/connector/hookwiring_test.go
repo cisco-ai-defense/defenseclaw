@@ -877,6 +877,16 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	}
 }
 
+func TestWindowsDriveAbsoluteHookPath(t *testing.T) {
+	if !isWindowsDriveAbsolutePath(`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`) {
+		t.Fatal("drive-rooted Windows hook path was not recognized as absolute")
+	}
+	setHookBinaryOverride(t, `C:defenseclaw-hook.exe`)
+	if isDefenseClawManagedHookExecutable(defenseclawHookBinaryOverride) {
+		t.Fatal("drive-relative Windows hook path was recognized as managed")
+	}
+}
+
 func TestRemoveOwnedHooksPreservesForeignHandlersInSharedMatcherGroup(t *testing.T) {
 	const hooksDir = "/home/u/.defenseclaw/hooks"
 	const foreignCommand = "/usr/bin/user-shared-hook"
