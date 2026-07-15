@@ -447,7 +447,7 @@ func processIdentity(pid uint32) (string, string, error) {
 	return windows.UTF16ToString(buffer[:size]), strconv.FormatInt(creation.Nanoseconds(), 10), nil
 }
 
-func liveProcessWithinInstallRoot(installRoot string) (uint32, string, error) {
+func liveProcessWithinInstallRoot(installRoot string, ignoredImages ...string) (uint32, string, error) {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return 0, "", fmt.Errorf("snapshot processes: %w", err)
@@ -468,7 +468,8 @@ func liveProcessWithinInstallRoot(installRoot string) (uint32, string, error) {
 			// walked. A query failure does not prove that the process executes from
 			// this ACL-protected per-user install tree, so only an observed image
 			// path can block activation.
-			if queryErr == nil && pathWithinRoot(imagePath, installRoot) {
+			if queryErr == nil && pathWithinRoot(imagePath, installRoot) &&
+				!pathMatchesAny(imagePath, ignoredImages) {
 				return entry.ProcessID, imagePath, nil
 			}
 		}
@@ -480,6 +481,15 @@ func liveProcessWithinInstallRoot(installRoot string) (uint32, string, error) {
 			return 0, "", fmt.Errorf("advance process snapshot: %w", err)
 		}
 	}
+}
+
+func pathMatchesAny(path string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if pathidentity.Same(path, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func pathWithinRoot(path, root string) bool {

@@ -65,6 +65,13 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 	if !strings.EqualFold(filepath.Clean(imagePath), filepath.Clean(target)) {
 		t.Fatalf("image path = %q, want %q", imagePath, target)
 	}
+	pid, imagePath, err = liveProcessWithinInstallRoot(installRoot, target)
+	if err != nil {
+		t.Fatalf("liveProcessWithinInstallRoot with ignored image: %v", err)
+	}
+	if pid != 0 || imagePath != "" {
+		t.Fatalf("ignored installed process = (%d, %q), want no match", pid, imagePath)
+	}
 }
 
 func TestLiveProcessWithinInstallRootHelper(t *testing.T) {

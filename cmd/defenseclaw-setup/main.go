@@ -292,6 +292,25 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			opts.FromVersion = oldState.Version
 		}
 	}
+	if hadInstall {
+		// Reject foreground CLI/TUI/runtime processes before unpacking the large
+		// offline payload. The managed gateway is intentionally ignored here: it
+		// remains available during staging and is stopped through its owned,
+		// authenticated lifecycle immediately before the final race-closing check.
+		gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot, gatewayPath)
+		if processErr != nil {
+			return 1, fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
+		}
+		if pid != 0 {
+			return retryRequiredCode, fmt.Errorf(
+				"%w (PID %d, %s); close running DefenseClaw terminals and retry",
+				errInstalledProcessRunning,
+				pid,
+				imagePath,
+			)
+		}
+	}
 	// Every install/repair/upgrade refreshes either the explicit selection or the
 	// existing owned connector roster. Existing data alone is not evidence that
 	// hooks are configured: it also covers legacy and data-preserving installs.
