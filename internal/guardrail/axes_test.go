@@ -103,6 +103,7 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"CMD-CURL-UPLOAD": {AxisEgressExternal},
 		"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
 		"CMD-ARCHIVE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+		"CMD-ENCODE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
 		"JUDGE-EXFIL-REPO": {AxisSensitiveAccess, AxisEgressExternal},
 		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
 		// Cloud metadata C2 endpoints (dual axis)
@@ -170,6 +171,7 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		// Network fetch
 		"CMD-CURL-UPLOAD": CapNetworkFetch,
 		"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
+		"CMD-ENCODE-EXFIL": CapNetworkFetch,
 		"CMD-WORKSPACE-ARCHIVE": CapWriteFS,
 		"SRC-FETCH":       CapNetworkFetch,
 		"SRC-FS-WRITE": CapWriteFS,

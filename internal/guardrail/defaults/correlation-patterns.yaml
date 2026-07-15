@@ -62,17 +62,18 @@ patterns:
 
   - id: REPO-ARCHIVE-EXFIL
     description: |
-      Workspace-scoped archive followed by an explicit file upload in
-      the same session. Catches split archive/upload steps without
-      flagging routine build artifacts or standalone transfer commands.
+      Workspace-scoped archive and explicit upload referencing the same
+      archive artifact (shared content_fingerprint). Catches split
+      archive/upload steps without correlating unrelated later uploads.
     window_events: 15
     severity_on_match: CRITICAL
     ordered: true
-    all_of:
+    fingerprint_chain:
       - with_rule_match:
           - CMD-WORKSPACE-ARCHIVE
         min_severity: MEDIUM
       - with_rule_match:
           - CMD-CURL-UPLOAD
           - CMD-WGET-POST
+          - CMD-ARCHIVE-EXFIL
         min_severity: HIGH

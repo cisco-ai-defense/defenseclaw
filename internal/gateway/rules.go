@@ -46,6 +46,10 @@ type RuleFinding struct {
 	Confidence float64  `json:"confidence"`
 	Evidence   string   `json:"evidence,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// ExternalEndpoint is the host/URL for network-touching command
+	// findings (curl/scp uploads). Fed into scan_findings and the
+	// correlator for allowlist-aware escalation.
+	ExternalEndpoint string `json:"external_endpoint,omitempty"`
 	// ToolCapabilityClass is set for tool-call inspection findings
 	// from the invoked tool's name (via guardrail.ClassifyToolName).
 	// Empty for content-only matches; the emission pipeline then
@@ -139,6 +143,7 @@ var commandRules = []PatternRule{
 	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-WORKSPACE-ARCHIVE", Pattern: regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+\S+\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b))`), Title: "Workspace-scoped archive creation", Severity: "MEDIUM", Confidence: 0.65, Tags: []string{"archive", "correlation"}},
 	{ID: "CMD-ARCHIVE-EXFIL", Pattern: regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+\S+\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b)).*(?:&&?|\|\||;).*(?:\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@)|\bwget\b\s+.*--post-(?:data|file)|\bscp\b\s+\S+.*[:@]|\brsync\b\s+\S+.*:)`), Title: "Workspace archive-then-upload chain", Severity: "HIGH", Confidence: 0.88, Tags: []string{"network", "exfiltration", "archive"}},
+	{ID: "CMD-ENCODE-EXFIL", Pattern: regexp.MustCompile(`(?i)(?:\b(?:base64|xxd|gzip)\b[^;&|]*\|[^;&|]*)+\b(?:curl|wget)\b.*(?:--upload-file|-T\s|--post-(?:data|file)|--data\s+@|https?://)`), Title: "Encode-then-upload exfiltration chain", Severity: "HIGH", Confidence: 0.82, Tags: []string{"network", "exfiltration", "encoding"}},
 	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
 	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 }
@@ -624,6 +629,7 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 			}
 
 			f = adjustConfidence(toolName, f)
+			f = enrichExfilFinding(f, text)
 			findings = append(findings, f)
 			seen[rule.ID] = true
 		}
@@ -654,6 +660,7 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 				}
 
 				f = adjustConfidence(toolName, f)
+				f = enrichExfilFinding(f, normalized)
 				findings = append(findings, f)
 			}
 		}

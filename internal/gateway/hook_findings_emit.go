@@ -609,6 +609,7 @@ func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
 			Evidence:            f.Evidence,
 			Tags:                f.Tags,
 			ToolCapabilityClass: f.ToolCapabilityClass,
+			ExternalEndpoint:    f.ExternalEndpoint,
 		})
 	}
 	return out

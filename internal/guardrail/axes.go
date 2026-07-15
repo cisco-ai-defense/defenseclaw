@@ -254,6 +254,7 @@ var ruleAxes = map[string][]DataAxis{
 	"CMD-PIPE-CURL":   {AxisEgressExternal},
 	"CMD-PIPE-WGET":   {AxisEgressExternal},
 	"CMD-ARCHIVE-EXFIL":      {AxisSensitiveAccess, AxisEgressExternal},
+	"CMD-ENCODE-EXFIL":       {AxisSensitiveAccess, AxisEgressExternal},
 	"CMD-WORKSPACE-ARCHIVE":  {AxisSensitiveAccess},
 	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
 

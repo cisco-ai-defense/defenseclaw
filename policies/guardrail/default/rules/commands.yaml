@@ -176,6 +176,12 @@ rules:
     severity: HIGH
     confidence: 0.88
     tags: [network, exfiltration, archive]
+  - id: CMD-ENCODE-EXFIL
+    pattern: '(?i)(?:\b(?:base64|xxd|gzip)\b[^;&|]*\|[^;&|]*)+\b(?:curl|wget)\b.*(?:--upload-file|-T\s|--post-(?:data|file)|--data\s+@|https?://)'
+    title: "Encode-then-upload exfiltration chain"
+    severity: HIGH
+    confidence: 0.82
+    tags: [network, exfiltration, encoding]
   - id: CMD-SOCAT-EXEC
     pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"

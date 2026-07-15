@@ -92,6 +92,13 @@
       ]
     },
     {
+      "id": "CMD-ENCODE-EXFIL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
       "id": "CMD-ENV-DUMP",
       "axes": [
         "sensitive_access"
