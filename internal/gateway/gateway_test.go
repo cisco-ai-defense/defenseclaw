@@ -7208,3 +7208,39 @@ func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.
 		t.Fatalf("unregistered wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestConnectorScopedTokenAuthenticatesMatchingLoopbackOTLPOnly(t *testing.T) {
+	api := &APIServer{
+		scannerCfg: &config.Config{Gateway: config.GatewayConfig{Token: "master-token"}},
+	}
+	api.SetConnectorRegistry(connector.NewDefaultRegistry())
+	api.SetHookAPITokens(map[string]string{"codex": "codex-scoped-token"})
+	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := func(path, source, remote string) int {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = remote
+		req.Header.Set("X-DefenseClaw-Token", "codex-scoped-token")
+		req.Header.Set("X-DefenseClaw-Source", source)
+		rec := httptest.NewRecorder()
+		allowed.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for _, path := range []string{"/v1/logs", "/v1/metrics", "/v1/traces"} {
+		if got := request(path, "codex", "127.0.0.1:47777"); got != http.StatusNoContent {
+			t.Fatalf("matching scoped token on %s status = %d, want %d", path, got, http.StatusNoContent)
+		}
+	}
+	if got := request("/v1/traces", "hermes", "127.0.0.1:47777"); got != http.StatusUnauthorized {
+		t.Fatalf("mismatched source status = %d, want %d", got, http.StatusUnauthorized)
+	}
+	if got := request("/v1/traces", "codex", "203.0.113.10:47777"); got != http.StatusUnauthorized {
+		t.Fatalf("non-loopback status = %d, want %d", got, http.StatusUnauthorized)
+	}
+	if got := request("/status", "codex", "127.0.0.1:47777"); got != http.StatusUnauthorized {
+		t.Fatalf("admin route status = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
