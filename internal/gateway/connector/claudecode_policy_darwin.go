@@ -7,12 +7,21 @@ package connector
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const claudeCodeManagedPreferencesDomain = "com.anthropic.claudecode"
+
+const (
+	claudeCodeManagedPreferenceCommandTimeout    = 5 * time.Second
+	claudeCodeManagedPreferenceDiagnosticLimit   = 64 << 10
+	claudeCodeManagedPreferenceScalarOutputLimit = 64 << 10
+)
 
 const claudeCodeForcedPreferenceScript = `ObjC.import('Foundation')
 function run(argv) {
@@ -26,27 +35,28 @@ func claudeCodePlatformManagedSettingsRoot() (string, error) {
 
 var (
 	claudeCodeManagedPreferencesExporter = func() ([]byte, error) {
-		cmd := exec.Command("/usr/bin/defaults", "export", claudeCodeManagedPreferencesDomain, "-")
-		output, err := cmd.Output()
-		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return output, err
+		return runClaudeCodeManagedPreferenceCommandWithLimits(
+			"/usr/bin/defaults",
+			[]string{"export", claudeCodeManagedPreferencesDomain, "-"},
+			nil,
+			claudeCodeManagedPreferenceCommandTimeout,
+			claudeCodeSettingsReadLimit+1,
+		)
 	}
 	claudeCodeManagedPreferencesConverter = func(plist []byte) ([]byte, error) {
-		cmd := exec.Command("/usr/bin/plutil", "-convert", "json", "-o", "-", "--", "-")
-		cmd.Stdin = bytes.NewReader(plist)
-		return cmd.Output()
+		return runClaudeCodeManagedPreferenceCommandWithLimits(
+			"/usr/bin/plutil",
+			[]string{"-convert", "json", "-o", "-", "--", "-"},
+			plist,
+			claudeCodeManagedPreferenceCommandTimeout,
+			claudeCodeSettingsReadLimit+1,
+		)
 	}
 	claudeCodeManagedPreferenceForced = func(key string) (bool, error) {
-		cmd := exec.Command(
+		output, err := runClaudeCodeManagedPreferenceCommand(
 			"/usr/bin/osascript", "-l", "JavaScript", "-e",
 			claudeCodeForcedPreferenceScript, "--", key, claudeCodeManagedPreferencesDomain,
 		)
-		output, err := cmd.Output()
-		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
-		}
 		if err != nil {
 			return false, err
 		}
@@ -60,6 +70,63 @@ var (
 		}
 	}
 )
+
+type claudeCodeBoundedCommandBuffer struct {
+	bytes.Buffer
+	limit int64
+}
+
+func (b *claudeCodeBoundedCommandBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - int64(b.Len())
+	if remaining <= 0 {
+		return 0, fmt.Errorf("command output exceeds %d bytes", b.limit)
+	}
+	if int64(len(p)) > remaining {
+		written, _ := b.Buffer.Write(p[:remaining])
+		return written, fmt.Errorf("command output exceeds %d bytes", b.limit)
+	}
+	return b.Buffer.Write(p)
+}
+
+func runClaudeCodeManagedPreferenceCommand(executable string, args ...string) ([]byte, error) {
+	return runClaudeCodeManagedPreferenceCommandWithLimits(
+		executable,
+		args,
+		nil,
+		claudeCodeManagedPreferenceCommandTimeout,
+		claudeCodeManagedPreferenceScalarOutputLimit,
+	)
+}
+
+func runClaudeCodeManagedPreferenceCommandWithLimits(
+	executable string,
+	args []string,
+	stdin []byte,
+	timeout time.Duration,
+	outputLimit int64,
+) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, args...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	stdout := &claudeCodeBoundedCommandBuffer{limit: outputLimit}
+	stderr := &claudeCodeBoundedCommandBuffer{limit: claudeCodeManagedPreferenceDiagnosticLimit}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("command %s timed out after %s", executable, timeout)
+	}
+	if err != nil {
+		if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
+			err = fmt.Errorf("%w: %s", err, diagnostic)
+		}
+		return nil, err
+	}
+	return append([]byte(nil), stdout.Bytes()...), nil
+}
 
 func loadClaudeCodeOSManagedSettings() (claudeCodeOSManagedSources, error) {
 	plist, err := claudeCodeManagedPreferencesExporter()

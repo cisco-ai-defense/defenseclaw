@@ -28,7 +28,9 @@ import (
 	"strings"
 )
 
-const claudeCodeSettingsReadLimit int64 = 4 << 20
+// Keep this identical to Doctor's managed-settings read boundary so the
+// guardian and diagnostics cannot disagree about whether a policy is valid.
+const claudeCodeSettingsReadLimit int64 = 2 << 20
 
 type claudeCodeSettingsSource struct {
 	name     string

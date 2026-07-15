@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func stubClaudeManagedPreferencesCommands(
@@ -87,5 +88,27 @@ func TestLoadClaudeCodeDarwinManagedPreferencesFailsClosed(t *testing.T) {
 	)
 	if _, err := loadClaudeCodeOSManagedSettings(); err == nil || !strings.Contains(err.Error(), "defaults unavailable") {
 		t.Fatalf("inspection error = %v", err)
+	}
+}
+
+func TestClaudeCodeDarwinManagedPreferenceCommandIsBounded(t *testing.T) {
+	if _, err := runClaudeCodeManagedPreferenceCommandWithLimits(
+		"/bin/sh",
+		[]string{"-c", "sleep 1"},
+		nil,
+		20*time.Millisecond,
+		1024,
+	); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error = %v", err)
+	}
+
+	if _, err := runClaudeCodeManagedPreferenceCommandWithLimits(
+		"/usr/bin/printf",
+		[]string{"%s", "output-over-limit"},
+		nil,
+		time.Second,
+		8,
+	); err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") {
+		t.Fatalf("output-limit error = %v", err)
 	}
 }

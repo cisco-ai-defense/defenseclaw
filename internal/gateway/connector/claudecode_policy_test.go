@@ -335,3 +335,13 @@ func TestClaudeManagedDropinsDeepMerge(t *testing.T) {
 		t.Fatalf("deep-merged object = %#v", nested)
 	}
 }
+
+func TestClaudeManagedSettingsRejectsDoctorOversizePolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "managed-settings.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", int(2<<20)+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := readStableClaudeCodeSettingsFile(path); !exists || err == nil || !strings.Contains(err.Error(), "exceeds 2097152 bytes") {
+		t.Fatalf("oversize managed settings = (exists=%v, err=%v)", exists, err)
+	}
+}
