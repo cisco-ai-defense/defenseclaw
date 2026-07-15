@@ -100,6 +100,32 @@ verifies the exact publisher `Cisco Systems, Inc.` on every signed executable,
 and removes the certificate and private build directory in a `finally` path. No
 development certificate or fabricated Cisco signature is generated.
 
+### Native executable resources
+
+Every project-built Windows executable is resource-complete before signing:
+the gateway, agent hook, CLI/scanner launcher, logon startup helper, and setup
+bootstrapper. Their PE resource directories contain the project-owned
+DefenseClaw shield icon, an exact `Cisco Systems, Inc.` / `Cisco DefenseClaw`
+`VERSIONINFO` record for the release version, and a component-specific
+application manifest. The manifest declares an `amd64` assembly identity,
+`asInvoker` with `uiAccess=false`, Windows 10/11 compatibility, Per-Monitor-v2
+DPI awareness with a Per-Monitor fallback, and `longPathAware=true`. Setup also
+activates Common Controls v6 because its Win32 wizard uses those controls.
+
+The installed `skill-scanner.exe`, `mcp-scanner.exe`, and
+`defenseclaw-observability.exe` commands are byte-identical aliases of the
+generic signed command launcher and therefore carry the same resource set.
+Bundled CPython and cosign are upstream-built dependencies and retain their
+upstream PE identity rather than being relabeled as Cisco-built executables.
+
+`internal/windowsresources` constructs resources without timestamps, replaces
+the complete PE resource directory, recomputes the PE checksum, and parses the
+result back before the artifact can reach signing. Verification requires an
+exact byte match for the manifest, all five icon sizes, and version data; it
+also rejects a non-amd64 PE or any attempt to patch an already signed file.
+GoReleaser applies the same contract to the standalone Windows ZIP, so the
+archive and native setup do not diverge.
+
 ## Install and maintenance layout
 
 Setup resolves Windows Known Folders rather than trusting profile environment

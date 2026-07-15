@@ -73,6 +73,37 @@ function Get-StableHookRuntimeExecutable {
     )
 }
 
+function Get-WorkspacePackageVersion {
+    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
+    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+        throw 'Could not resolve project version from pyproject.toml'
+    }
+    $packageVersion = $Matches[1]
+    if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
+        throw "Invalid package version for Windows resources: $packageVersion"
+    }
+    return $packageVersion
+}
+
+function Assert-WindowsExecutableResources(
+    [string]$Path,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [string]$Version,
+    [switch]$Apply
+) {
+    $go = Get-RequiredCommand 'go.exe'
+    $arguments = @(
+        'run', './internal/tools/windowsresources',
+        '-target', 'windows_amd64',
+        '-executable', $Path,
+        '-component', $Component,
+        '-version', $Version,
+        '-icon', (Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png')
+    )
+    if (-not $Apply) { $arguments += '-verify-only' }
+    Invoke-WindowsNativeProcess $go $arguments -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
+}
+
 function Get-CiscoAuthenticodeState([string]$Path) {
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     $publisher = if ($signature.SignerCertificate) {
@@ -965,14 +996,7 @@ function Invoke-BuildArtifacts {
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for build-artifacts' }
     $dist = Assert-SafeStateRoot $ArtifactRoot
     [IO.Directory]::CreateDirectory($root) | Out-Null
-    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
-    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-        throw 'Could not resolve project version from pyproject.toml'
-    }
-    $packageVersion = $Matches[1]
-    if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
-        throw "Invalid package version for Windows artifacts: $packageVersion"
-    }
+    $packageVersion = Get-WorkspacePackageVersion
     if (Test-Path -LiteralPath $dist) {
         Remove-SafeDisposableTree -Path $dist -Root $dist
     }
@@ -984,8 +1008,12 @@ function Invoke-BuildArtifacts {
     $previousCgo = $env:CGO_ENABLED
     try {
         $env:CGO_ENABLED = '0'
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
+        $gateway = Join-Path $stage 'defenseclaw.exe'
+        $hook = Join-Path $stage 'defenseclaw-hook.exe'
+        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', $gateway, './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
+        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', $hook, './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
+        Assert-WindowsExecutableResources $gateway 'gateway' $packageVersion -Apply
+        Assert-WindowsExecutableResources $hook 'hook' $packageVersion -Apply
     } finally {
         if ($null -eq $previousCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
         else { $env:CGO_ENABLED = $previousCgo }
@@ -2562,6 +2590,8 @@ function Invoke-SetupAcceptance {
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "native setup executable not found: $setup"
     }
+    $packageVersion = Get-WorkspacePackageVersion
+    Assert-WindowsExecutableResources $setup 'setup' $packageVersion
     $setupAuthenticode = Get-CiscoAuthenticodeState $setup
     $requireSignedProduct = $setupAuthenticode.Status -eq 'Valid'
     if ($requireSignedProduct -and $setupAuthenticode.Publisher -ne 'Cisco Systems, Inc.') {
@@ -2662,6 +2692,17 @@ function Invoke-SetupAcceptance {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
                 throw "setup install did not create required file: $required"
             }
+        }
+        foreach ($resourceContract in @(
+            [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
+            [pscustomobject]@{ Path = $startup; Component = 'startup' },
+            [pscustomobject]@{ Path = $gateway; Component = 'gateway' },
+            [pscustomobject]@{ Path = $hook; Component = 'hook' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\skill-scanner.exe'); Component = 'launcher' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\mcp-scanner.exe'); Component = 'launcher' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\defenseclaw-observability.exe'); Component = 'launcher' }
+        )) {
+            Assert-WindowsExecutableResources $resourceContract.Path $resourceContract.Component $packageVersion
         }
         if ($requireSignedProduct) {
             foreach ($productExecutable in @(

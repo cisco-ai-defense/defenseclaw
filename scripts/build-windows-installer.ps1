@@ -191,6 +191,33 @@ function Get-FileHashHex([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Set-WindowsExecutableResources(
+    [string]$Executable,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [switch]$VerifyOnly
+) {
+    $arguments = @(
+        'run', './internal/tools/windowsresources',
+        '-target', 'windows_amd64',
+        '-executable', $Executable,
+        '-component', $Component,
+        '-version', $Version,
+        '-icon', $resourceIcon
+    )
+    if ($VerifyOnly) { $arguments += '-verify-only' }
+    Invoke-CheckedProcess 'go' $arguments $repoRoot
+
+    # Exercise the same Win32 version API used by Explorer in addition to the
+    # tool's exact PE-resource parser.
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo([IO.Path]::GetFullPath($Executable))
+    if ($versionInfo.CompanyName -ne 'Cisco Systems, Inc.' -or
+        $versionInfo.ProductName -ne 'Cisco DefenseClaw' -or
+        $versionInfo.FileVersion -ne $Version -or
+        $versionInfo.ProductVersion -ne $Version) {
+        throw "Windows VERSIONINFO API returned unexpected metadata for ${Executable}: company='$($versionInfo.CompanyName)' product='$($versionInfo.ProductName)' file='$($versionInfo.FileVersion)' version='$($versionInfo.ProductVersion)'"
+    }
+}
+
 function Protect-SensitiveDirectory([string]$Path) {
     [IO.Directory]::CreateDirectory($Path) | Out-Null
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -304,11 +331,10 @@ if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
-$setupManifest = Join-Path $repoRoot 'cmd\defenseclaw-setup\setup.manifest'
-$setupManifestTool = Join-Path $repoRoot 'scripts\set-windows-application-manifest.ps1'
-foreach ($requiredSetupInput in @($setupManifest, $setupManifestTool)) {
+$resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
+foreach ($requiredSetupInput in @($resourceIcon)) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
-        throw "Required setup manifest input is missing: $requiredSetupInput"
+        throw "Required Windows installer input is missing: $requiredSetupInput"
     }
 }
 
@@ -539,10 +565,12 @@ $launcher = Join-Path $payload "defenseclaw-launcher.exe"
 Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
 )
+Set-WindowsExecutableResources $launcher 'launcher'
 $startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
 Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w -H=windowsgui", "-o", $startupLauncher, "./cmd/defenseclaw-startup"
 )
+Set-WindowsExecutableResources $startupLauncher 'startup'
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
@@ -550,7 +578,17 @@ Remove-SafeTree $gatewayPayloadDir $build
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
+Set-WindowsExecutableResources $gatewayBinary 'gateway' -VerifyOnly
+Set-WindowsExecutableResources $hookBinary 'hook' -VerifyOnly
 $payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
+foreach ($resourceContract in @(
+    [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
+    [pscustomobject]@{ Path = $startupLauncher; Component = 'startup' },
+    [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
+    [pscustomobject]@{ Path = $hookBinary; Component = 'hook' }
+)) {
+    Set-WindowsExecutableResources $resourceContract.Path $resourceContract.Component -VerifyOnly
+}
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
 Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
 
@@ -620,14 +658,13 @@ try {
     Invoke-CheckedProcess "go" @(
         "build", "-ldflags", "-s -w -H=windowsgui", "-o", $setupPath, "./cmd/defenseclaw-setup"
     )
-    # An explicit asInvoker manifest disables Windows installer-detection
-    # auto-elevation for the setup-named executable. The helper uses inbox
-    # Win32 resource APIs and verifies RT_MANIFEST/1 byte-for-byte before the
-    # executable is eligible for Authenticode signing.
-    & $setupManifestTool -Executable $setupPath -Manifest $setupManifest
+    # Resource mutation is deliberately the last PE-writing step before
+    # Authenticode. The tool rejects already-signed files and reads the final
+    # manifest, icon, and VERSIONINFO set back through an independent parser.
+    Set-WindowsExecutableResources $setupPath 'setup'
 } catch {
-    # Never leave a setup-named executable without the explicit asInvoker
-    # resource in an otherwise valid-looking output directory.
+    # Never leave a setup-named executable without its complete resource
+    # contract in an otherwise valid-looking output directory.
     Remove-Item -LiteralPath $setupPath -Force -ErrorAction SilentlyContinue
     throw
 } finally {
@@ -635,6 +672,7 @@ try {
 }
 
 $setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
+Set-WindowsExecutableResources $setupPath 'setup' -VerifyOnly
 $signed = $setupSigned -and $payloadSigned
 
 $shaPath = "$setupPath.sha256"
@@ -660,8 +698,9 @@ $provenance = [ordered]@{
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
         yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
         yara_compat_wheel_sha256 = $yaraCompatSha256
-        setup_manifest = 'cmd/defenseclaw-setup/setup.manifest'
-        setup_manifest_sha256 = Get-FileHashHex $setupManifest
+        windows_resource_policy = 'internal/windowsresources'
+        windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
+        windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
     }
     toolchain = $manifest.toolchain
 }

@@ -7,12 +7,12 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/windowsresources"
 	"golang.org/x/sys/windows"
 )
 
@@ -27,19 +27,15 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 		t.Fatalf("build setup probe: %v\n%s", err, output)
 	}
 
-	manifest := filepath.Join(repoRoot, "cmd", "defenseclaw-setup", "setup.manifest")
-	manifestTool := filepath.Join(repoRoot, "scripts", "set-windows-application-manifest.ps1")
-	pwsh, err := exec.LookPath("pwsh.exe")
-	if err != nil {
-		t.Fatalf("locate PowerShell 7: %v", err)
-	}
+	icon := filepath.Join(repoRoot, filepath.FromSlash(windowsresources.IconSource))
 	for _, args := range [][]string{
-		{"-NoLogo", "-NoProfile", "-NonInteractive", "-File", manifestTool, "-Executable", executable, "-Manifest", manifest},
-		{"-NoLogo", "-NoProfile", "-NonInteractive", "-File", manifestTool, "-Executable", executable, "-Manifest", manifest, "-VerifyOnly"},
+		{"run", "./internal/tools/windowsresources", "-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon},
+		{"run", "./internal/tools/windowsresources", "-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon, "-verify-only"},
 	} {
-		command := exec.Command(pwsh, args...)
+		command := exec.Command("go", args...)
+		command.Dir = repoRoot
 		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("manifest tool failed: %v\n%s", err, output)
+			t.Fatalf("resource tool failed: %v\n%s", err, output)
 		}
 	}
 
@@ -64,12 +60,22 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load setup manifest resource: %v", err)
 	}
-	want, err := os.ReadFile(manifest)
+	want, err := windowsresources.Manifest(windowsresources.ComponentSetup, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(embedded, want) {
-		t.Fatal("embedded RT_MANIFEST/1 does not byte-match setup.manifest")
+		t.Fatal("embedded RT_MANIFEST/1 does not byte-match the canonical generated setup manifest")
+	}
+	for _, resourceType := range []windows.ResourceID{windows.RT_GROUP_ICON, windows.RT_VERSION} {
+		resource, err := windows.FindResource(module, windows.CREATEPROCESS_MANIFEST_RESOURCE_ID, resourceType)
+		if err != nil {
+			t.Fatalf("find setup resource type %d: %v", resourceType, err)
+		}
+		contents, err := windows.LoadResourceData(module, resource)
+		if err != nil || len(contents) == 0 {
+			t.Fatalf("load setup resource type %d: bytes=%d err=%v", resourceType, len(contents), err)
+		}
 	}
 
 	help := exec.Command(executable, "/quiet", "/?")
