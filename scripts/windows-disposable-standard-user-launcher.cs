@@ -813,6 +813,17 @@ namespace DefenseClaw
                 return process.WaitForExit(milliseconds);
             }
 
+            public bool WaitForExitAndGetExitCode(int milliseconds, out int exitCode)
+            {
+                exitCode = 0;
+                if (!process.WaitForExit(milliseconds))
+                {
+                    return false;
+                }
+                exitCode = process.ExitCode;
+                return true;
+            }
+
             public uint ActiveProcessCount
             {
                 get { return job == IntPtr.Zero ? 0 : GetActiveJobProcessCount(job); }

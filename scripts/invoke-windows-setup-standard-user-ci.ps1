@@ -848,9 +848,15 @@ try {
     } else {
         ''
     }
-    $timedOut = $startupFailed -or
-        -not $childProcess.WaitForExit($TimeoutSeconds * 1000)
-    $exitCode = if ($timedOut) { 124 } else { $childProcess.ExitCode }
+    $exitCode = 124
+    $exited = $false
+    if (-not $startupFailed) {
+        $exited = $childProcess.WaitForExitAndGetExitCode(
+            $TimeoutSeconds * 1000,
+            [ref]$exitCode
+        )
+    }
+    $timedOut = $startupFailed -or -not $exited
 
     # No elevated file enumeration, hash, result read, diagnostics copy, or
     # profile cleanup is permitted until both containment layers are closed:
