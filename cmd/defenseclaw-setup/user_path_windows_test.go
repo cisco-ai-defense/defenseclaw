@@ -114,31 +114,50 @@ func TestUserPathMutationBoundsContinuousExternalChurn(t *testing.T) {
 }
 
 func TestUserPathTransactionRestoresMissingValue(t *testing.T) {
-	key, keyPath := createUserPathTestKey(t)
-	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	for _, test := range []struct {
+		name       string
+		changeType bool
+	}{
+		{name: "unchanged"},
+		{name: "user changed registry type", changeType: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, keyPath := createUserPathTestKey(t)
+			commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
 
-	mutation, err := mutateRegistryUserPath(
-		registry.CURRENT_USER,
-		keyPath,
-		addUserPathMutation(commandDir),
-	)
-	if err != nil {
-		t.Fatalf("add initially missing user PATH: %v", err)
-	}
-	if !mutation.Changed || !mutation.ValueCreated {
-		t.Fatalf("PATH ownership = changed:%t value-created:%t", mutation.Changed, mutation.ValueCreated)
-	}
-	assertUserPathValue(t, key, commandDir, registry.SZ)
+			mutation, err := mutateRegistryUserPath(
+				registry.CURRENT_USER,
+				keyPath,
+				addUserPathMutation(commandDir),
+			)
+			if err != nil {
+				t.Fatalf("add initially missing user PATH: %v", err)
+			}
+			if !mutation.Changed || !mutation.ValueCreated {
+				t.Fatalf("PATH ownership = changed:%t value-created:%t", mutation.Changed, mutation.ValueCreated)
+			}
+			assertUserPathValue(t, key, commandDir, registry.SZ)
+			if test.changeType {
+				if err := key.SetExpandStringValue("Path", commandDir); err != nil {
+					t.Fatalf("change setup-created PATH registry type: %v", err)
+				}
+			}
 
-	if _, err := mutateRegistryUserPath(
-		registry.CURRENT_USER,
-		keyPath,
-		removeUserPathMutation(commandDir, mutation.ReusedSeparator, mutation.ValueCreated),
-	); err != nil {
-		t.Fatalf("remove setup-created user PATH: %v", err)
-	}
-	if value, _, err := key.GetStringValue("Path"); err != registry.ErrNotExist {
-		t.Fatalf("setup-created PATH still exists as %q: %v", value, err)
+			if _, err := mutateRegistryUserPath(
+				registry.CURRENT_USER,
+				keyPath,
+				removeUserPathMutation(commandDir, mutation.ReusedSeparator, mutation.ValueCreated),
+			); err != nil {
+				t.Fatalf("remove setup-created user PATH: %v", err)
+			}
+			if test.changeType {
+				assertUserPathValue(t, key, "", registry.EXPAND_SZ)
+				return
+			}
+			if value, _, err := key.GetStringValue("Path"); err != registry.ErrNotExist {
+				t.Fatalf("setup-created PATH still exists as %q: %v", value, err)
+			}
+		})
 	}
 }
 

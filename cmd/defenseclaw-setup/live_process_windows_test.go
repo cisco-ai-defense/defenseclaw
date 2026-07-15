@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestLiveProcessWithinInstallRoot(t *testing.T) {
@@ -81,6 +83,11 @@ func TestProcessIdentityReportsExitedProcess(t *testing.T) {
 		t.Fatalf("start process: %v", err)
 	}
 	pid := uint32(cmd.Process.Pid)
+	processHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		t.Fatalf("open process synchronization handle: %v", err)
+	}
+	defer func() { _ = windows.CloseHandle(processHandle) }()
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("wait for process: %v", err)
 	}
