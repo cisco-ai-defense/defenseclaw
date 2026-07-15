@@ -28,11 +28,17 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 	}
 
 	icon := filepath.Join(repoRoot, filepath.FromSlash(windowsresources.IconSource))
+	resourceTool := filepath.Join(t.TempDir(), "windowsresources.exe")
+	resourceBuild := exec.Command("go", "build", "-o", resourceTool, "./internal/tools/windowsresources")
+	resourceBuild.Dir = repoRoot
+	if output, err := resourceBuild.CombinedOutput(); err != nil {
+		t.Fatalf("build resource tool: %v\n%s", err, output)
+	}
 	for _, args := range [][]string{
-		{"run", "./internal/tools/windowsresources", "-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon},
-		{"run", "./internal/tools/windowsresources", "-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon, "-verify-only"},
+		{"-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon},
+		{"-target", "windows_amd64", "-executable", executable, "-component", "setup", "-version", "1.2.3", "-icon", icon, "-verify-only"},
 	} {
-		command := exec.Command("go", args...)
+		command := exec.Command(resourceTool, args...)
 		command.Dir = repoRoot
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("resource tool failed: %v\n%s", err, output)

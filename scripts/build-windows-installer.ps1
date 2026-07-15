@@ -191,7 +191,7 @@ function Get-FileHashHex([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Set-WindowsExecutableResources(
+function Set-WindowsExecutableResource(
     [string]$Executable,
     [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
     [switch]$VerifyOnly
@@ -565,12 +565,12 @@ $launcher = Join-Path $payload "defenseclaw-launcher.exe"
 Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
 )
-Set-WindowsExecutableResources $launcher 'launcher'
+Set-WindowsExecutableResource $launcher 'launcher'
 $startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
 Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w -H=windowsgui", "-o", $startupLauncher, "./cmd/defenseclaw-startup"
 )
-Set-WindowsExecutableResources $startupLauncher 'startup'
+Set-WindowsExecutableResource $startupLauncher 'startup'
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
@@ -578,8 +578,8 @@ Remove-SafeTree $gatewayPayloadDir $build
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
-Set-WindowsExecutableResources $gatewayBinary 'gateway' -VerifyOnly
-Set-WindowsExecutableResources $hookBinary 'hook' -VerifyOnly
+Set-WindowsExecutableResource $gatewayBinary 'gateway' -VerifyOnly
+Set-WindowsExecutableResource $hookBinary 'hook' -VerifyOnly
 $payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
 foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
@@ -587,7 +587,7 @@ foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
     [pscustomobject]@{ Path = $hookBinary; Component = 'hook' }
 )) {
-    Set-WindowsExecutableResources $resourceContract.Path $resourceContract.Component -VerifyOnly
+    Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
 }
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
 Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
@@ -661,7 +661,7 @@ try {
     # Resource mutation is deliberately the last PE-writing step before
     # Authenticode. The tool rejects already-signed files and reads the final
     # manifest, icon, and VERSIONINFO set back through an independent parser.
-    Set-WindowsExecutableResources $setupPath 'setup'
+    Set-WindowsExecutableResource $setupPath 'setup'
 } catch {
     # Never leave a setup-named executable without its complete resource
     # contract in an otherwise valid-looking output directory.
@@ -672,7 +672,7 @@ try {
 }
 
 $setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
-Set-WindowsExecutableResources $setupPath 'setup' -VerifyOnly
+Set-WindowsExecutableResource $setupPath 'setup' -VerifyOnly
 $signed = $setupSigned -and $payloadSigned
 
 $shaPath = "$setupPath.sha256"

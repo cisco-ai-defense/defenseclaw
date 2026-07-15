@@ -89,8 +89,8 @@ jobs:
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
           $packageVersion = Get-WorkspacePackageVersion
-          Assert-WindowsExecutableResources (Join-Path $bin 'defenseclaw-gateway.exe') 'gateway' $packageVersion -Apply
-          Assert-WindowsExecutableResources (Join-Path $bin 'defenseclaw-hook.exe') 'hook' $packageVersion -Apply
+          Assert-WindowsExecutableResource (Join-Path $bin 'defenseclaw-gateway.exe') 'gateway' $packageVersion -Apply
+          Assert-WindowsExecutableResource (Join-Path $bin 'defenseclaw-hook.exe') 'hook' $packageVersion -Apply
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -295,10 +295,6 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-native-package

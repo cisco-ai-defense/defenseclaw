@@ -98,7 +98,7 @@ function Get-WorkspacePackageVersion {
     return $packageVersion
 }
 
-function Assert-WindowsExecutableResources(
+function Assert-WindowsExecutableResource(
     [string]$Path,
     [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
     [string]$Version,
@@ -1034,8 +1034,8 @@ function Invoke-BuildArtifacts {
         $hook = Join-Path $stage 'defenseclaw-hook.exe'
         Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', $gateway, './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
         Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', $hook, './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
-        Assert-WindowsExecutableResources $gateway 'gateway' $packageVersion -Apply
-        Assert-WindowsExecutableResources $hook 'hook' $packageVersion -Apply
+        Assert-WindowsExecutableResource $gateway 'gateway' $packageVersion -Apply
+        Assert-WindowsExecutableResource $hook 'hook' $packageVersion -Apply
         Invoke-WindowsNativeProcess $go @(
             'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w',
             '-o', (Join-Path $dist $windowsResourceVerifierName),
@@ -2626,7 +2626,7 @@ function Invoke-SetupAcceptance {
         throw "native setup executable not found: $setup"
     }
     $packageVersion = Get-WorkspacePackageVersion
-    Assert-WindowsExecutableResources $setup 'setup' $packageVersion
+    Assert-WindowsExecutableResource $setup 'setup' $packageVersion
     $setupAuthenticode = Get-CiscoAuthenticodeState $setup
     $requireSignedProduct = $setupAuthenticode.Status -eq 'Valid'
     if ($requireSignedProduct -and $setupAuthenticode.Publisher -ne 'Cisco Systems, Inc.') {
@@ -2737,7 +2737,7 @@ function Invoke-SetupAcceptance {
             [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\mcp-scanner.exe'); Component = 'launcher' },
             [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\defenseclaw-observability.exe'); Component = 'launcher' }
         )) {
-            Assert-WindowsExecutableResources $resourceContract.Path $resourceContract.Component $packageVersion
+            Assert-WindowsExecutableResource $resourceContract.Path $resourceContract.Component $packageVersion
         }
         if ($requireSignedProduct) {
             foreach ($productExecutable in @(
