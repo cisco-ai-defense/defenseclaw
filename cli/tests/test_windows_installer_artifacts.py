@@ -22,6 +22,7 @@ HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
 BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
 assert SPEC and SPEC.loader
 artifacts = importlib.util.module_from_spec(SPEC)
@@ -328,6 +329,28 @@ def test_reproducible_launcher_builds_include_final_pe_resources() -> None:
     assert body.index("Set-WindowsExecutableResource") < body.index("Get-FileHashHex $target")
     assert "Build-VerifiedGoBinary $launcher" in build and "$reproducibilityRoot 'launcher'" in build
     assert "Build-VerifiedGoBinary $startupLauncher" in build and "$reproducibilityRoot 'startup'" in build
+
+
+def test_signed_release_stages_offline_resource_verifier_before_lifecycle() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    publish = re.search(
+        r"(?ms)^function Publish-SetupAcceptanceResourceInputs\b.*?(?=^function |\Z)",
+        build,
+    )
+    assert publish
+    for name in (
+        "DefenseClawWindowsResourceVerifier-x64.exe",
+        "DefenseClawWindowsResourceIcon.png",
+        "DefenseClawWindowsResourceVersion.txt",
+    ):
+        assert name in publish.group(0)
+    assert "Build-VerifiedGoBinary $verifier './internal/tools/windowsresources'" in publish.group(0)
+    assert "Publish-SetupAcceptanceResourceInputs $out" in build
+
+    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    builder = "./scripts/build-windows-installer.ps1"
+    lifecycle = "./scripts/invoke-windows-setup-standard-user-ci.ps1"
+    assert release.index(builder) < release.index(lifecycle)
 
 
 def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:

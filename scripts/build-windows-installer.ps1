@@ -282,6 +282,25 @@ function Set-WindowsExecutableResource(
     }
 }
 
+function Publish-SetupAcceptanceResourceInputs(
+    [string]$DestinationRoot,
+    [string]$VerificationRoot,
+    [string]$IconPath,
+    [string]$PackageVersion,
+    [string]$SourceCommit
+) {
+    $verifier = Join-Path $DestinationRoot 'DefenseClawWindowsResourceVerifier-x64.exe'
+    Build-VerifiedGoBinary $verifier './internal/tools/windowsresources' `
+        "-s -w -buildid=defenseclaw-windows-resource-verifier-$SourceCommit" $VerificationRoot
+    Copy-Item -LiteralPath $IconPath `
+        -Destination (Join-Path $DestinationRoot 'DefenseClawWindowsResourceIcon.png') -Force
+    [IO.File]::WriteAllText(
+        (Join-Path $DestinationRoot 'DefenseClawWindowsResourceVersion.txt'),
+        $PackageVersion + "`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Protect-SensitiveDirectory([string]$Path) {
     [IO.Directory]::CreateDirectory($Path) | Out-Null
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -923,10 +942,18 @@ try {
         @($sbom.documentDescribes).Count -ne 1) {
         throw 'Merged Windows installer SBOM failed the release validity gate.'
     }
+    Publish-SetupAcceptanceResourceInputs $out `
+        (Join-Path $reproducibilityRoot 'resource-verifier') `
+        $resourceIcon $Version $sourceCommit
 } catch {
     # Never leave a setup-named executable or incomplete sidecars in an
     # otherwise valid-looking output directory.
-    foreach ($incomplete in @($setupPath, $shaPath, $provenancePath, $sbomPath)) {
+    foreach ($incomplete in @(
+        $setupPath, $shaPath, $provenancePath, $sbomPath,
+        (Join-Path $out 'DefenseClawWindowsResourceVerifier-x64.exe'),
+        (Join-Path $out 'DefenseClawWindowsResourceIcon.png'),
+        (Join-Path $out 'DefenseClawWindowsResourceVersion.txt')
+    )) {
         Remove-Item -LiteralPath $incomplete -Force -ErrorAction SilentlyContinue
     }
     throw
