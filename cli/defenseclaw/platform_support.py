@@ -143,7 +143,6 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
         "omnigent",
         "openclaw",
         "zeptoclaw",
-        "native-desktop-toasts",
     }
 )
 

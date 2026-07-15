@@ -31,6 +31,104 @@
           "contract_id": "codex-hooks-v1",
           "agent_version": {
             "min_inclusive": "0.124.0",
+            "max_exclusive": "0.129.0"
+          },
+          "default_for_unversioned": false,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.124.0 through 0.128.x expose six stable hook events. They have no hooks/list trust introspection and ignore hooks.state; validate them only as legacy no-bypass execution.",
+            "DefenseClaw may preseed inert hook state for upgrade continuity, but does not describe 0.124.0 through 0.128.x as trust-certified.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v2",
+          "agent_version": {
+            "min_inclusive": "0.129.0",
+            "max_exclusive": "0.133.0"
+          },
+          "default_for_unversioned": false,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.129.x through 0.132.x add PreCompact and PostCompact plus hooks/list trust introspection, for eight supported events.",
+            "On native Windows the generic and command_windows values must remain byte-identical so 0.129.x and newer clients derive the same trusted hook identity.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v3",
+          "agent_version": {
+            "min_inclusive": "0.133.0",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -74,7 +172,8 @@
             "scope": "user"
           },
           "notes": [
-            "Codex hooks were made stable in 0.124.0. DefenseClaw leaves the upper bound open until upstream publishes a breaking hook change.",
+            "Codex 0.133.0 is the first release with the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop.",
+            "Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
             "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
           ]
         }
@@ -147,13 +246,13 @@
               "UserPromptExpansion",
               "PreToolUse",
               "PermissionRequest",
-              "PostToolUse",
               "PostToolBatch",
               "TaskCreated",
               "TaskCompleted",
               "TeammateIdle",
               "Stop",
               "SubagentStop",
+              "ConfigChange",
               "PreCompact",
               "Elicitation",
               "ElicitationResult"
@@ -163,7 +262,10 @@
           },
           "notes": [
             "Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older Claude Code releases exposed smaller hook event sets.",
-            "Claude Code PreToolUse supports native HITL via permissionDecision=ask."
+            "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
+            "PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
+            "PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
+            "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions."
           ]
         }
       ]

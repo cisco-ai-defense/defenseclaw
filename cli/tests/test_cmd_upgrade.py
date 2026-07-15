@@ -799,8 +799,10 @@ class TestChecksumVerification(unittest.TestCase):
         self.assertEqual(cmd[0:2], ["/usr/bin/cosign", "verify-blob"])
         self.assertEqual(
             cmd[cmd.index("--certificate-identity-regexp") + 1],
-            "^https://github.com/cisco-ai-defense/defenseclaw/.+",
+            r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/"
+            r"release\.yaml@refs/(tags/9\.9\.9|heads/main)$",
         )
+        self.assertNotIn("/.+", cmd[cmd.index("--certificate-identity-regexp") + 1])
         self.assertEqual(
             cmd[cmd.index("--certificate-oidc-issuer") + 1],
             "https://token.actions.githubusercontent.com",

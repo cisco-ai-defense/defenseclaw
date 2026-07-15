@@ -248,6 +248,7 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, resolveActiveConnectorName(dataDir))
 	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts
 }
@@ -294,6 +295,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	opts.HookAPIToken = hookToken
 	opts.HookAPITokenScoped = true
 	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
 	previous := connector.LoadHookContractLockEntry(dataDir, name)
 	if opts.AgentVersion == "" {
 		// A scoped policy refresh must not downgrade a previously verified

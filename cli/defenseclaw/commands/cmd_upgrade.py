@@ -1097,6 +1097,15 @@ def _verify_checksums_sigstore(
         )
         return
 
+    # Release manifests are signed only by the repository's release workflow.
+    # Accept its exact version tag or an explicit dispatch from main, matching
+    # the release pipeline and rejecting every other workflow/ref identity in
+    # the repository.
+    escaped_version = version.replace(".", r"\.")
+    certificate_identity = (
+        rf"^https://github\.com/{GITHUB_REPO}/\.github/workflows/"
+        rf"release\.yaml@refs/(tags/{escaped_version}|heads/main)$"
+    )
     cmd = [
         cosign,
         "verify-blob",
@@ -1105,7 +1114,7 @@ def _verify_checksums_sigstore(
         "--signature",
         sig_path,
         "--certificate-identity-regexp",
-        f"^https://github.com/{GITHUB_REPO}/.+",
+        certificate_identity,
         "--certificate-oidc-issuer",
         "https://token.actions.githubusercontent.com",
         checksums_path,

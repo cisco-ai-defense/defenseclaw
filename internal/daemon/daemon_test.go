@@ -19,6 +19,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -448,5 +449,187 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	err := d.Stop(time.Second)
 	if err != ErrNotRunning {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
+	}
+}
+
+func TestRemovePIDFileIfStartedPreservesReplacement(t *testing.T) {
+	d := New(t.TempDir())
+	old := pidInfo{PID: 101, Executable: "old-gateway", StartIdentity: "old-start"}
+	replacement := pidInfo{PID: 202, Executable: "new-gateway", StartIdentity: "new-start"}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(old)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("replacement PID record was removed: %v", err)
+	}
+	if got.PID != replacement.PID || got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("PID record = %+v, want replacement %+v", got, replacement)
+	}
+}
+
+func TestRemovePIDFileIfStartedPreservesReusedPID(t *testing.T) {
+	d := New(t.TempDir())
+	old := pidInfo{PID: 303, Executable: "gateway", StartIdentity: "old-start"}
+	replacement := pidInfo{PID: old.PID, Executable: "gateway", StartIdentity: "new-start"}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(old)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("PID-reuse replacement record was removed: %v", err)
+	}
+	if got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
+	}
+}
+
+func TestRemovePIDFileIfStartedPreservesStrongReplacementAfterLegacyRead(t *testing.T) {
+	d := New(t.TempDir())
+	legacy := pidInfo{PID: 404}
+	replacement := pidInfo{
+		PID:           legacy.PID,
+		Executable:    "gateway",
+		StartIdentity: "replacement-start",
+	}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+
+	d.removePIDFileIfStarted(legacy)
+
+	got, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatalf("strong replacement PID record was removed: %v", err)
+	}
+	if got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("start identity = %q, want %q", got.StartIdentity, replacement.StartIdentity)
+	}
+}
+
+func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER"
+	if marker := os.Getenv(helperEnv); marker != "" {
+		observed := os.Getenv("DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED")
+		release := os.Getenv("DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE")
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(marker); err == nil {
+				if err := os.WriteFile(observed, []byte("observed"), 0o600); err != nil {
+					os.Exit(2)
+				}
+				for time.Now().Before(deadline) {
+					if _, err := os.Stat(release); err == nil {
+						os.Exit(0)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				os.Exit(3)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		os.Exit(4)
+	}
+
+	dataDir := t.TempDir()
+	marker := filepath.Join(dataDir, "graceful-stop.requested")
+	observed := filepath.Join(dataDir, "graceful-stop.observed")
+	release := filepath.Join(dataDir, "graceful-stop.release")
+	cmd := exec.Command(os.Args[0], "-test.run=TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID")
+	cmd.Env = append(os.Environ(),
+		helperEnv+"="+marker,
+		"DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED="+observed,
+		"DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE="+release,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitCh:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	identity, err := processStartIdentity(cmd.Process.Pid)
+	if err != nil || identity == "" {
+		t.Fatalf("capture helper identity: identity=%q err=%v", identity, err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(dataDir)
+	if err := d.writePIDInfo(cmd.Process.Pid, executable, identity); err != nil {
+		t.Fatal(err)
+	}
+	callbackPID := 0
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- d.StopGracefully(5*time.Second, func(pid int) error {
+			callbackPID = pid
+			return os.WriteFile(marker, []byte("stop"), 0o600)
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(observed); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper did not observe the accepted stop request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(d.PIDFile()); err != nil {
+		t.Fatalf("PID file was removed before the accepted request drained: %v", err)
+	}
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopCh; err != nil {
+		t.Fatal(err)
+	}
+	if callbackPID != cmd.Process.Pid {
+		t.Fatalf("graceful callback PID = %d, want %d", callbackPID, cmd.Process.Pid)
+	}
+	if _, err := os.Stat(d.PIDFile()); !os.IsNotExist(err) {
+		t.Fatalf("PID file remains after confirmed exit: %v", err)
+	}
+	select {
+	case waitErr := <-waitCh:
+		reaped = true
+		if waitErr != nil {
+			t.Fatalf("helper exit: %v", waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("helper process was not reaped")
 	}
 }

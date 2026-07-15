@@ -95,13 +95,12 @@ def test_notifications_model_matches_go_oracle_copy_and_argv() -> None:
     assert "not affected" in off_copy
 
 
-def test_windows_notifications_model_is_inactive_and_has_no_toggle_command() -> None:
+def test_windows_notifications_model_is_native_and_has_toggle_command() -> None:
     model = build_notifications_model(True, "Windows")
-    assert "unsupported" in model.title.lower()
-    assert "INACTIVE" in model.summary
-    assert "legacy setting retained" in model.summary
-    assert model.actions[0].label == "Close"
-    assert model.actions[0].command is None
+    assert model.title == "Desktop notifications"
+    assert "Will become:" in model.summary
+    assert model.actions[0].label == "Confirm"
+    assert model.actions[0].command == notifications_command(True)
 
 
 def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:

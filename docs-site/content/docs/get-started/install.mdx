@@ -19,7 +19,7 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 
 | Requirement | Version |
 | --- | --- |
-| Python | 3.10+ for source builds; native Windows setup bundles a managed Python 3.12 runtime |
+| Python | 3.10+ for source builds; native Windows setup bundles a managed Python 3.14 runtime |
 | Go | 1.26.2+ (only for source builds) |
 | Node.js | 18+ (only for the OpenClaw plugin, source builds) |
 | PowerShell/cmd | Optional on Windows for silent install and verification commands |
@@ -82,6 +82,13 @@ Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
 later. The setup executable contains the offline payload required for install;
 after download it does not require Python, `uv`, Go, Node.js, Git, or a
 PowerShell installation command.
+
+On Windows with Python 3.14, the supported install paths are this native Setup
+executable or a source checkout resolved with `uv`. VirusTotal does not publish
+a `yara-python` CPython 3.14 Windows wheel, so DefenseClaw's narrow YARA-X
+compatibility adapter is selected from the source tree by the locked `uv`
+graph and bundled into Setup. A plain `pip install` on Windows Python 3.14 is
+not a certified install path until that adapter is published independently.
 
 Native Windows uses agent hooks rather than the OpenClaw/ZeptoClaw proxy path.
 See [Native Windows](/docs/get-started/windows) for the supported connector

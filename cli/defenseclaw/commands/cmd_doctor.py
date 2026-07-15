@@ -43,6 +43,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_paths import (
+    connector_config_files,
     hermes_config_path,
     hermes_legacy_config_path,
     omnigent_config_path,
@@ -1378,11 +1379,7 @@ def _windows_native_hook_check(
     """
     paths = _hook_health_paths_from_lock(cfg, connector)
     if config_path is None:
-        config_path = (
-            paths[0]
-            if paths
-            else os.path.expanduser("~/.codex/config.toml" if connector == "codex" else "~/.claude/settings.json")
-        )
+        config_path = paths[0] if paths else connector_config_files(connector)[0]
     if install_root is None:
         install_root = _packaged_windows_install_root(getattr(cfg, "data_dir", "") or "")
     if install_root is None:
@@ -1394,6 +1391,11 @@ def _windows_native_hook_check(
         install_root=install_root,
         search_path=os.environ.get("PATH", "") if search_path is None else search_path,
         pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
+        workspace_dir=_workspace_dir(cfg) if connector == "claudecode" else "",
+        managed_enterprise=(
+            connector == "claudecode"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
     )
 
 
@@ -1419,7 +1421,11 @@ def _check_claudecode_hooks(
             pathext=pathext,
         )
         return
-    settings_path = os.path.expanduser("~/.claude/settings.json")
+    # Honor an explicitly modeled config path on every platform.  This keeps
+    # Doctor bound to the same Claude invocation that the caller selected and
+    # avoids accidentally inspecting an unrelated process-wide
+    # CLAUDE_CONFIG_DIR while validating a project or alternate home.
+    settings_path = config_path or connector_config_files("claudecode")[0]
     if not os.path.isfile(settings_path):
         _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
         return
@@ -4359,7 +4365,18 @@ def _check_hook_contract_lock(
     if native_runtime is not None:
         detail += f" {native_runtime.runtime_description}"
 
-    current_version = _discovered_agent_version(data_dir, connector)
+    # Native Codex setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_codex_agent = connector == "codex" and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
+    current_version = "" if protected_codex_agent else _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
         _emit(
             "fail",
