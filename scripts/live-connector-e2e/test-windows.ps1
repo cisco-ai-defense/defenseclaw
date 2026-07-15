@@ -1041,7 +1041,7 @@ try {
         $releaseWorkflowText,
         '(?s)  windows-real-client-certification:.*?(?=\r?\n  publish:)'
     ).Value
-    Assert-True ($releaseCertificationJob -match 'needs: windows-installer' -and
+    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release,\s*windows-installer\]' -and
         $releaseCertificationJob -match '-Operation release-certification' -and
         $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
         $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
