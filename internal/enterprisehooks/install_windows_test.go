@@ -53,6 +53,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	originalHigher := windowsClaudeHigherPolicyCheck
 	originalOwner := windowsManagedPolicyOwnerSID
 	originalRuntimeOwner := windowsManagedRuntimeOwnerSID
+	originalRuntimeChildOpen := windowsManagedRuntimeChildOpen
 	originalDirTrust := windowsManagedPolicyDirTrustCheck
 	originalFileTrust := windowsManagedPolicyFileTrustCheck
 	originalWriter := windowsManagedPolicyWriter
@@ -120,6 +121,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 		windowsClaudeHigherPolicyCheck = originalHigher
 		windowsManagedPolicyOwnerSID = originalOwner
 		windowsManagedRuntimeOwnerSID = originalRuntimeOwner
+		windowsManagedRuntimeChildOpen = originalRuntimeChildOpen
 		windowsManagedPolicyDirTrustCheck = originalDirTrust
 		windowsManagedPolicyFileTrustCheck = originalFileTrust
 		windowsManagedPolicyWriter = originalWriter
@@ -392,6 +394,59 @@ func TestInstallWindowsClaudeRejectsReparseDataDir(t *testing.T) {
 	}
 }
 
+func TestInstallWindowsClaudeRejectsDataDirSubstitutedAfterHomeBinding(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(dataDir, fixture.targetSID, true); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(fixture.home), "outside-runtime")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(filepath.Dir(fixture.home), "junction-probe")
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", probe, outside).CombinedOutput(); err != nil {
+		t.Skipf("directory junctions are unavailable: %v (%s)", err, output)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	originalOpen := windowsManagedRuntimeChildOpen
+	var swapErr error
+	windowsManagedRuntimeChildOpen = func(parent *os.File, name string, target *windows.SID) (windowsManagedRuntimeDirectory, error) {
+		if name == ".defenseclaw" {
+			originalDir := dataDir + ".original"
+			if err := os.Rename(dataDir, originalDir); err != nil {
+				swapErr = err
+				return windowsManagedRuntimeDirectory{}, err
+			}
+			if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", dataDir, outside).CombinedOutput(); err != nil {
+				swapErr = errors.New(err.Error() + ": " + string(output))
+				return windowsManagedRuntimeDirectory{}, swapErr
+			}
+		}
+		return originalOpen(parent, name, target)
+	}
+
+	_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
+	if swapErr != nil {
+		t.Fatalf("substitute data directory: %v", swapErr)
+	}
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reparse") {
+		t.Fatalf("Install error = %v, want bound reparse-substitution refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("privileged runtime write escaped through substituted junction: %v", err)
+	}
+	if _, err := os.Lstat(fixture.policyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed policy published after runtime binding failure: %v", err)
+	}
+}
+
 func TestInstallWindowsClaudeRefusesForeignManagedPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	foreign := []byte("{\"hooks\":{\"PreToolUse\":[]}}\n")
@@ -433,6 +488,32 @@ func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
 	}
 }
 
+func TestWriteWindowsManagedFileReappliesRequestedACLWhenBytesMatch(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	path := filepath.Join(filepath.Dir(fixture.policyPath), "acl-repair.json")
+	body := []byte("{\"schema\":1}\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsManagedPolicyProtection(path, false, false); err != nil {
+		t.Fatal(err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowsTestDACLGrants(path, users, windows.FILE_GENERIC_READ) {
+		t.Fatal("fixture unexpectedly grants Users read access")
+	}
+
+	if err := writeWindowsManagedFile(path, body, true); err != nil {
+		t.Fatalf("writeWindowsManagedFile: %v", err)
+	}
+	if !windowsTestDACLGrants(path, users, windows.FILE_GENERIC_READ) {
+		t.Fatal("unchanged managed file did not receive requested Users read ACL")
+	}
+}
+
 func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	hookDir := filepath.Join(fixture.home, ".defenseclaw", "hooks")
@@ -452,6 +533,10 @@ func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 	if err := setWindowsUserPathProtection(tokenPath, fixture.targetSID, false); err != nil {
 		t.Fatal(err)
 	}
+	originalSecurity := map[string]string{}
+	for _, path := range []string{filepath.Dir(hookDir), hookDir, tokenPath} {
+		originalSecurity[path] = windowsTestSecurityDescriptor(t, path)
+	}
 	originalWriter := windowsManagedPolicyWriter
 	failed := false
 	windowsManagedPolicyWriter = func(path string, data []byte, readable bool) error {
@@ -468,6 +553,11 @@ func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 	}
 	if got, err := os.ReadFile(tokenPath); err != nil || string(got) != sentinel {
 		t.Fatalf("runtime rollback = %q err=%v, want sentinel", got, err)
+	}
+	for path, want := range originalSecurity {
+		if got := windowsTestSecurityDescriptor(t, path); got != want {
+			t.Fatalf("runtime security rollback for %s = %q, want %q", path, got, want)
+		}
 	}
 	for _, path := range []string{fixture.policyPath, filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -531,6 +621,21 @@ func TestInstallWindowsClaudeRejectsHigherPriorityAndDisabledPolicy(t *testing.T
 			!strings.Contains(err.Error(), "supersedes file-based managed hooks") ||
 			!strings.Contains(err.Error(), basePolicyPath) {
 			t.Fatalf("Install error = %v", err)
+		}
+	})
+	t.Run("higher drop-in clears policy helper", func(t *testing.T) {
+		fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
+			"policyHelper": map[string]interface{}{"path": `C:\Program Files\Policy\helper.exe`},
+		})
+		clearPath := filepath.Join(filepath.Dir(fixture.policyPath), "20-clear-policy-helper.json")
+		if err := os.WriteFile(clearPath, []byte("{\"policyHelper\":null}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := setWindowsManagedPolicyProtection(clearPath, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+			t.Fatalf("Install with cleared policyHelper: %v", err)
 		}
 	})
 }
@@ -750,6 +855,23 @@ func windowsTestEffectiveRights(t *testing.T, path string, principal *windows.SI
 		t.Fatalf("GetEffectiveRightsFromAclW(%s, %s): %v", path, principal, syscall.Errno(status))
 	}
 	return rights
+}
+
+func windowsTestSecurityDescriptor(t *testing.T, path string) string {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor.String()
 }
 
 func windowsTestDACLGrants(path string, principal *windows.SID, mask windows.ACCESS_MASK) bool {

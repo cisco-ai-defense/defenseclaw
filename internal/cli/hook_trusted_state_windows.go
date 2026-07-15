@@ -66,6 +66,7 @@ func nativeHookExecutable() string {
 // so a long-running agent can never turn an uninstalled cached command into a
 // strict-availability block.
 func NativeHookRuntimeNoop() bool {
+	enterpriseManaged := hookArgsContainEnterpriseManaged(os.Args[1:])
 	executable := nativeHookExecutable()
 	state, recognized, err := hookruntime.ReadTrustedForExecutable(executable)
 	nativeHookRuntimeSnapshot.Lock()
@@ -76,6 +77,9 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
 	if !recognized {
+		if enterpriseManaged {
+			return enterpriseManagedHookRuntimeNoop()
+		}
 		return false
 	}
 	if err != nil {
@@ -84,7 +88,7 @@ func NativeHookRuntimeNoop() bool {
 	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
 		return true
 	}
-	if hookArgsContainEnterpriseManaged(os.Args[1:]) {
+	if enterpriseManaged {
 		return enterpriseManagedHookRuntimeNoop()
 	}
 	return false

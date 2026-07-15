@@ -767,7 +767,7 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	return append(body, '\n'), nil
 }
 
-// VerifyManagedHookPolicy verifies the exact persisted managed-policy bytes.
+// VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
 func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpts) error {
 	settings := map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -781,7 +781,29 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 		opts,
 		filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"),
 	)
-	return verifyClaudeCodeHookMatrix(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks"))
+	if err := verifyClaudeCodeHookMatrix(hooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks")); err != nil {
+		return err
+	}
+	expected, err := c.ManagedHookPolicy(opts)
+	if err != nil {
+		return fmt.Errorf("render expected Claude Code managed hook policy: %w", err)
+	}
+	var expectedSettings map[string]interface{}
+	if err := json.Unmarshal(expected, &expectedSettings); err != nil {
+		return fmt.Errorf("parse expected Claude Code managed hook policy: %w", err)
+	}
+	actualCanonical, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("canonicalize Claude Code managed hook policy: %w", err)
+	}
+	expectedCanonical, err := json.Marshal(expectedSettings)
+	if err != nil {
+		return fmt.Errorf("canonicalize expected Claude Code managed hook policy: %w", err)
+	}
+	if !bytes.Equal(actualCanonical, expectedCanonical) {
+		return fmt.Errorf("Claude Code managed hook policy differs from the canonical DefenseClaw policy")
+	}
+	return nil
 }
 
 func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string, hookArgs []string) {
@@ -1324,8 +1346,20 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 
 	err = withFileLock(settingsPath, func() error {
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+			var restorePerm os.FileMode
+			var exactData []byte
 			if exact, ok := managedFileBackupTransform(managedBackup, data, exists); ok {
-				return exact, nil
+				if exact.Remove {
+					return exact, nil
+				}
+				// A predecessor can capture an already-managed settings file as
+				// its "pristine" snapshot during an upgrade. Passing restored
+				// bytes through the same ownership-aware cleanup keeps that stale
+				// snapshot from resurrecting every DefenseClaw hook and OTel key.
+				data = exact.Data
+				exists = true
+				restorePerm = exact.Perm
+				exactData = exact.Data
 			}
 			if !exists {
 				return atomicTransformResult{Remove: true}, nil
@@ -1333,6 +1367,13 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			settings := map[string]interface{}{}
 			if err := json.Unmarshal(data, &settings); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
+			}
+			var exactCanonical []byte
+			if exactData != nil {
+				exactCanonical, err = json.Marshal(settings)
+				if err != nil {
+					return atomicTransformResult{}, fmt.Errorf("canonicalize exact Claude settings snapshot: %w", err)
+				}
 			}
 
 			if rawHooks, present := settings["hooks"]; present {
@@ -1418,11 +1459,18 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				}
 			}
 
+			canonical, err := json.Marshal(settings)
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
+			}
+			if exactData != nil && bytes.Equal(canonical, exactCanonical) {
+				return atomicTransformResult{Data: exactData, Perm: restorePerm}, nil
+			}
 			out, err := json.MarshalIndent(settings, "", "  ")
 			if err != nil {
 				return atomicTransformResult{}, fmt.Errorf("marshal restored settings: %w", err)
 			}
-			return atomicTransformResult{Data: out}, nil
+			return atomicTransformResult{Data: out, Perm: restorePerm}, nil
 		}); err != nil {
 			return fmt.Errorf("write restored settings: %w", err)
 		}

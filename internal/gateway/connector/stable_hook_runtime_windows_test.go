@@ -276,7 +276,7 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 	if !ok {
 		t.Fatalf("setup hooks have unexpected type %T", cfg["hooks"])
 	}
-	hooks["SessionStart"] = []interface{}{map[string]interface{}{
+	hooks["UserMaintenance"] = []interface{}{map[string]interface{}{
 		"hooks": []interface{}{map[string]interface{}{
 			"type":    "command",
 			"command": "user-maintenance-policy.exe",

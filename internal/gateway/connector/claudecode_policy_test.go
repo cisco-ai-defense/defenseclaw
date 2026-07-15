@@ -169,7 +169,7 @@ func TestClaudeManagedContractMissingFileTierIsRepairable(t *testing.T) {
 		return claudeCodeOSManagedSources{userFallback: &claudeCodeSettingsSource{
 			name:     "HKCU managed settings fallback",
 			path:     `HKCU\SOFTWARE\Policies\ClaudeCode\Settings`,
-			settings: map[string]interface{}{"model": "operator-default"},
+			settings: map[string]interface{}{"disableAllHooks": true},
 		}}, nil
 	}
 	previousSettings := ClaudeCodeSettingsPathOverride
@@ -187,7 +187,60 @@ func TestClaudeManagedContractMissingFileTierIsRepairable(t *testing.T) {
 	t.Setenv("ProgramFiles", filepath.Dir(managedRoot))
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	if present, err := claudeCodeEffectiveHookContract(opts); err != nil || present {
-		t.Fatalf("HKCU fallback without managed hook = (present=%v, err=%v), want repairable absence", present, err)
+		t.Fatalf("disabling HKCU fallback without managed hook = (present=%v, err=%v), want repairable absence", present, err)
+	}
+}
+
+func TestClaudeManagedHookPolicyVerificationRequiresCanonicalDocument(t *testing.T) {
+	_, opts, _, _ := isolatedClaudePolicyFixture(t)
+	opts.ManagedEnterprise = true
+	opts.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	conn := NewClaudeCodeConnector()
+	body, err := conn.ManagedHookPolicy(opts)
+	if err != nil {
+		t.Fatalf("render managed policy: %v", err)
+	}
+	if err := conn.VerifyManagedHookPolicy(body, opts); err != nil {
+		t.Fatalf("canonical managed policy rejected: %v", err)
+	}
+
+	var policy map[string]interface{}
+	if err := json.Unmarshal(body, &policy); err != nil {
+		t.Fatal(err)
+	}
+	minified, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyManagedHookPolicy(minified, opts); err != nil {
+		t.Fatalf("semantically canonical policy with different formatting rejected: %v", err)
+	}
+	policy["disableAllHooks"] = false
+	withExtraSetting, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyManagedHookPolicy(append(withExtraSetting, '\n'), opts); err == nil ||
+		!strings.Contains(err.Error(), "canonical DefenseClaw policy") {
+		t.Fatalf("extra top-level setting verification error = %v", err)
+	}
+
+	delete(policy, "disableAllHooks")
+	hooks := policy["hooks"].(map[string]interface{})
+	hooks["UserMaintenance"] = []interface{}{map[string]interface{}{
+		"hooks": []interface{}{map[string]interface{}{
+			"type":    "command",
+			"command": "operator-maintenance.exe",
+			"timeout": 5,
+		}},
+	}}
+	withUnrelatedHook, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyManagedHookPolicy(append(withUnrelatedHook, '\n'), opts); err == nil ||
+		!strings.Contains(err.Error(), "canonical DefenseClaw policy") {
+		t.Fatalf("unrelated managed hook verification error = %v", err)
 	}
 }
 

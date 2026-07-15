@@ -429,10 +429,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		token := ""
 		otlpToken := ""
-		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.DataDir)
-		if err == nil && strings.TrimSpace(target.SID) != "" {
-			resolved.sid = strings.TrimSpace(target.SID)
-		}
+		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			var tokenErr error
 			token, tokenErr = enterpriseHookScopedToken(cfg.DataDir, target.Connector)
@@ -860,18 +857,15 @@ type enterpriseHookTarget struct {
 }
 
 func resolveEnterpriseHookTarget() (enterpriseHookTarget, error) {
-	target, err := resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookDataDir)
-	if err == nil && strings.TrimSpace(enterpriseHookSID) != "" {
-		target.sid = strings.TrimSpace(enterpriseHookSID)
-	}
-	return target, err
+	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookSID, enterpriseHookDataDir)
 }
 
-func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, dataDir string) (enterpriseHookTarget, error) {
+func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, sid, dataDir string) (enterpriseHookTarget, error) {
 	target := enterpriseHookTarget{
 		home: strings.TrimSpace(userHome),
 		uid:  uid,
 		gid:  gid,
+		sid:  strings.TrimSpace(sid),
 	}
 	if name := strings.TrimSpace(userName); name != "" {
 		u, err := user.Lookup(name)
@@ -883,7 +877,9 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 		}
 		if target.uid < 0 {
 			if runtime.GOOS == "windows" {
-				target.sid = strings.TrimSpace(u.Uid)
+				if target.sid == "" {
+					target.sid = strings.TrimSpace(u.Uid)
+				}
 			} else {
 				uid, err := strconv.Atoi(u.Uid)
 				if err != nil {
@@ -902,8 +898,15 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 			}
 		}
 	}
+	if target.home == "" && target.sid != "" {
+		home, err := enterpriseHookSIDProfilePath(target.sid)
+		if err != nil {
+			return target, fmt.Errorf("enterprise hooks install: resolve profile for SID %s: %w", target.sid, err)
+		}
+		target.home = strings.TrimSpace(home)
+	}
 	if target.home == "" {
-		return target, fmt.Errorf("enterprise hooks install: --user or --user-home is required")
+		return target, fmt.Errorf("enterprise hooks install: --user, --user-home, or --sid is required")
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
 		return target, fmt.Errorf("enterprise hooks install: --data-dir must be absolute")

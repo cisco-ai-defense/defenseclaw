@@ -30,6 +30,7 @@ var (
 	windowsManagedRuntimeOwnerSID = func() (*windows.SID, error) {
 		return windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	}
+	windowsManagedRuntimeChildOpen = openWindowsManagedRuntimeChild
 )
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -127,37 +128,27 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 	}
 
 	hookDir := filepath.Join(dataDir, "hooks")
-	runtimePaths := windowsClaudeRuntimePaths(setupOpts, conn)
-	runtimeSnapshot, err := snapshotWindowsRuntimeFiles(runtimePaths)
+	runtimeDirectories, err := openWindowsManagedRuntimeDirectories(home, targetSID)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	createdDataDir := false
-	if _, statErr := os.Lstat(dataDir); errors.Is(statErr, os.ErrNotExist) {
-		createdDataDir = true
-	}
-	createdHookDir := false
-	if _, statErr := os.Lstat(hookDir); errors.Is(statErr, os.ErrNotExist) {
-		createdHookDir = true
+	defer runtimeDirectories.close()
+	runtimePaths := windowsClaudeRuntimePaths(setupOpts, conn)
+	runtimeSnapshot, err := snapshotWindowsRuntimeFiles(runtimePaths)
+	if err != nil {
+		_ = runtimeDirectories.rollback()
+		return InstallResult{}, err
 	}
 	rollbackRuntime := func(cause error) error {
 		if restoreErr := restoreWindowsRuntimeFiles(runtimeSnapshot); restoreErr != nil {
-			return fmt.Errorf("%v (runtime rollback failed: %v)", cause, restoreErr)
+			cause = fmt.Errorf("%v (runtime rollback failed: %v)", cause, restoreErr)
 		}
-		if createdDataDir || createdHookDir {
-			_ = removeEmptyWindowsDirectory(hookDir)
-		}
-		if createdDataDir {
-			_ = removeEmptyWindowsDirectory(dataDir)
-		} else if hardenErr := hardenWindowsManagedRuntime(dataDir, runtimePaths, targetSID); hardenErr != nil {
-			return fmt.Errorf("%v (runtime rollback hardening failed: %v)", cause, hardenErr)
+		if restoreErr := runtimeDirectories.rollback(); restoreErr != nil {
+			cause = fmt.Errorf("%v (runtime security rollback failed: %v)", cause, restoreErr)
 		}
 		return cause
 	}
 
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", err)
-	}
 	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(hookDir, setupOpts, conn); err != nil {
 		return InstallResult{}, rollbackRuntime(fmt.Errorf("enterprise hooks: write managed Claude Code hook runtime: %w", err))
 	}
@@ -176,7 +167,7 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 	if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 	}
-	if err := hardenWindowsManagedRuntime(dataDir, runtimePaths, targetSID); err != nil {
+	if err := hardenWindowsManagedRuntimeFiles(runtimePaths, targetSID); err != nil {
 		return InstallResult{}, rollbackAll(err)
 	}
 	persistedPolicy, err := os.ReadFile(policyPath)
@@ -597,28 +588,10 @@ func windowsPathOwner(path string) (*windows.SID, error) {
 }
 
 func rejectWindowsReparseChain(path string) error {
-	current, err := filepath.Abs(path)
-	if err != nil {
-		return err
+	if err := winpath.RejectReparseChain(path); err != nil {
+		return fmt.Errorf("enterprise hooks: %w", err)
 	}
-	for {
-		ptr, err := winpath.UTF16Ptr(current)
-		if err != nil {
-			return err
-		}
-		attributes, err := windows.GetFileAttributes(ptr)
-		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("enterprise hooks: reparse point in path: %s", current)
-		}
-		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
-			return err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
-	}
+	return nil
 }
 
 func windowsSIDString(sid *windows.SID) string {
@@ -628,10 +601,269 @@ func windowsSIDString(sid *windows.SID) string {
 	return sid.String()
 }
 
+type windowsManagedRuntimeDirectory struct {
+	file       *os.File
+	parent     *os.File
+	name       string
+	created    bool
+	identity   windows.ByHandleFileInformation
+	descriptor *windows.SECURITY_DESCRIPTOR
+}
+
+type windowsManagedRuntimeDirectories struct {
+	home     *os.File
+	children [2]windowsManagedRuntimeDirectory
+	closed   bool
+}
+
+func openWindowsManagedRuntimeDirectories(home string, target *windows.SID) (*windowsManagedRuntimeDirectories, error) {
+	homePtr, err := winpath.UTF16Ptr(home)
+	if err != nil {
+		return nil, err
+	}
+	homeHandle, err := windows.CreateFile(
+		homePtr,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: bind target user home: %w", err)
+	}
+	directories := &windowsManagedRuntimeDirectories{home: os.NewFile(uintptr(homeHandle), home)}
+	if directories.home == nil {
+		_ = windows.CloseHandle(homeHandle)
+		return nil, fmt.Errorf("enterprise hooks: bind target user home")
+	}
+	if _, _, err := validateWindowsRuntimeDirectoryHandle(directories.home, home, target, true); err != nil {
+		directories.close()
+		return nil, fmt.Errorf("enterprise hooks: bound user home trust check failed: %w", err)
+	}
+	parent := directories.home
+	for index, name := range []string{".defenseclaw", "hooks"} {
+		directories.children[index], err = windowsManagedRuntimeChildOpen(parent, name, target)
+		if err != nil {
+			_ = directories.rollback()
+			return nil, fmt.Errorf("enterprise hooks: bind per-user %s directory: %w", name, err)
+		}
+		parent = directories.children[index].file
+	}
+	return directories, nil
+}
+
+func openWindowsManagedRuntimeChild(parent *os.File, name string, target *windows.SID) (windowsManagedRuntimeDirectory, error) {
+	if filepath.Base(name) != name || name == "." || name == ".." {
+		return windowsManagedRuntimeDirectory{}, fmt.Errorf("invalid runtime directory name %q", name)
+	}
+	descriptor, err := windowsManagedRuntimeSecurityDescriptor(target, true)
+	if err != nil {
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	attributes, err := windowsManagedRuntimeObjectAttributes(parent, name, descriptor)
+	if err != nil {
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|
+			windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE,
+		attributes, &status, nil, windows.FILE_ATTRIBUTE_DIRECTORY, windows.FILE_SHARE_READ,
+		windows.FILE_OPEN_IF,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0, 0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.STATUS_REPARSE_POINT_ENCOUNTERED) {
+			return windowsManagedRuntimeDirectory{}, fmt.Errorf("reparse point substituted for %s", name)
+		}
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	file := os.NewFile(uintptr(handle), name)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return windowsManagedRuntimeDirectory{}, fmt.Errorf("wrap runtime directory handle %s", name)
+	}
+	directory := windowsManagedRuntimeDirectory{file: file, parent: parent, name: name, created: status.Information == 2}
+	directory.descriptor, directory.identity, err = validateWindowsRuntimeDirectoryHandle(file, name, target, false)
+	if err == nil {
+		err = setWindowsManagedRuntimeHandleProtection(file, target, true)
+	}
+	if err != nil {
+		_ = directory.rollback()
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	held, err := openWindowsManagedRuntimeDirectoryByIdentity(
+		parent, name, directory.identity,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+	)
+	if err != nil {
+		_ = directory.rollback()
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	if err := file.Close(); err != nil {
+		held.Close()
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	directory.file = held
+	return directory, nil
+}
+
+func windowsManagedRuntimeObjectAttributes(parent *os.File, name string, descriptor *windows.SECURITY_DESCRIPTOR) (*windows.OBJECT_ATTRIBUTES, error) {
+	unicode, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return nil, err
+	}
+	return &windows.OBJECT_ATTRIBUTES{
+		Length:             uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory:      windows.Handle(parent.Fd()),
+		ObjectName:         unicode,
+		Attributes:         windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		SecurityDescriptor: descriptor,
+	}, nil
+}
+
+func validateWindowsRuntimeDirectoryHandle(file *os.File, label string, target *windows.SID, requireTargetOwner bool) (*windows.SECURITY_DESCRIPTOR, windows.ByHandleFileInformation, error) {
+	handle := windows.Handle(file.Fd())
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, info, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return nil, info, fmt.Errorf("symlinks, junctions, and reparse points are not allowed: %s", label)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return nil, info, fmt.Errorf("expected directory: %s", label)
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return nil, info, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return nil, info, err
+	}
+	if requireTargetOwner && (owner == nil || !owner.Equals(target)) {
+		return nil, info, fmt.Errorf("owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), label)
+	}
+	if !requireTargetOwner && (owner == nil || (!owner.Equals(target) && !windowsEnterpriseRuntimeAdminIdentity(owner))) {
+		return nil, info, fmt.Errorf("foreign owner SID %s on %s", windowsSIDString(owner), label)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, info, fmt.Errorf("null or unreadable Windows DACL on %s", label)
+	}
+	if err := rejectWindowsRuntimeWriteACEs(label, dacl, target, true, true, true); err != nil {
+		return nil, info, err
+	}
+	return descriptor, info, nil
+}
+
+func (directory *windowsManagedRuntimeDirectory) rollback() error {
+	if directory.file == nil {
+		return nil
+	}
+	err := directory.file.Close()
+	directory.file = nil
+	if err != nil {
+		return err
+	}
+	file, err := openWindowsManagedRuntimeDirectoryByIdentity(
+		directory.parent, directory.name, directory.identity,
+		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ,
+	)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if directory.created {
+		deleteFile := uint32(1)
+		return windows.SetFileInformationByHandle(
+			windows.Handle(file.Fd()), windows.FileDispositionInfo,
+			(*byte)(unsafe.Pointer(&deleteFile)), uint32(unsafe.Sizeof(deleteFile)),
+		)
+	}
+	return restoreWindowsSecurityDescriptorHandle(file, directory.descriptor)
+}
+
+func openWindowsManagedRuntimeDirectoryByIdentity(
+	parent *os.File, name string, identity windows.ByHandleFileInformation, access, share uint32,
+) (*os.File, error) {
+	attributes, err := windowsManagedRuntimeObjectAttributes(parent, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle, access, attributes, &status, nil, 0, share,
+		windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0, 0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var current windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &current); err != nil {
+		windows.CloseHandle(handle)
+		return nil, err
+	}
+	if current.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		current.VolumeSerialNumber != identity.VolumeSerialNumber ||
+		current.FileIndexHigh != identity.FileIndexHigh || current.FileIndexLow != identity.FileIndexLow {
+		windows.CloseHandle(handle)
+		return nil, fmt.Errorf("runtime directory identity changed while held: %s", name)
+	}
+	file := os.NewFile(uintptr(handle), name)
+	if file == nil {
+		windows.CloseHandle(handle)
+		return nil, fmt.Errorf("wrap held runtime directory handle: %s", name)
+	}
+	return file, nil
+}
+
+func (directories *windowsManagedRuntimeDirectories) rollback() error {
+	if directories == nil || directories.closed {
+		return nil
+	}
+	var failures []error
+	for index := len(directories.children) - 1; index >= 0; index-- {
+		if err := directories.children[index].rollback(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	directories.close()
+	return errors.Join(failures...)
+}
+
+func (directories *windowsManagedRuntimeDirectories) close() {
+	if directories == nil || directories.closed {
+		return
+	}
+	for index := len(directories.children) - 1; index >= 0; index-- {
+		if directories.children[index].file != nil {
+			_ = directories.children[index].file.Close()
+		}
+	}
+	if directories.home != nil {
+		_ = directories.home.Close()
+	}
+	directories.closed = true
+}
+
 type windowsRuntimeFileSnapshot struct {
-	path    string
-	existed bool
-	data    []byte
+	path     string
+	existed  bool
+	data     []byte
+	security *windows.SECURITY_DESCRIPTOR
 }
 
 func windowsClaudeRuntimePaths(opts connector.SetupOpts, conn connector.Connector) []string {
@@ -672,6 +904,13 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 		}
 		snapshot.existed = true
 		snapshot.data = data
+		snapshot.security, err = windows.GetNamedSecurityInfo(
+			path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks: snapshot runtime security %s: %w", path, err)
+		}
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
@@ -687,6 +926,8 @@ func restoreWindowsRuntimeFiles(snapshots []windowsRuntimeFileSnapshot) error {
 			}
 			if err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+			} else if err := restoreWindowsSecurityDescriptor(snapshot.path, snapshot.security); err != nil {
+				failures = append(failures, fmt.Sprintf("%s security: %v", snapshot.path, err))
 			}
 			continue
 		}
@@ -700,6 +941,56 @@ func restoreWindowsRuntimeFiles(snapshots []windowsRuntimeFileSnapshot) error {
 	return nil
 }
 
+func restoreWindowsSecurityDescriptor(path string, descriptor *windows.SECURITY_DESCRIPTOR) error {
+	if descriptor == nil {
+		return nil
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	securityInfo := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		securityInfo |= windows.PROTECTED_DACL_SECURITY_INFORMATION
+	} else {
+		securityInfo |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, securityInfo, owner, nil, dacl, nil)
+}
+
+func restoreWindowsSecurityDescriptorHandle(file *os.File, descriptor *windows.SECURITY_DESCRIPTOR) error {
+	if descriptor == nil {
+		return nil
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	securityInfo := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		securityInfo |= windows.PROTECTED_DACL_SECURITY_INFORMATION
+	} else {
+		securityInfo |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
+	}
+	return windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, securityInfo, owner, nil, dacl, nil)
+}
+
 func hardenWindowsManagedRuntime(dataDir string, paths []string, target *windows.SID) error {
 	if err := setWindowsManagedRuntimeProtection(dataDir, target, true); err != nil {
 		return fmt.Errorf("enterprise hooks: harden administrator-managed data directory: %w", err)
@@ -708,6 +999,10 @@ func hardenWindowsManagedRuntime(dataDir string, paths []string, target *windows
 	if err := setWindowsManagedRuntimeProtection(hookDir, target, true); err != nil {
 		return fmt.Errorf("enterprise hooks: harden administrator-managed hook directory: %w", err)
 	}
+	return hardenWindowsManagedRuntimeFiles(paths, target)
+}
+
+func hardenWindowsManagedRuntimeFiles(paths []string, target *windows.SID) error {
 	for _, path := range paths {
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
@@ -725,13 +1020,58 @@ func setWindowsManagedRuntimeProtection(path string, target *windows.SID, direct
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return err
 	}
-	owner, err := windowsManagedRuntimeOwnerSID()
+	owner, acl, err := windowsManagedRuntimeProtection(target, directory)
 	if err != nil {
 		return err
 	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	extended, err := winpath.Extended(path)
 	if err != nil {
 		return err
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+func setWindowsManagedRuntimeHandleProtection(file *os.File, target *windows.SID, directory bool) error {
+	owner, acl, err := windowsManagedRuntimeProtection(target, directory)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(
+		windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, acl, nil,
+	)
+}
+
+func windowsManagedRuntimeSecurityDescriptor(target *windows.SID, directory bool) (*windows.SECURITY_DESCRIPTOR, error) {
+	owner, acl, err := windowsManagedRuntimeProtection(target, directory)
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return nil, err
+	}
+	if err := descriptor.SetOwner(owner, false); err != nil {
+		return nil, err
+	}
+	if err := descriptor.SetDACL(acl, true, false); err != nil {
+		return nil, err
+	}
+	return descriptor, nil
+}
+
+func windowsManagedRuntimeProtection(target *windows.SID, directory bool) (*windows.SID, *windows.ACL, error) {
+	owner, err := windowsManagedRuntimeOwnerSID()
+	if err != nil {
+		return nil, nil, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, nil, err
 	}
 	inheritance := uint32(windows.NO_INHERITANCE)
 	if directory {
@@ -758,16 +1098,9 @@ func setWindowsManagedRuntimeProtection(path string, target *windows.SID, direct
 	})
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	return owner, acl, nil
 }
 
 func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {

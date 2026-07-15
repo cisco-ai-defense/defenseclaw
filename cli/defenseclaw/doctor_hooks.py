@@ -983,7 +983,13 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> st
 
 def _default_claude_managed_settings_paths() -> tuple[str, ...]:
     """Return locally inspectable Windows file-policy sources in merge order."""
-    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    # FOLDERID_ProgramFiles = {905E63B6-C1BF-494E-B29C-65B732D3D21A}
+    program_files = _windows_known_folder_path("905e63b6-c1bf-494e-b29c-65b732d3d21a")
+    if not program_files:
+        raise _InspectionError(
+            "policy-blocked",
+            "cannot resolve the trusted Windows Program Files Known Folder for Claude Code managed policy",
+        )
     root = os.path.join(program_files, "ClaudeCode")
     paths = [os.path.join(root, "managed-settings.json")]
     dropins = os.path.join(root, "managed-settings.d")
@@ -1273,13 +1279,15 @@ def _resolve_claude_effective_document(
             f"Claude Code uses a dynamic policyHelper from {active_managed.label} that cannot be passively verified; "
             "include the DefenseClaw managed hook matrix in the helper output",
         )
-    _validate_claude_managed_controls(active_managed, managed_enterprise)
     if managed_enterprise:
-        if active_managed is None:
+        authoritative_managed = (remote, os_managed, file_managed)
+        if not any(active_managed is source for source in authoritative_managed if source is not None):
             raise _InspectionError(
                 "policy-blocked",
-                "Claude Code has no active managed settings source containing the DefenseClaw hook matrix",
+                "Claude Code has no active administrator-managed settings source "
+                "containing the DefenseClaw hook matrix",
             )
+        _validate_claude_managed_controls(active_managed, True)
         hooks = active_managed.settings.get("hooks")
         if not isinstance(hooks, dict):
             raise _InspectionError(
@@ -1288,6 +1296,7 @@ def _resolve_claude_effective_document(
             )
         return active_managed.settings, f"managed_source={active_managed.label}"
 
+    _validate_claude_managed_controls(active_managed, False)
     sources: list[_ClaudeSettingsSource] = []
     if cli_settings and cli_settings.strip():
         sources.append(_read_claude_cli_settings(cli_settings, workspace_dir))

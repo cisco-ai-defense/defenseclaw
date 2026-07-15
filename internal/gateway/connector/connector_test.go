@@ -6763,6 +6763,86 @@ func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *test
 	}
 }
 
+func TestClaudeCode_TeardownCleansManagedStateFromStalePristineSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-stale-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	managed, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupPath := managedFileBackupPath(dir, c.Name(), "settings.json")
+	backup, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce an upgrade from a predecessor that captured an existing
+	// DefenseClaw registration as pristine while recording the same bytes as
+	// its post-Setup image. The exact restore must not resurrect that state.
+	backup.Existed = true
+	backup.Mode = 0o600
+	backup.PristineBytes = append([]byte(nil), managed...)
+	backup.PristineSHA256 = sha256Hex(managed)
+	if err := writeManagedFileBackup(backupPath, backup); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown with stale pristine snapshot: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after stale pristine cleanup: %v", err)
+	}
+}
+
+func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	pristine := []byte("{\n\t\"operator\":true, \"env\" : { \"PATH\" : \"/custom/bin\" }\n}\n")
+	if err := os.WriteFile(settingsPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-exact-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, pristine) {
+		t.Fatalf("exact pristine bytes changed:\n got: %q\nwant: %q", got, pristine)
+	}
+}
+
 func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")

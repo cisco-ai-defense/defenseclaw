@@ -524,8 +524,8 @@ func inspectWindowsClaudeFilePolicyCompatibility(policyPath string) error {
 			}
 			disableAllHooks = value
 		}
-		if raw, exists := settings["policyHelper"]; exists && raw != nil {
-			policyHelper = true
+		if raw, exists := settings["policyHelper"]; exists {
+			policyHelper = raw != nil
 		}
 	}
 	if policyHelper {
@@ -576,7 +576,10 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 			return err
 		}
 		if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
-			return nil
+			if err := setWindowsManagedPolicyProtection(path, false, userReadable); err != nil {
+				return err
+			}
+			return windowsManagedPolicyFileTrustCheck(path)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

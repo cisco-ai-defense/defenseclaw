@@ -8,12 +8,31 @@ package connector
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
 const claudeCodeWindowsPolicyKey = `SOFTWARE\Policies\ClaudeCode`
+
+var claudeCodeWindowsProgramFilesRoot = func() (string, error) {
+	return winpath.CurrentUserKnownFolderPath(windows.FOLDERID_ProgramFiles)
+}
+
+func claudeCodePlatformManagedSettingsRoot() (string, error) {
+	root, err := claudeCodeWindowsProgramFilesRoot()
+	if err != nil {
+		return "", fmt.Errorf("resolve Windows Program Files Known Folder for Claude Code managed policy: %w", err)
+	}
+	root = strings.TrimSpace(root)
+	if root == "" || !filepath.IsAbs(root) {
+		return "", fmt.Errorf("resolve Windows Program Files Known Folder for Claude Code managed policy: invalid path %q", root)
+	}
+	return filepath.Join(filepath.Clean(root), "ClaudeCode"), nil
+}
 
 func loadClaudeCodeOSManagedSettings() (claudeCodeOSManagedSources, error) {
 	admin, err := readClaudeCodeWindowsRegistryPolicy(

@@ -903,6 +903,10 @@ def test_windows_configured_binary_requires_containment_extension_and_safe_chain
     monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: False)
     assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
 
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: True)
+    monkeypatch.setattr(ad, "_windows_acl_chain_is_safe", lambda *_args: False)
+    assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+
 
 def test_windows_configured_manager_prefix_is_candidate_and_trusted_root(
     monkeypatch,

@@ -175,6 +175,36 @@ func TestEnterpriseManagedHookRuntimeNoopsForUnregisteredSID(t *testing.T) {
 	}
 }
 
+func TestNativeHookRuntimeUnrecognizedEnterpriseInvocationResolvesFailClosedRuntime(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), nativeHookLauncherName)
+	if err := os.WriteFile(executable, []byte("test launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := hookExecutableOverride
+	previousArgs := os.Args
+	hookExecutableOverride = executable
+	os.Args = []string{executable, "hook", "--connector", "claudecode", "--enterprise-managed"}
+	t.Cleanup(func() {
+		hookExecutableOverride = previousExecutable
+		os.Args = previousArgs
+	})
+
+	called := false
+	stubEnterpriseManagedRuntimeResolver(t, func(got string) (string, bool, error) {
+		called = true
+		if !sameWindowsHookPath(got, executable) {
+			t.Fatalf("resolver executable = %q, want %q", got, executable)
+		}
+		return filepath.Join(t.TempDir(), ".defenseclaw"), false, errors.New("untrusted enterprise runtime")
+	})
+	if NativeHookRuntimeNoop() {
+		t.Fatal("unrecognized enterprise invocation was allowed to exit as a permissive no-op")
+	}
+	if !called || !enterpriseManagedHookRuntimeForceClosed() {
+		t.Fatalf("enterprise runtime resolver called=%v forceClosed=%v", called, enterpriseManagedHookRuntimeForceClosed())
+	}
+}
+
 func TestTrustedNativeHookHomeRejectsStateBoundToAnotherInstall(t *testing.T) {
 	executable, _ := stageTrustedNativeHookForTest(t, "closed")
 	statePath := filepath.Join(filepath.Dir(filepath.Dir(executable)), "installer", "install-state.json")

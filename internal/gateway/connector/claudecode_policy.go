@@ -24,7 +24,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -86,6 +85,12 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	// Unix guardian installs harden per-user hook scripts. Only the native
 	// enterprise path pins an administrator-owned executable in managed policy.
 	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	if managedPolicy && activeManaged == managed.userFallback {
+		// HKCU is a user-writable convenience tier. Restoring the higher file
+		// drop-in supersedes it, so even a disabling fallback remains ordinary,
+		// repairable absence rather than an administrator-policy failure.
+		return false, nil
+	}
 	if err := validateClaudeCodeManagedHookControls(activeManaged, managedPolicy); err != nil {
 		return false, err
 	}
@@ -404,29 +409,21 @@ func claudeCodeRemoteSettingsPath() string {
 	return filepath.Join(claudeCodeConfigDir(), "remote-settings.json")
 }
 
-func claudeCodeManagedSettingsRoot() string {
+func claudeCodeManagedSettingsRoot() (string, error) {
 	if override := strings.TrimSpace(ClaudeCodeManagedSettingsRootOverride); override != "" {
-		return filepath.Clean(override)
+		return filepath.Clean(override), nil
 	}
 	if ClaudeCodeSettingsPathOverride != "" {
-		return filepath.Join(filepath.Dir(ClaudeCodeSettingsPathOverride), ".managed-settings")
+		return filepath.Join(filepath.Dir(ClaudeCodeSettingsPathOverride), ".managed-settings"), nil
 	}
-	switch runtime.GOOS {
-	case "windows":
-		programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
-		if programFiles == "" {
-			programFiles = `C:\Program Files`
-		}
-		return filepath.Join(programFiles, "ClaudeCode")
-	case "darwin":
-		return "/Library/Application Support/ClaudeCode"
-	default:
-		return "/etc/claude-code"
-	}
+	return claudeCodePlatformManagedSettingsRoot()
 }
 
 func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
-	root := claudeCodeManagedSettingsRoot()
+	root, err := claudeCodeManagedSettingsRoot()
+	if err != nil {
+		return nil, err
+	}
 	paths := []string{filepath.Join(root, "managed-settings.json")}
 	dropin := filepath.Join(root, "managed-settings.d")
 	entries, err := os.ReadDir(dropin)

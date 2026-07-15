@@ -5,4 +5,10 @@
 
 package cli
 
+import "fmt"
+
+var enterpriseHookSIDProfilePath = func(string) (string, error) {
+	return "", fmt.Errorf("SID-only targets are supported only on native Windows")
+}
+
 func enterpriseHooksNativePlatformPreflight() error { return nil }

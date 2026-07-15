@@ -65,8 +65,8 @@ func LoadManifest(path string) (Manifest, error) {
 		if target.Enabled != nil && !*target.Enabled {
 			continue
 		}
-		if strings.TrimSpace(target.User) == "" && strings.TrimSpace(target.UserHome) == "" {
-			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires user or user_home", i)
+		if strings.TrimSpace(target.User) == "" && strings.TrimSpace(target.UserHome) == "" && strings.TrimSpace(target.SID) == "" {
+			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires user, user_home, or sid", i)
 		}
 		if strings.TrimSpace(target.Connector) == "" {
 			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires connector", i)

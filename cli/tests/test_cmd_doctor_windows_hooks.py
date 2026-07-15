@@ -17,6 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import defenseclaw.doctor_hooks as doctor_hooks
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
@@ -68,6 +70,25 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_claude_managed_paths_use_program_files_known_folder(self) -> None:
+        trusted = self.root / "Trusted Program Files"
+        attacker = self.root / "Attacker Program Files"
+        with (
+            patch.dict(os.environ, {"ProgramFiles": str(attacker)}),
+            patch(
+                "defenseclaw.doctor_hooks._windows_known_folder_path",
+                return_value=str(trusted),
+            ),
+        ):
+            paths = doctor_hooks._default_claude_managed_settings_paths()
+
+        self.assertEqual(paths, (str(trusted / "ClaudeCode" / "managed-settings.json"),))
+
+    def test_claude_managed_paths_fail_closed_without_known_folder(self) -> None:
+        with patch("defenseclaw.doctor_hooks._windows_known_folder_path", return_value=""):
+            with self.assertRaisesRegex(_InspectionError, "trusted Windows Program Files"):
+                doctor_hooks._default_claude_managed_settings_paths()
 
     def _runtime(self, name: str = "defenseclaw-hook.exe", body: bytes | None = None) -> Path:
         path = self.install / name
@@ -1116,6 +1137,32 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("managed_source=explicit managed settings", check.detail)
+
+    def test_claude_managed_enterprise_rejects_hkcu_hook_authority(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for groups in document["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    handler["args"].append("--enterprise-managed")
+
+        def registry_policy(hive_name: str):
+            return document if hive_name == "HKEY_CURRENT_USER" else None
+
+        with (
+            patch("defenseclaw.doctor_hooks._read_claude_registry_policy", side_effect=registry_policy),
+            patch("defenseclaw.doctor_hooks._default_claude_managed_settings_paths", return_value=()),
+        ):
+            check = self._validate(
+                "claudecode",
+                config,
+                managed_settings_paths=None,
+                managed_enterprise=True,
+            )
+
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn("administrator-managed settings source", check.detail)
 
     def test_codex_requires_complete_trusted_event_matrix(self) -> None:
         runtime = self._runtime()

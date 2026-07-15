@@ -16,6 +16,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+var (
+	enterpriseWindowsReparseChainCheck = winpath.RejectReparseChain
+	enterpriseWindowsProtectionWriter  = setEnterpriseWindowsManagedProtection
+)
+
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
 	path, err := connector.HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
@@ -71,14 +76,17 @@ func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
 }
 
 func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
+	if err := enterpriseWindowsReparseChainCheck(path); err != nil {
+		return fmt.Errorf("enterprise hooks: refusing unsafe %s path: %w", label, err)
+	}
 	owner, err := enterpriseWindowsPathOwner(dataDir)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect managed data_dir owner: %w", err)
 	}
-	if err := setEnterpriseWindowsManagedProtection(filepath.Dir(path), owner, true); err != nil {
+	if err := enterpriseWindowsProtectionWriter(filepath.Dir(path), owner, true); err != nil {
 		return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
 	}
-	if err := setEnterpriseWindowsManagedProtection(path, owner, false); err != nil {
+	if err := enterpriseWindowsProtectionWriter(path, owner, false); err != nil {
 		return fmt.Errorf("enterprise hooks: harden %s: %w", label, err)
 	}
 	return validateEnterpriseWindowsTokenLocation(dataDir, path, label)

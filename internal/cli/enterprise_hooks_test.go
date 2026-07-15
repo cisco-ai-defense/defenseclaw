@@ -347,3 +347,21 @@ func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
 		t.Fatal("RemoveManagedPolicy was not called")
 	}
 }
+
+func TestResolveEnterpriseHookTargetValuesResolvesSIDOnlyProfile(t *testing.T) {
+	original := enterpriseHookSIDProfilePath
+	t.Cleanup(func() { enterpriseHookSIDProfilePath = original })
+	enterpriseHookSIDProfilePath = func(sid string) (string, error) {
+		if sid != "S-1-5-21-111-222-333-1001" {
+			t.Fatalf("resolver SID = %q", sid)
+		}
+		return `C:\Users\alice`, nil
+	}
+	target, err := resolveEnterpriseHookTargetValues("", "", -1, -1, "S-1-5-21-111-222-333-1001", "")
+	if err != nil {
+		t.Fatalf("resolveEnterpriseHookTargetValues: %v", err)
+	}
+	if target.home != `C:\Users\alice` || target.sid != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("target = %+v, want resolved SID-only profile", target)
+	}
+}

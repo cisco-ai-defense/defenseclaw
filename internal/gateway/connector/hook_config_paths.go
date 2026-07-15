@@ -59,15 +59,16 @@ func HookPolicyWatchPathsForConnector(conn Connector, opts SetupOpts) []string {
 			filepath.Join(projectDir, "settings.local.json"),
 		)
 	}
-	managedRoot := claudeCodeManagedSettingsRoot()
-	paths = append(paths, filepath.Join(managedRoot, "managed-settings.json"))
-	dropin := filepath.Join(managedRoot, "managed-settings.d")
-	paths = append(paths, dropin)
-	if entries, err := os.ReadDir(dropin); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(strings.ToLower(name), ".json") {
-				paths = append(paths, filepath.Join(dropin, name))
+	if managedRoot, err := claudeCodeManagedSettingsRoot(); err == nil {
+		paths = append(paths, filepath.Join(managedRoot, "managed-settings.json"))
+		dropin := filepath.Join(managedRoot, "managed-settings.d")
+		paths = append(paths, dropin)
+		if entries, err := os.ReadDir(dropin); err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				if !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(strings.ToLower(name), ".json") {
+					paths = append(paths, filepath.Join(dropin, name))
+				}
 			}
 		}
 	}
