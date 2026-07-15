@@ -208,20 +208,23 @@ func expectedVersionInfo(component Component, versionValue string) (*version.Inf
 		Type:           version.App,
 	}
 	info.Flags.Prerelease = parsed.Pre
-	fields := map[string]string{
-		version.Comments:         "Built from the Cisco DefenseClaw open-source project.",
-		version.CompanyName:      companyName,
-		version.FileDescription:  metadata.FileDescription,
-		version.FileVersion:      parsed.Display,
-		version.InternalName:     metadata.InternalName,
-		version.LegalCopyright:   copyright,
-		version.OriginalFilename: metadata.OriginalFilename,
-		version.ProductName:      productName,
-		version.ProductVersion:   parsed.Display,
+	fields := []struct {
+		key   string
+		value string
+	}{
+		{key: version.Comments, value: "Built from the Cisco DefenseClaw open-source project."},
+		{key: version.CompanyName, value: companyName},
+		{key: version.FileDescription, value: metadata.FileDescription},
+		{key: version.FileVersion, value: parsed.Display},
+		{key: version.InternalName, value: metadata.InternalName},
+		{key: version.LegalCopyright, value: copyright},
+		{key: version.OriginalFilename, value: metadata.OriginalFilename},
+		{key: version.ProductName, value: productName},
+		{key: version.ProductVersion, value: parsed.Display},
 	}
-	for key, value := range fields {
-		if err := info.Set(version.LangDefault, key, value); err != nil {
-			return nil, fmt.Errorf("set VERSIONINFO %s: %w", key, err)
+	for _, field := range fields {
+		if err := info.Set(version.LangDefault, field.key, field.value); err != nil {
+			return nil, fmt.Errorf("set VERSIONINFO %s: %w", field.key, err)
 		}
 	}
 	return info, nil

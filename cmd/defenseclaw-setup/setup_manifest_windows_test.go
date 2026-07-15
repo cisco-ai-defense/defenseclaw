@@ -67,8 +67,9 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 	if !bytes.Equal(embedded, want) {
 		t.Fatal("embedded RT_MANIFEST/1 does not byte-match the canonical generated setup manifest")
 	}
+	const primaryResourceID windows.ResourceID = 1
 	for _, resourceType := range []windows.ResourceID{windows.RT_GROUP_ICON, windows.RT_VERSION} {
-		resource, err := windows.FindResource(module, windows.CREATEPROCESS_MANIFEST_RESOURCE_ID, resourceType)
+		resource, err := windows.FindResource(module, primaryResourceID, resourceType)
 		if err != nil {
 			t.Fatalf("find setup resource type %d: %v", resourceType, err)
 		}
