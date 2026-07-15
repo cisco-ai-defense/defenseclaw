@@ -10,11 +10,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -22,6 +24,114 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == "app-server" && os.Args[2] == "--stdio" {
+		serveCodexPolicyFixture()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// serveCodexPolicyFixture makes a copied native Go test image behave like the
+// narrow Codex app-server surface exercised by connector reconciliation. The
+// fixture is selected only through a protected, short-lived setup receipt, so
+// the command tests traverse the same executable validation path as Windows.
+func serveCodexPolicyFixture() {
+	decoder := json.NewDecoder(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for {
+		var request struct {
+			Method string `json:"method"`
+			ID     int    `json:"id"`
+		}
+		if err := decoder.Decode(&request); err != nil {
+			os.Exit(31)
+		}
+		switch request.Method {
+		case "initialize":
+			if err := encoder.Encode(map[string]any{
+				"id": request.ID, "result": map[string]any{"codexHome": "fixture"},
+			}); err != nil {
+				os.Exit(32)
+			}
+		case "initialized":
+			// Notification; no response is required.
+		case "configRequirements/read":
+			if err := encoder.Encode(map[string]any{
+				"id": request.ID,
+				"result": map[string]any{
+					"requirements": map[string]any{"allowManagedHooksOnly": false},
+				},
+			}); err != nil {
+				os.Exit(33)
+			}
+			return
+		default:
+			os.Exit(34)
+		}
+	}
+}
+
+func seedCodexSelectionForTest(t *testing.T, dataDir string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	sourcePath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve native test executable: %v", err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatalf("open native test executable: %v", err)
+	}
+	defer source.Close()
+
+	executable := filepath.Join(dataDir, "codex.exe")
+	destination, err := os.OpenFile(executable, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatalf("create native Codex fixture: %v", err)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(destination, hasher), source); err != nil {
+		_ = destination.Close()
+		t.Fatalf("copy native Codex fixture: %v", err)
+	}
+	if err := destination.Sync(); err != nil {
+		_ = destination.Close()
+		t.Fatalf("flush native Codex fixture: %v", err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatalf("close native Codex fixture: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := map[string]any{
+		"schema_version": 1,
+		"updated_at":     now.Format(time.RFC3339),
+		"selections": map[string]any{
+			"codex": map[string]any{
+				"connector":          "codex",
+				"source":             "setup-selected",
+				"executable":         executable,
+				"raw_version":        "codex 0.144.3",
+				"normalized_version": "0.144.3",
+				"sha256":             fmt.Sprintf("%x", hasher.Sum(nil)),
+				"selected_at":        now.Format(time.RFC3339),
+				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatalf("encode Codex selection fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_selection.json"), body, 0o600); err != nil {
+		t.Fatalf("write Codex selection fixture: %v", err)
+	}
+}
 
 type testHookContractLock struct {
 	Version                 int                                        `json:"version"`
@@ -175,6 +285,7 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 
 func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
 	home := t.TempDir()
 	codexPath := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
@@ -246,6 +357,7 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 
 func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
 	home := t.TempDir()
 	testenv.SetHome(t, home)
 	claudePath := filepath.Join(home, ".claude", "settings.json")

@@ -389,7 +389,20 @@ fi
 ! grep -q '^DEFENSECLAW_GATEWAY_TOKEN=' "$user_token" || fail "scoped token used legacy assignment format"
 grep -Fq "$hook_script" "$native_config" || fail "native agent config does not reference the managed hook"
 service_otlp_value="$(sudo -n cat "$service_otlp_token")"
-grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config" || fail "native agent config does not reference the gateway service OTLP token"
+if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
+    fail "native agent config leaked the gateway service OTLP token in an endpoint"
+fi
+case "$connector" in
+    codex)
+        if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
+            ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
+            fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
+        fi
+        ;;
+    claudecode)
+        grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as an Authorization bearer"
+        ;;
+esac
 sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
 
 sudo -n -u defenseclaw python3 - "$auth_record" "$connector" "$target_home" <<'PY'

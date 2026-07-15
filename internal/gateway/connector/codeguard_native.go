@@ -115,16 +115,28 @@ func ensureCodexCodeGuardSkill(ctx context.Context, opts SetupOpts) error {
 }
 
 func codexHomeDir() string {
-	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
-		return home
+	return connectorEnvHomeDir("CODEX_HOME", ".codex")
+}
+
+func connectorEnvHomeDir(variable, defaultDir string) string {
+	home := strings.TrimSpace(os.Getenv(variable))
+	if home == "" {
+		home = filepath.Join(strings.TrimSpace(userHomeDir()), defaultDir)
 	}
-	if home := strings.TrimSpace(userHomeDir()); home != "" {
-		return filepath.Join(home, ".codex")
+	if home == "" {
+		home = filepath.Join(".", defaultDir)
 	}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".codex")
+	if home == "~" {
+		home = userHomeDir()
+	} else if strings.HasPrefix(home, "~/") || strings.HasPrefix(home, `~\`) {
+		home = filepath.Join(userHomeDir(), home[2:])
 	}
-	return filepath.Join(".", ".codex")
+	if !filepath.IsAbs(home) {
+		if absolute, err := filepath.Abs(home); err == nil {
+			home = absolute
+		}
+	}
+	return filepath.Clean(home)
 }
 
 func codexSkillsDir() string {
