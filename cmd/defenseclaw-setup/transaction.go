@@ -2292,6 +2292,13 @@ func removeTransactionPath(path, allowedRoot string) error {
 }
 
 func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
+	return cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readConnectorReconciliation)
+}
+
+func cleanupCommittedSetupTransactionWithReconciliationReader(
+	transaction setupTransaction,
+	readReconciliation func() (*connectorReconciliationState, error),
+) error {
 	if transaction.Action == "install" {
 		state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
 		if err != nil {
@@ -2350,7 +2357,7 @@ func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 	}
 	if transaction.DeleteUserData {
-		residue, err := readConnectorReconciliation()
+		residue, err := readReconciliation()
 		if err != nil {
 			return err
 		}

@@ -318,14 +318,46 @@ func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
+	readNoReconciliation := func() (*connectorReconciliationState, error) { return nil, nil }
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readNoReconciliation); err != nil {
 		t.Fatalf("cleanupCommittedSetupTransaction: %v", err)
 	}
 	assertPathAbsent(t, transaction.TrashPath)
 	assertPathAbsent(t, filepath.Dir(maintenancePath))
 	assertPathAbsent(t, dataRoot)
-	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readNoReconciliation); err != nil {
 		t.Fatalf("idempotent cleanupCommittedSetupTransaction: %v", err)
+	}
+}
+
+func TestCommittedUninstallCleanupPreservesDataForPendingConnectorReconciliation(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, nil)
+	transaction.DeleteUserData = true
+	if err := os.MkdirAll(dataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataRoot, "state")
+	if err := os.WriteFile(statePath, []byte("preserve"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector:     "claudecode",
+			Operation:     "verify",
+			ConfigHome:    filepath.Join(filepath.Dir(dataRoot), ".claude"),
+			Message:       "managed connector cleanup is pending",
+			TransactionID: testCurrentTransactionID,
+		}},
+	}
+	readPendingReconciliation := func() (*connectorReconciliationState, error) { return pending, nil }
+
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readPendingReconciliation); err != nil {
+		t.Fatalf("cleanupCommittedSetupTransaction: %v", err)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("pending connector reconciliation data was not preserved: %v", err)
 	}
 }
 
