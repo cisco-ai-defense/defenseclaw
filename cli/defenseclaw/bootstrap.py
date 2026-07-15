@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw.connector_paths import hermes_config_path, omnigent_config_path
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    hermes_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -575,8 +579,7 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         steps.append(
             StepResult(
@@ -618,9 +621,7 @@ def _apply_first_run_choices(
             if _normalize_connector(str(key)) == wanted:
                 selected_override = pc
                 break
-        cfg.guardrail.connectors = {
-            connector: selected_override or PerConnectorGuardrailConfig()
-        }
+        cfg.guardrail.connectors = {connector: selected_override or PerConnectorGuardrailConfig()}
     else:
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
@@ -630,15 +631,11 @@ def _apply_first_run_choices(
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
         cfg.guardrail.judge.hook_connectors = (
-            list(options.judge_hook_connectors)
-            if options.judge_hook_connectors is not None
-            else ["*"]
+            list(options.judge_hook_connectors) if options.judge_hook_connectors is not None else ["*"]
         )
         if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
             cfg.guardrail.detection_strategy = "regex_judge"
-        completion_strategy = (
-            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
-        ).strip().lower()
+        completion_strategy = (getattr(cfg.guardrail, "detection_strategy_completion", "") or "").strip().lower()
         if completion_strategy in ("", "regex_only"):
             cfg.guardrail.detection_strategy_completion = "regex_judge"
     else:
@@ -1031,12 +1028,12 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "defenseclaw setup openclaw",
         )
     if connector == "codex":
-        path = os.path.expanduser("~/.codex/config.toml")
+        path = connector_config_files("codex")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Codex config found")
         return StepResult("Connector", "warn", "Codex config not found yet", "defenseclaw setup codex")
     if connector == "claudecode":
-        path = os.path.expanduser("~/.claude/settings.json")
+        path = connector_config_files("claudecode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Claude Code settings found")
         return StepResult("Connector", "warn", "Claude Code settings not found yet", "defenseclaw setup claude-code")
@@ -1122,8 +1119,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         try:
             config_text = Path(path).read_text(encoding="utf-8")
             configured = all(
-                marker in config_text
-                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
             )
         except (OSError, UnicodeError):
             configured = False

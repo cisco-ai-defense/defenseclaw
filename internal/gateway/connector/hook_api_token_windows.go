@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -49,7 +50,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if err != nil {
 		return err
 	}
-	pathPtr, err := windows.UTF16PtrFromString(path)
+	pathPtr, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return fmt.Errorf("encode Windows path %s: %w", path, err)
 	}
@@ -66,8 +67,12 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("expected regular file: %s", path)
 	}
+	extendedPath, err := winpath.Extended(path)
+	if err != nil {
+		return fmt.Errorf("encode extended Windows path %s: %w", path, err)
+	}
 	sd, err := windows.GetNamedSecurityInfo(
-		path,
+		extendedPath,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)

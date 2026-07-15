@@ -898,6 +898,44 @@ async def test_mouse_click_opens_command_drawer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tab_and_shift_tab_switch_panels_from_chrome_focus() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        app.query_one("#tabs", Tabs).focus()
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.active_panel == "alerts"
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.active_panel == "overview"
+
+
+@pytest.mark.asyncio
+async def test_setup_form_consumes_tab_before_global_panel_navigation() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        app._handle_overview_control("overview-setup-connector")  # noqa: SLF001
+        await pilot.pause()
+        assert app.active_panel == "setup"
+        assert app.setup_model.form_active is True
+        assert app.setup_model.form_cursor == 0
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.active_panel == "setup"
+        assert app.setup_model.form_cursor == 1
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.active_panel == "setup"
+        assert app.setup_model.form_cursor == 0
+
+
+@pytest.mark.asyncio
 async def test_command_palette_suggestions_tab_complete_and_click_execute() -> None:
     app = DefenseClawTUI()
     seen: dict[str, tuple[str, tuple[str, ...]]] = {}
@@ -1068,19 +1106,11 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         await pilot.press("N")
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "NotificationsToggleScreen"
-        if os.name == "nt":
-            assert app.screen_stack[-1].model.title == "Desktop notifications — unsupported"
-            await pilot.press("enter")
-            await pilot.pause()
-            assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
-            assert config.notifications.enabled is True
-            await pilot.press("escape")
-        else:
-            assert app.screen_stack[-1].model.title == "Desktop notifications"
-            await pilot.press("enter")
-            await pilot.pause()
-            assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
-            assert config.notifications.enabled is False
+        assert app.screen_stack[-1].model.title == "Desktop notifications"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
+        assert config.notifications.enabled is False
 
         app.action_switch_panel("overview")
         await pilot.press("X")

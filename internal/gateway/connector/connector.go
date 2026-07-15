@@ -117,6 +117,28 @@ type SetupOpts struct {
 	// HookContract. Empty means "not probed"; it never implies latest.
 	AgentVersion string
 
+	// AgentExecutable is the absolute local agent binary selected by trusted
+	// discovery. Connectors use it only for passive, bounded inspection of the
+	// agent's own effective policy surface (for example Codex app-server's
+	// configRequirements/read RPC). Keeping the selected path beside the
+	// observed version prevents a stale or poisoned PATH entry from changing
+	// which client Setup validates.
+	AgentExecutable string
+
+	// HookExecutable pins the administrator-owned native hook launcher used by
+	// managed policy deployment. Ordinary per-user setup leaves this empty and
+	// resolves the packaged launcher through the installed-state contract.
+	// Enterprise installers must supply an absolute, independently trusted path
+	// so a privileged policy write never captures the caller's PATH or profile.
+	HookExecutable string
+
+	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
+	// Claude Code through --settings for the invocation being inspected. An
+	// empty value means no command-line settings source is part of that
+	// invocation. The passive guardian cannot infer flags for future processes;
+	// callers validating a concrete launch must pass the value explicitly.
+	ClaudeSettingsOverride string
+
 	// HookContractID optionally pins setup/profile resolution to a specific
 	// known contract. A non-empty value that does not match the resolved
 	// contract marks the profile incompatible instead of silently using a
@@ -132,6 +154,15 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+}
+
+// ManagedHookPolicyProvider renders and verifies connector-owned settings for
+// a vendor's administrator policy tier. It is deliberately separate from
+// Setup: user-scoped configuration and machine-managed policy have different
+// ownership, rollback, and precedence contracts.
+type ManagedHookPolicyProvider interface {
+	ManagedHookPolicy(SetupOpts) ([]byte, error)
+	VerifyManagedHookPolicy([]byte, SetupOpts) error
 }
 
 // Connector is the contract every agent framework adapter implements.

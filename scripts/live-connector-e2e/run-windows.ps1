@@ -8,10 +8,15 @@ param(
     [string]$WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$StateRoot = (Join-Path $env:TEMP 'defenseclaw-windows-e2e'),
     [string]$HomeRoot = '',
+    [string]$NativeDataRoot = '',
     [string]$ResultsPath = '',
     [string]$ArtifactPath = '',
+    [string]$AgentPath = '',
+    [string]$ExpectedAgentVersion = '',
     [ValidateRange(1, 1800)][int]$CommandTimeoutSeconds = 180,
     [ValidateSet('run', 'capture', 'cleanup')][string]$Operation = 'run',
+    [switch]$AllowNativeDataRoot,
+    [switch]$ReleaseCertification,
     [switch]$NoRun
 )
 
@@ -64,6 +69,18 @@ function Get-EffectiveConnectorConfigPath(
     return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
 }
 
+function Get-StableHookRuntimeExecutable {
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'could not resolve the current user LocalAppData Known Folder'
+    }
+    return [IO.Path]::GetFullPath(
+        (Join-Path $localAppData 'DefenseClaw\HookRuntime\defenseclaw-hook.exe')
+    )
+}
+
 function Protect-TestDirectory([string]$Path) {
     $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -76,7 +93,8 @@ function Protect-TestDirectory([string]$Path) {
     $propagation = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    foreach ($sid in @($identity.User, $system)) {
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    foreach ($sid in @($identity.User, $system, $administrators)) {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $sid,
             [Security.AccessControl.FileSystemRights]::FullControl,
@@ -89,26 +107,150 @@ function Protect-TestDirectory([string]$Path) {
     [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
 }
 
-function Get-ProcessTreeSnapshot([int]$RootProcessId) {
-    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath)
-    $descendants = @()
-    $frontier = @($RootProcessId)
-    while ($frontier.Count -gt 0) {
-        $children = @($processes | Where-Object {
-            [int]$_.ParentProcessId -in $frontier -and [int]$_.ProcessId -ne $RootProcessId
-        })
-        $descendants += $children
-        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+function Get-ProcessTreeSnapshot {
+    param(
+        [Parameter(Mandatory)][object[]]$RootProcesses,
+        [AllowNull()][object[]]$ProcessSnapshot = $null
+    )
+    $processes = if ($null -eq $ProcessSnapshot) {
+        @(Get-CimInstance Win32_Process -OperationTimeoutSec 1 -ErrorAction Stop)
+    } else {
+        @($ProcessSnapshot)
     }
-    return $descendants
+    $descendants = @()
+    $seen = @{}
+    $frontier = @($RootProcesses)
+    foreach ($root in $frontier) {
+        $seen["$($root.ProcessId)|$($root.CreationDate)"] = $true
+    }
+    while ($frontier.Count -gt 0) {
+        $children = @()
+        foreach ($parent in $frontier) {
+            $parentCreated = [DateTime]::Parse(
+                [string]$parent.CreationDate,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            $parentExited = $false
+            $parentExit = [DateTime]::MinValue
+            $exitProperty = $parent.PSObject.Properties['ExitDate']
+            if ($null -ne $exitProperty -and
+                -not [string]::IsNullOrWhiteSpace([string]$exitProperty.Value)) {
+                $parentExit = [DateTime]::Parse(
+                    [string]$exitProperty.Value,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind
+                ).ToUniversalTime()
+                $parentExited = $true
+            } else {
+                $parentMatches = @($processes | Where-Object {
+                    if ([int]$_.ProcessId -ne [int]$parent.ProcessId) { return $false }
+                    $currentCreated = ([DateTime]$_.CreationDate).ToUniversalTime()
+                    return [Math]::Abs(($currentCreated - $parentCreated).TotalMilliseconds) -lt 1
+                }).Count -gt 0
+                if (-not $parentMatches) { continue }
+            }
+            foreach ($candidate in @($processes | Where-Object {
+                [int]$_.ParentProcessId -eq [int]$parent.ProcessId
+            })) {
+                $candidateCreated = ([DateTime]$candidate.CreationDate).ToUniversalTime()
+                if ($candidateCreated -lt $parentCreated) { continue }
+                # Only an exited root may expand without a current exact parent,
+                # and then only across the root's recorded lifetime.
+                if ($parentExited -and $candidateCreated -gt $parentExit) { continue }
+                $child = [pscustomobject]@{
+                    ProcessId = [int]$candidate.ProcessId
+                    ParentProcessId = [int]$candidate.ParentProcessId
+                    CreationDate = $candidateCreated.ToString('O')
+                    ExitDate = ''
+                    ExecutablePath = [string]$candidate.ExecutablePath
+                }
+                $key = "$($child.ProcessId)|$($child.CreationDate)"
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $children += $child
+            }
+        }
+        $descendants += $children
+        $frontier = @($children)
+    }
+    return @($descendants)
+}
+
+function Update-RootProcessExitBound([object]$RecordedProcess, [Diagnostics.Process]$Process) {
+    if (-not $Process.HasExited -or
+        -not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExitDate)) {
+        return
+    }
+    try {
+        $RecordedProcess.ExitDate = $Process.ExitTime.ToUniversalTime().ToString('O')
+    } catch {
+        Write-Warning (Protect-LogText "could not record process exit bound: $($_.Exception.Message)")
+    }
+}
+
+function Add-ProcessTreeSnapshot([hashtable]$Tracked, [object]$RootProcess) {
+    $roots = @($RootProcess) + @($Tracked.Values)
+    try {
+        foreach ($process in @(Get-ProcessTreeSnapshot $roots)) {
+            $key = "$($process.ProcessId)|$($process.CreationDate)"
+            $Tracked[$key] = $process
+        }
+    } catch {
+        Write-Warning (Protect-LogText "process tree snapshot failed: $($_.Exception.Message)")
+    }
 }
 
 function Test-SameProcessIdentity($RecordedProcess) {
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$RecordedProcess.ProcessId)" -ErrorAction SilentlyContinue
-    if ($null -eq $current) { return $false }
-    return [string]$current.CreationDate -eq [string]$RecordedProcess.CreationDate -and
-        [string]$current.ExecutablePath -eq [string]$RecordedProcess.ExecutablePath
+    $native = $null
+    try {
+        $native = [Diagnostics.Process]::GetProcessById([int]$RecordedProcess.ProcessId)
+        $expected = [DateTime]::Parse(
+            [string]$RecordedProcess.CreationDate,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+        if ([Math]::Abs(($native.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -ge 1) {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExecutablePath)) {
+            $currentImage = [string]$native.MainModule.FileName
+            if (-not [string]::Equals(
+                $currentImage,
+                [string]$RecordedProcess.ExecutablePath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                return $false
+            }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $native) { $native.Dispose() }
+    }
+}
+
+function Stop-ExactProcessTree([object[]]$Descendants) {
+    foreach ($recorded in @($Descendants)) {
+        if (-not (Test-SameProcessIdentity $recorded)) { continue }
+        $native = $null
+        try {
+            $native = [Diagnostics.Process]::GetProcessById([int]$recorded.ProcessId)
+            $started = $native.StartTime.ToUniversalTime()
+            $expected = [DateTime]::Parse(
+                [string]$recorded.CreationDate,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            if ([Math]::Abs(($started - $expected).TotalMilliseconds) -ge 1) { continue }
+            $native.Kill($true)
+        } catch {
+            Write-Warning (Protect-LogText "could not stop tracked PID $($recorded.ProcessId): $($_.Exception.Message)")
+        } finally {
+            if ($null -ne $native) { $native.Dispose() }
+        }
+    }
 }
 
 function Wait-ProcessTreeExit([object[]]$Descendants, [int]$TimeoutMilliseconds = 5000) {
@@ -119,10 +261,57 @@ function Wait-ProcessTreeExit([object[]]$Descendants, [int]$TimeoutMilliseconds 
         if ($alive.Count -eq 0) { return }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
+}
 
-    foreach ($process in @($Descendants | Where-Object { Test-SameProcessIdentity $_ })) {
-        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+function Get-TrackedProcessIdentitySummary([object[]]$Descendants) {
+    $rows = @($Descendants | Sort-Object ProcessId, CreationDate | Select-Object -First 16 | ForEach-Object {
+        $image = if ([string]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
+            'unknown'
+        } else {
+            [IO.Path]::GetFileName([string]$_.ExecutablePath)
+        }
+        "pid=$($_.ProcessId),created=$($_.CreationDate),image=$image"
+    })
+    if (@($Descendants).Count -gt 16) { $rows += 'additional-identities=truncated' }
+    if ($rows.Count -eq 0) { return 'none' }
+    return $rows -join ';'
+}
+
+function Write-NativeProcessPhase([string]$FilePath, [int]$ProcessId, [string]$Phase, [string]$Detail = '') {
+    $name = [IO.Path]::GetFileName($FilePath)
+    $line = "[native-process:$Phase] file=$name pid=$ProcessId"
+    if (-not [string]::IsNullOrWhiteSpace($Detail)) { $line += " $Detail" }
+    [Console]::Out.WriteLine((Protect-LogText $line))
+    [Console]::Out.Flush()
+}
+
+function Wait-RedirectedOutputTask([Threading.Tasks.Task]$Task, [DateTime]$Deadline) {
+    if ($Task.IsCompleted) { return $true }
+    $remaining = [int][Math]::Max(0, [Math]::Min([int]::MaxValue, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds))
+    if ($remaining -le 0) { return $false }
+    try {
+        return $Task.Wait($remaining)
+    } catch {
+        # A faulted read is complete; Read-RedirectedOutputTask returns a
+        # bounded diagnostic instead of rethrowing an AggregateException.
+        return $true
     }
+}
+
+function Read-RedirectedOutputTask([Threading.Tasks.Task[string]]$Task) {
+    if (-not $Task.IsCompleted) { return '[redirected output drain did not complete]' }
+    try { return [string]$Task.GetAwaiter().GetResult() }
+    catch { return "[redirected output unavailable: $($_.Exception.Message)]" }
+}
+
+function Test-RedirectedOutputTasksHealthy(
+    [Threading.Tasks.Task[string]]$StdOutTask,
+    [Threading.Tasks.Task[string]]$StdErrTask
+) {
+    return -not (
+        $StdOutTask.IsFaulted -or $StdOutTask.IsCanceled -or
+        $StdErrTask.IsFaulted -or $StdErrTask.IsCanceled
+    )
 }
 
 function Invoke-NativeProcess {
@@ -135,46 +324,141 @@ function Invoke-NativeProcess {
         [int[]]$AllowedExitCodes = @(0),
         [string]$LogPath = ''
     )
+    $inputText = $null
+    if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
+        $resolvedInput = (Resolve-Path -LiteralPath $InputPath -ErrorAction Stop).Path
+        $inputInfo = Get-Item -LiteralPath $resolvedInput -Force -ErrorAction Stop
+        if ($inputInfo -isnot [IO.FileInfo]) { throw "native process input is not a regular file: $resolvedInput" }
+        if ($inputInfo.Length -gt 1048576) { throw "native process input exceeds the 1 MiB limit: $resolvedInput" }
+        $inputText = [IO.File]::ReadAllText($resolvedInput)
+        if ([Text.Encoding]::UTF8.GetByteCount($inputText) -gt 1048576) {
+            throw "native process decoded input exceeds the 1 MiB limit: $resolvedInput"
+        }
+    }
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $start.RedirectStandardInput = -not [string]::IsNullOrWhiteSpace($InputPath)
+    $start.RedirectStandardInput = $null -ne $inputText
     foreach ($argument in $ArgumentList) { [void]$start.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
-    if (-not $process.Start()) { throw "failed to start $FilePath" }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    if ($InputPath) {
-        $inputText = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $InputPath).Path)
-        $process.StandardInput.Write($inputText)
-        $process.StandardInput.Close()
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw "failed to start $FilePath"
     }
-    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
-    if ($timedOut) {
-        $descendants = @(Get-ProcessTreeSnapshot $process.Id)
-        try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
-        $process.WaitForExit()
-        Wait-ProcessTreeExit $descendants
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $trackedDescendants = @{}
+        $rootProcessIdentity = [pscustomobject]@{
+            ProcessId = $process.Id
+            ParentProcessId = 0
+            CreationDate = $process.StartTime.ToUniversalTime().ToString('O')
+            ExitDate = ''
+            ExecutablePath = ''
+        }
+        $timeoutIdentitySummary = 'none'
+        $inputWriteFailed = $false
+        $inputWriteFailure = ''
+        $inputTimedOut = $false
+        Write-NativeProcessPhase $FilePath $process.Id 'started'
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($null -ne $inputText) {
+            $inputWriteTask = $process.StandardInput.WriteAsync($inputText)
+            $inputWriteComplete = Wait-RedirectedOutputTask $inputWriteTask $deadline
+            if (-not $inputWriteComplete) {
+                $inputTimedOut = $true
+            } elseif ($inputWriteTask.IsFaulted -or $inputWriteTask.IsCanceled) {
+                $inputWriteFailed = $true
+                try { $inputWriteTask.GetAwaiter().GetResult() }
+                catch { $inputWriteFailure = Protect-LogText $_.Exception.Message }
+            } else {
+                try { $process.StandardInput.Close() }
+                catch {
+                    $inputWriteFailed = $true
+                    $inputWriteFailure = Protect-LogText $_.Exception.Message
+                }
+            }
+        }
+        $timeoutPhase = if ($inputTimedOut) { 'stdin-write' } else { 'parent' }
+        $timedOut = $inputTimedOut
+        if (-not $timedOut -and -not $inputWriteFailed) {
+            $parentWaitMilliseconds = [int][Math]::Max(
+                0,
+                [Math]::Min([int]::MaxValue, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            )
+            $timedOut = -not $process.WaitForExit($parentWaitMilliseconds)
+        }
+        if (-not $timedOut -and -not $inputWriteFailed) {
+            Write-NativeProcessPhase $FilePath $process.Id 'parent-exited'
+            $drainGrace = [DateTime]::UtcNow.AddSeconds(5)
+            $drainDeadline = if ($drainGrace -lt $deadline) { $drainGrace } else { $deadline }
+            $stdoutComplete = Wait-RedirectedOutputTask $stdoutTask $drainDeadline
+            $stderrComplete = Wait-RedirectedOutputTask $stderrTask $drainDeadline
+            if (-not ($stdoutComplete -and $stderrComplete)) {
+                $timedOut = $true
+                $timeoutPhase = 'output-drain'
+            }
+        }
+        $outputReadFailed = -not $timedOut -and -not $inputWriteFailed -and
+            -not (Test-RedirectedOutputTasksHealthy $stdoutTask $stderrTask)
+        if ($timedOut -or $inputWriteFailed) {
+            Update-RootProcessExitBound $rootProcessIdentity $process
+            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
+            $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
+            if ($timedOut) {
+                Write-NativeProcessPhase $FilePath $process.Id "timeout-$timeoutPhase" "descendants=$timeoutIdentitySummary"
+            } else {
+                Write-NativeProcessPhase $FilePath $process.Id 'failed-input' "descendants=$timeoutIdentitySummary"
+            }
+            if (-not $process.HasExited) {
+                try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+                $null = $process.WaitForExit(1000)
+            }
+            Update-RootProcessExitBound $rootProcessIdentity $process
+            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
+            $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
+            Stop-ExactProcessTree @($trackedDescendants.Values)
+            Wait-ProcessTreeExit @($trackedDescendants.Values) 1000
+            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(1)
+            $null = Wait-RedirectedOutputTask $stdoutTask $cleanupDeadline
+            $null = Wait-RedirectedOutputTask $stderrTask $cleanupDeadline
+            if (-not $stdoutTask.IsCompleted) { $process.StandardOutput.Dispose() }
+            if (-not $stderrTask.IsCompleted) { $process.StandardError.Dispose() }
+        }
+        $stdout = Protect-LogText (Read-RedirectedOutputTask $stdoutTask)
+        $stderr = Protect-LogText (Read-RedirectedOutputTask $stderrTask)
+        if ($timedOut) {
+            $stderr = @($stderr, "[timeout descendants: $timeoutIdentitySummary]" | Where-Object { $_ }) -join [Environment]::NewLine
+        } elseif ($inputWriteFailed) {
+            $stderr = @($stderr, "[standard input write failed: $inputWriteFailure]" | Where-Object { $_ }) -join [Environment]::NewLine
+        }
+        $exitCode = if ($timedOut) { 124 } elseif ($inputWriteFailed) { 125 } else { $process.ExitCode }
+        $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
+        if ($LogPath) {
+            $parent = Split-Path -Parent $LogPath
+            if ($parent) { [IO.Directory]::CreateDirectory($parent) | Out-Null }
+            [IO.File]::WriteAllText($LogPath, $combined)
+        }
+        $result = [pscustomobject]@{ ExitCode = $exitCode; StdOut = $stdout; StdErr = $stderr; TimedOut = $timedOut; ProcessId = $process.Id }
+        Write-NativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($inputWriteFailed) { 'failed-input' } elseif ($outputReadFailed) { 'failed-output' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
+        if ($inputWriteFailed) {
+            throw "$FilePath standard input write failed`n$combined"
+        }
+        if ($outputReadFailed) {
+            throw "$FilePath redirected output capture failed`n$combined"
+        }
+        if ($exitCode -notin $AllowedExitCodes) {
+            $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
+            throw "$FilePath $reason`n$combined"
+        }
+        return $result
+    } finally {
+        $process.Dispose()
     }
-    $stdout = Protect-LogText $stdoutTask.GetAwaiter().GetResult()
-    $stderr = Protect-LogText $stderrTask.GetAwaiter().GetResult()
-    $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
-    $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
-    if ($LogPath) {
-        $parent = Split-Path -Parent $LogPath
-        if ($parent) { [IO.Directory]::CreateDirectory($parent) | Out-Null }
-        [IO.File]::WriteAllText($LogPath, $combined)
-    }
-    $result = [pscustomobject]@{ ExitCode = $exitCode; StdOut = $stdout; StdErr = $stderr; TimedOut = $timedOut; ProcessId = $process.Id }
-    if ($exitCode -notin $AllowedExitCodes) {
-        $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
-        throw "$FilePath $reason`n$combined"
-    }
-    return $result
 }
 
 function Get-EventLines([string]$Path) {
@@ -367,6 +651,10 @@ function Assert-DoctorHookRegistration {
     $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
     if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
     if ($rows[0].status -ne 'pass') { throw "doctor rejected setup-created $Connector hooks: $($rows[0].detail)" }
+    $expectedHookExecutable = Get-StableHookRuntimeExecutable
+    if ($rows[0].detail.IndexOf($expectedHookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "doctor validated an unexpected $Connector hook target: $($rows[0].detail)"
+    }
     if (Test-ObsoleteWindowsHookGuidance $rows[0].detail) {
         throw "doctor returned obsolete Unix guidance for native Windows $Connector hooks"
     }
@@ -593,7 +881,7 @@ function Assert-DoctorWindowsHookRegistration {
     if ($check.status -ne 'pass' -or $check.detail -notmatch 'healthy Windows-native executable registration') {
         throw "Doctor did not validate the registered $Connector Windows hook: $($check.status) $($check.detail)"
     }
-    $hookExecutable = (Get-Command 'defenseclaw-hook' -ErrorAction Stop).Source
+    $hookExecutable = Get-StableHookRuntimeExecutable
     if ($check.detail.IndexOf($hookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw "Doctor validated an unexpected hook target: $($check.detail)"
     }
@@ -625,7 +913,13 @@ function Assert-DoctorWindowsHookRegistration {
         $tamperedChecks = @($tamperedReport.checks | Where-Object { [string]::Equals([string]$_.label, $label, [StringComparison]::Ordinal) })
         if ($tamperedChecks.Count -ne 1) { throw "Tampered Doctor run returned $($tamperedChecks.Count) '$label' checks, expected one" }
         $tamperedCheck = $tamperedChecks[0]
-        if ($tamperedCheck.status -ne 'fail' -or $tamperedCheck.detail -notmatch 'obsolete gateway launcher') {
+        $expectedTamperDetail = if ($Connector -eq 'codex') {
+            'cannot be resolved'
+        } else {
+            'does not use the native hook runtime'
+        }
+        if ($tamperedCheck.status -ne 'fail' -or
+            $tamperedCheck.detail -notmatch [regex]::Escape($expectedTamperDetail)) {
             throw "Doctor did not reject the tampered $Connector hook command: $($tamperedCheck.status) $($tamperedCheck.detail)"
         }
         if ($tamperedCheck.detail -notmatch "setup $(if ($Connector -eq 'codex') { 'codex' } else { 'claude-code' }) --yes --restart") {
@@ -634,7 +928,7 @@ function Assert-DoctorWindowsHookRegistration {
         if ($tamperedCheck.detail -match '(?i)\x2esh\b|\bbash\b|\bwsl\b|\bchmod\b|\bunset\b|hook script') {
             throw "Doctor tamper result returned obsolete shell-hook guidance: $($tamperedCheck.detail)"
         }
-        Write-Result 'doctor:windows-hook-tamper' pass 'exit=1 obsolete-gateway-launcher=rejected obsolete-shell-guidance=absent'
+        Write-Result 'doctor:windows-hook-tamper' pass 'exit=1 non-native-gateway-launcher=rejected obsolete-shell-guidance=absent'
     } finally {
         [IO.File]::WriteAllBytes($configPath, $originalConfig)
     }
@@ -655,32 +949,54 @@ function Assert-DoctorWindowsHookRegistration {
     Wait-Gateway
 }
 
-function Assert-NativeEnterpriseHooksRejected {
-    $root = Join-Path $StateRoot 'enterprise-hooks-native-rejection'
+function Assert-NativeEnterpriseHooksRequireElevation {
+    $root = Join-Path $StateRoot 'enterprise-hooks-elevation-required'
     $targetHome = Join-Path $root 'target-home'
     $dataDir = Join-Path $targetHome '.defenseclaw'
     [IO.Directory]::CreateDirectory($dataDir) | Out-Null
     [IO.File]::WriteAllText((Join-Path $targetHome 'preserve.txt'), 'preserve')
-    $manifest = Join-Path $root 'targets.yaml'
-    [IO.File]::WriteAllText($manifest, "version: 1`ntargets: []`n", [Text.UTF8Encoding]::new($false))
     $gateway = (Get-Command 'defenseclaw-gateway' -ErrorAction Stop).Source
-    $commands = @(
-        [pscustomobject]@{ Name = 'install'; Args = @('enterprise', 'hooks', 'install', '--connector', $Connector, '--user-home', $targetHome, '--data-dir', $dataDir) },
-        [pscustomobject]@{ Name = 'reconcile'; Args = @('enterprise', 'hooks', 'reconcile', '--manifest', $manifest) },
-        [pscustomobject]@{ Name = 'watch'; Args = @('enterprise', 'hooks', 'watch', '--manifest', $manifest, '--interval', '1s', '--debounce', '100ms') }
-    )
-    foreach ($command in $commands) {
-        $before = Get-TreeFingerprint $root
-        $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList $command.Args -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot "enterprise-hooks-$($command.Name).log")
-        $after = Get-TreeFingerprint $root
-        if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw "enterprise hooks $($command.Name) did not return bounded exit 1" }
-        if (($result.StdOut + $result.StdErr) -notmatch 'enterprise hooks are unsupported on native Windows') { throw "enterprise hooks $($command.Name) did not report native Windows rejection" }
-        if ($before -ne $after) { throw "enterprise hooks $($command.Name) modified the disposable target tree" }
-        Write-Result "enterprise-hooks:$($command.Name):native-rejection" pass 'exit=1 bounded=true target-tree=unchanged'
-    }
+    $before = Get-TreeFingerprint $root
+    $result = Invoke-NativeProcess -FilePath $gateway -ArgumentList @(
+        'enterprise', 'hooks', 'install', '--connector', $Connector,
+        '--user-home', $targetHome, '--data-dir', $dataDir
+    ) -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot 'enterprise-hooks-install.log')
+    $after = Get-TreeFingerprint $root
+    if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw 'enterprise hooks install did not return bounded exit 1' }
+    if (($result.StdOut + $result.StdErr) -notmatch 'require an elevated administrator or LocalSystem token') { throw 'enterprise hooks install did not require native Windows elevation' }
+    if ($before -ne $after) { throw 'enterprise hooks install modified the disposable target tree' }
+    Write-Result 'enterprise-hooks:install:elevation-required' pass 'exit=1 bounded=true target-tree=unchanged'
 }
 
 function Install-Agent {
+    if ($ReleaseCertification) {
+        if ([string]::IsNullOrWhiteSpace($AgentPath) -or
+            [string]::IsNullOrWhiteSpace($ExpectedAgentVersion)) {
+            throw 'release certification requires an explicit preinstalled agent path and exact version'
+        }
+        if ($ExpectedAgentVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "release certification requires an exact numeric client version, got: $ExpectedAgentVersion"
+        }
+        $script:AgentPath = (Resolve-Path -LiteralPath $AgentPath -ErrorAction Stop).Path
+        $statePrefix = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+        if (-not $script:AgentPath.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "release client must be installed below the disposable certification state root: $script:AgentPath"
+        }
+        $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') `
+            -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
+        $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
+        $observedVersions = [regex]::Matches(
+            $script:AgentVersion,
+            '(?<![0-9A-Za-z.+-])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![0-9A-Za-z.+-])'
+        )
+        if ($observedVersions.Count -ne 1 -or
+            $observedVersions[0].Value -cne $ExpectedAgentVersion) {
+            throw "$Connector client version output '$($script:AgentVersion)' does not prove exact pin $ExpectedAgentVersion"
+        }
+        Write-Result install pass "exact=$ExpectedAgentVersion output=$($script:AgentVersion)"
+        return
+    }
+
     [IO.Directory]::CreateDirectory($script:ToolRoot) | Out-Null
     $package = if ($Connector -eq 'codex') { '@openai/codex@' + ($env:CODEX_VERSION ?? 'latest') } else { '@anthropic-ai/claude-code@' + ($env:CLAUDE_VERSION ?? 'latest') }
     Invoke-Tool 'npm.cmd' @('install', '--no-audit', '--no-fund', '--prefix', $script:ToolRoot, $package) -Timeout 300 | Out-Null
@@ -689,6 +1005,274 @@ function Install-Agent {
     $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
     $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
     Write-Result install pass $script:AgentVersion
+}
+
+function Get-CodexVersionNumber([string]$RawVersion) {
+    $match = [regex]::Match($RawVersion, '(?<!\d)(?<version>\d+\.\d+(?:\.\d+)?)')
+    if (-not $match.Success) { throw "could not parse Codex version: $RawVersion" }
+    $parts = @($match.Groups['version'].Value.Split('.'))
+    while ($parts.Count -lt 3) { $parts += '0' }
+    return [Version]::new([int]$parts[0], [int]$parts[1], [int]$parts[2])
+}
+
+function Get-CodexExpectedHookSpecs([Version]$Version) {
+    $specs = @(
+        [pscustomobject]@{ Event = 'sessionStart'; Matcher = 'startup|resume|clear'; TimeoutSec = 30 },
+        [pscustomobject]@{ Event = 'userPromptSubmit'; Matcher = $null; TimeoutSec = 30 },
+        [pscustomobject]@{ Event = 'preToolUse'; Matcher = '*'; TimeoutSec = 30 },
+        [pscustomobject]@{ Event = 'permissionRequest'; Matcher = '*'; TimeoutSec = 30 },
+        [pscustomobject]@{ Event = 'postToolUse'; Matcher = '*'; TimeoutSec = 30 }
+    )
+    if ($Version -ge [Version]'0.129.0') {
+        $specs += @(
+            [pscustomobject]@{ Event = 'preCompact'; Matcher = $null; TimeoutSec = 30 },
+            [pscustomobject]@{ Event = 'postCompact'; Matcher = $null; TimeoutSec = 30 }
+        )
+    }
+    if ($Version -ge [Version]'0.133.0') {
+        $specs += @(
+            [pscustomobject]@{ Event = 'subagentStart'; Matcher = '*'; TimeoutSec = 30 },
+            [pscustomobject]@{ Event = 'subagentStop'; Matcher = '*'; TimeoutSec = 90 }
+        )
+    }
+    $specs += [pscustomobject]@{ Event = 'stop'; Matcher = $null; TimeoutSec = 90 }
+    return @($specs)
+}
+
+function Get-CodexExpectedHookEvents([Version]$Version) {
+    return @(Get-CodexExpectedHookSpecs $Version | ForEach-Object { [string]$_.Event })
+}
+
+function Read-CodexAppServerResponse(
+    [IO.TextReader]$Reader,
+    [int]$RequestId,
+    [DateTime]$Deadline
+) {
+    do {
+        $remaining = [int][Math]::Max(
+            0,
+            [Math]::Min([int]::MaxValue, ($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        )
+        if ($remaining -le 0) { throw "Codex app-server request $RequestId timed out" }
+        $readTask = $Reader.ReadLineAsync()
+        if (-not $readTask.Wait($remaining)) {
+            throw "Codex app-server request $RequestId timed out while reading JSONL"
+        }
+        $line = $readTask.GetAwaiter().GetResult()
+        if ($null -eq $line) { throw "Codex app-server closed before response $RequestId" }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $message = $line | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "Codex app-server emitted malformed JSONL: $line" }
+        $idProperty = $message.PSObject.Properties['id']
+        if ($null -ne $idProperty -and [int]$idProperty.Value -eq $RequestId) {
+            $errorProperty = $message.PSObject.Properties['error']
+            if ($null -ne $errorProperty -and $null -ne $errorProperty.Value) {
+                throw "Codex app-server request $RequestId failed: $($errorProperty.Value | ConvertTo-Json -Compress -Depth 8)"
+            }
+            return $message
+        }
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "Codex app-server request $RequestId timed out"
+}
+
+function Invoke-CodexHooksList(
+    [string]$CodexJavaScript,
+    [string]$CodexHome,
+    [string]$WorkingDirectory,
+    [string]$VersionLabel
+) {
+    if (-not (Test-Path -LiteralPath $CodexJavaScript -PathType Leaf)) {
+        throw "Codex app-server launcher is missing for $VersionLabel"
+    }
+    $node = (Get-Command 'node.exe' -ErrorAction Stop).Source
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $node
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.WorkingDirectory = $WorkingDirectory
+    $start.Environment['CODEX_HOME'] = $CodexHome
+    # hooks/list is a local configuration/trust query. Remove provider secrets
+    # from this subprocess so certification cannot accidentally turn it into a
+    # model/network operation; the later no-bypass live turns retain the parent
+    # environment and exercise the authenticated client normally.
+    foreach ($name in @(
+        'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'LLM_API_KEY',
+        'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'
+    )) {
+        [void]$start.Environment.Remove($name)
+    }
+    [void]$start.ArgumentList.Add($CodexJavaScript)
+    [void]$start.ArgumentList.Add('app-server')
+    [void]$start.ArgumentList.Add('--listen')
+    [void]$start.ArgumentList.Add('stdio://')
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw "failed to start Codex $VersionLabel app-server"
+    }
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $initialize = [ordered]@{
+            id = 1
+            method = 'initialize'
+            params = [ordered]@{
+                clientInfo = [ordered]@{ name = 'defenseclaw-certification'; version = '1.0' }
+                capabilities = [ordered]@{ experimentalApi = $true }
+            }
+        } | ConvertTo-Json -Compress -Depth 8
+        $process.StandardInput.WriteLine($initialize)
+        $process.StandardInput.Flush()
+        $null = Read-CodexAppServerResponse $process.StandardOutput 1 $deadline
+
+        $process.StandardInput.WriteLine('{"method":"initialized","params":{}}')
+        $request = [ordered]@{
+            id = 2
+            method = 'hooks/list'
+            params = [ordered]@{ cwds = @($WorkingDirectory) }
+        } | ConvertTo-Json -Compress -Depth 6
+        $process.StandardInput.WriteLine($request)
+        $process.StandardInput.Flush()
+        return Read-CodexAppServerResponse $process.StandardOutput 2 $deadline
+    } finally {
+        try { $process.StandardInput.Close() } catch {}
+        if (-not $process.HasExited) {
+            try { $process.Kill($true) } catch {}
+            $null = $process.WaitForExit(5000)
+        }
+        $stderrDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        $null = Wait-RedirectedOutputTask $stderrTask $stderrDeadline
+        $stderr = Protect-LogText (Read-RedirectedOutputTask $stderrTask)
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            $log = Join-Path $script:LogRoot ("codex-app-server-$VersionLabel-stderr.log" -replace '[^A-Za-z0-9._\\/-]', '_')
+            [IO.File]::WriteAllText($log, $stderr)
+        }
+        $process.Dispose()
+    }
+}
+
+function Assert-CodexHookMetadata(
+    [object]$Hook,
+    [object]$ExpectedSpec,
+    [string]$ExpectedCommand,
+    [string]$ConfigPath,
+    [string]$VersionLabel,
+    [Collections.Generic.HashSet[string]]$SeenKeys
+) {
+    $eventName = [string]$Hook.eventName
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$Hook.sourcePath),
+        $ConfigPath,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Codex $VersionLabel hook source does not match the effective config path"
+    }
+    $enabledProperty = $Hook.PSObject.Properties['enabled']
+    $managedProperty = $Hook.PSObject.Properties['isManaged']
+    if ([string]$Hook.handlerType -cne 'command' -or
+        $null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or -not $enabledProperty.Value -or
+        $null -eq $managedProperty -or $managedProperty.Value -isnot [bool] -or $managedProperty.Value) {
+        throw "Codex $VersionLabel hook $eventName is not an enabled unmanaged command handler"
+    }
+    if ([string]$Hook.source -cne 'user' -or [string]$Hook.command -cne $ExpectedCommand) {
+        throw "Codex $VersionLabel hook $eventName is not the effective user command handler"
+    }
+    $matcherProperty = $Hook.PSObject.Properties['matcher']
+    $actualMatcher = if ($null -eq $matcherProperty) { $null } else { $matcherProperty.Value }
+    if (($null -eq $ExpectedSpec.Matcher -and $null -ne $actualMatcher) -or
+        ($null -ne $ExpectedSpec.Matcher -and [string]$actualMatcher -cne [string]$ExpectedSpec.Matcher)) {
+        throw "Codex $VersionLabel hook $eventName matcher=$actualMatcher, want $($ExpectedSpec.Matcher)"
+    }
+    $timeoutProperty = $Hook.PSObject.Properties['timeoutSec']
+    $actualTimeout = if ($null -eq $timeoutProperty) { $null } else { $timeoutProperty.Value }
+    $integerTimeout = $actualTimeout -is [int] -or $actualTimeout -is [long]
+    if (-not $integerTimeout -or [long]$actualTimeout -ne [long]$ExpectedSpec.TimeoutSec) {
+        throw "Codex $VersionLabel hook $eventName timeoutSec=$actualTimeout, want $($ExpectedSpec.TimeoutSec)"
+    }
+    $statusProperty = $Hook.PSObject.Properties['statusMessage']
+    if ($null -ne $statusProperty -and $null -ne $statusProperty.Value) {
+        throw "Codex $VersionLabel hook $eventName has unexpected statusMessage"
+    }
+    $expectedKeyPrefix = $ConfigPath + ':'
+    if (-not ([string]$Hook.key).StartsWith($expectedKeyPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $SeenKeys.Add([string]$Hook.key)) {
+        throw "Codex $VersionLabel hook $eventName has an invalid or duplicate positional trust key"
+    }
+    if ([string]$Hook.trustStatus -cne 'trusted') {
+        throw "Codex $VersionLabel hook $eventName trustStatus=$($Hook.trustStatus), want trusted"
+    }
+    if ([string]$Hook.currentHash -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Codex $VersionLabel hook $eventName has an invalid currentHash"
+    }
+}
+
+function Assert-CodexHooksListTrusted(
+    [string]$CodexJavaScript,
+    [string]$VersionLabel
+) {
+    $version = Get-CodexVersionNumber $VersionLabel
+    if ($version -lt [Version]'0.129.0') {
+        Write-Result "codex-hooks-list:$VersionLabel" pass 'legacy six-event client has no hooks/list trust protocol; validated by no-bypass execution only'
+        return
+    }
+    $codexHome = Resolve-EffectiveConnectorHome 'codex'
+    $configPath = [IO.Path]::GetFullPath((Join-Path $codexHome 'config.toml'))
+    $expectedCommand = (Get-CodexWindowsHookCommand ([IO.File]::ReadAllText($configPath))).Command
+    $workingDirectory = [IO.Path]::GetFullPath($WorkspaceRoot)
+    $response = Invoke-CodexHooksList $CodexJavaScript $codexHome $workingDirectory $VersionLabel
+    $entries = @($response.result.data)
+    if ($entries.Count -ne 1) {
+        throw "Codex $VersionLabel hooks/list returned $($entries.Count) working-directory entries, want 1"
+    }
+    $entry = $entries[0]
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$entry.cwd),
+        $workingDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Codex $VersionLabel hooks/list returned evidence for the wrong working directory"
+    }
+    if (@($entry.errors).Count -ne 0 -or @($entry.warnings).Count -ne 0) {
+        throw "Codex $VersionLabel hooks/list reported errors or warnings"
+    }
+    $hooks = @($entry.hooks)
+    $expectedSpecs = @(Get-CodexExpectedHookSpecs $version)
+    $expectedEvents = @($expectedSpecs.Event | Sort-Object)
+    $actualEvents = @($hooks | ForEach-Object { [string]$_.eventName } | Sort-Object)
+    if (($actualEvents -join "`0") -cne ($expectedEvents -join "`0")) {
+        throw "Codex $VersionLabel hook events = $($actualEvents -join ','), want $($expectedEvents -join ',')"
+    }
+    $expectedByEvent = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    foreach ($spec in $expectedSpecs) { $expectedByEvent.Add([string]$spec.Event, $spec) }
+    $seenKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($hook in $hooks) {
+        $eventName = [string]$hook.eventName
+        $expectedSpec = $null
+        if (-not $expectedByEvent.TryGetValue($eventName, [ref]$expectedSpec)) {
+            throw "Codex $VersionLabel returned unexpected hook metadata for $eventName"
+        }
+        Assert-CodexHookMetadata $hook $expectedSpec $expectedCommand $configPath $VersionLabel $seenKeys
+    }
+    Write-Result "codex-hooks-list:$VersionLabel" pass "$($hooks.Count) enabled handlers trusted without manual approval"
+}
+
+function Assert-CodexPinnedTrustMatrix {
+    if ($Connector -ne 'codex') { return }
+    foreach ($version in @('0.129.0', '0.133.0', '0.144.3')) {
+        $root = Join-Path $script:ToolRoot "codex-trust-$version"
+        Protect-TestDirectory $root
+        Invoke-Tool 'npm.cmd' @(
+            'install', '--no-audit', '--no-fund', '--prefix', $root,
+            "@openai/codex@$version"
+        ) -Timeout 300 | Out-Null
+        $codexJavaScript = Join-Path $root 'node_modules\@openai\codex\bin\codex.js'
+        Assert-CodexHooksListTrusted $codexJavaScript $version
+    }
 }
 
 function Invoke-Agent([string]$Label, [string]$Prompt, [int[]]$AllowedExitCodes = @(0)) {
@@ -750,7 +1334,7 @@ function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
     Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     Assert-TimeoutHandling
-    Assert-NativeEnterpriseHooksRejected
+    Assert-NativeEnterpriseHooksRequireElevation
     Initialize-DefenseClawEnv
     Invoke-Tool 'defenseclaw' @(
         'init', '--skip-install', '--non-interactive', '--yes', '--connector', $Connector,
@@ -785,8 +1369,23 @@ function Invoke-ContractRun {
 function Invoke-LiveRun {
     Install-Agent
     Initialize-DefenseClawEnv
-    Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    if (-not $ReleaseCertification) {
+        Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    }
     Invoke-Setup action
+    Assert-DoctorWindowsHookRegistration
+    if ($Connector -eq 'codex') {
+        # Real official package probes belong to the manual release/live-client
+        # certification layer. The mandatory deterministic contract stays
+        # registry-independent and validates the same config/hash machinery
+        # through local tests.
+        Assert-CodexPinnedTrustMatrix
+        $codexJavaScript = Join-Path $script:ToolRoot 'node_modules\@openai\codex\bin\codex.js'
+        Assert-CodexHooksListTrusted $codexJavaScript $script:AgentVersion
+        if ($ReleaseCertification) {
+            Write-Result codex:auto-trust pass 'hooks/list verified every setup-created handler enabled and trusted without manual approval'
+        }
+    }
     $start = @(Get-EventLines $script:GatewayJsonl).Count
     Invoke-Agent lifecycle 'Reply with only the word ready. Do not use tools.' | Out-Null
     Start-Sleep -Seconds 1
@@ -817,30 +1416,120 @@ function Invoke-LiveRun {
     Write-Result teardown pass
 }
 
+function Get-NormalizedExecutablePath([AllowNull()][string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    try { return [IO.Path]::GetFullPath($Path) }
+    catch { return '' }
+}
+
+function Get-NativeProcessStartIdentity([Diagnostics.Process]$Process) {
+    try {
+        $unixTicks = [long]($Process.StartTime.ToUniversalTime().Ticks - [DateTime]::UnixEpoch.Ticks)
+        return ([long]($unixTicks * 100)).ToString([Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return ''
+    }
+}
+
 function Stop-IsolatedProcessTree {
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [string[]]$ProductExecutablePaths = @(),
+        [string]$ProductDataRoot = $env:DEFENSECLAW_HOME
+    )
 
     $root = [IO.Path]::GetFullPath($StateRoot)
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $descendantIds = @{}
-    $frontier = @([int]$PID)
-    while ($frontier.Count -gt 0) {
-        $children = @($processes | Where-Object {
-            [int]$_.ProcessId -ne $PID -and
-            [int]$_.ParentProcessId -in $frontier -and
-            -not $descendantIds.ContainsKey([int]$_.ProcessId)
-        })
-        foreach ($child in $children) { $descendantIds[[int]$child.ProcessId] = $true }
-        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+    $ancestorIds = [Collections.Generic.HashSet[int]]::new()
+    $ancestorId = [int]$PID
+    while ($ancestorId -gt 0 -and $ancestorIds.Add($ancestorId)) {
+        $ancestor = @($processes | Where-Object {
+            [int]$_.ProcessId -eq $ancestorId
+        } | Select-Object -First 1)
+        if ($ancestor.Count -ne 1) { break }
+        $ancestorId = [int]$ancestor[0].ParentProcessId
     }
+
+    $knownProductPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (@($ProductExecutablePaths).Count -eq 0) {
+        $gateway = @(Get-Command 'defenseclaw-gateway' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1)
+        if ($gateway.Count -eq 1) { $ProductExecutablePaths = @([string]$gateway[0].Source) }
+    }
+    foreach ($path in @($ProductExecutablePaths)) {
+        $normalized = Get-NormalizedExecutablePath $path
+        if (-not [string]::IsNullOrWhiteSpace($normalized)) { [void]$knownProductPaths.Add($normalized) }
+    }
+
+    # Gateway and watchdog children are detached and carry their managed home
+    # in the environment/working directory, not argv. If graceful stop fails,
+    # accept only current strong PID records whose recorded and live executable
+    # both equal the exact gateway path selected by this harness.
+    $managedProductProcesses = @{}
+    if ($knownProductPaths.Count -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($ProductDataRoot)) {
+        foreach ($name in @('gateway.pid', 'watchdog.pid')) {
+            $pidPath = Join-Path $ProductDataRoot $name
+            if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) { continue }
+            $native = $null
+            try {
+                $record = [IO.File]::ReadAllText($pidPath) | ConvertFrom-Json -ErrorAction Stop
+                $processId = [int]$record.pid
+                $recordedPath = Get-NormalizedExecutablePath ([string]$record.executable)
+                $recordedIdentity = [string]$record.start_identity
+                if ($processId -le 0 -or
+                    -not $knownProductPaths.Contains($recordedPath) -or
+                    [string]::IsNullOrWhiteSpace($recordedIdentity) -or
+                    $ancestorIds.Contains($processId)) {
+                    continue
+                }
+                $native = [Diagnostics.Process]::GetProcessById($processId)
+                $livePath = Get-NormalizedExecutablePath ([string]$native.MainModule.FileName)
+                $liveIdentity = Get-NativeProcessStartIdentity $native
+                if (-not [string]::Equals(
+                        $livePath, $recordedPath, [StringComparison]::OrdinalIgnoreCase
+                    ) -or
+                    $liveIdentity -cne $recordedIdentity) {
+                    $native.Dispose()
+                    $native = $null
+                    continue
+                }
+                if ($managedProductProcesses.ContainsKey($processId)) {
+                    $native.Dispose()
+                    $native = $null
+                    continue
+                }
+                $managedProductProcesses[$processId] = $native
+                $native = $null
+            } catch {
+                if ($null -ne $native) { $native.Dispose() }
+            }
+        }
+    }
+
     foreach ($process in $processes) {
         $processId = [int]$process.ProcessId
         $matchesRoot = $process.CommandLine -and
             $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        if ($processId -ne $PID -and ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
+        if (-not $ancestorIds.Contains($processId) -and
+            -not $managedProductProcesses.ContainsKey($processId) -and
+            $matchesRoot -and
             $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($entry in @($managedProductProcesses.GetEnumerator())) {
+        try {
+            if ($PSCmdlet.ShouldProcess("PID $($entry.Key)", 'Stop managed product process')) {
+                $entry.Value.Kill($true)
+                if (-not $entry.Value.WaitForExit(5000)) {
+                    Write-Warning "managed product PID $($entry.Key) did not exit within 5 seconds"
+                }
+            }
+        } catch {
+            Write-Warning (Protect-LogText "could not stop managed product PID $($entry.Key): $($_.Exception.Message)")
+        } finally {
+            $entry.Value.Dispose()
         }
     }
 }
@@ -865,9 +1554,24 @@ if (-not $NoRun) {
     $StateRoot = [IO.Path]::GetFullPath($StateRoot)
     if ($StateRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw 'StateRoot must not be the real user profile' }
     $useHomeDataRoot = -not [string]::IsNullOrWhiteSpace($HomeRoot)
-    $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
-    if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'HomeRoot must be contained by StateRoot'
+    if ($ReleaseCertification) {
+        if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+            throw 'release certification may mutate only a disposable GitHub-hosted Windows runner user'
+        }
+        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'release certification requires RUNNER_TEMP'
+        }
+        $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+        if (-not $StateRoot.StartsWith($runnerTemp + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'release certification StateRoot must be below RUNNER_TEMP'
+        }
+        $HomeRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        $useHomeDataRoot = $true
+    } else {
+        $HomeRoot = if ($HomeRoot) { [IO.Path]::GetFullPath($HomeRoot) } else { Join-Path $StateRoot 'home' }
+        if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'HomeRoot must be contained by StateRoot'
+        }
     }
     Protect-TestDirectory $StateRoot
     $script:ResultsPath = if ($ResultsPath) { [IO.Path]::GetFullPath($ResultsPath) } else { Join-Path $StateRoot 'results.jsonl' }
@@ -877,8 +1581,24 @@ if (-not $NoRun) {
     $script:ToolRoot = Join-Path $StateRoot 'tools'
     $script:CommandIndex = 0; $script:AgentVersion = 'unversioned'
     $env:USERPROFILE = $HomeRoot; $env:HOME = $env:USERPROFILE
-    $env:DEFENSECLAW_HOME = if ($useHomeDataRoot) { Join-Path $HomeRoot '.defenseclaw' } else { Join-Path $StateRoot 'defenseclaw' }
-    Protect-TestDirectory $env:USERPROFILE
+    $env:DEFENSECLAW_HOME = if (-not [string]::IsNullOrWhiteSpace($NativeDataRoot)) {
+        if ($Layer -ne 'contract' -or -not $AllowNativeDataRoot) {
+            throw 'NativeDataRoot is restricted to an explicitly authorized packaged contract run'
+        }
+        $nativeDataRoot = [IO.Path]::GetFullPath($NativeDataRoot).TrimEnd('\')
+        $expectedNativeDataRoot = [IO.Path]::GetFullPath((Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        ) '.defenseclaw')).TrimEnd('\')
+        if (-not [string]::Equals($nativeDataRoot, $expectedNativeDataRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'NativeDataRoot must be the current Windows user Known-Folder data root'
+        }
+        $nativeDataRoot
+    } elseif ($useHomeDataRoot) {
+        Join-Path $HomeRoot '.defenseclaw'
+    } else {
+        Join-Path $StateRoot 'defenseclaw'
+    }
+    if (-not $ReleaseCertification) { Protect-TestDirectory $env:USERPROFILE }
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }
