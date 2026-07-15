@@ -140,7 +140,12 @@ def test_atomic_writers_close_and_remove_staging_file_on_failure(
     elif failure_stage == "serialize":
         monkeypatch.setattr(yaml, "safe_dump", fail)
     else:
-        monkeypatch.setattr(os, "replace", fail)
+        if module is file_permissions:
+            monkeypatch.setattr(file_permissions, "replace_file_durable", fail)
+        elif module is setup_writer:
+            monkeypatch.setattr(setup_writer, "replace_file_durable", fail)
+        else:
+            monkeypatch.setattr(os, "replace", fail)
 
     target = tmp_path / f"{_name}.yaml"
     target.write_text("ORIGINAL\n", encoding="utf-8")
@@ -173,6 +178,67 @@ def test_migration_writer_closes_and_removes_staging_file_when_permissions_fail(
     target = tmp_path / "migration-secret.yaml"
     assert migrations._atomic_write_text(os.fspath(target), "secret\n", mode=0o600) is False
     _assert_staging_cleanup(record)
+
+
+def test_durable_replace_commits_complete_sibling_file(tmp_path):
+    target = tmp_path / "state.json"
+    staging = tmp_path / ".state.json.new"
+    target.write_bytes(b"old")
+    staging.write_bytes(b"new-complete-payload")
+
+    file_permissions.replace_file_durable(staging, target)
+
+    assert target.read_bytes() == b"new-complete-payload"
+    assert not staging.exists()
+
+
+def test_durable_delete_removes_live_name_and_tombstone(tmp_path):
+    target = tmp_path / "legacy-runtime.json"
+    target.write_bytes(b"legacy")
+
+    file_permissions.delete_file_durable(target)
+
+    assert not target.exists()
+    assert list(tmp_path.glob(".legacy-runtime.json.deleted.*")) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="write-through delete tombstones are Windows-specific")
+def test_windows_durable_delete_reports_retained_tombstone(monkeypatch, tmp_path):
+    target = tmp_path / "legacy-runtime.json"
+    target.write_bytes(b"legacy")
+    real_unlink = os.unlink
+
+    def reject_tombstone(path):
+        if ".deleted." in os.path.basename(os.fspath(path)):
+            raise PermissionError("injected tombstone retention")
+        return real_unlink(path)
+
+    monkeypatch.setattr(file_permissions.os, "unlink", reject_tombstone)
+    with pytest.raises(OSError, match="removed live path but could not delete durable tombstone") as caught:
+        file_permissions.delete_file_durable(target)
+
+    retained = list(tmp_path.glob(".legacy-runtime.json.deleted.*"))
+    assert not target.exists()
+    assert len(retained) == 1
+    assert os.fspath(retained[0]) in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native long-path contract is Windows-specific")
+def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
+    parent = tmp_path
+    for index in range(18):
+        parent /= f"durable-segment-{index:02d}"
+    parent.mkdir(parents=True)
+    target = parent / "state.json"
+    staging = parent / ".state.json.new"
+    assert len(os.fspath(target)) > 260
+    target.write_bytes(b"old")
+    staging.write_bytes(b"new")
+
+    file_permissions.replace_file_durable(staging, target)
+
+    assert target.read_bytes() == b"new"
+    assert not staging.exists()
 
 
 def test_dotenv_writer_closes_descriptor_when_permissions_fail(monkeypatch, tmp_path):

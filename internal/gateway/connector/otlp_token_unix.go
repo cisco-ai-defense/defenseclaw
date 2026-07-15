@@ -24,6 +24,12 @@ import (
 	"syscall"
 )
 
+// otlpValidateDirectory is a no-op on Unix, where the existing token-file
+// mode and ownership checks remain the compatibility contract.
+func otlpValidateDirectory(_ string) error {
+	return nil
+}
+
 // otlpOpenNoFollow returns O_NOFOLLOW flag value for symlink-safe file opens.
 func otlpOpenNoFollow() int {
 	return syscall.O_NOFOLLOW
@@ -42,8 +48,8 @@ func otlpValidatePerm(path string, info os.FileInfo) error {
 // current user. Returns nil if the check passes or is not applicable.
 func otlpValidateOwner(path string, info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		if int(stat.Uid) != os.Getuid() {
-			return fmt.Errorf("OTLP path-token %s uid %d does not match current uid %d", path, stat.Uid, os.Getuid())
+		if int(stat.Uid) != os.Geteuid() && !hookAPITrustedOwner(stat.Uid) {
+			return fmt.Errorf("OTLP path-token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid", path, stat.Uid, os.Geteuid(), os.Getuid())
 		}
 	}
 	return nil

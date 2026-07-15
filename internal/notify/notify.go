@@ -27,9 +27,10 @@
 //     would-block / approval-pending UX can render the source and
 //     severity inline without packing them into the body string.
 //
-// Platform-native delivery happens in sendPlatform (osascript on
-// macOS, notify-send on Linux); on platforms without sendPlatform the
-// package falls back to writing a structured line on fallbackWriter.
+// Platform-native delivery happens in sendPlatform (osascript on macOS,
+// notify-send on Linux, and an in-process Shell_NotifyIconW broker on
+// Windows); on platforms without sendPlatform the package falls back to
+// writing a structured line on fallbackWriter.
 package notify
 
 import (
@@ -66,10 +67,7 @@ func DesktopCapabilityForGOOS(goos string) DesktopNotificationCapability {
 	case "linux":
 		return DesktopNotificationCapability{GOOS: goos, Supported: true, Provider: "notify-send"}
 	case "windows":
-		return DesktopNotificationCapability{
-			GOOS:              goos,
-			UnsupportedReason: "native Windows desktop/toast notifications are not supported in this release",
-		}
+		return DesktopNotificationCapability{GOOS: goos, Supported: true, Provider: "Shell_NotifyIconW"}
 	default:
 		return DesktopNotificationCapability{
 			GOOS:              goos,

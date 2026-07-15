@@ -77,7 +77,7 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 		raw = "allow"
 	}
 
-	if raw == "block" && !claudeCodeCanEnforceProfile(in.Event) {
+	if raw == "block" && !claudeCodeCanEnforceProfile(in) {
 		return HookVerdictOutput{Action: "allow", WouldBlock: true}
 	}
 
@@ -205,13 +205,9 @@ func claudeCodeAdditionalContextForProfile(rawAction, severity, reason string, w
 // gateway/claude_code_hook.go — the set of events for which a
 // "block" verdict actually reaches an enforceable surface. Events
 // outside this set produce wouldBlock=true / allow.
-func claudeCodeCanEnforceProfile(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
-		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
-		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
-		return true
-	default:
+func claudeCodeCanEnforceProfile(in HookVerdictInput) bool {
+	if in.Event == "ConfigChange" && strings.EqualFold(strings.TrimSpace(hookFirstString(in.Payload, "source")), "policy_settings") {
 		return false
 	}
+	return in.Caps.CanBlock && eventInProfile(in.Event, in.Caps.BlockEvents)
 }

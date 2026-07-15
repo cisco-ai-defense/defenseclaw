@@ -16,6 +16,9 @@ import (
 // enterprise guardian should watch for tamper/repair events. It performs the
 // same trust checks as Install, but it does not create or modify files.
 func WatchDirs(opts InstallOptions) ([]string, error) {
+	if dirs, handled, err := platformWatchDirs(opts); handled {
+		return dirs, err
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return nil, err

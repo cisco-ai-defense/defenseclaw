@@ -460,6 +460,20 @@ func (c *Config) ClawHomeDir() string {
 	return c.ConnectorHomeDir(c.activeConnector())
 }
 
+func connectorEnvHome(variable, defaultDir string) string {
+	if configured := strings.TrimSpace(os.Getenv(variable)); configured != "" {
+		configured = expandPath(configured)
+		if !filepath.IsAbs(configured) {
+			if absolute, err := filepath.Abs(configured); err == nil {
+				configured = absolute
+			}
+		}
+		return filepath.Clean(configured)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, defaultDir)
+}
+
 // ConnectorWorkspaceDir returns the explicitly pinned project/workspace root
 // for connectors whose hook or component surfaces are repository-scoped. Empty
 // means "global/user scope"; the daemon must not infer a workspace from its
@@ -489,9 +503,9 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
-		return filepath.Join(home, ".claude")
+		return connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
 	case "codex":
-		return filepath.Join(home, ".codex")
+		return connectorEnvHome("CODEX_HOME", ".codex")
 	case "zeptoclaw":
 		return filepath.Join(home, ".zeptoclaw")
 	case "hermes":
@@ -613,12 +627,12 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".claude", "skills"),
+			filepath.Join(c.ConnectorHomeDir("claudecode"), "skills"),
 			workspaceJoin(cwd, ".claude", "skills"),
 		})
 	case "codex":
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".codex", "skills"),
+			filepath.Join(c.ConnectorHomeDir("codex"), "skills"),
 			workspaceJoin(cwd, ".codex", "skills"),
 		})
 	case "zeptoclaw":
@@ -684,11 +698,11 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		return []string{
-			filepath.Join(home, ".claude", "plugins"),
+			filepath.Join(c.ConnectorHomeDir("claudecode"), "plugins"),
 		}
 	case "codex":
 		return []string{
-			filepath.Join(home, ".codex", "plugins"),
+			filepath.Join(c.ConnectorHomeDir("codex"), "plugins"),
 		}
 	case "zeptoclaw":
 		return []string{
@@ -721,15 +735,11 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 // --- Connector-specific MCP readers ---
 
 func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
 
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}
@@ -753,15 +763,12 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 	// read both, with the project-local file taking precedence so
 	// per-project overrides win — matching how Codex itself layers
 	// them at runtime.
-	home, _ := os.UserHomeDir()
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	if home != "" {
-		tomlPath := filepath.Join(home, ".codex", "config.toml")
-		if e, err := readMCPFromCodexConfigTOML(tomlPath); err == nil {
-			entries = append(entries, e...)
-		}
+	tomlPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	if e, err := readMCPFromCodexConfigTOML(tomlPath); err == nil {
+		entries = append(entries, e...)
 	}
 	if cwd != "" {
 		mcpJsonPath := filepath.Join(cwd, ".mcp.json")

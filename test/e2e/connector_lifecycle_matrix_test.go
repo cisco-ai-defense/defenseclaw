@@ -78,6 +78,7 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 				seedClaudeCodeSettingsParentDir(t)
 			case "codex":
 				seedCodexConfigParentDir(t)
+				seedCodexPolicyFixture(t, dataDir, &opts)
 			}
 
 			// Stage 1: pre-Setup, fresh DataDir + isolated home →

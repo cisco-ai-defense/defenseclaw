@@ -176,8 +176,8 @@ with a warning. Action mode fails closed unless
 | --------- | -------------------------- | ---------------------------- | ---------------------- | ------------ |
 | OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
-| Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Codex | versioned hook contract | `0.124.0`-`0.128.x` (6 events), `0.129.x`-`0.132.x` (8 events), `>=0.133.0` (10 events/full) | `codex-hooks-v1` / `v2` / `v3`, script `v6` | prompt, tool_call, tool_result |
+| Claude Code | hook contract | `>=2.1.152` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v8` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
@@ -188,14 +188,18 @@ with a warning. Action mode fails closed unless
 | OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
 | OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result, event_content |
 
-No hook contract currently has a `max_exclusive` ceiling. We only add an upper
-bound when an upstream release publishes a breaking hook change; otherwise,
-future connector versions remain reproducible through the lock file and drift
-checks instead of being blocked by a guessed major-version cap.
+Codex's v1 and v2 entries use `max_exclusive` boundaries to model additive
+upstream event surfaces precisely; the v3 full contract remains open-ended.
+Other connectors add an upper bound only when an upstream release publishes a
+breaking hook change. Future versions remain reproducible through the lock file
+and drift checks instead of being blocked by a guessed major-version cap.
 
-Version floors are evidence-backed from upstream release notes or current
-vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0`
-enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes
+Version floors are evidence-backed from upstream release notes, tagged source,
+or current vendor docs. Codex `0.124.0` has six stable events; `0.129.0` adds
+`PreCompact` and `PostCompact` plus hook trust introspection; `0.133.0` adds
+`SubagentStart` and `SubagentStop` and is the first release with all ten events
+in DefenseClaw's full contract. Gemini CLI `0.26.0` enabled hooks by default,
+Cursor `1.7.0` introduced beta hooks, Hermes
 `0.11.0` added shell hooks for `pre_tool_call`, Windsurf `1.12.41` added user
 prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first
 release containing every event in the current DefenseClaw Copilot contract.
@@ -205,7 +209,7 @@ until upstream publishes a hook-version floor. DefenseClaw installs OpenHands
 globally through `~/.openhands/hooks.json` by default and uses repo-local
 `.openhands/hooks.json` only when a workspace is pinned.
 Claude Code is pinned to the current documented hook surface captured at
-`2.1.144`; older Claude Code versions exposed smaller event sets.
+`2.1.152`, which introduced `MessageDisplay`; older Claude Code versions exposed smaller event sets.
 
 ## Hook Capability Matrix
 
@@ -408,9 +412,16 @@ on events the host actually emits and honors.
 
 - Source: [`internal/gateway/connector/codex.go`](../internal/gateway/connector/codex.go)
   near `buildCodexHooksTable` and `HookCapabilities`.
-- Current contract: Codex `>=0.124.0` honors the stable hook table DefenseClaw
-  writes to `~/.codex/config.toml`. DefenseClaw wires six lifecycle events;
-  five are block-capable and `SessionStart` is context/telemetry only.
+- Current contracts: Codex `0.124.0` through `0.128.x` honor six events, `0.129.x` through
+  `0.132.x` honors eight, and `>=0.133.0` honors the complete ten-event table
+  DefenseClaw writes to `~/.codex/config.toml`. The five enforcement events are
+  block-capable; the additional lifecycle events are context/telemetry only.
+- Trust: `0.124.0` through `0.128.x` predate `hooks/list` and ignore `hooks.state`, so they are
+  tested only as legacy no-bypass execution. For `>=0.129.0`, native release
+  certification requires every recognized DefenseClaw handler to be enabled
+  and report `trustStatus=trusted` without manual approval. Windows writes the
+  generic and `command_windows` commands byte-for-byte identically so both the
+  0.129 and current hash semantics recognize the same consent record.
 - Data path: Codex talks directly to its configured upstream model provider.
   DefenseClaw does **not** rewrite Codex through an LLM proxy. Inspection comes
   from lifecycle hooks, native OTel, and the agent-turn-complete notify bridge.
