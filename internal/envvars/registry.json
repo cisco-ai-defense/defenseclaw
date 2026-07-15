@@ -2176,6 +2176,19 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_SETUP_MAINTENANCE_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup maintenance-gateway helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the bounded native Setup child-timeout helper.",
