@@ -107,7 +107,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
                             "hook_script_version": version,
                             "locations": locations,
                         }
-                    }
+                    },
                 }
             ),
             encoding="utf-8",
@@ -367,6 +367,38 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("trust state does not match", check.detail)
 
+    def test_codex_obsolete_gateway_precedes_current_contract_trust_mismatch(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector codex'
+        config = self._config("codex", command)
+        document = tomllib.loads(config.read_text(encoding="utf-8"))
+        source = _codex_hook_state_key_source(str(config))
+        state_lines = ["", "[hooks.state]"]
+        for event, (event_key, _matcher, _timeout) in _CODEX_HOOK_SPECS.items():
+            group = document["hooks"][event][0]
+            hook = group["hooks"][0]
+            key = f"{source}:{event_key}:0:0"
+            trusted_hash = _codex_command_hook_hash(event_key, group.get("matcher"), hook)
+            state_lines.append(f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(trusted_hash)} }}")
+        config.write_text(
+            config.read_text(encoding="utf-8") + "\n".join(state_lines) + "\n",
+            encoding="utf-8",
+        )
+        self._lock("codex", config, contract="codex-hooks-v3")
+
+        obsolete = self._runtime("defenseclaw-gateway.exe")
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                str(runtime).replace("\\", "\\\\"), str(obsolete).replace("\\", "\\\\")
+            ),
+            encoding="utf-8",
+        )
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("obsolete gateway launcher", check.detail)
+        self.assertIn("defenseclaw setup codex --yes --restart", check.detail)
+
     def test_codex_post_install_policy_change_and_inspection_failure_are_blocking(self) -> None:
         runtime = self._runtime()
         config = self._config("codex", f'"{runtime}" hook --connector codex')
@@ -447,11 +479,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertTrue(managed_only)
         self.assertIn(executable, source)
         messages = [json.loads(line) for line in stdin.recorded.splitlines()]
-        self.assertEqual([message.get("method") for message in messages], [
-            "initialize",
-            "initialized",
-            "configRequirements/read",
-        ])
+        self.assertEqual(
+            [message.get("method") for message in messages],
+            [
+                "initialize",
+                "initialized",
+                "configRequirements/read",
+            ],
+        )
         popen.assert_called_once()
         argv = popen.call_args.args[0]
         self.assertEqual(argv, [executable, "app-server", "--stdio"])
@@ -551,10 +586,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         process = SimpleNamespace(
             pid=1234,
             stdin=io.BytesIO(),
-            stdout=io.BytesIO(
-                b'{"id":1,"result":{}}\n'
-                b'{"id":2,"error":{"code":-32000,"message":"primary failure"}}\n'
-            ),
+            stdout=io.BytesIO(b'{"id":1,"result":{}}\n{"id":2,"error":{"code":-32000,"message":"primary failure"}}\n'),
             stderr=io.BytesIO(),
             poll=MagicMock(return_value=0),
             wait=MagicMock(return_value=0),

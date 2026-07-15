@@ -489,13 +489,9 @@ def _codex_policy_executable(data_dir: str) -> str:
     try:
         actual_digest = stable_executable_sha256(executable)
     except OSError as exc:
-        raise _InspectionError(
-            "policy-blocked", f"cannot revalidate selected Codex executable: {exc}"
-        ) from exc
+        raise _InspectionError("policy-blocked", f"cannot revalidate selected Codex executable: {exc}") from exc
     if actual_digest != expected_digest:
-        raise _InspectionError(
-            "policy-blocked", "selected Codex executable no longer matches protected Setup evidence"
-        )
+        raise _InspectionError("policy-blocked", "selected Codex executable no longer matches protected Setup evidence")
     return executable
 
 
@@ -508,9 +504,7 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
     creationflags = 0
     windows_job = None
     if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
-            subprocess, "CREATE_SUSPENDED", 0x00000004
-        )
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
     try:
         process = subprocess.Popen(
             [executable, "app-server", "--stdio"],
@@ -574,11 +568,7 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
             except (UnicodeError, ValueError) as exc:
                 emit_response("error", f"cannot parse Codex policy response: {exc}")
                 return
-            if (
-                isinstance(message, dict)
-                and type(message.get("id")) is int
-                and message["id"] in {1, 2}
-            ):
+            if isinstance(message, dict) and type(message.get("id")) is int and message["id"] in {1, 2}:
                 emit_response("message", message)
 
     def read_stderr() -> None:
@@ -649,9 +639,7 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
             {
                 "method": "initialize",
                 "id": 1,
-                "params": {
-                    "clientInfo": {"name": "defenseclaw", "title": "DefenseClaw", "version": "1"}
-                },
+                "params": {"clientInfo": {"name": "defenseclaw", "title": "DefenseClaw", "version": "1"}},
             }
         )
         wait_for(1)
@@ -1485,6 +1473,9 @@ def validate_windows_hook_registration(
         target = resolved
         basename = ntpath.basename(resolved).casefold()
         evidence, expected_runtime_version, contract_id = _contract_evidence(data_dir, connector, config_path)
+        if basename in {"defenseclaw-gateway.exe", "defenseclaw-gateway.cmd"}:
+            _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
+            raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
         if connector == "codex":
             _validate_codex_hook_contract(document, contract_id, config_path)
         if kind == "powershell":
@@ -1502,9 +1493,6 @@ def validate_windows_hook_registration(
                     f"PowerShell hook target is version v{marker.group(1)}; expected {expected_runtime_version}",
                 )
             runtime = "PowerShell"
-        elif basename in {"defenseclaw-gateway.exe", "defenseclaw-gateway.cmd"}:
-            _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
-            raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
         elif basename == "defenseclaw-hook.exe":
             header = _stable_regular_file(resolved, install_root, read_limit=2)
             if header != b"MZ":
