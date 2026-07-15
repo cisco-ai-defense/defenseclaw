@@ -91,29 +91,90 @@ function Protect-TestDirectory([string]$Path) {
     [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
 }
 
-function Get-ProcessTreeSnapshot([int[]]$RootProcessIds) {
-    $processes = @(Get-CimInstance Win32_Process -OperationTimeoutSec 1 -ErrorAction Stop)
-    $descendants = @()
-    $frontier = @($RootProcessIds | Select-Object -Unique)
-    while ($frontier.Count -gt 0) {
-        $children = @($processes | Where-Object {
-            [int]$_.ParentProcessId -in $frontier -and [int]$_.ProcessId -notin $RootProcessIds
-        })
-        $descendants += $children
-        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+function Get-ProcessTreeSnapshot {
+    param(
+        [Parameter(Mandatory)][object[]]$RootProcesses,
+        [AllowNull()][object[]]$ProcessSnapshot = $null
+    )
+    $processes = if ($null -eq $ProcessSnapshot) {
+        @(Get-CimInstance Win32_Process -OperationTimeoutSec 1 -ErrorAction Stop)
+    } else {
+        @($ProcessSnapshot)
     }
-    return @($descendants | ForEach-Object {
-        [pscustomobject]@{
-            ProcessId = [int]$_.ProcessId
-            ParentProcessId = [int]$_.ParentProcessId
-            CreationDate = ([DateTime]$_.CreationDate).ToUniversalTime().ToString('O')
-            ExecutablePath = [string]$_.ExecutablePath
+    $descendants = @()
+    $seen = @{}
+    $frontier = @($RootProcesses)
+    foreach ($root in $frontier) {
+        $seen["$($root.ProcessId)|$($root.CreationDate)"] = $true
+    }
+    while ($frontier.Count -gt 0) {
+        $children = @()
+        foreach ($parent in $frontier) {
+            $parentCreated = [DateTime]::Parse(
+                [string]$parent.CreationDate,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            $parentExited = $false
+            $parentExit = [DateTime]::MinValue
+            $exitProperty = $parent.PSObject.Properties['ExitDate']
+            if ($null -ne $exitProperty -and
+                -not [string]::IsNullOrWhiteSpace([string]$exitProperty.Value)) {
+                $parentExit = [DateTime]::Parse(
+                    [string]$exitProperty.Value,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind
+                ).ToUniversalTime()
+                $parentExited = $true
+            } else {
+                $parentMatches = @($processes | Where-Object {
+                    if ([int]$_.ProcessId -ne [int]$parent.ProcessId) { return $false }
+                    $currentCreated = ([DateTime]$_.CreationDate).ToUniversalTime()
+                    return [Math]::Abs(($currentCreated - $parentCreated).TotalMilliseconds) -lt 1
+                }).Count -gt 0
+                if (-not $parentMatches) { continue }
+            }
+            foreach ($candidate in @($processes | Where-Object {
+                [int]$_.ParentProcessId -eq [int]$parent.ProcessId
+            })) {
+                $candidateCreated = ([DateTime]$candidate.CreationDate).ToUniversalTime()
+                if ($candidateCreated -lt $parentCreated) { continue }
+                # Only an exited root may expand without a current exact parent,
+                # and then only across the root's recorded lifetime.
+                if ($parentExited -and $candidateCreated -gt $parentExit) { continue }
+                $child = [pscustomobject]@{
+                    ProcessId = [int]$candidate.ProcessId
+                    ParentProcessId = [int]$candidate.ParentProcessId
+                    CreationDate = $candidateCreated.ToString('O')
+                    ExitDate = ''
+                    ExecutablePath = [string]$candidate.ExecutablePath
+                }
+                $key = "$($child.ProcessId)|$($child.CreationDate)"
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $children += $child
+            }
         }
-    })
+        $descendants += $children
+        $frontier = @($children)
+    }
+    return @($descendants)
 }
 
-function Add-ProcessTreeSnapshot([hashtable]$Tracked, [int]$RootProcessId) {
-    $roots = @($RootProcessId) + @($Tracked.Values | ForEach-Object { [int]$_.ProcessId })
+function Update-RootProcessExitBound([object]$RecordedProcess, [Diagnostics.Process]$Process) {
+    if (-not $Process.HasExited -or
+        -not [string]::IsNullOrWhiteSpace([string]$RecordedProcess.ExitDate)) {
+        return
+    }
+    try {
+        $RecordedProcess.ExitDate = $Process.ExitTime.ToUniversalTime().ToString('O')
+    } catch {
+        Write-Warning (Protect-LogText "could not record process exit bound: $($_.Exception.Message)")
+    }
+}
+
+function Add-ProcessTreeSnapshot([hashtable]$Tracked, [object]$RootProcess) {
+    $roots = @($RootProcess) + @($Tracked.Values)
     try {
         foreach ($process in @(Get-ProcessTreeSnapshot $roots)) {
             $key = "$($process.ProcessId)|$($process.CreationDate)"
@@ -275,6 +336,13 @@ function Invoke-NativeProcess {
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $trackedDescendants = @{}
+        $rootProcessIdentity = [pscustomobject]@{
+            ProcessId = $process.Id
+            ParentProcessId = 0
+            CreationDate = $process.StartTime.ToUniversalTime().ToString('O')
+            ExitDate = ''
+            ExecutablePath = ''
+        }
         $timeoutIdentitySummary = 'none'
         $inputWriteFailed = $false
         $inputWriteFailure = ''
@@ -322,7 +390,8 @@ function Invoke-NativeProcess {
         $outputReadFailed = -not $timedOut -and -not $inputWriteFailed -and
             -not (Test-RedirectedOutputTasksHealthy $stdoutTask $stderrTask)
         if ($timedOut -or $inputWriteFailed) {
-            Add-ProcessTreeSnapshot $trackedDescendants $process.Id
+            Update-RootProcessExitBound $rootProcessIdentity $process
+            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
             $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
             if ($timedOut) {
                 Write-NativeProcessPhase $FilePath $process.Id "timeout-$timeoutPhase" "descendants=$timeoutIdentitySummary"
@@ -333,7 +402,8 @@ function Invoke-NativeProcess {
                 try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
                 $null = $process.WaitForExit(1000)
             }
-            Add-ProcessTreeSnapshot $trackedDescendants $process.Id
+            Update-RootProcessExitBound $rootProcessIdentity $process
+            Add-ProcessTreeSnapshot $trackedDescendants $rootProcessIdentity
             $timeoutIdentitySummary = Get-TrackedProcessIdentitySummary @($trackedDescendants.Values)
             Stop-ExactProcessTree @($trackedDescendants.Values)
             Wait-ProcessTreeExit @($trackedDescendants.Values) 1000

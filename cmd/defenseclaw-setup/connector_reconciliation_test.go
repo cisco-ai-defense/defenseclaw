@@ -145,6 +145,35 @@ func TestReconcileRemovedConnectorsDoesNotLetClientFailureEscape(t *testing.T) {
 	}
 }
 
+func TestReconcilePreservedConnectorsRefreshesEntireExistingRoster(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	transaction := setupTransaction{
+		ID:                      strings.Repeat("a", 32),
+		DataRoot:                filepath.Join(root, "data"),
+		PreviousConnectors:      []string{"codex", "claudecode"},
+		PreviousCodexHome:       filepath.Join(root, "codex"),
+		PreviousClaudeConfigDir: filepath.Join(root, "claude"),
+	}
+	var calls []string
+	recorder := reconcilePreservedConnectors(
+		transaction,
+		filepath.Join(root, "defenseclaw-gateway.exe"),
+		[]string{"PRESERVED=1"},
+		func(_, _, connector, action string, env []string) error {
+			calls = append(calls, connector+":"+action+":"+strings.Join(env, ","))
+			return nil
+		},
+	)
+	want := "codex:reconcile:PRESERVED=1,claudecode:reconcile:PRESERVED=1"
+	if got := strings.Join(calls, ","); got != want {
+		t.Fatalf("preserved connector calls = %q, want %q", got, want)
+	}
+	if len(recorder.attempts) != 2 || len(recorder.failures) != 0 {
+		t.Fatalf("preserved connector reconciliation = %+v", recorder)
+	}
+}
+
 func TestBoundedReconciliationMessageIsSingleLineValidUTF8(t *testing.T) {
 	t.Parallel()
 	message := boundedReconciliationMessage("  locked\r\n" + strings.Repeat("é", maxConnectorReconciliationMessage))

@@ -98,6 +98,22 @@ func reconcileRemovedConnectors(
 	return reconciliation
 }
 
+func reconcilePreservedConnectors(
+	transaction setupTransaction,
+	gatewayPath string,
+	childEnv []string,
+	run connectorLifecycleRunner,
+) connectorReconciliationRecorder {
+	reconciliation := connectorReconciliationRecorder{}
+	for _, connectorName := range transaction.PreviousConnectors {
+		configHome := connectorConfigHome(transaction, connectorName, true)
+		reconciliation.run(transaction.ID, connectorName, configHome, "reconcile", func() error {
+			return run(gatewayPath, transaction.DataRoot, connectorName, "reconcile", childEnv)
+		})
+	}
+	return reconciliation
+}
+
 func boundedReconciliationMessage(message string) string {
 	message = strings.Join(strings.Fields(message), " ")
 	if len(message) > maxConnectorReconciliationMessage {

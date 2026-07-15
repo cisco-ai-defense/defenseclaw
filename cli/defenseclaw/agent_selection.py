@@ -312,9 +312,11 @@ def _codex_wrapper_native_candidates(
         value = match.group(1)
         folded = value.casefold()
         if folded.startswith("%~dp0\\"):
-            target = os.path.join(os.path.dirname(wrapper), value[len("%~dp0\\") :])
+            relative = value[len("%~dp0\\") :].replace("\\", os.sep).replace("/", os.sep)
+            target = os.path.join(os.path.dirname(wrapper), relative)
         elif folded.startswith("%dp0%\\"):
-            target = os.path.join(os.path.dirname(wrapper), value[len("%dp0%\\") :])
+            relative = value[len("%dp0%\\") :].replace("\\", os.sep).replace("/", os.sep)
+            target = os.path.join(os.path.dirname(wrapper), relative)
         elif os.path.isabs(value):
             target = value
         else:

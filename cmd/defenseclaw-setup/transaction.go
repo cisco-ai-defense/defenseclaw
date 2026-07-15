@@ -43,41 +43,42 @@ type userPathSnapshot struct {
 }
 
 type setupTransaction struct {
-	SchemaVersion                int                      `json:"schema_version"`
-	ID                           string                   `json:"id"`
-	Action                       string                   `json:"action"`
-	InstallRoot                  string                   `json:"install_root"`
-	DataRoot                     string                   `json:"data_root"`
-	MaintenancePath              string                   `json:"maintenance_path"`
-	StagingPath                  string                   `json:"staging_path"`
-	BackupPath                   string                   `json:"backup_path"`
-	TrashPath                    string                   `json:"trash_path"`
-	MaintenanceNew               string                   `json:"maintenance_new"`
-	MaintenanceBackup            string                   `json:"maintenance_backup"`
-	HadInstall                   bool                     `json:"had_install"`
-	MaintenanceExisted           bool                     `json:"maintenance_existed"`
-	PreviousMaintenanceSHA256    string                   `json:"previous_maintenance_sha256,omitempty"`
-	PreviousState                *installState            `json:"previous_state,omitempty"`
-	PreviousPath                 userPathSnapshot         `json:"previous_path"`
-	PreviousAutoStart            gatewayAutoStartSnapshot `json:"previous_auto_start"`
-	PreviousServices             serviceState             `json:"previous_services"`
-	PreviousConnectors           []string                 `json:"previous_connectors,omitempty"`
-	TargetConnector              string                   `json:"target_connector"`
-	TargetMode                   string                   `json:"target_mode"`
-	TargetServices               serviceState             `json:"target_services"`
-	FromVersion                  string                   `json:"from_version,omitempty"`
-	TargetVersion                string                   `json:"target_version,omitempty"`
-	PreviousCodexHome            string                   `json:"previous_codex_home,omitempty"`
-	PreviousClaudeConfigDir      string                   `json:"previous_claude_config_dir,omitempty"`
-	CodexHome                    string                   `json:"codex_home,omitempty"`
-	ClaudeConfigDir              string                   `json:"claude_config_dir,omitempty"`
-	MaintenanceSHA256            string                   `json:"maintenance_sha256,omitempty"`
-	DeleteUserData               bool                     `json:"delete_user_data,omitempty"`
-	UninstallPathEntryOwned      bool                     `json:"uninstall_path_entry_owned,omitempty"`
-	UninstallPathSeparatorReused bool                     `json:"uninstall_path_separator_reused,omitempty"`
-	UninstallPathValueCreated    bool                     `json:"uninstall_path_value_created,omitempty"`
-	HandoffFromInstall           string                   `json:"handoff_from_install,omitempty"`
-	HandoffPreviousState         *installState            `json:"handoff_previous_state,omitempty"`
+	SchemaVersion                  int                      `json:"schema_version"`
+	ID                             string                   `json:"id"`
+	Action                         string                   `json:"action"`
+	InstallRoot                    string                   `json:"install_root"`
+	DataRoot                       string                   `json:"data_root"`
+	MaintenancePath                string                   `json:"maintenance_path"`
+	StagingPath                    string                   `json:"staging_path"`
+	BackupPath                     string                   `json:"backup_path"`
+	TrashPath                      string                   `json:"trash_path"`
+	MaintenanceNew                 string                   `json:"maintenance_new"`
+	MaintenanceBackup              string                   `json:"maintenance_backup"`
+	HadInstall                     bool                     `json:"had_install"`
+	MaintenanceExisted             bool                     `json:"maintenance_existed"`
+	PreviousMaintenanceSHA256      string                   `json:"previous_maintenance_sha256,omitempty"`
+	PreviousState                  *installState            `json:"previous_state,omitempty"`
+	PreviousPath                   userPathSnapshot         `json:"previous_path"`
+	PreviousAutoStart              gatewayAutoStartSnapshot `json:"previous_auto_start"`
+	PreviousServices               serviceState             `json:"previous_services"`
+	PreviousConnectors             []string                 `json:"previous_connectors,omitempty"`
+	PreserveConnectorConfiguration bool                     `json:"preserve_connector_configuration,omitempty"`
+	TargetConnector                string                   `json:"target_connector"`
+	TargetMode                     string                   `json:"target_mode"`
+	TargetServices                 serviceState             `json:"target_services"`
+	FromVersion                    string                   `json:"from_version,omitempty"`
+	TargetVersion                  string                   `json:"target_version,omitempty"`
+	PreviousCodexHome              string                   `json:"previous_codex_home,omitempty"`
+	PreviousClaudeConfigDir        string                   `json:"previous_claude_config_dir,omitempty"`
+	CodexHome                      string                   `json:"codex_home,omitempty"`
+	ClaudeConfigDir                string                   `json:"claude_config_dir,omitempty"`
+	MaintenanceSHA256              string                   `json:"maintenance_sha256,omitempty"`
+	DeleteUserData                 bool                     `json:"delete_user_data,omitempty"`
+	UninstallPathEntryOwned        bool                     `json:"uninstall_path_entry_owned,omitempty"`
+	UninstallPathSeparatorReused   bool                     `json:"uninstall_path_separator_reused,omitempty"`
+	UninstallPathValueCreated      bool                     `json:"uninstall_path_value_created,omitempty"`
+	HandoffFromInstall             string                   `json:"handoff_from_install,omitempty"`
+	HandoffPreviousState           *installState            `json:"handoff_previous_state,omitempty"`
 }
 
 type setupTransactionPaths struct {
@@ -179,8 +180,15 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		previousState = &copyState
 	}
 	previousConnectors := normalizeStringSlice(connectorsForNativeUninstall(oldState, dataRoot))
+	preserveConnectorConfiguration := action == "install" && opts.PreserveConnectorConfiguration
 	targetConnector := opts.Connector
 	targetServices := requestedServices(opts, previousServices)
+	if preserveConnectorConfiguration && len(previousConnectors) != 0 {
+		// CLI configuration can add connectors after an installer-first "none"
+		// choice. Once registrations exist, servicing must restore the gateway
+		// even when it was stopped before repair.
+		targetServices.Gateway = true
+	}
 	if action == "uninstall" {
 		targetConnector = "none"
 		targetServices = serviceState{}
@@ -223,6 +231,13 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	if preserveConnectorConfiguration {
+		// A quiet repair/upgrade without a connector choice services the exact
+		// homes already owned by the installation. Environment drift must not
+		// silently move or collapse connector configuration.
+		codexHome = previousCodexHome
+		claudeConfigDir = previousClaudeConfigDir
+	}
 	maintenanceSHA256 := ""
 	maintenanceExisted, previousMaintenanceSHA256, err := snapshotMaintenanceFile(maintenancePath)
 	if err != nil {
@@ -242,39 +257,40 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	uninstallPathSeparatorReused := uninstallPathOwned && previousState.PathSeparatorReused
 	uninstallPathValueCreated := uninstallPathOwned && previousState.PathValueCreated
 	return setupTransaction{
-		SchemaVersion:                setupTransactionSchemaVersion,
-		ID:                           id,
-		Action:                       action,
-		InstallRoot:                  installRoot,
-		DataRoot:                     dataRoot,
-		MaintenancePath:              maintenancePath,
-		StagingPath:                  staging,
-		BackupPath:                   backup,
-		TrashPath:                    trash,
-		MaintenanceNew:               maintenanceNew,
-		MaintenanceBackup:            maintenanceBackup,
-		HadInstall:                   oldState != nil,
-		MaintenanceExisted:           maintenanceExisted,
-		PreviousMaintenanceSHA256:    previousMaintenanceSHA256,
-		PreviousState:                previousState,
-		PreviousPath:                 pathSnapshot,
-		PreviousAutoStart:            autoStartSnapshot,
-		PreviousServices:             previousServices,
-		PreviousConnectors:           previousConnectors,
-		TargetConnector:              targetConnector,
-		TargetMode:                   opts.Mode,
-		TargetServices:               targetServices,
-		FromVersion:                  fromVersion,
-		TargetVersion:                targetVersion,
-		PreviousCodexHome:            previousCodexHome,
-		PreviousClaudeConfigDir:      previousClaudeConfigDir,
-		CodexHome:                    codexHome,
-		ClaudeConfigDir:              claudeConfigDir,
-		MaintenanceSHA256:            maintenanceSHA256,
-		DeleteUserData:               opts.DeleteUserData,
-		UninstallPathEntryOwned:      uninstallPathOwned,
-		UninstallPathSeparatorReused: uninstallPathSeparatorReused,
-		UninstallPathValueCreated:    uninstallPathValueCreated,
+		SchemaVersion:                  setupTransactionSchemaVersion,
+		ID:                             id,
+		Action:                         action,
+		InstallRoot:                    installRoot,
+		DataRoot:                       dataRoot,
+		MaintenancePath:                maintenancePath,
+		StagingPath:                    staging,
+		BackupPath:                     backup,
+		TrashPath:                      trash,
+		MaintenanceNew:                 maintenanceNew,
+		MaintenanceBackup:              maintenanceBackup,
+		HadInstall:                     oldState != nil,
+		MaintenanceExisted:             maintenanceExisted,
+		PreviousMaintenanceSHA256:      previousMaintenanceSHA256,
+		PreviousState:                  previousState,
+		PreviousPath:                   pathSnapshot,
+		PreviousAutoStart:              autoStartSnapshot,
+		PreviousServices:               previousServices,
+		PreviousConnectors:             previousConnectors,
+		PreserveConnectorConfiguration: preserveConnectorConfiguration,
+		TargetConnector:                targetConnector,
+		TargetMode:                     opts.Mode,
+		TargetServices:                 targetServices,
+		FromVersion:                    fromVersion,
+		TargetVersion:                  targetVersion,
+		PreviousCodexHome:              previousCodexHome,
+		PreviousClaudeConfigDir:        previousClaudeConfigDir,
+		CodexHome:                      codexHome,
+		ClaudeConfigDir:                claudeConfigDir,
+		MaintenanceSHA256:              maintenanceSHA256,
+		DeleteUserData:                 opts.DeleteUserData,
+		UninstallPathEntryOwned:        uninstallPathOwned,
+		UninstallPathSeparatorReused:   uninstallPathSeparatorReused,
+		UninstallPathValueCreated:      uninstallPathValueCreated,
 	}, nil
 }
 
@@ -492,9 +508,6 @@ func resolvePreviousConnectorHome(
 	previousConnectors []string,
 	dataRoot, connectorName, logicalName, fallback string,
 ) (string, error) {
-	if configured != "" {
-		return configured, nil
-	}
 	managed := false
 	for _, previous := range previousConnectors {
 		if previous == connectorName {
@@ -502,10 +515,17 @@ func resolvePreviousConnectorHome(
 			break
 		}
 	}
-	if !managed {
-		return fallback, nil
+	fallbackHome := configured
+	if fallbackHome == "" {
+		fallbackHome = fallback
 	}
-	return inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallback)
+	if !managed {
+		return fallbackHome, nil
+	}
+	// The managed backup names the configuration file DefenseClaw actually
+	// owns. It is newer and more specific than installer state when a connector
+	// was added later through the CLI under an override home.
+	return inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallbackHome)
 }
 
 func transactionChildEnv(transaction setupTransaction) []string {
@@ -696,6 +716,22 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 					return fmt.Errorf("uninstall handoff previous state: %w", err)
 				}
 			}
+		}
+	}
+	if transaction.PreserveConnectorConfiguration {
+		if transaction.Action != "install" || !transaction.HadInstall || transaction.PreviousState == nil {
+			return errors.New("connector-preserving transaction has no previous installation")
+		}
+		if transaction.TargetConnector != transaction.PreviousState.Connector ||
+			transaction.TargetMode != transaction.PreviousState.Mode {
+			return errors.New("connector-preserving transaction changed the installer selection")
+		}
+		if !samePath(transaction.PreviousCodexHome, transaction.CodexHome) ||
+			!samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir) {
+			return errors.New("connector-preserving transaction changed a connector configuration home")
+		}
+		if len(transaction.PreviousConnectors) != 0 && !transaction.TargetServices.Gateway {
+			return errors.New("connector-preserving transaction disabled the required gateway")
 		}
 	}
 	if transaction.MaintenanceExisted {
@@ -1578,47 +1614,56 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		return fmt.Errorf("publish stable hook runtime: %w", err)
 	}
 	reconciliation := connectorReconciliationRecorder{}
-	for _, connectorName := range transaction.PreviousConnectors {
-		if connectorName == transaction.TargetConnector && !connectorHomeChanged(transaction, connectorName) {
-			continue
-		}
-		configHome := connectorConfigHome(transaction, connectorName, true)
-		if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
-			return runConnectorLifecycleWithEnv(
-				gatewayPath,
-				transaction.DataRoot,
-				connectorName,
-				"teardown",
-				previousChildEnv,
-			)
-		}) {
-			continue
-		}
-		reconciliation.run(transaction.ID, connectorName, configHome, "verify", func() error {
-			return runConnectorLifecycleWithEnv(
-				gatewayPath,
-				transaction.DataRoot,
-				connectorName,
-				"verify",
-				previousChildEnv,
-			)
-		})
-	}
-	if transaction.TargetConnector != "none" {
-		opts := options{Connector: transaction.TargetConnector, Mode: transaction.TargetMode, Quiet: true}
-		configHome := connectorConfigHome(transaction, transaction.TargetConnector, false)
-		if reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "configure", func() error {
-			return runInitialConfigurationWithEnv(transaction.InstallRoot, transaction.DataRoot, opts, childEnv)
-		}) {
-			reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "reconcile", func() error {
+	if transaction.PreserveConnectorConfiguration {
+		reconciliation = reconcilePreservedConnectors(
+			transaction,
+			gatewayPath,
+			previousChildEnv,
+			runConnectorLifecycleWithEnv,
+		)
+	} else {
+		for _, connectorName := range transaction.PreviousConnectors {
+			if connectorName == transaction.TargetConnector && !connectorHomeChanged(transaction, connectorName) {
+				continue
+			}
+			configHome := connectorConfigHome(transaction, connectorName, true)
+			if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
 				return runConnectorLifecycleWithEnv(
 					gatewayPath,
 					transaction.DataRoot,
-					transaction.TargetConnector,
-					"reconcile",
-					childEnv,
+					connectorName,
+					"teardown",
+					previousChildEnv,
+				)
+			}) {
+				continue
+			}
+			reconciliation.run(transaction.ID, connectorName, configHome, "verify", func() error {
+				return runConnectorLifecycleWithEnv(
+					gatewayPath,
+					transaction.DataRoot,
+					connectorName,
+					"verify",
+					previousChildEnv,
 				)
 			})
+		}
+		if transaction.TargetConnector != "none" {
+			opts := options{Connector: transaction.TargetConnector, Mode: transaction.TargetMode, Quiet: true}
+			configHome := connectorConfigHome(transaction, transaction.TargetConnector, false)
+			if reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "configure", func() error {
+				return runInitialConfigurationWithEnv(transaction.InstallRoot, transaction.DataRoot, opts, childEnv)
+			}) {
+				reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "reconcile", func() error {
+					return runConnectorLifecycleWithEnv(
+						gatewayPath,
+						transaction.DataRoot,
+						transaction.TargetConnector,
+						"reconcile",
+						childEnv,
+					)
+				})
+			}
 		}
 	}
 	connectorReconciliationPending, err := settleInstallConnectorReconciliation(

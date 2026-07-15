@@ -519,6 +519,43 @@ func TestValidateSetupTransactionRejectsUnrelatedRecordedPath(t *testing.T) {
 	}
 }
 
+func TestValidateSetupTransactionBindsPreservedConnectorState(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, &previous)
+	transaction.PreserveConnectorConfiguration = true
+	transaction.PreviousConnectors = []string{"codex"}
+	transaction.TargetServices.Gateway = true
+	transaction.PreviousCodexHome = filepath.Join(filepath.Dir(dataRoot), ".codex")
+	transaction.CodexHome = transaction.PreviousCodexHome
+	transaction.PreviousClaudeConfigDir = filepath.Join(filepath.Dir(dataRoot), ".claude")
+	transaction.ClaudeConfigDir = transaction.PreviousClaudeConfigDir
+	expected := setupTransactionExpectations{
+		InstallRoot:     installRoot,
+		DataRoot:        dataRoot,
+		MaintenancePath: maintenancePath,
+	}
+	if err := validateSetupTransaction(transaction, expected); err != nil {
+		t.Fatalf("valid connector-preserving transaction rejected: %v", err)
+	}
+
+	changedHome := transaction
+	changedHome.CodexHome = filepath.Join(filepath.Dir(dataRoot), "other-codex")
+	if err := validateSetupTransaction(changedHome, expected); err == nil {
+		t.Fatal("connector-preserving transaction changed its recorded Codex home")
+	}
+	changedSelection := transaction
+	changedSelection.TargetConnector = "codex"
+	if err := validateSetupTransaction(changedSelection, expected); err == nil {
+		t.Fatal("connector-preserving transaction changed its installer selection")
+	}
+	disabledGateway := transaction
+	disabledGateway.TargetServices.Gateway = false
+	if err := validateSetupTransaction(disabledGateway, expected); err == nil {
+		t.Fatal("connector-preserving transaction disabled its required gateway")
+	}
+}
+
 func TestValidateSetupTransactionRejectsReparseRoot(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows reparse-point validation")
@@ -905,6 +942,37 @@ func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *tes
 				t.Fatalf("resolved previous connector home = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *testing.T) {
+	dataRoot := t.TempDir()
+	backupPath := filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(t.TempDir(), "cli-configured-codex-home")
+	if err := os.WriteFile(
+		backupPath,
+		[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, "config.toml"))),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	staleInstallStateHome := filepath.Join(t.TempDir(), "installer-default-codex-home")
+	got, err := resolvePreviousConnectorHome(
+		staleInstallStateHome,
+		[]string{"codex"},
+		dataRoot,
+		"codex",
+		"config.toml",
+		filepath.Join(t.TempDir(), "fallback-codex-home"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, want) {
+		t.Fatalf("resolved previous connector home = %q, want managed binding %q", got, want)
 	}
 }
 

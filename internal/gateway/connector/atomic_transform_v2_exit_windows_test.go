@@ -36,7 +36,8 @@ func atomicTransformV2HardExitPayload() []byte {
 }
 
 func atomicTransformV2HardExitEnv(overrides ...string) []string {
-	const controlPrefix = "DEFENSECLAW_V2_HARD_EXIT_"
+	const helperControl = "DEFENSECLAW_V2_HARD_EXIT_HELPER"
+	controlPrefix := strings.TrimSuffix(helperControl, "HELPER")
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")

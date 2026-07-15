@@ -94,6 +94,11 @@ type options struct {
 	FromVersion     string
 	CodexHome       string
 	ClaudeConfigDir string
+	// PreserveConnectorConfiguration is internal transaction intent, never a
+	// command-line property. Servicing an existing install without an explicit
+	// connector or mode selection must refresh its owned registrations in place
+	// instead of collapsing connector changes made later through the CLI.
+	PreserveConnectorConfiguration bool
 }
 
 type payloadManifest struct {
@@ -239,6 +244,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if oldState != nil {
 		if !opts.ConnectorSet && validConnector(oldState.Connector) {
 			opts.Connector = oldState.Connector
+			opts.PreserveConnectorConfiguration = !opts.ModeSet
 		}
 		if !opts.ModeSet && validMode(oldState.Mode) {
 			opts.Mode = oldState.Mode
@@ -247,9 +253,9 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			opts.FromVersion = oldState.Version
 		}
 	}
-	// Every install/repair/upgrade refreshes the selected connector. Existing
-	// data is not evidence that hooks are configured: it also covers legacy
-	// installs and data-preserving uninstalls.
+	// Every install/repair/upgrade refreshes either the explicit selection or the
+	// existing owned connector roster. Existing data alone is not evidence that
+	// hooks are configured: it also covers legacy and data-preserving installs.
 	upgradeFrom := opts.FromVersion
 	pathEntryOwned := oldState != nil && oldState.PathEntryOwned
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
@@ -1050,6 +1056,20 @@ func verifySelectedServices(gatewayPath, dataRoot string, wanted serviceState) e
 		if err != nil {
 			return fmt.Errorf("verify %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
+	}
+	// The status commands intentionally return success for a stopped service so
+	// they remain useful to operators. Setup needs the stronger postcondition:
+	// every requested process must own its exact PID/start/image identity before
+	// a committed repair or upgrade is reported complete.
+	actual, err := inspectOwnedServices(gatewayPath, dataRoot)
+	if err != nil {
+		return fmt.Errorf("inspect selected services after startup: %w", err)
+	}
+	if wanted.Gateway && !actual.Gateway {
+		return errors.New("managed gateway did not remain running after startup")
+	}
+	if wanted.Watchdog && !actual.Watchdog {
+		return errors.New("managed watchdog did not remain running after startup")
 	}
 	return nil
 }

@@ -1901,7 +1901,7 @@ func finishAtomicTransformIntent(
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	return recoverAtomicTransformOnce(intent.LogicalPath, intent.StateDir)
+	return recoverAtomicTransformWithStateDirPrepared(intent.LogicalPath, intent.StateDir)
 }
 
 func recoverAfterAtomicTransformError(path, stateDir string, cause error) error {

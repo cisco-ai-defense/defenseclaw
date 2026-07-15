@@ -24,6 +24,45 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "assertion failed: $Message" }
 }
 
+function New-SyntheticProcessIdentity(
+    [int]$ProcessId,
+    [string]$Created,
+    [string]$Exited = ''
+) {
+    return [pscustomobject]@{
+        ProcessId = $ProcessId
+        ParentProcessId = 0
+        CreationDate = $Created
+        ExitDate = $Exited
+        ExecutablePath = ''
+    }
+}
+
+function New-SyntheticProcessRow([int]$ProcessId, [int]$ParentId, [string]$Created) {
+    return [pscustomobject]@{
+        ProcessId = $ProcessId
+        ParentProcessId = $ParentId
+        CreationDate = [DateTime]$Created
+        ExecutablePath = "C:\process-$ProcessId.exe"
+    }
+}
+
+function Assert-SyntheticProcessTree(
+    [object[]]$Roots,
+    [object[]]$Processes,
+    [int[]]$ExpectedIds,
+    [string]$Message
+) {
+    $expected = @($ExpectedIds | Sort-Object) -join ','
+    $liveIds = @(Get-ProcessTreeSnapshot -RootProcesses $Roots -ProcessSnapshot $Processes |
+        ForEach-Object ProcessId | Sort-Object) -join ','
+    $nativeIds = @(Get-WindowsNativeProcessTreeSnapshot `
+        -RootProcesses $Roots -ProcessSnapshot $Processes |
+        ForEach-Object ProcessId | Sort-Object) -join ','
+    Assert-True ($liveIds -ceq $expected) "$Message (live helper returned: $liveIds)"
+    Assert-True ($nativeIds -ceq $expected) "$Message (native helper returned: $nativeIds)"
+}
+
 try {
     foreach ($scriptPath in @(
         $harness,
@@ -38,6 +77,28 @@ try {
         Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
     }
     . $harness -NoRun
+    . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
+
+    $liveRoot = New-SyntheticProcessIdentity 100 '2026-07-15T00:10:00Z'
+    Assert-SyntheticProcessTree @($liveRoot) @(
+        (New-SyntheticProcessRow 100 1 '2026-07-15T00:10:00Z'),
+        (New-SyntheticProcessRow 200 100 '2026-07-15T00:11:00Z'),
+        (New-SyntheticProcessRow 201 200 '2026-07-15T00:12:00Z')
+    ) @(200, 201) 'exact live parent identities preserve valid ancestry'
+
+    $reusedParent = New-SyntheticProcessIdentity 200 '2026-07-15T00:11:00Z'
+    Assert-SyntheticProcessTree @($reusedParent) @(
+        (New-SyntheticProcessRow 200 999 '2026-07-15T00:20:00Z'),
+        (New-SyntheticProcessRow 201 200 '2026-07-15T00:21:00Z')
+    ) @() 'a reused parent PID cannot authorize a newer child'
+
+    $exitedRoot = New-SyntheticProcessIdentity `
+        100 '2026-07-15T00:10:00Z' '2026-07-15T00:15:00Z'
+    Assert-SyntheticProcessTree @($exitedRoot) @(
+        (New-SyntheticProcessRow 200 100 '2026-07-15T00:12:00Z'),
+        (New-SyntheticProcessRow 201 200 '2026-07-15T00:13:00Z'),
+        (New-SyntheticProcessRow 300 100 '2026-07-15T00:16:00Z')
+    ) @(200, 201) 'an exited root expands only within its recorded lifetime'
 
     Assert-True ((Get-CodexVersionNumber 'codex-cli 0.124.0') -eq [Version]'0.124.0') `
         'Codex version parser accepts the pinned minimum client format'
