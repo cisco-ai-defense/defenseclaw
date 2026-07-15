@@ -55,6 +55,18 @@ class _GatewayConfigRecorder:
         token_resolver = getattr(gateway, "resolved_token", None)
         token = token_resolver() if callable(token_resolver) else ""
         if not token:
+            # A first gateway start may create the canonical token after this
+            # CLI process loaded config (for example: init --no-start-gateway,
+            # then setup <connector> --restart). Refresh the installation
+            # dotenv once at emission time so the command can authenticate its
+            # final canonical audit fact without requiring a second invocation.
+            data_dir = str(getattr(self._cfg, "data_dir", "") or "")
+            if data_dir:
+                from defenseclaw.config import _load_dotenv_into_os
+
+                _load_dotenv_into_os(data_dir)
+                token = token_resolver() if callable(token_resolver) else ""
+        if not token:
             raise CanonicalObservabilityError(
                 "gateway authentication is unavailable; start or reconfigure the v8 gateway"
             )

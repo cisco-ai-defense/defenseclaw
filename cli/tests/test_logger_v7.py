@@ -247,6 +247,37 @@ def test_from_config_defers_missing_auth_failure_until_emit() -> None:
         logger.log_action("policy-reload", "default", "changed")
 
 
+def test_from_config_refreshes_token_created_after_logger_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    gateway = SimpleNamespace(
+        api_bind="127.0.0.1",
+        api_port=18970,
+        resolved_token=lambda: os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", ""),
+    )
+    cfg = SimpleNamespace(
+        config_version=8,
+        data_dir=str(tmp_path),
+        gateway=gateway,
+        openshell=None,
+        guardrail=None,
+    )
+    logger = Logger.from_config(cfg)
+
+    # Model EnsureGatewayToken writing .env during the command's first
+    # gateway restart, after config and Logger were already constructed.
+    (tmp_path / ".env").write_text("DEFENSECLAW_GATEWAY_TOKEN=fresh-token\n", encoding="utf-8")
+    recorder = _Recorder()
+    with patch("defenseclaw.logger.OrchestratorClient", return_value=recorder) as client:
+        logger.log_action("setup-hook-connector", "config", "connector=codex")
+
+    client.assert_called_once_with(host="127.0.0.1", port=18970, timeout=10, token="fresh-token")
+    assert recorder.payloads[0]["kind"] == "action"
+    assert recorder.closed
+
+
 def test_explicit_no_runtime_capability_buffers_and_writes_nothing() -> None:
     logger = Logger.no_runtime()
     logger.log_action("policy-reload", "default", "owner=alice@example.com")
