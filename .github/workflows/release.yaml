@@ -368,6 +368,8 @@ jobs:
           go-version-file: go.mod
 
       - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: v2.6.2
 
       - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
@@ -523,10 +525,11 @@ jobs:
         run: |
           set -euo pipefail
           make dist-upgrade-manifest
-          rm -f dist/checksums.txt.sig dist/checksums.txt.pem
+          rm -f dist/checksums.txt.sig dist/checksums.txt.pem dist/checksums.txt.bundle
           make dist-checksums
           cosign sign-blob \
             --yes \
+            --bundle=dist/checksums.txt.bundle \
             --output-certificate=dist/checksums.txt.pem \
             --output-signature=dist/checksums.txt.sig \
             dist/checksums.txt
@@ -619,6 +622,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: v2.6.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist-base
@@ -630,12 +635,13 @@ jobs:
       - name: Recompute final checksums after Windows setup artifact is present
         run: |
           set -euo pipefail
-          rm -f dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
+          rm -f dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem dist/checksums.txt.bundle
           cd dist
-          find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
+          find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem ! -name checksums.txt.bundle | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
           cd ..
           cosign sign-blob \
             --yes \
+            --bundle=dist/checksums.txt.bundle \
             --output-certificate=dist/checksums.txt.pem \
             --output-signature=dist/checksums.txt.sig \
             dist/checksums.txt
@@ -665,6 +671,7 @@ jobs:
             dist/checksums.txt
             dist/checksums.txt.sig
             dist/checksums.txt.pem
+            dist/checksums.txt.bundle
             dist/*.whl
             dist/upgrade-manifest.json
           )

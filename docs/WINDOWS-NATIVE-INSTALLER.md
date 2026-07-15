@@ -10,12 +10,16 @@ parallel DefenseClaw distribution:
 - The Python CLI/TUI is `defenseclaw-<version>-py3-none-any.whl`.
 - `upgrade-manifest.json`, `checksums.txt`, signatures, SBOMs, and provenance are
   produced by the existing atomic release pipeline.
-- `scripts/install.ps1` remains the legacy release-asset installer. Its
-  per-user state, connector, repair, rollback, and lifecycle behavior is the
-  compatibility reference for native setup.
+- `scripts/install.ps1` is a compatibility bootstrap only. On Windows it
+  authenticates the signed release checksum manifest and offline Sigstore
+  proof, verifies the schema-1 provenance binding for the exact Setup SHA-256
+  and Cisco Authenticode publisher, and delegates to
+  `DefenseClawSetup-x64.exe`. It never resolves or installs Python, `uv`,
+  wheels, or individual gateway artifacts.
 - `scripts/windows-native-ci.ps1` remains the native Windows package and
-  lifecycle acceptance harness. Setup acceptance extends that harness instead
-  of cloning the whole suite.
+  lifecycle acceptance harness. Required lifecycle and connector contracts
+  install the exact native Setup artifact; a separate no-network test proves
+  local bootstrap delegation and legacy argument mapping.
 
 ## Delivery decision
 
@@ -68,6 +72,15 @@ builder then embeds:
 - the locked installed Python dependency tree;
 - the signed release `upgrade-manifest.json`; and
 - the native managed-command launcher.
+
+The release also publishes `checksums.txt.bundle` beside the detached
+signature and certificate. The compatibility bootstrap passes that bundled
+transparency-log proof to pinned Cosign with `--offline`. The authenticated
+checksum root must contain exactly one entry each for Setup, its provenance,
+and the upgrade manifest. The provenance must describe a signed schema-1 OSS
+artifact and repeat Setup's exact authenticated SHA-256. Local mode requires
+the complete release bundle plus the pinned Cosign executable and performs no
+network access.
 
 An internal manifest hashes every embedded file with SHA-256. Setup validates
 that manifest before staging, bounds ZIP entry count and expanded size, rejects
