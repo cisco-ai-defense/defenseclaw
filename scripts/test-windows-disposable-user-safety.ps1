@@ -70,7 +70,7 @@ try {
             [IO.DirectoryInfo]::new($path),
             $leaseSections
         )
-        $leaseSnapshots[$path] = $security.GetSecurityDescriptorSddlForm($leaseSections)
+        $leaseSnapshots[$path] = Get-DisposableAclSemanticFingerprint $security
     }
     $ancestorLease = @()
     try {
@@ -99,7 +99,7 @@ try {
             [IO.DirectoryInfo]::new($path),
             $leaseSections
         )
-        if ($security.GetSecurityDescriptorSddlForm($leaseSections) -cne
+        if ((Get-DisposableAclSemanticFingerprint $security) -cne
             [string]$leaseSnapshots[$path]) {
             throw "ancestor ACL lease did not restore the exact descriptor: $path"
         }

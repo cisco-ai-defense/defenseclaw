@@ -247,6 +247,37 @@ function Assert-DisposableAncestorReadLease {
     }
 }
 
+function Get-DisposableAclSemanticFingerprint {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Security)
+
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Security.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    $aces = [Collections.Generic.List[string]]::new()
+    if ($null -ne $raw.DiscretionaryAcl) {
+        foreach ($ace in $raw.DiscretionaryAcl) {
+            $bytes = [byte[]]::new($ace.BinaryLength)
+            $ace.GetBinaryForm($bytes, 0)
+            $aces.Add([Convert]::ToBase64String($bytes))
+        }
+    }
+    $present = ($raw.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0
+    $protected = ($raw.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0
+    $revision = if ($null -eq $raw.DiscretionaryAcl) {
+        -1
+    } else {
+        [int]$raw.DiscretionaryAcl.Revision
+    }
+    $owner = if ($null -eq $raw.Owner) { '<none>' } else { $raw.Owner.Value }
+    $group = if ($null -eq $raw.Group) { '<none>' } else { $raw.Group.Value }
+    return '{0}|{1}|present={2}|protected={3}|revision={4}|{5}' -f
+        $owner, $group, $present, $protected, $revision, ($aces -join ';')
+}
+
 function Restore-DisposableAncestorReadLease {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object[]]$Lease)
@@ -268,11 +299,12 @@ function Restore-DisposableAncestorReadLease {
                 $directory,
                 $sections
             )
-            # SetAccessControl may canonicalize the binary form differently on
-            # different Windows builds. Owner, group, DACL, and DACL control
-            # flags are the security semantics we changed and must round-trip.
-            if ($observed.GetSecurityDescriptorSddlForm($sections) -cne
-                [string]$entry.Sddl) {
+            # Windows may canonicalize descriptor bytes and auto-inheritance
+            # metadata differently across releases. Compare the complete raw
+            # ACE sequence plus the owner, group, revision, and security-relevant
+            # DACL flags instead of a platform-specific serialization.
+            if ((Get-DisposableAclSemanticFingerprint $observed) -cne
+                [string]$entry.Fingerprint) {
                 throw 'restored security descriptor does not match its snapshot'
             }
             $remaining = @($observed.GetAccessRules(
@@ -351,6 +383,7 @@ function Grant-DisposableAncestorReadLease {
                 $security.GetSecurityDescriptorBinaryForm()
             )
             Sddl = $security.GetSecurityDescriptorSddlForm($sections)
+            Fingerprint = Get-DisposableAclSemanticFingerprint $security
         })
     }
 
