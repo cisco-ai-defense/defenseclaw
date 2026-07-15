@@ -82,6 +82,28 @@ STRICT_BASE64_RE = re.compile(
     rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
 )
 MACOS_VERIFICATION_STATUSES = ("notarized", "unverified")
+WINDOWS_SETUP_START_VERSION = (0, 8, 6)
+WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
+WINDOWS_SETUP_PUBLISHER = "Cisco Systems, Inc."
+WINDOWS_SETUP_CLIENTS = {
+    "codex": "0.144.3",
+    "claudecode": "2.1.208",
+}
+WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
+    "automatic-codex-trust",
+    "lifecycle",
+    "tool-allow",
+    "tool-block",
+    "gateway-jsonl",
+    "audit-correlation",
+    "connector-otlp",
+    "repair",
+    "upgrade",
+    "uninstall",
+)
+CHECKSUMS_BUNDLE_FILENAME = "checksums.txt.bundle"
+MAX_WINDOWS_SETUP_BYTES = 2 * 1024 * 1024 * 1024
+MAX_WINDOWS_SETUP_METADATA_BYTES = 128 * 1024 * 1024
 
 
 class CandidateError(RuntimeError):
@@ -417,6 +439,31 @@ def release_identity_asset_names(version: str) -> tuple[str, ...]:
     return (RELEASE_PROVENANCE_FILENAME, RELEASE_SOURCE_MAP_FILENAME)
 
 
+def windows_installer_asset_names(version: str) -> tuple[str, ...]:
+    """Return the exact signed native-Setup custody set for 0.8.6+."""
+
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
+        return ()
+    return (
+        WINDOWS_SETUP_ASSET,
+        f"{WINDOWS_SETUP_ASSET}.certification.json",
+        f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        f"{WINDOWS_SETUP_ASSET}.sha256",
+    )
+
+
+def release_proof_asset_names(version: str) -> tuple[str, ...]:
+    """Return checksum-signature proof files published outside checksums.txt."""
+
+    _validate_version(version)
+    names = ["checksums.txt.pem", "checksums.txt.sig"]
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        names.append(CHECKSUMS_BUNDLE_FILENAME)
+    return tuple(sorted(names))
+
+
 def payload_asset_names(
     version: str,
     macos_verification_status: str,
@@ -428,6 +475,7 @@ def payload_asset_names(
                 *macos_asset_names(version, macos_verification_status),
                 *resolver_asset_names(version),
                 *release_identity_asset_names(version),
+                *windows_installer_asset_names(version),
             )
         )
     )
@@ -444,8 +492,7 @@ def published_asset_names(
             (
                 *payload_asset_names(version, macos_verification_status),
                 "checksums.txt",
-                "checksums.txt.pem",
-                "checksums.txt.sig",
+                *release_proof_asset_names(version),
             )
         )
     )
@@ -568,7 +615,7 @@ def _load_upgrade_baseline_policy() -> tuple[list[str], dict[str, list[str]]]:
         or not isinstance(config_versions, dict)
         or set(config_versions) != set(configured)
         or any(
-            not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7}
+            not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7, 8}
             for value in config_versions.values()
         )
         or (
@@ -3040,6 +3087,53 @@ def _validate_gateway_binary(
         raise CandidateError(f"gateway in {archive_name} does not embed release commit {commit}")
 
 
+def _validate_windows_gateway_zip_payload(
+    payload: bytes,
+    *,
+    version: str,
+    arch: str,
+    commit: str | None,
+    archive_name: str,
+) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            seen: set[PurePosixPath] = set()
+            gateway_payloads: list[bytes] = []
+            for member in archive.infolist():
+                raw_name = member.filename[:-1] if member.is_dir() else member.filename
+                member_path = _safe_archive_member_path(raw_name, archive_name)
+                if member_path in seen:
+                    raise CandidateError(f"duplicate member in gateway archive {archive_name}: {member.filename}")
+                seen.add(member_path)
+                unix_mode = (member.external_attr >> 16) & 0xFFFF
+                file_kind = stat.S_IFMT(unix_mode)
+                if file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise CandidateError(f"non-regular member in gateway archive {archive_name}: {member.filename}")
+                if member.is_dir():
+                    continue
+                if member.flag_bits & 0x1:
+                    raise CandidateError(f"encrypted member in gateway archive {archive_name}: {member.filename}")
+                if member_path != PurePosixPath("defenseclaw.exe"):
+                    continue
+                if member.file_size <= 0 or member.file_size > MAX_GATEWAY_BINARY_BYTES:
+                    raise CandidateError(f"gateway binary size is invalid in {archive_name}")
+                gateway_payloads.append(archive.read(member))
+    except CandidateError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise CandidateError(f"invalid gateway archive {archive_name}: {exc}") from exc
+    if len(gateway_payloads) != 1:
+        raise CandidateError(f"gateway archive {archive_name} must contain exactly one root defenseclaw.exe binary")
+    _validate_gateway_binary(
+        gateway_payloads[0],
+        os_name="windows",
+        arch=arch,
+        version=version,
+        commit=commit,
+        archive_name=archive_name,
+    )
+
+
 def _validate_gateway_archives(
     directory: Path,
     version: str,
@@ -3099,48 +3193,10 @@ def _validate_gateway_archives(
 
     for arch in ("amd64", "arm64"):
         path = directory / artifacts["gateways"]["windows"][arch]
-        try:
-            with zipfile.ZipFile(io.BytesIO(_protected_payload(path))) as archive:
-                seen = set()
-                gateway_payloads = []
-                for member in archive.infolist():
-                    raw_name = member.filename[:-1] if member.is_dir() else member.filename
-                    member_path = _safe_archive_member_path(raw_name, path.name)
-                    if member_path in seen:
-                        raise CandidateError(
-                            f"duplicate member in gateway archive {path.name}: {member.filename}"
-                        )
-                    seen.add(member_path)
-                    unix_mode = (member.external_attr >> 16) & 0xFFFF
-                    file_kind = stat.S_IFMT(unix_mode)
-                    if file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
-                        raise CandidateError(
-                            f"non-regular member in gateway archive {path.name}: {member.filename}"
-                        )
-                    if member.is_dir():
-                        continue
-                    if member.flag_bits & 0x1:
-                        raise CandidateError(
-                            f"encrypted member in gateway archive {path.name}: {member.filename}"
-                        )
-                    if member_path != PurePosixPath("defenseclaw.exe"):
-                        continue
-                    if member.file_size <= 0 or member.file_size > MAX_GATEWAY_BINARY_BYTES:
-                        raise CandidateError(f"gateway binary size is invalid in {path.name}")
-                    gateway_payloads.append(archive.read(member))
-        except CandidateError:
-            raise
-        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-            raise CandidateError(f"invalid gateway archive {path}: {exc}") from exc
-        if len(gateway_payloads) != 1:
-            raise CandidateError(
-                f"gateway archive {path.name} must contain exactly one root defenseclaw.exe binary"
-            )
-        _validate_gateway_binary(
-            gateway_payloads[0],
-            os_name="windows",
-            arch=arch,
+        _validate_windows_gateway_zip_payload(
+            _protected_payload(path),
             version=version,
+            arch=arch,
             commit=commit,
             archive_name=path.name,
         )
@@ -3317,6 +3373,113 @@ def extract_gateway(release_dir: Path, output: Path, version: str, os_name: str,
     except (OSError, tarfile.TarError) as exc:
         raise CandidateError(f"could not extract candidate gateway: {exc}") from exc
     output.chmod(0o755)
+
+
+def _write_exclusive_file(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
+    owned = False
+    try:
+        with path.open("xb") as handle:
+            owned = True
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        path.chmod(mode)
+    except OSError as exc:
+        if owned:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise CandidateError(f"could not publish extracted installer input {path.name}: {exc}") from exc
+
+
+def extract_windows_installer_inputs(
+    release_dir: Path,
+    output_dir: Path,
+    version: str,
+) -> None:
+    """Decode only authenticated Windows x64 Setup inputs into a new private dir."""
+
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
+        raise CandidateError("native Windows Setup input extraction starts with release 0.8.6")
+    if output_dir.exists() or output_dir.is_symlink():
+        raise CandidateError(f"Windows installer input output already exists: {output_dir}")
+
+    verify_runtime(release_dir, version)
+    attestation = _parse_checksums(release_dir / RUNTIME_ATTESTATION_FILENAME)
+    artifacts = _expected_release_artifacts(version)
+    protected_gateway_name = artifacts["gateways"]["windows"]["amd64"]
+    protected_wheel_name = artifacts["wheel"]
+
+    def protected_payload(name: str) -> bytes:
+        source = release_dir / name
+        expected = attestation.get(name)
+        before = _sha256(source)
+        if expected != before:
+            raise CandidateError(f"runtime attestation changed before extracting {name}")
+        payload = _protected_payload(source)
+        if _sha256(source) != before:
+            raise CandidateError(f"protected runtime input changed while extracting {name}")
+        return payload
+
+    manifest_source = release_dir / "upgrade-manifest.json"
+    manifest_expected = attestation.get(manifest_source.name)
+    manifest_before = _sha256(manifest_source)
+    if manifest_expected != manifest_before:
+        raise CandidateError("runtime attestation changed before extracting upgrade-manifest.json")
+    try:
+        manifest_payload = manifest_source.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read verified upgrade manifest: {exc}") from exc
+    if _sha256(manifest_source) != manifest_before:
+        raise CandidateError("upgrade-manifest.json changed while being extracted")
+
+    gateway_payload = protected_payload(protected_gateway_name)
+    wheel_payload = protected_payload(protected_wheel_name)
+    gateway_name = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel_name = f"defenseclaw-{version}-py3-none-any.whl"
+    created: list[Path] = []
+    try:
+        try:
+            output_dir.mkdir(parents=True, mode=0o700)
+            output_dir.chmod(0o700)
+        except OSError as exc:
+            raise CandidateError(
+                f"could not create private Windows installer input directory: {exc}"
+            ) from exc
+        for name, payload in (
+            (gateway_name, gateway_payload),
+            (wheel_name, wheel_payload),
+            ("upgrade-manifest.json", manifest_payload),
+        ):
+            destination = output_dir / name
+            _write_exclusive_file(destination, payload)
+            created.append(destination)
+        if _strict_file_names(output_dir, "Windows installer input") != tuple(
+            sorted((gateway_name, wheel_name, "upgrade-manifest.json"))
+        ):
+            raise CandidateError("Windows installer input contains an unexpected file set")
+        _validate_upgrade_manifest(output_dir / "upgrade-manifest.json", version)
+        _validate_windows_gateway_zip_payload(
+            gateway_payload,
+            version=version,
+            arch="amd64",
+            commit=None,
+            archive_name=gateway_name,
+        )
+        _validate_wheel(output_dir / wheel_name, version)
+    except Exception:
+        for path in reversed(created):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        try:
+            output_dir.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def _copy_exact(source: Path, destination: Path, names: tuple[str, ...]) -> None:
@@ -3517,6 +3680,427 @@ def _validate_release_identity(
     return provenance
 
 
+def _validate_windows_setup_pe(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+        if not 0 < size <= MAX_WINDOWS_SETUP_BYTES:
+            raise CandidateError("Windows Setup executable size is invalid")
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read Windows Setup executable: {exc}") from exc
+    if len(payload) != size or len(payload) < 0x100 or payload[:2] != b"MZ":
+        raise CandidateError("Windows Setup is not a complete PE executable")
+    pe_offset = struct.unpack_from("<I", payload, 0x3C)[0]
+    if pe_offset > len(payload) - 24 or payload[pe_offset : pe_offset + 4] != b"PE\0\0":
+        raise CandidateError("Windows Setup has an invalid PE header")
+    machine = struct.unpack_from("<H", payload, pe_offset + 4)[0]
+    optional_size = struct.unpack_from("<H", payload, pe_offset + 20)[0]
+    optional_offset = pe_offset + 24
+    if machine != 0x8664:
+        raise CandidateError("Windows Setup is not an x64 PE executable")
+    if optional_size < 152 or optional_offset + optional_size > len(payload):
+        raise CandidateError("Windows Setup has a truncated PE32+ optional header")
+    if struct.unpack_from("<H", payload, optional_offset)[0] != 0x20B:
+        raise CandidateError("Windows Setup is not a PE32+ executable")
+    if struct.unpack_from("<H", payload, optional_offset + 68)[0] != 2:
+        raise CandidateError("Windows Setup is not a Windows GUI executable")
+    directory_count = struct.unpack_from("<I", payload, optional_offset + 108)[0]
+    if directory_count < 5:
+        raise CandidateError("Windows Setup lacks an Authenticode certificate directory")
+    certificate_offset, certificate_size = struct.unpack_from("<II", payload, optional_offset + 112 + 4 * 8)
+    if certificate_offset <= 0 or certificate_size < 8 or certificate_offset > len(payload) - certificate_size:
+        raise CandidateError("Windows Setup lacks a complete embedded Authenticode signature")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _require_object_fields(
+    value: object,
+    expected: set[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise CandidateError(f"{label} does not use its closed field set")
+    return value
+
+
+def _read_windows_setup_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not 0 < info.st_size <= MAX_WINDOWS_SETUP_METADATA_BYTES
+        ):
+            raise CandidateError(f"{label} has an invalid file type or size")
+        payload = path.read_bytes()
+        if len(payload) != info.st_size:
+            raise CandidateError(f"{label} changed while being read")
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except CandidateError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateError(f"invalid {label} {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise CandidateError(f"{label} must contain a JSON object")
+    return document
+
+
+def _validate_windows_setup_provenance(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+) -> None:
+    document = _read_windows_setup_json(path, "Windows Setup provenance")
+    _require_object_fields(
+        document,
+        {
+            "schema_version",
+            "artifact",
+            "artifact_sha256",
+            "version",
+            "source_commit",
+            "distribution_flavor",
+            "built_at_utc",
+            "unsigned",
+            "authenticode",
+            "inputs",
+            "toolchain",
+        },
+        "Windows Setup provenance",
+    )
+    if (
+        document.get("schema_version") != 1
+        or document.get("artifact") != WINDOWS_SETUP_ASSET
+        or document.get("artifact_sha256") != setup_sha256
+        or document.get("version") != version
+        or document.get("source_commit") != commit
+        or document.get("distribution_flavor") != "oss"
+        or document.get("unsigned") is not False
+    ):
+        raise CandidateError("Windows Setup provenance release identity mismatch")
+    built_at = document.get("built_at_utc")
+    if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
+        raise CandidateError("Windows Setup provenance build timestamp is invalid")
+    if not isinstance(document.get("inputs"), dict) or not isinstance(document.get("toolchain"), dict):
+        raise CandidateError("Windows Setup provenance build inputs are invalid")
+
+    authenticode = _require_object_fields(
+        document.get("authenticode"),
+        {"schema_version", "files"},
+        "Windows Setup Authenticode inventory",
+    )
+    files = authenticode.get("files")
+    if authenticode.get("schema_version") != 1 or not isinstance(files, dict):
+        raise CandidateError("Windows Setup Authenticode inventory is invalid")
+    evidence = _require_object_fields(
+        files.get(WINDOWS_SETUP_ASSET),
+        {
+            "schema_version",
+            "installed_path",
+            "sbom_file_name",
+            "sha256",
+            "expected",
+            "observed",
+        },
+        "Windows Setup Authenticode evidence",
+    )
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("installed_path") != WINDOWS_SETUP_ASSET
+        or evidence.get("sbom_file_name") != f"./{WINDOWS_SETUP_ASSET}"
+        or evidence.get("sha256") != setup_sha256
+    ):
+        raise CandidateError("Windows Setup Authenticode evidence digest mismatch")
+    expected = _require_object_fields(
+        evidence.get("expected"),
+        {
+            "policy",
+            "status",
+            "publisher",
+            "signature_type",
+            "platform_identity_required",
+            "timestamp_required",
+            "signer_thumbprint_sha256",
+            "timestamp_signer_thumbprint_sha256",
+            "timestamp_token_sha256",
+        },
+        "Windows Setup expected Authenticode policy",
+    )
+    if (
+        expected.get("policy") != "defenseclaw-product-publisher"
+        or expected.get("status") != "Valid"
+        or expected.get("publisher") != WINDOWS_SETUP_PUBLISHER
+        or expected.get("signature_type") != "Authenticode"
+        or expected.get("platform_identity_required") is not True
+        or expected.get("timestamp_required") is not True
+    ):
+        raise CandidateError("Windows Setup does not require Cisco Authenticode and RFC3161")
+    for field in (
+        "signer_thumbprint_sha256",
+        "timestamp_signer_thumbprint_sha256",
+        "timestamp_token_sha256",
+    ):
+        if not isinstance(expected.get(field), str) or SHA256_RE.fullmatch(expected[field]) is None:
+            raise CandidateError(f"Windows Setup Authenticode {field} is invalid")
+
+    observed = _require_object_fields(
+        evidence.get("observed"),
+        {
+            "status",
+            "publisher",
+            "signature_type",
+            "signer",
+            "chain",
+            "timestamp",
+            "embedded_signatures",
+        },
+        "Windows Setup observed Authenticode evidence",
+    )
+    if (
+        observed.get("status") != "Valid"
+        or observed.get("publisher") != WINDOWS_SETUP_PUBLISHER
+        or observed.get("signature_type") != "Authenticode"
+    ):
+        raise CandidateError("Windows Setup observed Authenticode identity is invalid")
+    signer = observed.get("signer")
+    timestamp = observed.get("timestamp")
+    if not isinstance(signer, dict) or signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256"):
+        raise CandidateError("Windows Setup Authenticode signer identity is inconsistent")
+    if (
+        not isinstance(timestamp, dict)
+        or timestamp.get("present") is not True
+        or timestamp.get("format") != "rfc3161"
+        or timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
+        or not isinstance(timestamp.get("signing_time_utc"), str)
+        or not timestamp.get("signing_time_utc")
+    ):
+        raise CandidateError("Windows Setup RFC3161 timestamp evidence is invalid")
+    timestamp_certificate = timestamp.get("certificate")
+    if not isinstance(timestamp_certificate, dict) or timestamp_certificate.get("thumbprint_sha256") != expected.get(
+        "timestamp_signer_thumbprint_sha256"
+    ):
+        raise CandidateError("Windows Setup RFC3161 signer identity is inconsistent")
+    embedded = observed.get("embedded_signatures")
+    if not isinstance(embedded, list) or len(embedded) != 1:
+        raise CandidateError("Windows Setup must contain exactly one embedded Authenticode signature")
+    embedded_signature = embedded[0]
+    if not isinstance(embedded_signature, dict) or embedded_signature.get("publisher") != WINDOWS_SETUP_PUBLISHER:
+        raise CandidateError("Windows Setup embedded Authenticode publisher is invalid")
+    embedded_signer = embedded_signature.get("signer")
+    embedded_timestamp = embedded_signature.get("timestamp")
+    if (
+        not isinstance(embedded_signer, dict)
+        or embedded_signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256")
+        or not isinstance(embedded_timestamp, dict)
+        or embedded_timestamp.get("present") is not True
+        or embedded_timestamp.get("format") != "rfc3161"
+        or embedded_timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
+    ):
+        raise CandidateError("Windows Setup embedded Authenticode timestamp identity is invalid")
+
+
+def _validate_windows_setup_sbom(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+) -> None:
+    document = _read_windows_setup_json(path, "Windows Setup SBOM")
+    expected_namespace = f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_sha256}"
+    if (
+        document.get("spdxVersion") != "SPDX-2.3"
+        or document.get("dataLicense") != "CC0-1.0"
+        or document.get("SPDXID") != "SPDXRef-DOCUMENT"
+        or document.get("documentNamespace") != expected_namespace
+        or document.get("comment") != f"DefenseClaw source commit: {commit}"
+    ):
+        raise CandidateError("Windows Setup SBOM document identity is invalid")
+    packages = document.get("packages")
+    files = document.get("files")
+    relationships = document.get("relationships")
+    if not all(isinstance(value, list) for value in (packages, files, relationships)):
+        raise CandidateError("Windows Setup SBOM inventory is invalid")
+    setup_packages = [
+        item for item in packages if isinstance(item, dict) and item.get("name") == "DefenseClaw Windows Setup"
+    ]
+    if len(setup_packages) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one Setup package")
+    package = setup_packages[0]
+    package_id = package.get("SPDXID")
+    if (
+        not isinstance(package_id, str)
+        or package.get("versionInfo") != version
+        or package.get("packageFileName") != WINDOWS_SETUP_ASSET
+    ):
+        raise CandidateError("Windows Setup SBOM package identity is invalid")
+    package_hashes = package.get("checksums")
+    if (
+        not isinstance(package_hashes, list)
+        or sum(
+            isinstance(item, dict) and item.get("algorithm") == "SHA256" and item.get("checksumValue") == setup_sha256
+            for item in package_hashes
+        )
+        != 1
+    ):
+        raise CandidateError("Windows Setup SBOM package digest is invalid")
+    expected_purl = f"pkg:github/cisco-ai-defense/defenseclaw@{version}"
+    refs = package.get("externalRefs")
+    if (
+        not isinstance(refs, list)
+        or sum(
+            isinstance(item, dict)
+            and item.get("referenceCategory") == "PACKAGE-MANAGER"
+            and item.get("referenceType") == "purl"
+            and item.get("referenceLocator") == expected_purl
+            for item in refs
+        )
+        != 1
+    ):
+        raise CandidateError("Windows Setup SBOM source package identity is invalid")
+    setup_files = [
+        item for item in files if isinstance(item, dict) and item.get("fileName") == f"./{WINDOWS_SETUP_ASSET}"
+    ]
+    if len(setup_files) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one Setup file")
+    setup_file = setup_files[0]
+    file_id = setup_file.get("SPDXID")
+    file_hashes = setup_file.get("checksums")
+    if (
+        not isinstance(file_id, str)
+        or not isinstance(file_hashes, list)
+        or sum(
+            isinstance(item, dict) and item.get("algorithm") == "SHA256" and item.get("checksumValue") == setup_sha256
+            for item in file_hashes
+        )
+        != 1
+    ):
+        raise CandidateError("Windows Setup SBOM file digest is invalid")
+    if document.get("documentDescribes") != [package_id]:
+        raise CandidateError("Windows Setup SBOM documentDescribes is invalid")
+    required_relationships = (
+        ("SPDXRef-DOCUMENT", "DESCRIBES", package_id),
+        (package_id, "CONTAINS", file_id),
+    )
+    for source, relationship_type, target in required_relationships:
+        if (
+            sum(
+                isinstance(item, dict)
+                and item.get("spdxElementId") == source
+                and item.get("relationshipType") == relationship_type
+                and item.get("relatedSpdxElement") == target
+                for item in relationships
+            )
+            != 1
+        ):
+            raise CandidateError("Windows Setup SBOM relationships are invalid")
+
+
+def _validate_windows_setup_certification(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+) -> None:
+    document = _read_windows_setup_json(path, "Windows Setup certification")
+    _require_object_fields(
+        document,
+        {
+            "schema_version",
+            "status",
+            "platform",
+            "setup",
+            "clients",
+            "connectors",
+            "requirements",
+            "source_commit",
+            "release_version",
+            "staging_artifact_digest",
+            "run_url",
+        },
+        "Windows Setup certification",
+    )
+    setup = document.get("setup")
+    if (
+        document.get("schema_version") != 1
+        or document.get("status") != "passed"
+        or document.get("platform") != "windows-x64"
+        or setup
+        != {
+            "name": WINDOWS_SETUP_ASSET,
+            "sha256": setup_sha256,
+            "publisher": WINDOWS_SETUP_PUBLISHER,
+        }
+        or document.get("clients") != WINDOWS_SETUP_CLIENTS
+        or document.get("connectors") != ["codex", "claudecode"]
+        or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
+        or document.get("source_commit") != commit
+        or document.get("release_version") != version
+    ):
+        raise CandidateError("Windows Setup certification identity or required evidence mismatch")
+    staging_digest = document.get("staging_artifact_digest")
+    if not isinstance(staging_digest, str) or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", staging_digest) is None:
+        raise CandidateError("Windows Setup certification staging digest is invalid")
+    run_url = document.get("run_url")
+    if (
+        not isinstance(run_url, str)
+        or re.fullmatch(
+            r"https://github\.com/cisco-ai-defense/defenseclaw/actions/runs/[1-9][0-9]*",
+            run_url,
+        )
+        is None
+    ):
+        raise CandidateError("Windows Setup certification run URL is invalid")
+
+
+def _validate_windows_installer_assets(
+    directory: Path,
+    version: str,
+    commit: str,
+    *,
+    exact_file_set: bool = False,
+) -> None:
+    names = windows_installer_asset_names(version)
+    if not names:
+        return
+    _require_regular_files(directory, names, "Windows installer artifact")
+    if exact_file_set and _strict_file_names(directory, "Windows installer artifact") != names:
+        raise CandidateError("Windows installer artifact directory must contain exactly five files")
+    setup_path = directory / WINDOWS_SETUP_ASSET
+    setup_sha256 = _validate_windows_setup_pe(setup_path)
+    sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
+    try:
+        sidecar_payload = sidecar.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read Windows Setup SHA-256 sidecar: {exc}") from exc
+    match = re.fullmatch(
+        rb"([0-9a-f]{64})  DefenseClawSetup-x64\.exe(?:\r\n|\n)",
+        sidecar_payload,
+    )
+    if match is None or match.group(1).decode("ascii") != setup_sha256:
+        raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
+    _validate_windows_setup_provenance(
+        directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+    )
+    _validate_windows_setup_sbom(
+        directory / f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+    )
+    _validate_windows_setup_certification(
+        directory / f"{WINDOWS_SETUP_ASSET}.certification.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+    )
+
+
 def assemble(
     runtime_dir: Path,
     macos_dir: Path,
@@ -3525,6 +4109,7 @@ def assemble(
     commit: str,
     macos_verification_status: str,
     *,
+    windows_dir: Path | None = None,
     source_tree: str | None = None,
     bridge_commit: str | None = None,
     bridge_tree: str | None = None,
@@ -3546,6 +4131,19 @@ def assemble(
     if root.exists():
         raise CandidateError(f"candidate output already exists: {root}")
 
+    windows_names = windows_installer_asset_names(version)
+    if windows_names:
+        if windows_dir is None:
+            raise CandidateError(f"release {version} requires --windows-dir")
+        _validate_windows_installer_assets(
+            windows_dir,
+            version,
+            commit,
+            exact_file_set=True,
+        )
+    elif windows_dir is not None:
+        raise CandidateError(f"release {version} forbids native Windows Setup artifacts")
+
     verify_runtime(runtime_dir, version)
     _validate_gateway_archives(runtime_dir, version, commit=commit)
     macos_names = macos_asset_names(version, macos_verification_status)
@@ -3561,16 +4159,17 @@ def assemble(
     dist.mkdir(parents=True)
     _copy_exact(runtime_dir, dist, runtime_asset_names(version))
     _copy_exact(macos_dir, dist, macos_names)
+    if windows_dir is not None:
+        _copy_exact(windows_dir, dist, windows_names)
+        _validate_windows_installer_assets(dist, version, commit)
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
     if source_map is not None and provenance is not None:
-        (dist / RELEASE_SOURCE_MAP_FILENAME).write_text(
-            _canonical_json(source_map),
-            encoding="utf-8",
+        (dist / RELEASE_SOURCE_MAP_FILENAME).write_bytes(
+            _canonical_json(source_map).encode("utf-8"),
         )
-        (dist / RELEASE_PROVENANCE_FILENAME).write_text(
-            _canonical_json(provenance),
-            encoding="utf-8",
+        (dist / RELEASE_PROVENANCE_FILENAME).write_bytes(
+            _canonical_json(provenance).encode("utf-8"),
         )
 
     notes = runtime_dir / "CHANGELOG.md"
@@ -3642,6 +4241,7 @@ def seal(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
+    _validate_windows_installer_assets(dist, version, commit)
     names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
@@ -3695,6 +4295,7 @@ def verify(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
+    _validate_windows_installer_assets(dist, version, commit)
     expected_names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, expected_names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
@@ -3825,9 +4426,15 @@ def _parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--os", choices=("darwin", "linux"), required=True)
     extract_parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
 
+    extract_windows_parser = subparsers.add_parser("extract-windows-installer-inputs")
+    extract_windows_parser.add_argument("--release-dir", type=Path, required=True)
+    extract_windows_parser.add_argument("--output-dir", type=Path, required=True)
+    extract_windows_parser.add_argument("--version", required=True)
+
     assemble_parser = subparsers.add_parser("assemble")
     assemble_parser.add_argument("--runtime-dir", type=Path, required=True)
     assemble_parser.add_argument("--macos-dir", type=Path, required=True)
+    assemble_parser.add_argument("--windows-dir", type=Path)
     assemble_parser.add_argument("--root", type=Path, required=True)
     assemble_parser.add_argument("--version", required=True)
     assemble_parser.add_argument("--commit", required=True)
@@ -3892,6 +4499,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "extract-gateway":
             extract_gateway(args.release_dir, args.output, args.version, args.os, args.arch)
             print(f"candidate gateway extracted: {args.output}")
+        elif args.command == "extract-windows-installer-inputs":
+            extract_windows_installer_inputs(args.release_dir, args.output_dir, args.version)
+            print(f"Windows installer inputs extracted: {args.output_dir}")
         elif args.command == "assemble":
             assemble(
                 args.runtime_dir,
@@ -3900,6 +4510,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.version,
                 args.commit,
                 args.macos_verification_status,
+                windows_dir=args.windows_dir,
                 source_tree=args.source_tree,
                 bridge_commit=args.bridge_commit,
                 bridge_tree=args.bridge_tree,

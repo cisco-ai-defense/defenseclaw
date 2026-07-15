@@ -387,8 +387,10 @@ function Invoke-CosignVerification {
     )) {
         $before[$path] = Get-Sha256Hex -Path $path
     }
-    $escapedVersion = [Regex]::Escape($ReleaseVersion)
-    $identity = "^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/(tags/$escapedVersion|heads/main)$"
+    # Release candidates are signed before tag creation by the protected main
+    # workflow.  Do not accept a tag-ref identity: it is not the reviewed
+    # signing path and would broaden the offline trust policy unnecessarily.
+    $identity = "^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
     $previousErrorActionPreference = $ErrorActionPreference
     $output = @()
     $exitCode = 1
