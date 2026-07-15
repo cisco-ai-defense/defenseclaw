@@ -610,6 +610,20 @@ func (reader *readerThatFailsAfterData) Read(buffer []byte) (int, error) {
 	return 0, errors.New("injected source failure")
 }
 
+func TestReadPayloadManifestAcceptsYaraCompatibilityWheel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"yara_compat_wheel":"yara_python.whl"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var manifest payloadManifest
+	if err := readJSON(path, &manifest); err != nil {
+		t.Fatalf("readJSON rejected the generated YARA compatibility field: %v", err)
+	}
+	if manifest.YaraCompatWheel != "yara_python.whl" {
+		t.Fatalf("YaraCompatWheel = %q, want yara_python.whl", manifest.YaraCompatWheel)
+	}
+}
+
 func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 	manifest := payloadManifest{
 		SchemaVersion:      1,
@@ -619,6 +633,7 @@ func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 		GatewayArchive:     "gateway.zip",
 		Wheel:              "defenseclaw.whl",
 		PythonEmbed:        "python.zip",
+		YaraCompatWheel:    "yara-python.whl",
 		SitePackages:       "site-packages.zip",
 		Launcher:           "launcher.exe",
 		StartupLauncher:    "startup.exe",

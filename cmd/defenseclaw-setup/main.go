@@ -132,6 +132,7 @@ type payloadManifest struct {
 	GatewayArchive     string            `json:"gateway_archive"`
 	Wheel              string            `json:"wheel"`
 	PythonEmbed        string            `json:"python_embed"`
+	YaraCompatWheel    string            `json:"yara_compat_wheel"`
 	UpgradeManifest    string            `json:"upgrade_manifest"`
 	SitePackages       string            `json:"site_packages"`
 	Launcher           string            `json:"launcher"`
@@ -1185,6 +1186,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		manifest.GatewayArchive,
 		manifest.Wheel,
 		manifest.PythonEmbed,
+		manifest.YaraCompatWheel,
 		manifest.SitePackages,
 		manifest.Launcher,
 		manifest.StartupLauncher,
