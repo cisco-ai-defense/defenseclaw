@@ -3015,7 +3015,7 @@ function Invoke-Contract {
         $env:PATH = "$fixturePrefix$managedPython;$managedBin;$env:PATH"
         $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
         & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
-            -StateRoot $contractRoot -HomeRoot $contractHome -NativeDataRoot $dataRoot `
+            -StateRoot $contractProfileRoot -HomeRoot $contractHome -NativeDataRoot $dataRoot `
             -AllowNativeDataRoot -ResultsPath (Join-Path $root 'results.jsonl') `
             -ArtifactPath (Join-Path $root 'contract-diagnostics')
 

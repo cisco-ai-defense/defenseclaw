@@ -962,7 +962,7 @@ try {
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
         $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
         'native Setup acceptance executes the cached Apps & Features binary and proves deferred self-delete removes InstallerCache'
-    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
+    Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
         $nativeHarnessText -match '-AllowNativeDataRoot' -and
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
         $harnessText -match 'NativeDataRoot must be the current Windows user Known-Folder data root') `
@@ -1042,9 +1042,9 @@ try {
     Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'
     Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
-    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and
+    Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome' -and
         $harnessText -match 'HomeRoot must be contained by StateRoot') `
-        'connector contract keeps the installed runtime and agent homes in one disposable ownership root'
+        'connector contract keeps alternate agent homes inside the current-user-owned profile root'
     $contractInstall = $contractFunction.IndexOf(
         'Invoke-WindowsSetupStandardUserProcess $setup',
         [StringComparison]::Ordinal
@@ -1057,8 +1057,9 @@ try {
         '$env:CLAUDE_CONFIG_DIR = $claudeHome',
         [StringComparison]::Ordinal
     )
-    Assert-True ($nativeHarnessText -match 'Join-Path \$contractRoot ''codex-home''' -and
-        $nativeHarnessText -match 'Join-Path \$contractRoot ''claude-home''' -and
+    Assert-True ($nativeHarnessText -match 'Join-Path \$realProfile ''\.defenseclaw-ci-contract''' -and
+        $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''codex-home''' -and
+        $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''claude-home''' -and
         $nativeHarnessText -match 'Assert-WindowsNativePathsDisjoint @\(\$contractHome, \$codexHome, \$claudeHome\)' -and
         $contractInstall -ge 0 -and
         $codexHomeCapture -ge 0 -and $codexHomeCapture -lt $contractInstall -and
