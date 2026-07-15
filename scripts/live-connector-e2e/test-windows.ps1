@@ -804,9 +804,13 @@ try {
         $standardUserLauncherStart -notmatch 'startupInfo\.lpDesktop\s*=') `
         'disposable PowerShell starts with hidden console-backed stdio on the exact inherited desktop'
     Assert-True ($standardUserLauncherText -match 'WaitForExitAndGetExitCode\s*\(' -and
+        $standardUserLauncherText -match 'WaitForSingleObject\s*\(' -and
+        $standardUserLauncherText -match 'GetExitCodeProcess\s*\(' -and
+        $standardUserLauncherText -match 'processInfo\.hProcess\s*=\s*IntPtr\.Zero' -and
+        $standardUserLauncherText -notmatch 'process\.WaitForExit\s*\(' -and
         $standardUserCIText -match '\.WaitForExitAndGetExitCode\s*\(' -and
         $standardUserCIText -match '\[ref\]\$exitCode') `
-        'disposable-user wrapper captures the native root exit code without nullable property projection'
+        'disposable-user wrapper retains the authoritative native handle and captures the root exit code'
     Assert-True ($standardUserCIText -match 'Disable-LocalUser' -and
         $standardUserCIText -match 'GetOwnerSid' -and
         $standardUserCIText -match 'Stop-AndVerifyDisposableSidProcesses' -and

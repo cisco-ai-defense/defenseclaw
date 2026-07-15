@@ -33,6 +33,9 @@ namespace DefenseClaw
         private const int TokenElevation = 20;
         private const int TokenPrimary = 1;
         private const uint DACL_SECURITY_INFORMATION = 0x00000004;
+        private const uint WAIT_OBJECT_0 = 0x00000000;
+        private const uint WAIT_TIMEOUT = 0x00000102;
+        private const uint WAIT_FAILED = 0xFFFFFFFF;
         private const int ERROR_INSUFFICIENT_BUFFER = 122;
 
         // Deliberately excludes WINSTA_EXITWINDOWS. The child may enumerate
@@ -238,6 +241,13 @@ namespace DefenseClaw
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
         [DllImport("kernel32.dll")]
         private static extern uint SetErrorMode(uint mode);
 
@@ -418,8 +428,13 @@ namespace DefenseClaw
                 }
                 resumed = true;
                 DisposableStandardUserProcess result =
-                    new DisposableStandardUserProcess(process, job, previousSuspendCount);
+                    new DisposableStandardUserProcess(
+                        process,
+                        processInfo.hProcess,
+                        job,
+                        previousSuspendCount);
                 process = null;
+                processInfo.hProcess = IntPtr.Zero;
                 job = IntPtr.Zero;
                 return result;
             }
@@ -791,37 +806,86 @@ namespace DefenseClaw
         {
             private readonly Process process;
             private readonly uint initialSuspendCount;
+            private IntPtr processHandle;
             private IntPtr job;
             private bool disposed;
 
             internal DisposableStandardUserProcess(
                 Process process,
+                IntPtr processHandle,
                 IntPtr job,
                 uint initialSuspendCount)
             {
                 this.process = process;
+                this.processHandle = processHandle;
                 this.job = job;
                 this.initialSuspendCount = initialSuspendCount;
             }
 
             public int Id { get { return process.Id; } }
-            public bool HasExited { get { return process.HasExited; } }
-            public int ExitCode { get { return process.ExitCode; } }
+            public bool HasExited { get { return WaitForNativeExit(0); } }
+            public int ExitCode
+            {
+                get
+                {
+                    if (!WaitForNativeExit(0))
+                    {
+                        throw new InvalidOperationException("process has not exited");
+                    }
+                    return ReadNativeExitCode();
+                }
+            }
 
             public bool WaitForExit(int milliseconds)
             {
-                return process.WaitForExit(milliseconds);
+                return WaitForNativeExit(milliseconds);
             }
 
             public bool WaitForExitAndGetExitCode(int milliseconds, out int exitCode)
             {
                 exitCode = 0;
-                if (!process.WaitForExit(milliseconds))
+                if (!WaitForNativeExit(milliseconds))
                 {
                     return false;
                 }
-                exitCode = process.ExitCode;
+                exitCode = ReadNativeExitCode();
                 return true;
+            }
+
+            private bool WaitForNativeExit(int milliseconds)
+            {
+                if (disposed || processHandle == IntPtr.Zero)
+                {
+                    throw new ObjectDisposedException("DisposableStandardUserProcess");
+                }
+                if (milliseconds < -1)
+                {
+                    throw new ArgumentOutOfRangeException("milliseconds");
+                }
+                uint timeout = milliseconds == -1 ? UInt32.MaxValue : checked((uint)milliseconds);
+                uint result = WaitForSingleObject(processHandle, timeout);
+                if (result == WAIT_OBJECT_0) return true;
+                if (result == WAIT_TIMEOUT) return false;
+                if (result == WAIT_FAILED)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "WaitForSingleObject failed for disposable standard-user process");
+                }
+                throw new InvalidOperationException(
+                    "WaitForSingleObject returned unexpected status " + result);
+            }
+
+            private int ReadNativeExitCode()
+            {
+                uint exitCode;
+                if (!GetExitCodeProcess(processHandle, out exitCode))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetExitCodeProcess failed for disposable standard-user process");
+                }
+                return unchecked((int)exitCode);
             }
 
             public uint ActiveProcessCount
@@ -836,13 +900,14 @@ namespace DefenseClaw
                 diagnostic.Append(" resume_previous_count=").Append(initialSuspendCount);
                 try
                 {
-                    process.Refresh();
-                    diagnostic.Append(" has_exited=").Append(process.HasExited);
-                    if (process.HasExited)
+                    bool hasExited = WaitForNativeExit(0);
+                    diagnostic.Append(" has_exited=").Append(hasExited);
+                    if (hasExited)
                     {
-                        diagnostic.Append(" exit_code=").Append(process.ExitCode);
+                        diagnostic.Append(" exit_code=").Append(ReadNativeExitCode());
                         return diagnostic.ToString();
                     }
+                    process.Refresh();
                     diagnostic.Append(" cpu_ms=").Append(
                         (long)process.TotalProcessorTime.TotalMilliseconds);
                     int emitted = 0;
@@ -907,7 +972,7 @@ namespace DefenseClaw
                     CloseHandle(job);
                     job = IntPtr.Zero;
                 }
-                if (!process.HasExited && !process.WaitForExit(milliseconds))
+                if (!WaitForNativeExit(milliseconds))
                 {
                     throw new InvalidOperationException(
                         "disposable standard-user root process did not exit after job termination");
@@ -933,8 +998,19 @@ namespace DefenseClaw
                         CloseHandle(job);
                         job = IntPtr.Zero;
                     }
-                    process.Dispose();
-                    disposed = true;
+                    try
+                    {
+                        process.Dispose();
+                    }
+                    finally
+                    {
+                        if (processHandle != IntPtr.Zero)
+                        {
+                            CloseHandle(processHandle);
+                            processHandle = IntPtr.Zero;
+                        }
+                        disposed = true;
+                    }
                 }
             }
         }
