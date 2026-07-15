@@ -42,6 +42,11 @@ function Get-DefenseClawCertificateChainEvidence(
         # release depending on transient revocation-network availability.
         $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
         $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+        $disableDownloads = $chain.ChainPolicy.PSObject.Properties['DisableCertificateDownloads']
+        if ($null -eq $disableDownloads) {
+            throw 'Offline Authenticode chain evidence requires a runtime with cache-only certificate-chain support.'
+        }
+        $chain.ChainPolicy.DisableCertificateDownloads = $true
         $built = $chain.Build($Certificate)
         $statuses = @($chain.ChainStatus | ForEach-Object { [string]$_.Status } | Sort-Object -Unique)
         $certificates = @($chain.ChainElements | ForEach-Object {

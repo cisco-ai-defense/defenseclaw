@@ -134,6 +134,16 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 	}
 }
 
+func TestParseArgsVerifyAction(t *testing.T) {
+	opts, err := parseArgs([]string{"/verify"})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.Action != "verify" {
+		t.Fatalf("action = %q, want verify", opts.Action)
+	}
+}
+
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	for _, connector := range []string{"none", "codex", "claudecode"} {
 		for _, mode := range []string{"observe", "action"} {

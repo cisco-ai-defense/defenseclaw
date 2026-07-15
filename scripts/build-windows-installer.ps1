@@ -216,7 +216,8 @@ function Build-VerifiedGoBinary(
     [string]$Output,
     [string]$Package,
     [string]$LdFlags,
-    [string]$VerificationRoot
+    [string]$VerificationRoot,
+    [string]$ResourceComponent = ''
 ) {
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Output)) | Out-Null
     [IO.Directory]::CreateDirectory($VerificationRoot) | Out-Null
@@ -234,6 +235,9 @@ function Build-VerifiedGoBinary(
                 'build', '-trimpath', '-buildvcs=false', '-ldflags', $LdFlags,
                 '-o', $target, $Package
             )
+            if (-not [string]::IsNullOrWhiteSpace($ResourceComponent)) {
+                Set-WindowsExecutableResource $target $ResourceComponent
+            }
             $hashes += Get-FileHashHex $target
         }
         $verificationHash = $hashes[0]
@@ -636,11 +640,9 @@ $siteZip = Join-Path $payload "site-packages.zip"
 Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot
 
 $launcher = Join-Path $payload "defenseclaw-launcher.exe"
-Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot
-Set-WindowsExecutableResource $launcher 'launcher'
+Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot 'launcher'
 $startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
-Build-VerifiedGoBinary $startupLauncher './cmd/defenseclaw-startup' "-s -w -buildid=defenseclaw-startup-$sourceCommit -H=windowsgui" $reproducibilityRoot
-Set-WindowsExecutableResource $startupLauncher 'startup'
+Build-VerifiedGoBinary $startupLauncher './cmd/defenseclaw-startup' "-s -w -buildid=defenseclaw-startup-$sourceCommit -H=windowsgui" $reproducibilityRoot 'startup'
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build

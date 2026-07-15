@@ -26,6 +26,7 @@ const (
 	productAuthenticodePolicy          = "defenseclaw-product-publisher"
 	pinnedInputAuthenticodePolicy      = "pinned-input-observation"
 	digestOnlyAuthenticodePolicy       = "digest-only-upstream"
+	maxEmbeddedCertificateTableSize    = 16 << 20
 )
 
 var (
@@ -330,56 +331,87 @@ func takeASN1(input []byte) (asn1.RawValue, []byte, error) {
 }
 
 func readEmbeddedPKCS7(filePath string) ([]byte, bool, error) {
-	data, err := os.ReadFile(filePath)
+	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, false, err
 	}
-	if len(data) < 64 || binary.LittleEndian.Uint16(data[:2]) != 0x5a4d {
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	fileSize := info.Size()
+	readRegion := func(offset, size int64) ([]byte, error) {
+		if offset < 0 || size < 0 || offset > fileSize || size > fileSize-offset {
+			return nil, errors.New("portable executable region is outside the file")
+		}
+		region := make([]byte, int(size))
+		if _, err := file.ReadAt(region, offset); err != nil {
+			return nil, err
+		}
+		return region, nil
+	}
+	dosHeader, err := readRegion(0, 64)
+	if err != nil || binary.LittleEndian.Uint16(dosHeader[:2]) != 0x5a4d {
 		return nil, false, errors.New("file is not a portable executable")
 	}
-	peOffset := int64(int32(binary.LittleEndian.Uint32(data[0x3c:0x40])))
-	if peOffset < 0 || peOffset+24 > int64(len(data)) ||
-		binary.LittleEndian.Uint32(data[peOffset:peOffset+4]) != 0x00004550 {
+	peOffset := int64(int32(binary.LittleEndian.Uint32(dosHeader[0x3c:0x40])))
+	if peOffset < 0 || peOffset > fileSize-24 {
 		return nil, false, errors.New("portable executable has an invalid PE header")
 	}
-	optionalSize := int64(binary.LittleEndian.Uint16(data[peOffset+20 : peOffset+22]))
+	peHeader, err := readRegion(peOffset, 24)
+	if err != nil || binary.LittleEndian.Uint32(peHeader[:4]) != 0x00004550 {
+		return nil, false, errors.New("portable executable has an invalid PE header")
+	}
+	optionalSize := int64(binary.LittleEndian.Uint16(peHeader[20:22]))
 	optionalOffset := peOffset + 24
-	if optionalSize < 0 || optionalOffset+optionalSize > int64(len(data)) || optionalSize < 136 {
+	if optionalSize < 136 || optionalOffset > fileSize-optionalSize {
 		return nil, false, errors.New("portable executable has an invalid optional header")
 	}
-	magic := binary.LittleEndian.Uint16(data[optionalOffset : optionalOffset+2])
-	dataDirectoriesOffset := int64(0)
+	optionalHeader, err := readRegion(optionalOffset, optionalSize)
+	if err != nil {
+		return nil, false, errors.New("portable executable has an invalid optional header")
+	}
+	magic := binary.LittleEndian.Uint16(optionalHeader[:2])
+	dataDirectoriesOffset := 0
 	switch magic {
 	case 0x10b:
-		dataDirectoriesOffset = optionalOffset + 96
+		dataDirectoriesOffset = 96
 	case 0x20b:
-		dataDirectoriesOffset = optionalOffset + 112
+		dataDirectoriesOffset = 112
 	default:
 		return nil, false, errors.New("portable executable has an unsupported optional header")
 	}
-	if dataDirectoriesOffset+40 > optionalOffset+optionalSize {
+	if dataDirectoriesOffset+40 > len(optionalHeader) {
 		return nil, false, errors.New("portable executable omits the security directory")
 	}
-	certificateOffset := int64(binary.LittleEndian.Uint32(data[dataDirectoriesOffset+32 : dataDirectoriesOffset+36]))
-	certificateSize := int64(binary.LittleEndian.Uint32(data[dataDirectoriesOffset+36 : dataDirectoriesOffset+40]))
+	certificateOffset := int64(binary.LittleEndian.Uint32(optionalHeader[dataDirectoriesOffset+32 : dataDirectoriesOffset+36]))
+	certificateSize := int64(binary.LittleEndian.Uint32(optionalHeader[dataDirectoriesOffset+36 : dataDirectoriesOffset+40]))
 	if certificateOffset == 0 && certificateSize == 0 {
 		return nil, false, nil
 	}
-	if certificateOffset <= 0 || certificateSize < 8 || certificateOffset+certificateSize > int64(len(data)) {
+	if certificateOffset <= 0 || certificateSize < 8 || certificateOffset > fileSize-certificateSize {
+		return nil, false, errors.New("portable executable has an invalid certificate table")
+	}
+	if certificateSize > maxEmbeddedCertificateTableSize {
+		return nil, false, errors.New("portable executable certificate table is too large")
+	}
+	certificateTable, err := readRegion(certificateOffset, certificateSize)
+	if err != nil {
 		return nil, false, errors.New("portable executable has an invalid certificate table")
 	}
 	var selected []byte
-	for cursor, end := certificateOffset, certificateOffset+certificateSize; cursor+8 <= end; {
-		length := int64(binary.LittleEndian.Uint32(data[cursor : cursor+4]))
-		certificateType := binary.LittleEndian.Uint16(data[cursor+6 : cursor+8])
-		if length < 8 || cursor+length > end {
+	for cursor, end := 0, len(certificateTable); cursor+8 <= end; {
+		length := int(binary.LittleEndian.Uint32(certificateTable[cursor : cursor+4]))
+		certificateType := binary.LittleEndian.Uint16(certificateTable[cursor+6 : cursor+8])
+		if length < 8 || length > end-cursor {
 			return nil, false, errors.New("portable executable has a malformed WIN_CERTIFICATE record")
 		}
 		if certificateType == 0x0002 {
 			if selected != nil {
 				return nil, false, errors.New("portable executable has multiple PKCS#7 certificate-table records")
 			}
-			selected = append([]byte(nil), data[cursor+8:cursor+length]...)
+			selected = append([]byte(nil), certificateTable[cursor+8:cursor+length]...)
 		}
 		cursor += (length + 7) &^ 7
 	}

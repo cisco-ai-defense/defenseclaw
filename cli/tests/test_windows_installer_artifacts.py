@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -315,6 +316,31 @@ def test_builder_checks_distroot_gateway_and_hook_identity_before_signing() -> N
     assert build.index(hook_check) < build.index(signing_call)
 
 
+def test_reproducible_launcher_builds_include_final_pe_resources() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^function Build-VerifiedGoBinary\b.*?(?=^function |\Z)", build
+    )
+    assert function
+    body = function.group(0)
+    assert "foreach ($target in @($verification, $Output))" in body
+    assert "Set-WindowsExecutableResource $target $ResourceComponent" in body
+    assert body.index("Set-WindowsExecutableResource") < body.index("Get-FileHashHex $target")
+    assert "Build-VerifiedGoBinary $launcher" in build and "$reproducibilityRoot 'launcher'" in build
+    assert "Build-VerifiedGoBinary $startupLauncher" in build and "$reproducibilityRoot 'startup'" in build
+
+
+def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
+    authenticode = AUTHENTICODE_PS1.read_text(encoding="utf-8")
+    identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
+    assert "DisableCertificateDownloads" in authenticode
+    assert "$chain.ChainPolicy.DisableCertificateDownloads = $true" in authenticode
+    assert "runtime with cache-only certificate-chain support" in authenticode
+    assert "$process.WaitForExit($remaining)" in identity
+    assert "$drainTask.Wait($remaining)" in identity
+    assert "$process.WaitForExit()" not in identity
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
 def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path) -> None:
     go = shutil.which("go")
@@ -376,6 +402,61 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         assert diagnostic in (result.stdout + result.stderr)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handle inheritance")
+def test_binary_identity_output_drain_shares_the_process_deadline(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    pwsh = shutil.which("pwsh")
+    if not go or not pwsh:
+        pytest.skip("Go and PowerShell are required for the binary identity timeout regression")
+
+    source = tmp_path / "main.go"
+    source.write_text(
+        "package main\n"
+        'import ("encoding/json"; "os"; "os/exec")\n'
+        "func main() {\n"
+        ' child := exec.Command("cmd.exe", "/d", "/c", "ping -n 6 127.0.0.1 >nul")\n'
+        " child.Stdout = os.Stdout; child.Stderr = os.Stderr; _ = child.Start()\n"
+        ' _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"schema_version":1,'
+        '"name":"defenseclaw-gateway","version":"1.2.3",'
+        '"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "inherited-output.exe"
+    subprocess.run(
+        [go, "build", "-o", executable, source],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    command = (
+        ". $env:DC_IDENTITY_HELPER; "
+        "Assert-DefenseClawBinaryIdentity -Path $env:DC_IDENTITY_BINARY "
+        "-ExpectedName defenseclaw-gateway -ExpectedVersion 1.2.3 "
+        "-ExpectedCommit ('a' * 40) -TimeoutSeconds 1"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "DC_IDENTITY_HELPER": str(BINARY_IDENTITY_PS1),
+            "DC_IDENTITY_BINARY": str(executable),
+        }
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - started
+    assert result.returncode != 0
+    assert "identity output streams did not close within 1 seconds" in result.stdout + result.stderr
+    assert elapsed < 5
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")
 def test_digest_only_authenticode_evidence_is_strict_mode_safe(tmp_path: Path) -> None:
     go = shutil.which("go")
@@ -429,6 +510,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     document = json.loads(args.output.read_text(encoding="utf-8"))
 
     assert document["spdxVersion"] == "SPDX-2.3"
+    assert document["comment"] == f"DefenseClaw source commit: {args.source_commit}"
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
     assert summary["payload_digests"] == 10

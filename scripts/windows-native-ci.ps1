@@ -3114,6 +3114,9 @@ function Assert-WindowsReleaseCertificationEnvironment {
     if ([string]$env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$') {
         throw 'release-certification requires the exact lowercase 40-character GITHUB_SHA'
     }
+    if ([string]$env:WINDOWS_RELEASE_VERSION -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+        throw 'release-certification requires the exact resolved WINDOWS_RELEASE_VERSION'
+    }
     foreach ($secretName in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY')) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($secretName))) {
             throw "$secretName is required for non-advisory real-client release certification"
@@ -3136,10 +3139,42 @@ function Install-PinnedWindowsReleaseClient(
     Assert-ExactWindowsReleaseClientVersion $Specification.Version $Specification.Connector
     Protect-TestDirectory $ClientRoot
     $npm = Get-RequiredCommand 'npm.cmd'
-    Invoke-WindowsNativeProcess $npm @(
-        'install', '--no-audit', '--no-fund', '--package-lock=false',
-        '--prefix', $ClientRoot, "$($Specification.Package)@$($Specification.Version)"
-    ) -TimeoutSeconds 600 -LogPath (Join-Path $Logs "npm-$($Specification.Connector).log") | Out-Null
+    $apiKeyEnvironment = @{}
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $name = [string]$entry.Key
+        if ($name -match '(?i)_API_KEY$') {
+            $apiKeyEnvironment[$name] = [string]$entry.Value
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+    }
+    try {
+        # Resolve the complete transitive graph once, then require npm ci to
+        # consume that exact lock without mutating it. Authentication secrets
+        # are deliberately unavailable to both npm processes and package code.
+        Invoke-WindowsNativeProcess $npm @(
+            'install', '--package-lock-only', '--ignore-scripts', '--save-exact',
+            '--no-audit', '--no-fund', '--prefix', $ClientRoot,
+            "$($Specification.Package)@$($Specification.Version)"
+        ) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $Logs "npm-resolve-$($Specification.Connector).log") | Out-Null
+        $lockPath = Join-Path $ClientRoot 'package-lock.json'
+        if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+            throw "official client dependency lock is missing: $lockPath"
+        }
+        $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+        Invoke-WindowsNativeProcess $npm @(
+            'ci', '--no-audit', '--no-fund', '--prefix', $ClientRoot
+        ) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $Logs "npm-install-$($Specification.Connector).log") | Out-Null
+        $installedLockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+        if ($installedLockHash -cne $lockHash) {
+            throw 'npm ci mutated the exact official-client dependency lock'
+        }
+    } finally {
+        foreach ($name in $apiKeyEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $apiKeyEnvironment[$name], 'Process')
+        }
+    }
     $manifestPath = Join-Path $ClientRoot $Specification.Manifest
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "official client package manifest is missing: $manifestPath"
@@ -3154,6 +3189,88 @@ function Install-PinnedWindowsReleaseClient(
         throw "official client executable is missing: $command"
     }
     return [IO.Path]::GetFullPath($command)
+}
+
+function Assert-WindowsReleaseSbom(
+    [string]$Path,
+    [string]$SetupHash,
+    [string]$Version,
+    [string]$SourceCommit
+) {
+    $sbom = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sbom.spdxVersion -cne 'SPDX-2.3' -or
+        [string]$sbom.dataLicense -cne 'CC0-1.0' -or
+        [string]$sbom.SPDXID -cne 'SPDXRef-DOCUMENT') {
+        throw 'release setup SBOM is not the required SPDX 2.3 document'
+    }
+    $escapedVersion = [Uri]::EscapeDataString($Version)
+    $expectedNamespace = "https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/$escapedVersion/$SetupHash"
+    if ([string]$sbom.documentNamespace -cne $expectedNamespace) {
+        throw 'release setup SBOM namespace does not identify the exact installer bytes and version'
+    }
+    if ([string]$sbom.comment -cne "DefenseClaw source commit: $SourceCommit") {
+        throw 'release setup SBOM source commit does not match GITHUB_SHA'
+    }
+
+    $setupPackages = @($sbom.packages | Where-Object {
+        [string]$_.name -ceq 'DefenseClaw Windows Setup'
+    })
+    if ($setupPackages.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one Setup package'
+    }
+    $setupPackage = $setupPackages[0]
+    if ([string]$setupPackage.versionInfo -cne $Version -or
+        [string]$setupPackage.packageFileName -cne 'DefenseClawSetup-x64.exe') {
+        throw 'release setup SBOM package identity is invalid'
+    }
+    $packageHashes = @($setupPackage.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and [string]$_.checksumValue -ceq $SetupHash
+    })
+    if ($packageHashes.Count -ne 1) {
+        throw 'release setup SBOM package does not identify the exact installer SHA-256'
+    }
+    $expectedPurl = "pkg:github/cisco-ai-defense/defenseclaw@$escapedVersion"
+    $purls = @($setupPackage.externalRefs | Where-Object {
+        [string]$_.referenceCategory -ceq 'PACKAGE-MANAGER' -and
+        [string]$_.referenceType -ceq 'purl' -and
+        [string]$_.referenceLocator -ceq $expectedPurl
+    })
+    if ($purls.Count -ne 1) {
+        throw 'release setup SBOM package does not identify the expected source project and version'
+    }
+
+    $setupFiles = @($sbom.files | Where-Object {
+        [string]$_.fileName -ceq './DefenseClawSetup-x64.exe'
+    })
+    if ($setupFiles.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one canonical Setup file'
+    }
+    $setupFile = $setupFiles[0]
+    $fileHashes = @($setupFile.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and [string]$_.checksumValue -ceq $SetupHash
+    })
+    if ($fileHashes.Count -ne 1) {
+        throw 'release setup SBOM file does not identify the exact installer SHA-256'
+    }
+    $packageID = [string]$setupPackage.SPDXID
+    $fileID = [string]$setupFile.SPDXID
+    $described = @($sbom.documentDescribes)
+    if ($described.Count -ne 1 -or [string]$described[0] -cne $packageID) {
+        throw 'release setup SBOM documentDescribes does not identify only the Setup package'
+    }
+    $describesRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq 'SPDXRef-DOCUMENT' -and
+        [string]$_.relationshipType -ceq 'DESCRIBES' -and
+        [string]$_.relatedSpdxElement -ceq $packageID
+    })
+    $containsRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq $packageID -and
+        [string]$_.relationshipType -ceq 'CONTAINS' -and
+        [string]$_.relatedSpdxElement -ceq $fileID
+    })
+    if ($describesRelationships.Count -ne 1 -or $containsRelationships.Count -ne 1) {
+        throw 'release setup SBOM relationships do not bind the document, package, and Setup file'
+    }
 }
 
 function Assert-WindowsReleasePersistentPath([string]$ExpectedLauncher, [string]$Logs) {
@@ -3307,7 +3424,8 @@ function Invoke-WindowsReleaseCertification {
     $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
     $sidecarPath = "$setup.sha256"
     $provenancePath = "$setup.provenance.json"
-    foreach ($metadataPath in @($sidecarPath, $provenancePath, "$setup.sbom.json")) {
+    $sbomPath = "$setup.sbom.json"
+    foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
         if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
             throw "release setup metadata is missing: $metadataPath"
         }
@@ -3322,6 +3440,17 @@ function Invoke-WindowsReleaseCertification {
     }
     if ([string]$provenance.source_commit -cne [string]$env:GITHUB_SHA) {
         throw "release setup provenance source commit does not match GITHUB_SHA: $($provenance.source_commit)"
+    }
+    $releaseVersion = [string]$env:WINDOWS_RELEASE_VERSION
+    if ([string]$provenance.version -cne $releaseVersion) {
+        throw "release setup provenance version does not match the resolved release: $($provenance.version) != $releaseVersion"
+    }
+    Assert-WindowsReleaseSbom `
+        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA)
+    $releaseMetadataHashes = @{}
+    foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
+        $releaseMetadataHashes[$metadataPath] = `
+            (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 
     $logs = Join-Path $root 'logs'
@@ -3421,6 +3550,9 @@ function Invoke-WindowsReleaseCertification {
             if ([string]$installedIdentity.source_commit -cne [string]$env:GITHUB_SHA) {
                 throw "installed source commit does not match GITHUB_SHA in $identityPath"
             }
+            if ([string]$installedIdentity.version -cne $releaseVersion) {
+                throw "installed version does not match resolved release in ${identityPath}: $($installedIdentity.version) != $releaseVersion"
+            }
         }
         Assert-WindowsReleasePersistentPath $launcher $logs
         $env:PATH = "$bin;$(@($toolBins) -join ';');$($originalEnvironment['PATH'])"
@@ -3461,6 +3593,13 @@ function Invoke-WindowsReleaseCertification {
             throw 'the signed DefenseClawSetup-x64.exe bytes changed during release certification'
         }
         Assert-CiscoAuthenticodeSignature $setup
+        foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
+            $finalMetadataHash = `
+                (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($finalMetadataHash -cne $releaseMetadataHashes[$metadataPath]) {
+                throw "release metadata changed during real-client certification: $metadataPath"
+            }
+        }
         foreach ($requiredRunValue in @('GITHUB_SERVER_URL', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_SHA')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($requiredRunValue))) {
                 throw "$requiredRunValue is required for durable release certification evidence"
@@ -3477,7 +3616,10 @@ function Invoke-WindowsReleaseCertification {
                 sha256 = $setupHash
                 publisher = 'Cisco Systems, Inc.'
             }
-            clients = [ordered]@{ codex = '0.144.3'; claudecode = '2.1.208' }
+            clients = [ordered]@{
+                codex = [string]$clients['codex'].Specification.Version
+                claudecode = [string]$clients['claudecode'].Specification.Version
+            }
             connectors = @('codex', 'claudecode')
             requirements = @(
                 'automatic-codex-trust', 'lifecycle', 'tool-allow', 'tool-block',
@@ -3485,6 +3627,7 @@ function Invoke-WindowsReleaseCertification {
                 'repair', 'upgrade', 'uninstall'
             )
             source_commit = $env:GITHUB_SHA
+            release_version = $releaseVersion
             staging_artifact_digest = ([string]$env:WINDOWS_RELEASE_ARTIFACT_DIGEST).ToLowerInvariant()
             run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
         }

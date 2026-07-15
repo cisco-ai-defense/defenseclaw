@@ -40,10 +40,33 @@ function Assert-DefenseClawBinaryIdentity {
     try {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $process.Kill($true) } catch {}
-            $process.WaitForExit()
-            throw "DefenseClaw identity input timed out: $Path"
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $remaining = [Math]::Max(0, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+        if (-not $process.WaitForExit($remaining)) {
+            $killFailure = $null
+            try {
+                $process.Kill($true)
+            } catch {
+                $killFailure = $_.Exception.Message
+                try {
+                    $process.Kill()
+                } catch {
+                    $killFailure += "; fallback kill failed: $($_.Exception.Message)"
+                }
+            }
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                $detail = if ($killFailure) { "; kill failed: $killFailure" } else { '' }
+                throw "DefenseClaw identity input timed out and cleanup did not complete: ${Path}${detail}"
+            }
+            $detail = if ($killFailure) { "; kill failed: $killFailure" } else { '' }
+            throw "DefenseClaw identity input timed out: ${Path}${detail}"
+        }
+        $remaining = [Math]::Max(0, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+        $drainTask = [Threading.Tasks.Task]::WhenAll(
+            [Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+        )
+        if (-not $drainTask.Wait($remaining)) {
+            throw "DefenseClaw identity output streams did not close within $TimeoutSeconds seconds: $Path"
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()

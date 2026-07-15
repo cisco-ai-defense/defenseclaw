@@ -985,8 +985,12 @@ function Install-Agent {
         $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') `
             -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
         $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
-        $escapedVersion = [regex]::Escape($ExpectedAgentVersion)
-        if ($script:AgentVersion -notmatch "(?<![0-9.])$escapedVersion(?![0-9.])") {
+        $observedVersions = [regex]::Matches(
+            $script:AgentVersion,
+            '(?<![0-9A-Za-z.+-])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![0-9A-Za-z.+-])'
+        )
+        if ($observedVersions.Count -ne 1 -or
+            $observedVersions[0].Value -cne $ExpectedAgentVersion) {
             throw "$Connector client version output '$($script:AgentVersion)' does not prove exact pin $ExpectedAgentVersion"
         }
         Write-Result install pass "exact=$ExpectedAgentVersion output=$($script:AgentVersion)"

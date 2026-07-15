@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -27,6 +28,56 @@ func unsignedTestPE() []byte {
 	binary.LittleEndian.PutUint32(data[optional+108:optional+112], 16)
 	copy(data[400:], []byte("DefenseClaw unsigned PE fixture"))
 	return data
+}
+
+func setTestPECertificateTable(data []byte, offset, size uint32) {
+	optional := 0x80 + 24
+	securityDirectory := optional + 112 + 32
+	binary.LittleEndian.PutUint32(data[securityDirectory:securityDirectory+4], offset)
+	binary.LittleEndian.PutUint32(data[securityDirectory+4:securityDirectory+8], size)
+}
+
+func TestReadEmbeddedPKCS7ReadsCertificateTable(t *testing.T) {
+	data := unsignedTestPE()
+	payload := []byte("pkcs7-fixture")
+	const certificateOffset = 400
+	recordLength := 8 + len(payload)
+	recordSize := (recordLength + 7) &^ 7
+	setTestPECertificateTable(data, certificateOffset, uint32(recordSize))
+	binary.LittleEndian.PutUint32(data[certificateOffset:certificateOffset+4], uint32(recordLength))
+	binary.LittleEndian.PutUint16(data[certificateOffset+4:certificateOffset+6], 0x0200)
+	binary.LittleEndian.PutUint16(data[certificateOffset+6:certificateOffset+8], 0x0002)
+	copy(data[certificateOffset+8:], payload)
+	path := filepath.Join(t.TempDir(), "signed.exe")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, present, err := readEmbeddedPKCS7(path)
+	if err != nil {
+		t.Fatalf("readEmbeddedPKCS7: %v", err)
+	}
+	if !present || !bytes.Equal(got, payload) {
+		t.Fatalf("PKCS#7 = %x, present=%t; want %x, true", got, present, payload)
+	}
+}
+
+func TestReadEmbeddedPKCS7RejectsOversizedCertificateTable(t *testing.T) {
+	data := unsignedTestPE()
+	const certificateOffset = 512
+	certificateSize := uint32(maxEmbeddedCertificateTableSize + 1)
+	setTestPECertificateTable(data, certificateOffset, certificateSize)
+	path := filepath.Join(t.TempDir(), "oversized.exe")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, int64(certificateOffset)+int64(certificateSize)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := readEmbeddedPKCS7(path); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("readEmbeddedPKCS7 oversized table error = %v", err)
+	}
 }
 
 func digestBytes(data []byte) string {

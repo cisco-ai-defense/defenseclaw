@@ -288,6 +288,17 @@ func run(opts options) (int, error) {
 		printUsage()
 		return 0, nil
 	}
+	if opts.Action == "verify" {
+		self, err := os.Executable()
+		if err != nil {
+			return 1, err
+		}
+		if err := verifySetupExecutablePolicyAt(self, false); err != nil {
+			return 1, fmt.Errorf("verify setup Authenticode policy: %w", err)
+		}
+		fmt.Println("DefenseClaw Setup Authenticode verification succeeded")
+		return 0, nil
+	}
 	// INS-32: this read-only token/session/desktop gate must remain the first
 	// operation for every state-changing action. The setup mutex, known-folder
 	// resolution, registry, and filesystem transaction code below are all
@@ -1123,7 +1134,7 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 		return fmt.Errorf("gateway version check: %w", err)
 	}
 	hook := filepath.Join(root, "bin", "defenseclaw-hook.exe")
-	output, err = runCapturedSetupCommand(setupValidationTimeout, childEnv, hook, "--version-json")
+	output, err = runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, hook, "--version-json")
 	if err != nil {
 		return fmt.Errorf("hook version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -1657,6 +1668,8 @@ func parseArgs(args []string) (options, error) {
 		switch lower {
 		case "/?", "-?", "/help", "--help":
 			opts.Action = "help"
+		case "/verify", "-verify", "--verify":
+			opts.Action = "verify"
 		case "/quiet", "-quiet", "--quiet", "/qn":
 			opts.Quiet = true
 		case "/norestart":
@@ -1749,7 +1762,7 @@ func normalizeConnector(value string) string {
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1]")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 

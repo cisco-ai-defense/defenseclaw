@@ -5,6 +5,7 @@
 package connector
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -154,8 +155,22 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.setup(t, path)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read unsafe token before provisioning attempt: %v", err)
+			}
 			if got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
 				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
+			}
+			if got, err := EnsureOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
+				t.Fatalf("EnsureOTLPPathToken succeeded with token %q, want error", got)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read unsafe token after provisioning attempt: %v", err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("rejected provisioning modified the existing unsafe token")
 			}
 		})
 	}

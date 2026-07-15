@@ -45,7 +45,8 @@ merge gate. Production publication has a separate required Windows release
 cell: it installs the exact Authenticode-signed Setup artifact, installs exact
 official Codex and Claude Code versions, fails closed when either provider
 credential is unavailable, and requires both connectors' live allow/block,
-automatic-trust, audit, and OTLP evidence. `publish` depends on that cell, and
+audit, and OTLP evidence, plus Codex automatic-trust evidence. `publish`
+depends on that cell, and
 the resulting `DefenseClawSetup-x64.exe.certification.json` is included in the
 signed release checksum set. Its bounded three-hour job budget leaves time for
 cleanup and failure-diagnostics upload after every bounded child operation. The

@@ -137,6 +137,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('py-' + $env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD)
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Sync locked Python environment
@@ -216,6 +217,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Parse every PowerShell script
@@ -357,6 +359,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

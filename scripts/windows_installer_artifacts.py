@@ -363,10 +363,11 @@ def _declared_license(metadata) -> tuple[str, str | None]:
 
 
 class SpdxDocument:
-    def __init__(self, name: str, namespace: str, created: str):
+    def __init__(self, name: str, namespace: str, created: str, source_commit: str):
         self.name = name
         self.namespace = namespace
         self.created = created
+        self.source_commit = source_commit
         self.files: dict[str, dict] = {}
         self.file_sha1: dict[str, str] = {}
         self.packages: dict[str, dict] = {}
@@ -468,6 +469,7 @@ class SpdxDocument:
             "SPDXID": "SPDXRef-DOCUMENT",
             "name": self.name,
             "documentNamespace": self.namespace,
+            "comment": f"DefenseClaw source commit: {self.source_commit}",
             "creationInfo": {
                 "created": self.created,
                 "creators": [
@@ -903,7 +905,9 @@ def build_sbom(args: argparse.Namespace) -> dict:
         "https://github.com/cisco-ai-defense/defenseclaw/"
         f"spdx/windows/{urllib.parse.quote(args.version, safe='-._~')}/{setup_sha256}"
     )
-    document = SpdxDocument(f"DefenseClawSetup-x64.exe-{args.version}", namespace, created)
+    document = SpdxDocument(
+        f"DefenseClawSetup-x64.exe-{args.version}", namespace, created, args.source_commit
+    )
 
     setup_id = document.add_package(
         "windows-setup",

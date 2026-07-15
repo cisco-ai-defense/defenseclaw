@@ -588,6 +588,7 @@ jobs:
           }
       - name: Build and Authenticode-sign native setup executable
         env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
@@ -615,7 +616,7 @@ jobs:
 
   windows-real-client-certification:
     name: Certify signed installer with real Windows clients
-    needs: windows-installer
+    needs: [release, windows-installer]
     runs-on: windows-latest
     # Bounded child operations fit below this budget, preserving time for the
     # harness finally cleanup and failure-diagnostics upload.
@@ -656,6 +657,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact-digest }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.release.outputs.tag }}
         run: >-
           ./scripts/windows-native-ci.ps1
           -Operation release-certification

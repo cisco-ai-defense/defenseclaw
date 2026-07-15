@@ -312,6 +312,17 @@ function Get-Sha256Hex {
     }
 }
 
+function Get-ByteSha256Hex {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Assert-Sha256 {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -329,13 +340,20 @@ function Assert-Sha256 {
 }
 
 function Get-AuthenticatedChecksum {
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
     param(
-        [Parameter(Mandatory = $true)][string]$ChecksumsPath,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Path')][string]$ChecksumsPath,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Content')][string]$ChecksumsContent,
         [Parameter(Mandatory = $true)][string]$FileName
     )
 
     $found = @()
-    foreach ($line in [IO.File]::ReadAllLines($ChecksumsPath)) {
+    $lines = if ($PSCmdlet.ParameterSetName -eq 'Content') {
+        $ChecksumsContent -split '\r?\n'
+    } else {
+        [IO.File]::ReadAllLines($ChecksumsPath)
+    }
+    foreach ($line in $lines) {
         if ($line -match '^([0-9a-fA-F]{64})[ \t]+\*?(.+?)[ \t]*$') {
             $listedName = $Matches[2].Trim().Replace('\', '/')
             if ($listedName.StartsWith('./', [StringComparison]::Ordinal)) {
@@ -400,7 +418,19 @@ function Invoke-CosignVerification {
             Die "Release verification input changed while Cosign was running: $path"
         }
     }
+    $authenticatedBytes = [IO.File]::ReadAllBytes($ChecksumsPath)
+    $authenticatedHash = Get-ByteSha256Hex -Bytes $authenticatedBytes
+    if (-not $authenticatedHash.Equals(
+        $before[$ChecksumsPath], [StringComparison]::OrdinalIgnoreCase)) {
+        Die "Release checksum content changed after Cosign verification: $ChecksumsPath"
+    }
+    try {
+        $authenticatedContent = [Text.UTF8Encoding]::new($false, $true).GetString($authenticatedBytes)
+    } catch {
+        Die "Authenticated $ChecksumsAsset is not valid UTF-8: $($_.Exception.Message)"
+    }
     Write-Ok "Release checksum signature verified (Sigstore)"
+    return $authenticatedContent
 }
 
 function Assert-UpgradeManifest {
@@ -473,6 +503,15 @@ function Assert-SetupProvenance {
 function Assert-SetupAuthenticode {
     param([Parameter(Mandatory = $true)][string]$Path)
 
+    if (-not [string]::IsNullOrWhiteSpace($Local)) {
+        $exitCode = Invoke-BoundedNativeProcess -FilePath $Path `
+            -Arguments @('/verify') -TimeoutSeconds 120 -Hidden
+        if ($exitCode -ne 0) {
+            Die "Setup offline Authenticode verification failed (exit $exitCode)"
+        }
+        Write-Ok "Setup Authenticode signature verified offline ($ExpectedPublisher)"
+        return
+    }
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     $publisher = ""
     if ($null -ne $signature.SignerCertificate) {
@@ -554,7 +593,7 @@ function Invoke-StagedChecksumVerification {
     $certificate = Join-Path $StageRoot $ChecksumsCertificateAsset
     $sigstoreBundle = Join-Path $StageRoot $ChecksumsBundleAsset
 
-    Invoke-CosignVerification -Verifier $Verifier -ChecksumsPath $checksums `
+    return Invoke-CosignVerification -Verifier $Verifier -ChecksumsPath $checksums `
         -SignaturePath $signature -CertificatePath $certificate -BundlePath $sigstoreBundle `
         -ReleaseVersion $ReleaseVersion
 }
@@ -562,15 +601,16 @@ function Invoke-StagedChecksumVerification {
 function Complete-StagedBundleVerification {
     param(
         [Parameter(Mandatory = $true)][string]$StageRoot,
-        [Parameter(Mandatory = $true)][string]$ReleaseVersion
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
     )
 
-    $checksums = Join-Path $StageRoot $ChecksumsAsset
     $setup = Join-Path $StageRoot $SetupAsset
-    $setupSha = Get-AuthenticatedChecksum -ChecksumsPath $checksums -FileName $SetupAsset
-    Assert-StagedUpgradeManifest -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion
+    $setupSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent -FileName $SetupAsset
+    Assert-StagedUpgradeManifest -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
+        -ChecksumsContent $ChecksumsContent
     Assert-StagedSetupProvenance -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
-        -SetupSha256 $setupSha
+        -SetupSha256 $setupSha -ChecksumsContent $ChecksumsContent
     Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset
     Assert-SetupAuthenticode -Path $setup
 
@@ -585,12 +625,12 @@ function Complete-StagedBundleVerification {
 function Assert-StagedUpgradeManifest {
     param(
         [Parameter(Mandatory = $true)][string]$StageRoot,
-        [Parameter(Mandatory = $true)][string]$ReleaseVersion
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
     )
 
-    $checksums = Join-Path $StageRoot $ChecksumsAsset
     $manifest = Join-Path $StageRoot $UpgradeManifestAsset
-    $manifestSha = Get-AuthenticatedChecksum -ChecksumsPath $checksums `
+    $manifestSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent `
         -FileName $UpgradeManifestAsset
     Assert-Sha256 -Path $manifest -Expected $manifestSha -Label $UpgradeManifestAsset
     Assert-UpgradeManifest -Path $manifest -ReleaseVersion $ReleaseVersion
@@ -600,12 +640,12 @@ function Assert-StagedSetupProvenance {
     param(
         [Parameter(Mandatory = $true)][string]$StageRoot,
         [Parameter(Mandatory = $true)][string]$ReleaseVersion,
-        [Parameter(Mandatory = $true)][string]$SetupSha256
+        [Parameter(Mandatory = $true)][string]$SetupSha256,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
     )
 
-    $checksums = Join-Path $StageRoot $ChecksumsAsset
     $provenance = Join-Path $StageRoot $ProvenanceAsset
-    $provenanceSha = Get-AuthenticatedChecksum -ChecksumsPath $checksums `
+    $provenanceSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent `
         -FileName $ProvenanceAsset
     Assert-Sha256 -Path $provenance -Expected $provenanceSha -Label $ProvenanceAsset
     Assert-SetupProvenance -Path $provenance -ReleaseVersion $ReleaseVersion `
@@ -633,24 +673,25 @@ function Stage-RemoteBundle {
                 -Destination (Join-Path $stage $asset.Name) -Label $asset.Name `
                 -MaximumBytes $asset.Maximum
         }
-        Invoke-StagedChecksumVerification -StageRoot $stage `
+        $authenticatedChecksums = Invoke-StagedChecksumVerification -StageRoot $stage `
             -ReleaseVersion $ReleaseVersion -Verifier $cosign
         Invoke-DownloadFile -Uri "$releaseBase/$UpgradeManifestAsset" `
             -Destination (Join-Path $stage $UpgradeManifestAsset) `
             -Label $UpgradeManifestAsset -MaximumBytes 1048576
-        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $ReleaseVersion
+        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $ReleaseVersion `
+            -ChecksumsContent $authenticatedChecksums
         Invoke-DownloadFile -Uri "$releaseBase/$ProvenanceAsset" `
             -Destination (Join-Path $stage $ProvenanceAsset) `
             -Label $ProvenanceAsset -MaximumBytes 1048576
         $setupSha = Get-AuthenticatedChecksum `
-            -ChecksumsPath (Join-Path $stage $ChecksumsAsset) -FileName $SetupAsset
+            -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
         Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $ReleaseVersion `
-            -SetupSha256 $setupSha
+            -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
         Invoke-DownloadFile -Uri "$releaseBase/$SetupAsset" `
             -Destination (Join-Path $stage $SetupAsset) `
             -Label $SetupAsset -MaximumBytes 2147483648
         return Complete-StagedBundleVerification -StageRoot $stage `
-            -ReleaseVersion $ReleaseVersion
+            -ReleaseVersion $ReleaseVersion -ChecksumsContent $authenticatedChecksums
     } catch {
         Remove-PrivateStageRoot -Path $stage
         throw
@@ -693,18 +734,19 @@ function Stage-LocalBundle {
         Copy-RegularFile -Source $cosignSource -Destination $cosign `
             -Label "pinned Cosign verifier" -MaximumBytes 104857600
         Assert-Sha256 -Path $cosign -Expected $CosignSha256 -Label "pinned Cosign verifier"
-        Invoke-StagedChecksumVerification -StageRoot $stage `
+        $authenticatedChecksums = Invoke-StagedChecksumVerification -StageRoot $stage `
             -ReleaseVersion $releaseVersion -Verifier $cosign
-        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $releaseVersion
+        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $releaseVersion `
+            -ChecksumsContent $authenticatedChecksums
         $setupSha = Get-AuthenticatedChecksum `
-            -ChecksumsPath (Join-Path $stage $ChecksumsAsset) -FileName $SetupAsset
+            -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
         Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $releaseVersion `
-            -SetupSha256 $setupSha
+            -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
         Copy-RegularFile -Source (Join-Path $localRoot $SetupAsset) `
             -Destination (Join-Path $stage $SetupAsset) -Label $SetupAsset `
             -MaximumBytes 2147483648
         return Complete-StagedBundleVerification -StageRoot $stage `
-            -ReleaseVersion $releaseVersion
+            -ReleaseVersion $releaseVersion -ChecksumsContent $authenticatedChecksums
     } catch {
         Remove-PrivateStageRoot -Path $stage
         throw
@@ -755,6 +797,56 @@ function New-SetupArgumentList {
     return [string[]]$arguments
 }
 
+function Invoke-BoundedNativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
+        [switch]$Hidden
+    )
+
+    $start = @{
+        FilePath = $FilePath
+        PassThru = $true
+    }
+    if ($Arguments.Count -gt 0) { $start['ArgumentList'] = $Arguments }
+    if ($Hidden) { $start['WindowStyle'] = 'Hidden' }
+    $process = Start-Process @start
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $treeKillError = $null
+            try {
+                $process.Kill($true)
+            } catch {
+                $treeKillError = $_.Exception.Message
+                $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+                $taskkillPath = Join-Path $systemDirectory 'taskkill.exe'
+                $taskkill = Start-Process -FilePath $taskkillPath `
+                    -ArgumentList @('/PID', [string]$process.Id, '/T', '/F') `
+                    -PassThru -WindowStyle Hidden
+                try {
+                    if (-not $taskkill.WaitForExit(10000)) {
+                        try { $taskkill.Kill() } catch {}
+                        throw "Timed out while terminating native process tree: $FilePath"
+                    }
+                } finally {
+                    $taskkill.Dispose()
+                }
+            }
+            if (-not $process.WaitForExit(10000)) {
+                throw "Native process timed out and cleanup did not complete: $FilePath"
+            }
+            if ($treeKillError) {
+                Write-Warn2 "Used taskkill fallback for timed-out native process tree: $treeKillError"
+            }
+            throw "Native process timed out after $TimeoutSeconds seconds: $FilePath"
+        }
+        return [int]$process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-NativeSetup {
     param(
         [Parameter(Mandatory = $true)][string]$SetupPath,
@@ -768,8 +860,8 @@ function Invoke-NativeSetup {
     Assert-Sha256 -Path $SetupPath -Expected $ExpectedSha256 -Label $SetupAsset
     Assert-SetupAuthenticode -Path $SetupPath
     Write-Step "Starting authenticated native Setup"
-    & $SetupPath @Arguments
-    return [int]$LASTEXITCODE
+    return Invoke-BoundedNativeProcess -FilePath $SetupPath -Arguments $Arguments `
+        -TimeoutSeconds 3600
 }
 
 function Main {

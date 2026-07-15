@@ -275,6 +275,40 @@ try {{
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_cosign_verification_freezes_authenticated_checksum_content(tmp_path: Path) -> None:
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text("a" * 64 + "  DefenseClawSetup-x64.exe\n", encoding="ascii")
+    signature = tmp_path / "checksums.txt.sig"
+    certificate = tmp_path / "checksums.txt.pem"
+    bundle = tmp_path / "checksums.txt.bundle"
+    for item in (signature, certificate, bundle):
+        item.write_bytes(b"fixture")
+    # A real PE avoids cmd.exe reinterpreting the Sigstore identity regex pipe.
+    # doskey accepts and ignores this argument shape with a successful exit.
+    verifier_source = shutil.which("doskey.exe")
+    if not verifier_source:
+        pytest.skip("Windows doskey executable is unavailable")
+    verifier = tmp_path / "cosign.exe"
+    shutil.copyfile(verifier_source, verifier)
+    verifier_sha = hashlib.sha256(verifier.read_bytes()).hexdigest()
+
+    completed = _run_powershell(
+        rf"""
+{_dot_source()}
+$script:CosignSha256 = '{verifier_sha}'
+$frozen = Invoke-CosignVerification -Verifier '{_ps_quote(verifier)}' `
+  -ChecksumsPath '{_ps_quote(checksums)}' -SignaturePath '{_ps_quote(signature)}' `
+  -CertificatePath '{_ps_quote(certificate)}' -BundlePath '{_ps_quote(bundle)}' `
+  -ReleaseVersion '1.2.3'
+[IO.File]::WriteAllText('{_ps_quote(checksums)}', ('b' * 64) + "  DefenseClawSetup-x64.exe`n")
+Get-AuthenticatedChecksum -ChecksumsContent $frozen -FileName 'DefenseClawSetup-x64.exe'
+"""
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "a" * 64
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
 def test_authenticated_manifest_requires_exact_windows_policy(tmp_path: Path) -> None:
     manifest = tmp_path / "upgrade-manifest.json"
     manifest.write_text(json.dumps(_manifest()), encoding="utf-8")
@@ -370,6 +404,30 @@ try {{
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_local_authenticode_uses_setup_cache_only_verifier(tmp_path: Path) -> None:
+    setup = tmp_path / "DefenseClawSetup-x64.exe"
+    setup.write_bytes(b"authenticated setup fixture")
+    completed = _run_powershell(
+        rf"""
+{_dot_source(f"-Local '{_ps_quote(tmp_path)}'")}
+function Get-AuthenticodeSignature {{ throw 'NETWORK_CAPABLE_VERIFIER_CALLED' }}
+function Invoke-BoundedNativeProcess {{
+  param($FilePath, [string[]]$Arguments, $TimeoutSeconds, [switch]$Hidden)
+  if ($FilePath -ne '{_ps_quote(setup)}' -or ($Arguments -join '|') -ne '/verify') {{
+    throw 'wrong offline verifier invocation'
+  }}
+  return 0
+}}
+Assert-SetupAuthenticode -Path '{_ps_quote(setup)}'
+Write-Output 'VERIFIED'
+"""
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "NETWORK_CAPABLE_VERIFIER_CALLED" not in completed.stdout + completed.stderr
+    assert "VERIFIED" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
 def test_local_bundle_delegates_without_any_network_or_dependency_tool(
     tmp_path: Path,
 ) -> None:
@@ -406,6 +464,7 @@ function Invoke-CosignVerification {{
   param($Verifier, $ChecksumsPath, $SignaturePath, $CertificatePath, $BundlePath, $ReleaseVersion)
   if ($ReleaseVersion -ne '1.2.3') {{ throw "wrong version: $ReleaseVersion" }}
   Write-Host 'COSIGN_VERIFIED'
+  return [IO.File]::ReadAllText($ChecksumsPath)
 }}
 function Assert-SetupAuthenticode {{ param($Path) Write-Host 'AUTHENTICODE_VERIFIED' }}
 function Invoke-NativeSetup {{
@@ -456,8 +515,107 @@ def test_setup_is_reauthenticated_immediately_before_handoff() -> None:
     function = text.split("function Invoke-NativeSetup", 1)[1].split("\nfunction Main", 1)[0]
     checksum = function.index("Assert-Sha256")
     authenticode = function.index("Assert-SetupAuthenticode")
-    execution = function.index("& $SetupPath @Arguments")
+    execution = function.index("Invoke-BoundedNativeProcess")
     assert checksum < authenticode < execution
+    assert "& $SetupPath" not in function
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process semantics")
+def test_bounded_native_process_waits_for_windows_gui_exit_code(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    if not go:
+        pytest.skip("Go toolchain is unavailable")
+    source = tmp_path / "gui_exit.go"
+    source.write_text(
+        'package main\nimport ("os"; "time")\n'
+        'func main() { time.Sleep(200 * time.Millisecond); os.Exit(23) }\n',
+        encoding="utf-8",
+    )
+    executable = tmp_path / "gui-exit.exe"
+    build = subprocess.run(
+        [go, "build", "-ldflags=-H=windowsgui", "-o", executable, source],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    completed = _run_powershell(
+        rf"""
+{_dot_source()}
+$code = Invoke-BoundedNativeProcess -FilePath '{_ps_quote(executable)}' `
+  -Arguments @() -TimeoutSeconds 30 -Hidden
+Write-Output "EXIT=$code"
+""",
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "EXIT=23" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process-tree semantics")
+def test_bounded_native_process_timeout_cleans_gui_process_tree(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    if not go:
+        pytest.skip("Go toolchain is unavailable")
+    source = tmp_path / "gui_tree.go"
+    source.write_text(
+        "package main\n"
+        'import ("os"; "os/exec"; "strconv"; "time")\n'
+        "func main() {\n"
+        ' marker := os.Getenv("DC_GUI_CHILD_PID")\n'
+        ' if len(os.Args) > 1 && os.Args[1] == "child" {\n'
+        "  _ = os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0600)\n"
+        "  time.Sleep(30 * time.Second); return\n"
+        " }\n"
+        ' child := exec.Command(os.Args[0], "child")\n'
+        " _ = child.Start()\n"
+        " deadline := time.Now().Add(5 * time.Second)\n"
+        " for time.Now().Before(deadline) { if _, err := os.Stat(marker); err == nil { break }; time.Sleep(20 * time.Millisecond) }\n"
+        " time.Sleep(30 * time.Second)\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "gui-tree.exe"
+    build = subprocess.run(
+        [go, "build", "-ldflags=-H=windowsgui", "-o", executable, source],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+    marker = tmp_path / "child.pid"
+
+    completed = _run_powershell(
+        rf"""
+{_dot_source()}
+$env:DC_GUI_CHILD_PID = '{_ps_quote(marker)}'
+$message = ''
+try {{
+  Invoke-BoundedNativeProcess -FilePath '{_ps_quote(executable)}' `
+    -Arguments @() -TimeoutSeconds 1 -Hidden | Out-Null
+  throw 'expected timeout'
+}} catch {{
+  $message = $_.Exception.Message
+}}
+if (-not (Test-Path -LiteralPath '{_ps_quote(marker)}' -PathType Leaf)) {{
+  throw 'child PID marker was not created'
+}}
+$childPid = [int]([IO.File]::ReadAllText('{_ps_quote(marker)}'))
+Start-Sleep -Milliseconds 500
+$alive = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+if ($null -ne $alive) {{
+  Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue
+  throw "timed-out GUI descendant remained alive: $childPid"
+}}
+Write-Output "TIMEOUT=$message"
+""",
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "TIMEOUT=Native process timed out" in completed.stdout
 
 
 def test_dot_source_is_the_only_no_run_seam() -> None:
@@ -465,5 +623,5 @@ def test_dot_source_is_the_only_no_run_seam() -> None:
     assert "if ($MyInvocation.InvocationName -ne '.')" in text
     assert "in-memory ScriptBlock" in text
     assert "if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { exit 0 }" in text
-    assert "DEFENSECLAW_INSTALLER_TEST" not in text
+    assert "DEFENSECLAW_" + "INSTALLER_TEST" not in text
     assert "AllowUnsigned" not in text

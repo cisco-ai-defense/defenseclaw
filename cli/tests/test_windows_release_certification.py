@@ -28,6 +28,13 @@ def test_release_clients_are_both_official_and_exactly_pinned() -> None:
     assert "Assert-ExactWindowsReleaseClientVersion" in installer
     assert "package.json" not in installer  # the immutable manifest path comes from the spec
     assert "manifest.version -cne" in installer
+    assert "GetEnvironmentVariables('Process')" in installer
+    assert "_API_KEY$" in installer
+    assert "SetEnvironmentVariable($name, $null, 'Process')" in installer
+    assert "'install', '--package-lock-only', '--ignore-scripts', '--save-exact'" in installer
+    assert "'ci', '--no-audit', '--no-fund'" in installer
+    assert installer.count("Get-FileHash -LiteralPath $lockPath") == 2
+    assert "npm ci mutated the exact official-client dependency lock" in installer
 
 
 def test_release_gate_uses_only_the_exact_signed_setup_bytes() -> None:
@@ -38,12 +45,46 @@ def test_release_gate_uses_only_the_exact_signed_setup_bytes() -> None:
     assert "release setup SHA-256 sidecar mismatch" in gate
     assert "provenance.artifact_sha256" in gate
     assert "provenance.source_commit -cne [string]$env:GITHUB_SHA" in gate
+    assert "Assert-WindowsReleaseSbom" in gate
     assert "installedStatePath" in gate and "installedPayloadPath" in gate
     assert "installedIdentity.source_commit -cne [string]$env:GITHUB_SHA" in gate
     assert "the signed DefenseClawSetup-x64.exe bytes changed" in gate
+    assert "release metadata changed during real-client certification" in gate
+    assert gate.count("Get-FileHash -LiteralPath $metadataPath") == 2
     assert "Invoke-WindowsNativeProcess $setup" in gate
     for forbidden in ("go build", "uv sync", "Install-PackagedArtifacts", "Invoke-BuildArtifacts"):
         assert forbidden.lower() not in gate.lower()
+
+
+def test_release_sbom_binds_setup_bytes_version_and_source_commit() -> None:
+    sbom = _function("Assert-WindowsReleaseSbom")
+    assert "SPDX-2.3" in sbom and "CC0-1.0" in sbom
+    assert "spdx/windows/$escapedVersion/$SetupHash" in sbom
+    assert 'sbom.comment -cne "DefenseClaw source commit: $SourceCommit"' in sbom
+    assert "DefenseClaw Windows Setup" in sbom
+    assert "./DefenseClawSetup-x64.exe" in sbom
+    assert "pkg:github/cisco-ai-defense/defenseclaw@$escapedVersion" in sbom
+    assert "documentDescribes" in sbom
+    assert "DESCRIBES" in sbom and "CONTAINS" in sbom
+
+
+def test_release_version_is_independently_bound_end_to_end() -> None:
+    gate = _function("Invoke-WindowsReleaseCertification")
+    workflow = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+    assert "WINDOWS_RELEASE_VERSION: ${{ needs.release.outputs.tag }}" in workflow
+    assert "needs: [release, windows-installer]" in workflow
+    assert "provenance.version -cne $releaseVersion" in gate
+    assert "installedIdentity.version -cne $releaseVersion" in gate
+    assert "$sbomPath $setupHash $releaseVersion" in gate
+
+
+def test_certification_evidence_derives_versions_from_installed_specs() -> None:
+    gate = _function("Invoke-WindowsReleaseCertification")
+    evidence = gate.split("$evidence = [ordered]@{", 1)[1]
+    assert "[string]$clients['codex'].Specification.Version" in evidence
+    assert "[string]$clients['claudecode'].Specification.Version" in evidence
+    assert "codex = '0.144.3'" not in evidence
+    assert "claudecode = '2.1.208'" not in evidence
 
 
 def test_release_gate_cannot_skip_a_connector_or_manual_trust() -> None:
@@ -97,7 +138,7 @@ def test_publish_has_a_non_advisory_real_client_dependency() -> None:
     publish = re.search(r"(?ms)^  publish:.*", RELEASE)
     assert certification and publish
     job = certification.group(0)
-    assert "needs: windows-installer" in job
+    assert "needs: [release, windows-installer]" in job
     assert "continue-on-error" not in job
     assert "-Operation release-certification" in job
     assert "secrets.OPENAI_API_KEY" in job and "secrets.ANTHROPIC_API_KEY" in job
@@ -127,6 +168,7 @@ def test_certification_evidence_is_not_faked_in_validated_versions() -> None:
 def test_release_documentation_matches_the_enforced_gate() -> None:
     installer = (ROOT / "docs" / "WINDOWS-NATIVE-INSTALLER.md").read_text(encoding="utf-8")
     ci = (ROOT / "docs" / "WINDOWS-NATIVE-CI.md").read_text(encoding="utf-8")
+    ci_flat = " ".join(ci.split())
     for claim in (
         "Codex CLI `0.144.3`",
         "Claude Code `2.1.208`",
@@ -134,5 +176,5 @@ def test_release_documentation_matches_the_enforced_gate() -> None:
         "DefenseClawSetup-x64.exe.certification.json",
     ):
         assert claim in installer
-    assert "`publish` depends on that cell" in ci
-    assert "never builds or installs\nDefenseClaw from the source checkout" in ci
+    assert "`publish` depends on that cell" in ci_flat
+    assert "never builds or installs DefenseClaw from the source checkout" in ci_flat
