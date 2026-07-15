@@ -1384,23 +1384,12 @@ function Stop-IsolatedProcessTree {
         if ($ancestor.Count -ne 1) { break }
         $ancestorId = [int]$ancestor[0].ParentProcessId
     }
-    $descendantIds = @{}
-    $frontier = @([int]$PID)
-    while ($frontier.Count -gt 0) {
-        $children = @($processes | Where-Object {
-            [int]$_.ProcessId -ne $PID -and
-            [int]$_.ParentProcessId -in $frontier -and
-            -not $descendantIds.ContainsKey([int]$_.ProcessId)
-        })
-        foreach ($child in $children) { $descendantIds[[int]$child.ProcessId] = $true }
-        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
-    }
     foreach ($process in $processes) {
         $processId = [int]$process.ProcessId
         $matchesRoot = $process.CommandLine -and
             $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
         if (-not $ancestorIds.Contains($processId) -and
-            ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
+            $matchesRoot -and
             $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }

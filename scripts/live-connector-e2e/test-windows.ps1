@@ -506,13 +506,26 @@ try {
         $unrelated.Dispose()
     }
 
-    $descendant = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden
+    $unrelatedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-Command', 'Start-Sleep -Seconds 30'
+    ) -PassThru -WindowStyle Hidden
+    $ownedRoot = Join-Path $StateRoot 'cleanup-owned-process'
+    [IO.Directory]::CreateDirectory($ownedRoot) | Out-Null
+    $ownedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $ownedRoot
+    ) -PassThru -WindowStyle Hidden
     try {
         Start-Sleep -Milliseconds 250
         Stop-IsolatedProcessTree -Confirm:$false
-        Assert-True ($descendant.WaitForExit(5000)) 'isolated cleanup killed a descendant without StateRoot in its command line'
+        Assert-True ($ownedDescendant.WaitForExit(5000)) `
+            'isolated cleanup killed a process owned by StateRoot'
+        Assert-True (-not $unrelatedDescendant.HasExited) `
+            'isolated cleanup preserved a descendant without StateRoot in its command line'
     } finally {
-        Stop-Process -Id $descendant.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $unrelatedDescendant.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $ownedDescendant.Id -Force -ErrorAction SilentlyContinue
+        $unrelatedDescendant.Dispose()
+        $ownedDescendant.Dispose()
     }
 
     $jsonl = Join-Path $temp 'gateway.jsonl'
@@ -1047,6 +1060,9 @@ try {
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
         $isolatedCleanup -match '-not \$ancestorIds\.Contains\(\$processId\)') `
         'isolated process cleanup excludes the complete ancestor wrapper chain'
+    Assert-True ($isolatedCleanup -match '\$matchesRoot -and' -and
+        $isolatedCleanup -notmatch 'descendantIds') `
+        'isolated process cleanup only terminates state-root-owned processes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and
         $harnessText -match 'obsolete gateway launcher' -and
         $harnessText -match 'does not use the native hook runtime' -and
