@@ -715,6 +715,9 @@ func mutateRegistryUserPath(
 	keyPath string,
 	transform func(userPathSnapshot) (userPathMutation, error),
 ) (userPathMutation, error) {
+	if err := validateUserPathTransactionSupport(); err != nil {
+		return userPathMutation{}, err
+	}
 	key, _, err := registry.CreateKey(root, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return userPathMutation{}, err
@@ -741,6 +744,22 @@ func mutateRegistryUserPath(
 		return mutation, err
 	}
 	return mutation, nil
+}
+
+func validateUserPathTransactionSupport() error {
+	for _, required := range []struct {
+		name string
+		proc *windows.LazyProc
+	}{
+		{"KtmW32.dll!CreateTransaction", procCreateUserPathTransaction},
+		{"KtmW32.dll!CommitTransaction", procCommitUserPathTransaction},
+		{"advapi32.dll!RegOpenKeyTransactedW", procOpenUserPathKeyTransactedW},
+	} {
+		if err := required.proc.Find(); err != nil {
+			return fmt.Errorf("resolve required user PATH transaction procedure %s: %w", required.name, err)
+		}
+	}
+	return nil
 }
 
 func mutateUserPath(

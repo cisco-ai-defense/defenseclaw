@@ -40,8 +40,8 @@ const (
 	processTreeMarkerEnv      = "DEFENSECLAW_PROCESS_TREE_MARKER"
 	managedBreakawayHelperEnv = "DEFENSECLAW_MANAGED_BREAKAWAY_HELPER"
 	managedBreakawayChildEnv  = "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD"
-	inheritedOutputHelperEnv  = "PROCESSUTIL_TEST_INHERITED_OUTPUT_HELPER"
-	inheritedOutputChildEnv   = "PROCESSUTIL_TEST_INHERITED_OUTPUT_CHILD"
+	inheritedOutputHelperEnv  = "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER"
+	inheritedOutputChildEnv   = "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD"
 )
 
 func TestCommandContextPreventsConsoleAllocation(t *testing.T) {

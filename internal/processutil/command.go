@@ -31,9 +31,10 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 	return cmd
 }
 
-// CombinedOutputTree runs cmd inside a platform-managed process-tree lifetime
-// boundary. On Windows, cancellation and command completion terminate every
-// non-breakaway descendant through a kill-on-close Job Object.
+// CombinedOutputTree captures cmd's combined output. On Windows, cancellation
+// and command completion terminate every non-breakaway descendant through a
+// kill-on-close Job Object. On other platforms, it is equivalent to
+// cmd.CombinedOutput and does not guarantee descendant cleanup.
 //
 // allowManagedBreakaway is reserved for trusted launchers whose separately
 // identity-checked daemon must intentionally survive the short-lived command.

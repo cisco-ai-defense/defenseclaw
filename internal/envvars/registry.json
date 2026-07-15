@@ -2211,6 +2211,28 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output descendant subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_PROCESS_TREE_GRANDCHILD",
       "category": "test_fixture",
       "purpose": "Selects the process-tree grandchild subprocess fixture.",
