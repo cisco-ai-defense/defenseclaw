@@ -60,6 +60,39 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	assertNoUnauthorizedWindowsWriter(t, dir)
 }
 
+func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
+	const (
+		accessAllowedObjectACE         = 0x05
+		accessDeniedObjectACE          = 0x06
+		accessAllowedCallbackACE       = 0x09
+		accessDeniedCallbackACE        = 0x0A
+		accessAllowedCallbackObjectACE = 0x0B
+		accessDeniedCallbackObjectACE  = 0x0C
+	)
+
+	for _, tc := range []struct {
+		name    string
+		aceType byte
+		want    bool
+	}{
+		{name: "basic allow", aceType: windows.ACCESS_ALLOWED_ACE_TYPE, want: true},
+		{name: "basic deny", aceType: windows.ACCESS_DENIED_ACE_TYPE, want: true},
+		{name: "object allow", aceType: accessAllowedObjectACE},
+		{name: "object deny", aceType: accessDeniedObjectACE},
+		{name: "callback allow", aceType: accessAllowedCallbackACE},
+		{name: "callback deny", aceType: accessDeniedCallbackACE},
+		{name: "callback object allow", aceType: accessAllowedCallbackObjectACE},
+		{name: "callback object deny", aceType: accessDeniedCallbackObjectACE},
+		{name: "unknown future type", aceType: 0x7F},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSimpleDiscretionaryACE(tc.aceType); got != tc.want {
+				t.Fatalf("isSimpleDiscretionaryACE(0x%x) = %v, want %v", tc.aceType, got, tc.want)
+			}
+		})
+	}
+}
+
 func ownWindowsTestPath(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -173,6 +206,74 @@ func TestProtectDirectoryWindowsRejectsNestedJunction(t *testing.T) {
 
 	if err := ProtectDirectory(filepath.Join(junction, "child")); err == nil {
 		t.Fatal("ProtectDirectory accepted a nested junction escape")
+	}
+}
+
+func TestCreatePrivateDirectoryWindowsReportsCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "created-private")
+	created, err := CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory: %v", err)
+	}
+	if !created {
+		t.Fatal("CreatePrivateDirectory did not report creating a missing target")
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatalf("inspect created directory DACL: %v", err)
+	}
+	if !safe {
+		t.Fatal("created directory does not have a private DACL")
+	}
+
+	created, err = CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory existing target: %v", err)
+	}
+	if created {
+		t.Fatal("CreatePrivateDirectory reported creating an existing target")
+	}
+}
+
+func TestCreatePrivateDirectoryWindowsPreservesExistingACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operator-owned")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(everyone, windows.GENERIC_WRITE),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantMask := windowsAllowMaskForSID(t, path, everyone)
+
+	created, err := CreatePrivateDirectory(path)
+	if err != nil {
+		t.Fatalf("CreatePrivateDirectory existing target: %v", err)
+	}
+	if created {
+		t.Fatal("CreatePrivateDirectory reported creating an existing target")
+	}
+	if got := windowsAllowMaskForSID(t, path, everyone); got != wantMask {
+		t.Fatalf("existing Everyone mask = 0x%x, want preserved 0x%x", uint32(got), uint32(wantMask))
 	}
 }
 

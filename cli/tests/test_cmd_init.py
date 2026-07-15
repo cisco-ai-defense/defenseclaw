@@ -114,6 +114,12 @@ class TestInitFirstRunBackend(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_mock = self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
         self._had_llm_key = "DEFENSECLAW_LLM_KEY" in os.environ
         self._llm_key = os.environ.get("DEFENSECLAW_LLM_KEY", "")
 
@@ -176,6 +182,67 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["connector"], "codex")
         self.assertTrue(cfg["guardrail"]["enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
+
+    def test_explicit_connector_requires_protected_executable_selection(self):
+        self.selection_mock.return_value = ({}, {"codex": "untrusted executable"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "codex",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("freshly verified selected agent executable", result.output)
+        self.assertIn("untrusted executable", result.output)
+
+    def test_non_windows_codex_init_does_not_require_windows_policy_receipt(self):
+        self.selection_mock.return_value = ({}, {"codex": "must not be consulted"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "codex",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_not_called()
+
+    def test_windows_claude_init_does_not_require_unused_codex_policy_receipt(self):
+        self.selection_mock.return_value = ({}, {"claudecode": "must not be consulted"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "claudecode",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_not_called()
 
     def test_sandbox_flag_reports_explicit_scope(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
@@ -1825,6 +1892,12 @@ class TestInitFailModeFlag(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-failmode-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -1946,6 +2019,12 @@ class TestInitHITLFlags(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-hilt-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -2576,6 +2655,12 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-observe-all-")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def _invoke(self, args, env=None):
         full_env = {"DEFENSECLAW_HOME": self.tmp_dir}

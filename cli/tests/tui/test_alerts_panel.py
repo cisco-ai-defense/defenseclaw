@@ -95,6 +95,27 @@ def test_alerts_refresh_preserves_last_good_rows_when_database_is_locked() -> No
     assert [row.event.id for row in model.filtered] == ["cached"]
 
 
+def test_alerts_exact_low_signal_filter_refreshes_store() -> None:
+    class CountingStore:
+        calls = 0
+
+        def list_alerts(self, _limit: int) -> list[Event]:
+            self.calls += 1
+            return [
+                Event(id="high", severity="HIGH", action="block", target="skill://one"),
+                Event(id="low", severity="LOW", action="allow", target="gateway"),
+            ]
+
+    store = CountingStore()
+    model = AlertsPanelModel(store=store)
+    model.set_events([AlertEvent(id="high", severity="HIGH", action="block", target="skill://one")])
+
+    model.set_severity_filter_exact("LOW")
+
+    assert store.calls == 1
+    assert [row.event.id for row in model.filtered] == ["low"]
+
+
 def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
     model = AlertsPanelModel()
     model.set_events(
