@@ -411,10 +411,21 @@ dc_driver_main() {
 
   # 2. DefenseClaw init + connector setup.
   dc_init_defenseclaw
+  local cfg cfg_baseline cfg_baseline_state
+  cfg="$(dc_connector_config_file "${connector}")"
+  cfg_baseline="${TMPDIR:-/tmp}/dc-e2e-${connector}-config-$$.baseline"
+  cfg_baseline_state="missing"
+  if [ -f "${cfg}" ]; then
+    cp "${cfg}" "${cfg_baseline}"
+    cfg_baseline_state="present"
+  else
+    rm -f "${cfg_baseline}"
+  fi
   if dc_setup_connector "${connector}" "${DC_DRIVER_MODE}"; then
     dc_record_result "setup" pass "mode=${DC_DRIVER_MODE}"
   else
     dc_record_result "setup" fail "defenseclaw setup ${connector} failed"
+    rm -f "${cfg_baseline}"
     return 1
   fi
 
@@ -422,13 +433,13 @@ dc_driver_main() {
   dc_driver_run_probes "${connector}" || rc=1
 
   # 8. Teardown + clean-state.
-  local cfg; cfg="$(dc_connector_config_file "${connector}")"
-  if dc_teardown_connector "${connector}" && dc_assert_teardown "${connector}" "${cfg}"; then
+  if dc_teardown_connector "${connector}" && dc_assert_teardown "${connector}" "${cfg}" "${cfg_baseline}" "${cfg_baseline_state}"; then
     dc_record_result "teardown" pass ""
   else
     dc_record_result "teardown" fail "residual state after teardown"
     rc=1
   fi
+  rm -f "${cfg_baseline}"
 
   return "${rc}"
 }

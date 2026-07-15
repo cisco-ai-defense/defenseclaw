@@ -65,7 +65,24 @@ fi
 dc_section "contract smoke: ${DC_E2E_CONNECTOR} ($(dc_detect_os))"
 
 dc_init_defenseclaw
-dc_setup_connector "${DC_E2E_CONNECTOR}" action
+
+# Capture the exact pre-setup agent config. Teardown is correct when it
+# restores these bytes (or restores absence), not when the resulting file
+# happens to contain no generic "defenseclaw" substring. The latter falsely
+# rejects legitimate pre-existing user content and does not prove restoration.
+cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+cfg_baseline="${TMPDIR:-/tmp}/dc-e2e-${DC_E2E_CONNECTOR}-config-$$.baseline"
+cfg_baseline_state="missing"
+if [ -f "${cfg}" ]; then
+  cp "${cfg}" "${cfg_baseline}"
+  cfg_baseline_state="present"
+else
+  rm -f "${cfg_baseline}"
+fi
+if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action; then
+  rm -f "${cfg_baseline}"
+  exit 1
+fi
 
 overall_rc=0
 
@@ -134,10 +151,9 @@ else
   overall_rc=1
 fi
 
-# Teardown + clean-state assertion.
-cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+# Teardown + exact pre-setup state assertion.
 if dc_teardown_connector "${DC_E2E_CONNECTOR}"; then
-  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}"; then
+  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}" "${cfg_baseline}" "${cfg_baseline_state}"; then
     dc_record_result "teardown" pass ""
   else
     dc_record_result "teardown" fail "config not restored: ${cfg}"
@@ -147,5 +163,7 @@ else
   dc_record_result "teardown" fail "connector verify reported residual state"
   overall_rc=1
 fi
+
+rm -f "${cfg_baseline}"
 
 exit "${overall_rc}"

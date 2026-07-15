@@ -348,17 +348,42 @@ dc_assert_blocked() {
   return 0
 }
 
-# dc_assert_teardown <connector> <agent_config_file> — after
-# `defenseclaw-gateway connector teardown`, the agent config no longer
-# references DefenseClaw's hook script. Proves clean uninstall.
+# dc_assert_teardown <connector> <agent_config_file> [baseline_file baseline_state]
+# — after `defenseclaw-gateway connector teardown`, prove that the agent
+# config is byte-identical to its pre-setup state. A pre-existing user config
+# may legitimately contain the word "defenseclaw", so grepping for that word
+# is neither an ownership check nor a restoration check. Callers that do not
+# provide a baseline retain the narrower managed-reference fallback.
 dc_assert_teardown() {
-  local connector="$1" cfg="$2"
+  local connector="$1" cfg="$2" baseline="${3:-}" baseline_state="${4:-}"
+  if [ -n "${baseline}" ]; then
+    case "${baseline_state}" in
+      present)
+        if [ ! -f "${cfg}" ] || ! cmp -s "${baseline}" "${cfg}"; then
+          dc_err "teardown did not restore the pre-setup config bytes in ${cfg}"
+          return 1
+        fi
+        return 0
+        ;;
+      missing)
+        if [ -e "${cfg}" ]; then
+          dc_err "teardown left a config that was absent before setup: ${cfg}"
+          return 1
+        fi
+        return 0
+        ;;
+      *)
+        dc_err "invalid teardown baseline state ${baseline_state:-<empty>}"
+        return 1
+        ;;
+    esac
+  fi
   if [ ! -f "${cfg}" ]; then
     # Some teardowns remove the file entirely — that is clean.
     return 0
   fi
-  if grep -q "defenseclaw" "${cfg}" 2>/dev/null; then
-    dc_err "teardown left a defenseclaw reference in ${cfg}"
+  if grep -Eq -- '-hook\.sh|/otlp/[^/]+/|"managedBy"[[:space:]]*:[[:space:]]*"defenseclaw"' "${cfg}" 2>/dev/null; then
+    dc_err "teardown left a managed hook or OTLP reference in ${cfg}"
     return 1
   fi
   return 0
