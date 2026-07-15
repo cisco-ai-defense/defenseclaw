@@ -2189,6 +2189,105 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the detached managed-breakaway child subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_MANAGED_BREAKAWAY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the managed-breakaway parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output descendant subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_GRANDCHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the process-tree grandchild subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the process-tree parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_MARKER",
+      "category": "test_fixture",
+      "purpose": "Marker path written by the managed-breakaway process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_PID_FILE",
+      "category": "test_fixture",
+      "purpose": "PID-record path shared with the process-tree cancellation fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test PID path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the parent-cancellation native Setup helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "cmd/defenseclaw-setup/main_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the bounded native Setup child-timeout helper.",
@@ -2348,6 +2447,44 @@
       "consumers": [
         {
           "location": "internal/notify/notify_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_AUTHENTICODE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Carries the Authenticode PowerShell helper path to the native unsigned-PE regression fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_windows_installer_artifacts.py",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_UNSIGNED_PE",
+      "category": "test_fixture",
+      "purpose": "Carries an unsigned portable-executable fixture path to the native Authenticode evidence regression.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_windows_installer_artifacts.py",
           "description": "Native Windows test fixture; never read by production runtime paths"
         }
       ],

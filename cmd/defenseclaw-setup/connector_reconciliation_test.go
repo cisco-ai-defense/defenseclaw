@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,6 +295,173 @@ func TestReconcilePreservedConnectorsRefreshesEntireExistingRoster(t *testing.T)
 	}
 	if len(recorder.attempts) != 2 || len(recorder.failures) != 0 {
 		t.Fatalf("preserved connector reconciliation = %+v", recorder)
+	}
+}
+
+func TestRetryPendingConnectorReconciliationClearsCleanUnattemptedIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	claudeHome := filepath.Join(root, "claude")
+	transaction := setupTransaction{
+		ID:       strings.Repeat("1", 32),
+		DataRoot: filepath.Join(root, "data"),
+	}
+	recorder := connectorReconciliationRecorder{attempts: []connectorReconciliationAttempt{{
+		Connector: "codex", ConfigHome: filepath.Join(root, "codex"),
+	}}}
+	state := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector: "claudecode", Operation: "verify", ConfigHome: claudeHome,
+			Message: "old failure", TransactionID: strings.Repeat("2", 32),
+		}},
+	}
+	var actions []string
+	err := retryPendingConnectorReconciliation(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		&recorder,
+		func() (*connectorReconciliationState, error) { return state, nil },
+		func(_, _, connector, action string, env []string) error {
+			actions = append(actions, connector+":"+action)
+			if envValue(env, "CLAUDE_CONFIG_DIR") != claudeHome || envValue(env, "CODEX_HOME") != "" {
+				t.Fatalf("stale Claude retry env = %q", env)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(actions, ","); got != "claudecode:verify" {
+		t.Fatalf("stale clean retry actions = %q", got)
+	}
+	if len(recorder.attempts) != 2 || len(recorder.failures) != 0 {
+		t.Fatalf("stale clean retry recorder = %+v", recorder)
+	}
+}
+
+func TestRetryPendingConnectorReconciliationHealsDirtyIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	home := filepath.Join(root, "claude")
+	transaction := setupTransaction{ID: strings.Repeat("3", 32), DataRoot: filepath.Join(root, "data")}
+	recorder := connectorReconciliationRecorder{}
+	state := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector: "claudecode", Operation: "teardown", ConfigHome: home,
+			Message: "locked", TransactionID: strings.Repeat("4", 32),
+		}},
+	}
+	var actions []string
+	err := retryPendingConnectorReconciliation(
+		transaction, filepath.Join(root, "gateway.exe"), &recorder,
+		func() (*connectorReconciliationState, error) { return state, nil },
+		func(_, _, _, action string, _ []string) error {
+			actions = append(actions, action)
+			if len(actions) == 1 {
+				return errors.New("still dirty")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(actions, ","); got != "verify,teardown,verify" {
+		t.Fatalf("dirty retry actions = %q", got)
+	}
+	if len(recorder.attempts) != 1 || len(recorder.failures) != 0 {
+		t.Fatalf("healed retry recorder = %+v", recorder)
+	}
+}
+
+func TestRetryPendingConnectorReconciliationRetainsTerminalFailure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	home := filepath.Join(root, "codex")
+	transaction := setupTransaction{ID: strings.Repeat("5", 32), DataRoot: filepath.Join(root, "data")}
+	recorder := connectorReconciliationRecorder{}
+	state := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector: "codex", Operation: "verify", ConfigHome: home,
+			Message: "old failure", TransactionID: strings.Repeat("6", 32),
+		}},
+	}
+	verifyCalls := 0
+	err := retryPendingConnectorReconciliation(
+		transaction, filepath.Join(root, "gateway.exe"), &recorder,
+		func() (*connectorReconciliationState, error) { return state, nil },
+		func(_, _, _, action string, _ []string) error {
+			if action == "verify" {
+				verifyCalls++
+				if verifyCalls == 2 {
+					return nil
+				}
+			}
+			return fmt.Errorf("%s failed", action)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.failures) != 1 {
+		t.Fatalf("terminal retry failures = %+v", recorder.failures)
+	}
+	failure := recorder.failures[0]
+	if failure.TransactionID != transaction.ID || failure.Operation != "teardown" ||
+		!strings.Contains(failure.Message, "teardown retry") {
+		t.Fatalf("terminal retry failure = %+v", failure)
+	}
+}
+
+func TestRetryPendingConnectorReconciliationDoesNotTeardownTouchedConnectorAtAnotherHome(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	oldHome := filepath.Join(root, "old-codex")
+	transaction := setupTransaction{ID: strings.Repeat("7", 32), DataRoot: filepath.Join(root, "data")}
+	recorder := connectorReconciliationRecorder{attempts: []connectorReconciliationAttempt{{
+		Connector: "codex", ConfigHome: filepath.Join(root, "current-codex"),
+	}}}
+	state := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector: "codex", Operation: "verify", ConfigHome: oldHome,
+			Message: "old failure", TransactionID: strings.Repeat("8", 32),
+		}},
+	}
+	var actions []string
+	err := retryPendingConnectorReconciliation(
+		transaction, filepath.Join(root, "gateway.exe"), &recorder,
+		func() (*connectorReconciliationState, error) { return state, nil },
+		func(_, _, _, action string, _ []string) error {
+			actions = append(actions, action)
+			return errors.New("still dirty")
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(actions, ","); got != "verify" {
+		t.Fatalf("same-connector retry actions = %q", got)
+	}
+	if len(recorder.failures) != 1 || recorder.failures[0].TransactionID != transaction.ID {
+		t.Fatalf("same-connector failure was not refreshed: %+v", recorder.failures)
+	}
+}
+
+func TestRetryPendingConnectorReconciliationPropagatesReaderError(t *testing.T) {
+	t.Parallel()
+	want := errors.New("marker access denied")
+	err := retryPendingConnectorReconciliation(
+		setupTransaction{}, "", &connectorReconciliationRecorder{},
+		func() (*connectorReconciliationState, error) { return nil, want },
+		func(_, _, _, _ string, _ []string) error { return nil },
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("reader error = %v, want %v", err, want)
 	}
 }
 

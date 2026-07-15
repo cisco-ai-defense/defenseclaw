@@ -12,7 +12,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('stage-package-data', 'build-artifacts', 'build-installer', 'setup-acceptance', 'contract', 'capture', 'cleanup', 'self-test')]
+    [ValidateSet('stage-package-data', 'build-artifacts', 'build-installer', 'setup-acceptance', 'release-certification', 'contract', 'capture', 'cleanup', 'self-test')]
     [string]$Operation = 'self-test',
     [string]$WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-windows-native-ci'),
@@ -26,6 +26,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
+
+$windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
+$windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
+$windowsResourceVersionName = 'DefenseClawWindowsResourceVersion.txt'
 
 $setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
 if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
@@ -71,6 +75,55 @@ function Get-StableHookRuntimeExecutable {
     return [IO.Path]::GetFullPath(
         (Join-Path $localAppData 'DefenseClaw\HookRuntime\defenseclaw-hook.exe')
     )
+}
+
+function Get-WorkspacePackageVersion {
+    $projectPath = Join-Path $WorkspaceRoot 'pyproject.toml'
+    if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
+        $projectText = Get-Content -LiteralPath $projectPath -Raw -Encoding UTF8
+        if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw 'Could not resolve project version from pyproject.toml'
+        }
+        $packageVersion = $Matches[1]
+    } else {
+        $versionPath = Join-Path $PSScriptRoot $windowsResourceVersionName
+        if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+            throw 'Could not resolve project version from the workspace or packaged resource verifier'
+        }
+        $packageVersion = ([IO.File]::ReadAllText($versionPath)).Trim()
+    }
+    if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
+        throw "Invalid package version for Windows resources: $packageVersion"
+    }
+    return $packageVersion
+}
+
+function Assert-WindowsExecutableResource(
+    [string]$Path,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [string]$Version,
+    [switch]$Apply
+) {
+    $arguments = @(
+        '-target', 'windows_amd64',
+        '-executable', $Path,
+        '-component', $Component,
+        '-version', $Version
+    )
+    $verifier = Join-Path $PSScriptRoot $windowsResourceVerifierName
+    $packagedIcon = Join-Path $PSScriptRoot $windowsResourceIconName
+    if ((Test-Path -LiteralPath $verifier -PathType Leaf) -and
+        (Test-Path -LiteralPath $packagedIcon -PathType Leaf)) {
+        $command = $verifier
+        $arguments += @('-icon', $packagedIcon)
+    } else {
+        $command = Get-RequiredCommand 'go.exe'
+        $arguments = @('run', './internal/tools/windowsresources') + $arguments + @(
+            '-icon', (Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png')
+        )
+    }
+    if (-not $Apply) { $arguments += '-verify-only' }
+    Invoke-WindowsNativeProcess $command $arguments -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
 }
 
 function Get-CiscoAuthenticodeState([string]$Path) {
@@ -965,33 +1018,92 @@ function Invoke-BuildArtifacts {
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for build-artifacts' }
     $dist = Assert-SafeStateRoot $ArtifactRoot
     [IO.Directory]::CreateDirectory($root) | Out-Null
-    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
-    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-        throw 'Could not resolve project version from pyproject.toml'
-    }
-    $packageVersion = $Matches[1]
-    if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
-        throw "Invalid package version for Windows artifacts: $packageVersion"
-    }
+    $packageVersion = Get-WorkspacePackageVersion
     if (Test-Path -LiteralPath $dist) {
         Remove-SafeDisposableTree -Path $dist -Root $dist
     }
     [IO.Directory]::CreateDirectory($dist) | Out-Null
     $go = Get-RequiredCommand 'go.exe'
     $uv = Get-RequiredCommand 'uv.exe'
+    $git = Get-RequiredCommand 'git.exe'
+    $epochResult = Invoke-WindowsNativeProcess $git @(
+        '-C', $WorkspaceRoot, 'show', '-s', '--format=%ct', 'HEAD'
+    ) -TimeoutSeconds 30
+    $sourceDateEpoch = $epochResult.StdOut.Trim()
+    if ($sourceDateEpoch -notmatch '^\d{9,}$') {
+        throw "git returned an invalid source epoch: $sourceDateEpoch"
+    }
+    $commitResult = Invoke-WindowsNativeProcess $git @(
+        '-C', $WorkspaceRoot, 'rev-parse', '--verify', 'HEAD'
+    ) -TimeoutSeconds 30
+    $sourceCommit = $commitResult.StdOut.Trim().ToLowerInvariant()
+    if ($sourceCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "git returned an invalid source commit: $sourceCommit"
+    }
+    $artifactHelper = Join-Path $WorkspaceRoot 'scripts\windows_installer_artifacts.py'
+    if (-not (Test-Path -LiteralPath $artifactHelper -PathType Leaf)) {
+        throw "deterministic Windows artifact helper is missing: $artifactHelper"
+    }
     $stage = Join-Path $root 'gateway-stage'
+    $gatewayVerificationStage = Join-Path $root 'gateway-stage-verification'
     [IO.Directory]::CreateDirectory($stage) | Out-Null
+    [IO.Directory]::CreateDirectory($gatewayVerificationStage) | Out-Null
     $previousCgo = $env:CGO_ENABLED
     try {
         $env:CGO_ENABLED = '0'
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
+        foreach ($binary in @(
+            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
+            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
+        )) {
+            foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
+                $target = Join-Path $targetRoot $binary[0]
+                Invoke-WindowsNativeProcess $go @(
+                    'build', '-trimpath', '-buildvcs=false', '-ldflags', $binary[2],
+                    '-o', $target, $binary[1]
+                ) -TimeoutSeconds 900 | Out-Null
+                Assert-WindowsExecutableResource -Path $target -Component $binary[3] -Version $packageVersion -Apply
+            }
+            $primaryHash = (Get-FileHash -LiteralPath (Join-Path $stage $binary[0]) -Algorithm SHA256).Hash
+            $verificationHash = (Get-FileHash -LiteralPath (Join-Path $gatewayVerificationStage $binary[0]) -Algorithm SHA256).Hash
+            if ($primaryHash -ne $verificationHash) {
+                throw "reproducible Go build self-check failed for $($binary[0])"
+            }
+        }
+        Invoke-WindowsNativeProcess $go @(
+            'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w',
+            '-o', (Join-Path $dist $windowsResourceVerifierName),
+            './internal/tools/windowsresources'
+        ) -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
+        Copy-Item -LiteralPath (
+            Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
+        ) -Destination (Join-Path $dist $windowsResourceIconName)
+        [IO.File]::WriteAllText(
+            (Join-Path $dist $windowsResourceVersionName),
+            $packageVersion + "`n",
+            [Text.UTF8Encoding]::new($false)
+        )
     } finally {
         if ($null -eq $previousCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
         else { $env:CGO_ENABLED = $previousCgo }
     }
-    Compress-Archive -LiteralPath (Join-Path $stage 'defenseclaw.exe'), (Join-Path $stage 'defenseclaw-hook.exe') `
-        -DestinationPath (Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip") -Force
+    $gatewayArchive = Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip"
+    $gatewayArchiveVerification = Join-Path $root 'gateway-archive-verification.zip'
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--frozen', 'python', $artifactHelper, 'zip',
+        '--source', $stage,
+        '--output', $gatewayArchive,
+        '--epoch', $sourceDateEpoch
+    ) -TimeoutSeconds 900 -WorkingDirectory $WorkspaceRoot | Out-Null
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--frozen', 'python', $artifactHelper, 'zip',
+        '--source', $stage,
+        '--output', $gatewayArchiveVerification,
+        '--epoch', $sourceDateEpoch
+    ) -TimeoutSeconds 900 -WorkingDirectory $WorkspaceRoot | Out-Null
+    if ((Get-FileHash -LiteralPath $gatewayArchive -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $gatewayArchiveVerification -Algorithm SHA256).Hash) {
+        throw 'deterministic gateway ZIP self-check failed'
+    }
 
     $packageStage = Join-Path $root 'package-source'
     if (Test-Path -LiteralPath $packageStage) {
@@ -1004,10 +1116,27 @@ function Invoke-BuildArtifacts {
     [IO.Directory]::CreateDirectory((Join-Path $packageStage 'cli')) | Out-Null
     Copy-Tree (Join-Path $WorkspaceRoot 'cli\defenseclaw') (Join-Path $packageStage 'cli\defenseclaw')
     Stage-PackageData (Join-Path $packageStage 'cli\defenseclaw')
-    Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $dist) -TimeoutSeconds 900 -WorkingDirectory $packageStage | Out-Null
+    $packageVerificationStage = Join-Path $root 'package-source-verification'
+    Copy-Tree $packageStage $packageVerificationStage
+    $wheelVerificationRoot = Join-Path $root 'wheel-verification'
+    [IO.Directory]::CreateDirectory($wheelVerificationRoot) | Out-Null
+    $previousSourceDateEpoch = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH')
+    try {
+        [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $sourceDateEpoch)
+        Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $dist) -TimeoutSeconds 900 -WorkingDirectory $packageStage | Out-Null
+        Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $wheelVerificationRoot) -TimeoutSeconds 900 -WorkingDirectory $packageVerificationStage | Out-Null
+    } finally {
+        [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $previousSourceDateEpoch)
+    }
     $wheel = Get-ChildItem -LiteralPath $dist -Filter 'defenseclaw-*.whl' -File | Select-Object -First 1
     if (-not $wheel) {
         throw 'wheel build did not produce a DefenseClaw wheel'
+    }
+    $verificationWheels = @(Get-ChildItem -LiteralPath $wheelVerificationRoot -Filter $wheel.Name -File)
+    if ($verificationWheels.Count -ne 1 -or
+        (Get-FileHash -LiteralPath $wheel.FullName -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $verificationWheels[0].FullName -Algorithm SHA256).Hash) {
+        throw 'reproducible DefenseClaw wheel self-check failed'
     }
     $archive = [IO.Compression.ZipFile]::OpenRead($wheel.FullName)
     try {
@@ -2562,6 +2691,8 @@ function Invoke-SetupAcceptance {
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "native setup executable not found: $setup"
     }
+    $packageVersion = Get-WorkspacePackageVersion
+    Assert-WindowsExecutableResource -Path $setup -Component 'setup' -Version $packageVersion
     $setupAuthenticode = Get-CiscoAuthenticodeState $setup
     $requireSignedProduct = $setupAuthenticode.Status -eq 'Valid'
     if ($requireSignedProduct -and $setupAuthenticode.Publisher -ne 'Cisco Systems, Inc.') {
@@ -2662,6 +2793,18 @@ function Invoke-SetupAcceptance {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
                 throw "setup install did not create required file: $required"
             }
+        }
+        foreach ($resourceContract in @(
+            [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
+            [pscustomobject]@{ Path = $startup; Component = 'startup' },
+            [pscustomobject]@{ Path = $gateway; Component = 'gateway' },
+            [pscustomobject]@{ Path = $hook; Component = 'hook' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\skill-scanner.exe'); Component = 'launcher' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\mcp-scanner.exe'); Component = 'launcher' },
+            [pscustomobject]@{ Path = (Join-Path $installRoot 'bin\defenseclaw-observability.exe'); Component = 'launcher' }
+        )) {
+            Assert-WindowsExecutableResource -Path $resourceContract.Path `
+                -Component $resourceContract.Component -Version $packageVersion
         }
         if ($requireSignedProduct) {
             foreach ($productExecutable in @(
@@ -2932,6 +3075,587 @@ function Invoke-SetupAcceptance {
         }
         Assert-UserPathRegistrySnapshot $userPathBefore `
             'setup failure cleanup did not restore the original user PATH exactly'
+    }
+}
+
+function Get-WindowsReleaseClientSpecifications {
+    return @(
+        [pscustomobject]@{
+            Connector = 'codex'
+            Version = '0.144.3'
+            Package = '@openai/codex'
+            Manifest = 'node_modules\@openai\codex\package.json'
+            Command = 'codex.cmd'
+        },
+        [pscustomobject]@{
+            Connector = 'claudecode'
+            Version = '2.1.208'
+            Package = '@anthropic-ai/claude-code'
+            Manifest = 'node_modules\@anthropic-ai\claude-code\package.json'
+            Command = 'claude.cmd'
+        }
+    )
+}
+
+function Assert-ExactWindowsReleaseClientVersion([string]$Version, [string]$ConnectorName) {
+    if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+        throw "$ConnectorName release certification requires one exact numeric version, got: $Version"
+    }
+}
+
+function Assert-WindowsReleaseCertificationEnvironment {
+    Assert-NativeWindowsX64
+    if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+        throw 'release-certification may mutate only a disposable GitHub-hosted Windows runner user'
+    }
+    if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+        throw 'release-certification requires RUNNER_TEMP'
+    }
+    if ([string]$env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'release-certification requires the exact lowercase 40-character GITHUB_SHA'
+    }
+    if ([string]$env:WINDOWS_RELEASE_VERSION -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+        throw 'release-certification requires the exact resolved WINDOWS_RELEASE_VERSION'
+    }
+    foreach ($secretName in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY')) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($secretName))) {
+            throw "$secretName is required for non-advisory real-client release certification"
+        }
+    }
+    $artifactDigest = [Environment]::GetEnvironmentVariable('WINDOWS_RELEASE_ARTIFACT_DIGEST')
+    if ($artifactDigest -notmatch '^(?:sha256:)?[0-9a-fA-F]{64}$') {
+        throw 'release-certification requires the immutable uploaded Windows artifact digest'
+    }
+    foreach ($specification in Get-WindowsReleaseClientSpecifications) {
+        Assert-ExactWindowsReleaseClientVersion $specification.Version $specification.Connector
+    }
+}
+
+function Install-PinnedWindowsReleaseClient(
+    [object]$Specification,
+    [string]$ClientRoot,
+    [string]$Logs
+) {
+    Assert-ExactWindowsReleaseClientVersion $Specification.Version $Specification.Connector
+    Protect-TestDirectory $ClientRoot
+    $npm = Get-RequiredCommand 'npm.cmd'
+    $apiKeyEnvironment = @{}
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $name = [string]$entry.Key
+        if ($name -match '(?i)_API_KEY$') {
+            $apiKeyEnvironment[$name] = [string]$entry.Value
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+    }
+    try {
+        # Resolve the complete transitive graph once, then require npm ci to
+        # consume that exact lock without mutating it. Authentication secrets
+        # are deliberately unavailable to both npm processes and package code.
+        Invoke-WindowsNativeProcess $npm @(
+            'install', '--package-lock-only', '--ignore-scripts', '--save-exact',
+            '--no-audit', '--no-fund', '--prefix', $ClientRoot,
+            "$($Specification.Package)@$($Specification.Version)"
+        ) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $Logs "npm-resolve-$($Specification.Connector).log") | Out-Null
+        $lockPath = Join-Path $ClientRoot 'package-lock.json'
+        if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+            throw "official client dependency lock is missing: $lockPath"
+        }
+        $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+        Invoke-WindowsNativeProcess $npm @(
+            'ci', '--no-audit', '--no-fund', '--prefix', $ClientRoot
+        ) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $Logs "npm-install-$($Specification.Connector).log") | Out-Null
+        $installedLockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+        if ($installedLockHash -cne $lockHash) {
+            throw 'npm ci mutated the exact official-client dependency lock'
+        }
+    } finally {
+        foreach ($name in $apiKeyEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $apiKeyEnvironment[$name], 'Process')
+        }
+    }
+    $manifestPath = Join-Path $ClientRoot $Specification.Manifest
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "official client package manifest is missing: $manifestPath"
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$manifest.name -ne $Specification.Package -or
+        [string]$manifest.version -cne $Specification.Version) {
+        throw "official client package identity mismatch: $($manifest.name)@$($manifest.version)"
+    }
+    $command = Join-Path $ClientRoot "node_modules\.bin\$($Specification.Command)"
+    if (-not (Test-Path -LiteralPath $command -PathType Leaf)) {
+        throw "official client executable is missing: $command"
+    }
+    return [IO.Path]::GetFullPath($command)
+}
+
+function Assert-WindowsReleaseSbom(
+    [string]$Path,
+    [string]$SetupHash,
+    [string]$Version,
+    [string]$SourceCommit
+) {
+    $sbom = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sbom.spdxVersion -cne 'SPDX-2.3' -or
+        [string]$sbom.dataLicense -cne 'CC0-1.0' -or
+        [string]$sbom.SPDXID -cne 'SPDXRef-DOCUMENT') {
+        throw 'release setup SBOM is not the required SPDX 2.3 document'
+    }
+    $escapedVersion = [Uri]::EscapeDataString($Version)
+    $expectedNamespace = "https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/$escapedVersion/$SetupHash"
+    if ([string]$sbom.documentNamespace -cne $expectedNamespace) {
+        throw 'release setup SBOM namespace does not identify the exact installer bytes and version'
+    }
+    if ([string]$sbom.comment -cne "DefenseClaw source commit: $SourceCommit") {
+        throw 'release setup SBOM source commit does not match GITHUB_SHA'
+    }
+
+    $setupPackages = @($sbom.packages | Where-Object {
+        [string]$_.name -ceq 'DefenseClaw Windows Setup'
+    })
+    if ($setupPackages.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one Setup package'
+    }
+    $setupPackage = $setupPackages[0]
+    if ([string]$setupPackage.versionInfo -cne $Version -or
+        [string]$setupPackage.packageFileName -cne 'DefenseClawSetup-x64.exe') {
+        throw 'release setup SBOM package identity is invalid'
+    }
+    $packageHashes = @($setupPackage.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and [string]$_.checksumValue -ceq $SetupHash
+    })
+    if ($packageHashes.Count -ne 1) {
+        throw 'release setup SBOM package does not identify the exact installer SHA-256'
+    }
+    $expectedPurl = "pkg:github/cisco-ai-defense/defenseclaw@$escapedVersion"
+    $purls = @($setupPackage.externalRefs | Where-Object {
+        [string]$_.referenceCategory -ceq 'PACKAGE-MANAGER' -and
+        [string]$_.referenceType -ceq 'purl' -and
+        [string]$_.referenceLocator -ceq $expectedPurl
+    })
+    if ($purls.Count -ne 1) {
+        throw 'release setup SBOM package does not identify the expected source project and version'
+    }
+
+    $setupFiles = @($sbom.files | Where-Object {
+        [string]$_.fileName -ceq './DefenseClawSetup-x64.exe'
+    })
+    if ($setupFiles.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one canonical Setup file'
+    }
+    $setupFile = $setupFiles[0]
+    $fileHashes = @($setupFile.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and [string]$_.checksumValue -ceq $SetupHash
+    })
+    if ($fileHashes.Count -ne 1) {
+        throw 'release setup SBOM file does not identify the exact installer SHA-256'
+    }
+    $packageID = [string]$setupPackage.SPDXID
+    $fileID = [string]$setupFile.SPDXID
+    $described = @($sbom.documentDescribes)
+    if ($described.Count -ne 1 -or [string]$described[0] -cne $packageID) {
+        throw 'release setup SBOM documentDescribes does not identify only the Setup package'
+    }
+    $describesRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq 'SPDXRef-DOCUMENT' -and
+        [string]$_.relationshipType -ceq 'DESCRIBES' -and
+        [string]$_.relatedSpdxElement -ceq $packageID
+    })
+    $containsRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq $packageID -and
+        [string]$_.relationshipType -ceq 'CONTAINS' -and
+        [string]$_.relatedSpdxElement -ceq $fileID
+    })
+    if ($describesRelationships.Count -ne 1 -or $containsRelationships.Count -ne 1) {
+        throw 'release setup SBOM relationships do not bind the document, package, and Setup file'
+    }
+}
+
+function Assert-WindowsReleasePersistentPath([string]$ExpectedLauncher, [string]$Logs) {
+    $savedPath = $env:PATH
+    try {
+        $userPath = [Environment]::ExpandEnvironmentVariables(
+            [Environment]::GetEnvironmentVariable('Path', 'User') ?? ''
+        )
+        $machinePath = [Environment]::ExpandEnvironmentVariables(
+            [Environment]::GetEnvironmentVariable('Path', 'Machine') ?? ''
+        )
+        $env:PATH = "$userPath;$machinePath"
+        $resolved = @(Get-Command 'defenseclaw.exe' -CommandType Application -ErrorAction Stop)[0].Source
+        if (-not [IO.Path]::GetFullPath($resolved).Equals(
+            [IO.Path]::GetFullPath($ExpectedLauncher),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "new-shell PATH resolved $resolved, expected $ExpectedLauncher"
+        }
+        Invoke-WindowsNativeProcess $resolved @('--version') -TimeoutSeconds 120 `
+            -LogPath (Join-Path $Logs 'release-persistent-path-version.log') | Out-Null
+    } finally {
+        $env:PATH = $savedPath
+    }
+}
+
+function Invoke-WindowsReleaseRealConnector(
+    [object]$Specification,
+    [string]$ClientPath,
+    [string]$ConnectorRoot,
+    [string]$ResultsPath,
+    [string]$Diagnostics
+) {
+    Protect-TestDirectory $ConnectorRoot
+    $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
+    $pwsh = Get-RequiredCommand 'pwsh.exe'
+    Invoke-WindowsNativeProcess $pwsh @(
+        '-NoLogo', '-NoProfile', '-File', $harness,
+        '-Layer', 'live',
+        '-Connector', $Specification.Connector,
+        '-WorkspaceRoot', $WorkspaceRoot,
+        '-StateRoot', $ConnectorRoot,
+        '-ResultsPath', $ResultsPath,
+        '-ArtifactPath', (Join-Path $Diagnostics $Specification.Connector),
+        '-AgentPath', $ClientPath,
+        '-ExpectedAgentVersion', $Specification.Version,
+        '-CommandTimeoutSeconds', '300',
+        '-ReleaseCertification'
+    ) -TimeoutSeconds 1800 -LogPath (Join-Path $Diagnostics "harness-$($Specification.Connector).log") | Out-Null
+}
+
+function Assert-WindowsReleaseRealClientResults([string]$ResultsPath) {
+    if (-not (Test-Path -LiteralPath $ResultsPath -PathType Leaf)) {
+        throw "release certification result stream is missing: $ResultsPath"
+    }
+    $rows = @(Get-Content -LiteralPath $ResultsPath -Encoding UTF8 |
+        Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+    $requiredEvents = @(
+        'install', 'doctor:windows-hook-registration', 'lifecycle:fires', 'tool-allow:fires',
+        'tool-block:enforced', 'audit-correlation', 'telemetry', 'teardown'
+    )
+    foreach ($connectorName in @('codex', 'claudecode')) {
+        foreach ($eventName in $requiredEvents) {
+            $matches = @($rows | Where-Object {
+                $_.connector -eq $connectorName -and
+                $_.event -eq $eventName -and
+                $_.status -eq 'pass'
+            })
+            if ($matches.Count -lt 1) {
+                throw "release certification is missing $connectorName/$eventName pass evidence"
+            }
+        }
+    }
+    $autoTrust = @($rows | Where-Object {
+        $_.connector -eq 'codex' -and
+        $_.event -eq 'codex:auto-trust' -and
+        $_.status -eq 'pass'
+    })
+    if ($autoTrust.Count -lt 1) {
+        throw 'release certification is missing automatic Codex trusted-hash evidence'
+    }
+}
+
+function Assert-WindowsReleaseDoctorRows([string]$Launcher, [string]$Logs) {
+    $doctor = Invoke-WindowsNativeProcess $Launcher @('doctor', '--json-output') `
+        -TimeoutSeconds 300 -LogPath (Join-Path $Logs 'release-doctor-after-maintenance.json')
+    try { $report = $doctor.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "installed Doctor returned invalid JSON after repair/upgrade: $($_.Exception.Message)" }
+    foreach ($label in @('Codex hooks', 'Claude Code hooks')) {
+        $rows = @($report.checks | Where-Object { [string]$_.label -like "$label*" })
+        if ($rows.Count -ne 1 -or [string]$rows[0].status -ne 'pass' -or
+            [string]$rows[0].detail -notmatch 'healthy Windows-native') {
+            throw "Doctor did not verify $label after exact-installer repair/upgrade"
+        }
+    }
+}
+
+function Assert-WindowsReleaseCleanUninstall(
+    [string]$InstallRoot,
+    [string]$DataRoot,
+    [string]$CacheRoot,
+    [string]$ARPKey,
+    [string[]]$ConnectorConfigs,
+    [AllowNull()][string]$OriginalUserPath,
+    [string]$PreservedCodexHooksPath,
+    [string]$ExpectedCodexHooks
+) {
+    for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $CacheRoot); $attempt++) {
+        Start-Sleep -Milliseconds 250
+    }
+    foreach ($path in @($InstallRoot, $DataRoot, $CacheRoot, $ARPKey)) {
+        if (Test-Path -LiteralPath $path) {
+            throw "release uninstall left managed state behind: $path"
+        }
+    }
+    Assert-NoDefenseClawRegistration $ConnectorConfigs
+    if (-not (Test-Path -LiteralPath $PreservedCodexHooksPath -PathType Leaf)) {
+        throw "release uninstall removed the unrelated Codex hook file: $PreservedCodexHooksPath"
+    }
+    $actualCodexHooks = [IO.File]::ReadAllText($PreservedCodexHooksPath)
+    if (-not [string]::Equals($actualCodexHooks, $ExpectedCodexHooks, [StringComparison]::Ordinal)) {
+        throw 'release uninstall did not preserve the unrelated Codex hook byte-for-byte'
+    }
+    if (-not [string]::Equals(
+        $OriginalUserPath,
+        [Environment]::GetEnvironmentVariable('Path', 'User'),
+        [StringComparison]::Ordinal
+    )) {
+        throw 'release uninstall did not restore the original user PATH exactly'
+    }
+}
+
+function Invoke-WindowsReleaseCertification {
+    Assert-WindowsReleaseCertificationEnvironment
+    if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for release-certification' }
+    $root = Assert-SafeStateRoot $StateRoot
+    if (-not (Test-PathWithin $root $env:RUNNER_TEMP)) {
+        throw 'release-certification StateRoot must be a strict child of RUNNER_TEMP'
+    }
+    Protect-TestDirectory $root
+    Set-CurrentUserAsDefaultOwner
+
+    $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
+    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+        throw "release setup executable not found: $setup"
+    }
+    if ([IO.Path]::GetFileName($setup) -cne 'DefenseClawSetup-x64.exe') {
+        throw "release certification requires canonical Setup bytes: $setup"
+    }
+    Assert-CiscoAuthenticodeSignature $setup
+    $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sidecarPath = "$setup.sha256"
+    $provenancePath = "$setup.provenance.json"
+    $sbomPath = "$setup.sbom.json"
+    foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
+        if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+            throw "release setup metadata is missing: $metadataPath"
+        }
+    }
+    $sidecarHash = (([IO.File]::ReadAllText($sidecarPath).Trim() -split '\s+')[0]).ToLowerInvariant()
+    if ($sidecarHash -cne $setupHash) {
+        throw "release setup SHA-256 sidecar mismatch: $sidecarHash != $setupHash"
+    }
+    $provenance = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$provenance.artifact_sha256 -cne $setupHash) {
+        throw 'release setup provenance does not identify the exact signed installer bytes'
+    }
+    if ([string]$provenance.source_commit -cne [string]$env:GITHUB_SHA) {
+        throw "release setup provenance source commit does not match GITHUB_SHA: $($provenance.source_commit)"
+    }
+    $releaseVersion = [string]$env:WINDOWS_RELEASE_VERSION
+    if ([string]$provenance.version -cne $releaseVersion) {
+        throw "release setup provenance version does not match the resolved release: $($provenance.version) != $releaseVersion"
+    }
+    Assert-WindowsReleaseSbom `
+        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA)
+    $releaseMetadataHashes = @{}
+    foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
+        $releaseMetadataHashes[$metadataPath] = `
+            (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    $logs = Join-Path $root 'logs'
+    $diagnostics = Join-Path $root 'diagnostics'
+    $results = Join-Path $root 'real-client-results.jsonl'
+    Protect-TestDirectory $logs
+    Protect-TestDirectory $diagnostics
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $installRoot = Join-Path $localAppData 'Programs\DefenseClaw'
+    $dataRoot = Join-Path $userProfile '.defenseclaw'
+    $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
+    $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
+    $codexConfigPath = Join-Path $userProfile '.codex\config.toml'
+    $codexHooksPath = Join-Path $userProfile '.codex\hooks.json'
+    $claudeConfigPath = Join-Path $userProfile '.claude\settings.json'
+    $connectorConfigs = @($codexConfigPath, $codexHooksPath, $claudeConfigPath)
+    foreach ($path in @($installRoot, $dataRoot, $cacheRoot, $arpKey) + $connectorConfigs) {
+        if (Test-Path -LiteralPath $path) {
+            throw "release certification refuses pre-existing product or connector state: $path"
+        }
+    }
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $codexHooksPath)) | Out-Null
+    $unrelatedCodexHooks = [ordered]@{
+        hooks = [ordered]@{
+            SessionStart = @(
+                [ordered]@{
+                    matcher = 'startup|resume|clear'
+                    hooks = @(
+                        [ordered]@{
+                            type = 'command'
+                            command = 'cmd.exe /d /c exit 0'
+                            timeout = 5
+                        }
+                    )
+                }
+            )
+        }
+    } | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($codexHooksPath, $unrelatedCodexHooks, [Text.UTF8Encoding]::new($false))
+
+    $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $originalEnvironment = @{}
+    foreach ($name in @(
+        'PATH', 'HOME', 'USERPROFILE', 'DEFENSECLAW_HOME',
+        'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'NPM_CONFIG_CACHE'
+    )) {
+        $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $installed = $false
+    $completed = $false
+    try {
+        $env:NPM_CONFIG_CACHE = Join-Path $root 'npm-cache'
+        $clients = @{}
+        $toolBins = [Collections.Generic.List[string]]::new()
+        foreach ($specification in Get-WindowsReleaseClientSpecifications) {
+            $connectorRoot = Join-Path $root $specification.Connector
+            $clientRoot = Join-Path $connectorRoot 'tools'
+            $client = Install-PinnedWindowsReleaseClient $specification $clientRoot $logs
+            $clients[$specification.Connector] = [pscustomobject]@{
+                Specification = $specification
+                Path = $client
+                Root = $connectorRoot
+            }
+            $toolBins.Add((Split-Path -Parent $client))
+        }
+        $env:PATH = (@($toolBins) + @($originalEnvironment['PATH'])) -join ';'
+        $env:USERPROFILE = $userProfile
+        $env:HOME = $userProfile
+        $env:DEFENSECLAW_HOME = $dataRoot
+        $env:CODEX_HOME = Join-Path $userProfile '.codex'
+        $env:CLAUDE_CONFIG_DIR = Join-Path $userProfile '.claude'
+
+        Invoke-WindowsNativeProcess $setup @(
+            '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=codex',
+            'MODE=action', 'STARTGATEWAY=1'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'release-setup-install.log') | Out-Null
+        $installed = $true
+
+        $bin = Join-Path $installRoot 'bin'
+        $launcher = Join-Path $bin 'defenseclaw.exe'
+        $gateway = Join-Path $bin 'defenseclaw-gateway.exe'
+        $hook = Join-Path $bin 'defenseclaw-hook.exe'
+        foreach ($product in @($launcher, $gateway, $hook)) {
+            if (-not (Test-Path -LiteralPath $product -PathType Leaf)) {
+                throw "exact signed Setup did not install required product executable: $product"
+            }
+            Assert-CiscoAuthenticodeSignature $product
+        }
+        $installedStatePath = Join-Path $installRoot 'installer\install-state.json'
+        $installedPayloadPath = Join-Path $installRoot 'installer\payload-manifest.json'
+        foreach ($identityPath in @($installedStatePath, $installedPayloadPath)) {
+            if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) {
+                throw "exact signed Setup did not install source identity: $identityPath"
+            }
+            $installedIdentity = Get-Content -LiteralPath $identityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([string]$installedIdentity.source_commit -cne [string]$env:GITHUB_SHA) {
+                throw "installed source commit does not match GITHUB_SHA in $identityPath"
+            }
+            if ([string]$installedIdentity.version -cne $releaseVersion) {
+                throw "installed version does not match resolved release in ${identityPath}: $($installedIdentity.version) != $releaseVersion"
+            }
+        }
+        Assert-WindowsReleasePersistentPath $launcher $logs
+        $env:PATH = "$bin;$(@($toolBins) -join ';');$($originalEnvironment['PATH'])"
+
+        foreach ($connectorName in @('codex', 'claudecode')) {
+            $client = $clients[$connectorName]
+            Invoke-WindowsReleaseRealConnector `
+                $client.Specification $client.Path $client.Root $results $diagnostics
+        }
+        Assert-WindowsReleaseRealClientResults $results
+
+        Invoke-WindowsNativeProcess $launcher @(
+            'setup', 'codex', '--yes', '--mode', 'action', '--restart'
+        ) -TimeoutSeconds 300 -LogPath (Join-Path $logs 'release-reconfigure-codex.log') | Out-Null
+        Invoke-WindowsNativeProcess $launcher @(
+            'setup', 'claude-code', '--yes', '--mode', 'action', '--restart'
+        ) -TimeoutSeconds 300 -LogPath (Join-Path $logs 'release-reconfigure-claudecode.log') | Out-Null
+
+        Invoke-WindowsNativeProcess $setup @(
+            '/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'release-setup-repair.log') | Out-Null
+        Invoke-WindowsNativeProcess $setup @(
+            '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'release-setup-upgrade.log') | Out-Null
+        Assert-WindowsReleaseDoctorRows $launcher $logs
+
+        # Uninstall must tear down both active connectors itself. A pre-teardown
+        # here would hide the release defect this certification is meant to catch.
+        Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+            -TimeoutSeconds 900 -LogPath (Join-Path $logs 'release-setup-uninstall.log') | Out-Null
+        $installed = $false
+        Assert-WindowsReleaseCleanUninstall `
+            $installRoot $dataRoot $cacheRoot $arpKey $connectorConfigs $originalUserPath `
+            $codexHooksPath $unrelatedCodexHooks
+
+        $finalHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($finalHash -cne $setupHash) {
+            throw 'the signed DefenseClawSetup-x64.exe bytes changed during release certification'
+        }
+        Assert-CiscoAuthenticodeSignature $setup
+        foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
+            $finalMetadataHash = `
+                (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($finalMetadataHash -cne $releaseMetadataHashes[$metadataPath]) {
+                throw "release metadata changed during real-client certification: $metadataPath"
+            }
+        }
+        foreach ($requiredRunValue in @('GITHUB_SERVER_URL', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_SHA')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($requiredRunValue))) {
+                throw "$requiredRunValue is required for durable release certification evidence"
+            }
+        }
+        $evidencePath = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) `
+            'DefenseClawSetup-x64.exe.certification.json'
+        $evidence = [ordered]@{
+            schema_version = 1
+            status = 'passed'
+            platform = 'windows-x64'
+            setup = [ordered]@{
+                name = 'DefenseClawSetup-x64.exe'
+                sha256 = $setupHash
+                publisher = 'Cisco Systems, Inc.'
+            }
+            clients = [ordered]@{
+                codex = [string]$clients['codex'].Specification.Version
+                claudecode = [string]$clients['claudecode'].Specification.Version
+            }
+            connectors = @('codex', 'claudecode')
+            requirements = @(
+                'automatic-codex-trust', 'lifecycle', 'tool-allow', 'tool-block',
+                'gateway-jsonl', 'audit-correlation', 'connector-otlp',
+                'repair', 'upgrade', 'uninstall'
+            )
+            source_commit = $env:GITHUB_SHA
+            release_version = $releaseVersion
+            staging_artifact_digest = ([string]$env:WINDOWS_RELEASE_ARTIFACT_DIGEST).ToLowerInvariant()
+            run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+        }
+        [IO.File]::WriteAllText(
+            $evidencePath,
+            ($evidence | ConvertTo-Json -Depth 8),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Write-Host 'Exact signed Windows installer passed both real-client release certifications.'
+        $completed = $true
+    } finally {
+        if ($installed -and (Test-Path -LiteralPath $setup -PathType Leaf)) {
+            try {
+                Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+                    -AllowedExitCodes @(0, 1603) -TimeoutSeconds 900 `
+                    -LogPath (Join-Path $logs 'release-emergency-uninstall.log') | Out-Null
+            } catch {
+                Write-Warning "release emergency uninstall failed: $(Protect-WindowsNativeText $_.Exception.Message)"
+            }
+        }
+        foreach ($name in $originalEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], 'Process')
+        }
+        if ($completed) {
+            Assert-WindowsReleaseCleanUninstall `
+                $installRoot $dataRoot $cacheRoot $arpKey $connectorConfigs $originalUserPath `
+                $codexHooksPath $unrelatedCodexHooks
+        }
     }
 }
 
@@ -3329,6 +4053,7 @@ if (-not $NoRun) {
         'build-artifacts' { Invoke-BuildArtifacts }
         'build-installer' { Invoke-BuildInstaller }
         'setup-acceptance' { Invoke-SetupAcceptance }
+        'release-certification' { Invoke-WindowsReleaseCertification }
         'contract' { Invoke-Contract }
         'capture' { Invoke-Capture }
         'cleanup' { Invoke-Cleanup }

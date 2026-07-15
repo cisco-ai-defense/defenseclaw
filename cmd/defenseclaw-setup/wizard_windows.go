@@ -6,6 +6,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,11 +188,13 @@ type setupWizard struct {
 	openLog        uintptr
 	logPath        string
 
-	running bool
-	done    bool
-	code    int
-	err     error
-	mu      sync.Mutex
+	running         bool
+	done            bool
+	cancelRequested bool
+	operationCancel context.CancelFunc
+	code            int
+	err             error
+	mu              sync.Mutex
 }
 
 type wizardChoice struct {
@@ -345,7 +349,7 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 		}
 	case wmClose:
 		if wiz != nil && wiz.running {
-			messageBox(hwnd, "Setup is still running. Wait for it to finish before closing this window.", "DefenseClaw Setup", 0x40)
+			wiz.requestCancellation()
 			return 0
 		}
 		procDestroyWindow.Call(hwnd)
@@ -535,7 +539,9 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 			w.startAction()
 		}
 	case idCancel:
-		if !w.running {
+		if w.running {
+			w.requestCancellation()
+		} else {
 			w.mu.Lock()
 			w.code = userExitCode
 			w.mu.Unlock()
@@ -561,6 +567,9 @@ func (w *setupWizard) syncGatewayChoice() {
 
 func (w *setupWizard) startAction() {
 	w.running = true
+	operationContext, operationCancel := context.WithCancel(context.Background())
+	w.operationCancel = operationCancel
+	w.cancelRequested = false
 	setShutdownBlockReason(w.hwnd, "DefenseClaw Setup is committing an installation transaction.")
 	w.opts.Quiet = true
 	if w.opts.Action == "uninstall" {
@@ -579,26 +588,67 @@ func (w *setupWizard) startAction() {
 	}
 	setText(w.heading, "Working")
 	w.enableInputs(false)
+	// Keep cancellation available while the worker advances to a rollback-safe
+	// journal boundary. The window remains open until rollback has completed.
+	procEnableWindow.Call(w.cancel, 1)
 	w.show(w.progress, true)
 	procSendMessage.Call(w.progress, pbmSetMarquee, 1, 30)
-	go func(opts options) {
+	go func(ctx context.Context, cancel context.CancelFunc, opts options) {
+		defer cancel()
 		var code int
 		var err error
 		if opts.Action == "uninstall" {
-			code, err = runUninstall(opts, w.installRoot, w.dataRoot)
+			code, err = runUninstallContext(ctx, opts, w.installRoot, w.dataRoot)
 		} else {
-			code, err = runInstall(opts, w.installRoot, w.dataRoot)
+			code, err = runInstallContext(ctx, opts, w.installRoot, w.dataRoot)
 		}
 		w.mu.Lock()
 		w.code = code
 		w.err = err
 		w.mu.Unlock()
 		procPostMessage.Call(w.hwnd, wmDone, 0, 0)
-	}(w.opts)
+	}(operationContext, operationCancel, w.opts)
+}
+
+func (w *setupWizard) requestCancellation() {
+	const (
+		mbYesNo        = 0x00000004
+		mbIconQuestion = 0x00000020
+		mbDefButton2   = 0x00000100
+		idYes          = 6
+	)
+	w.requestCancellationWithPrompt(func() bool {
+		return messageBoxResult(
+			w.hwnd,
+			"Cancel Setup at the next safe point?\r\n\r\nUncommitted changes will be rolled back before this window closes. If the transaction is already committed, Setup must finish its durable recovery steps.",
+			"Cancel DefenseClaw Setup",
+			mbYesNo|mbIconQuestion|mbDefButton2,
+		) == idYes
+	})
+}
+
+func (w *setupWizard) requestCancellationWithPrompt(confirm func() bool) {
+	if !w.running || w.cancelRequested {
+		return
+	}
+	if !confirm() || !w.running || w.cancelRequested {
+		// MessageBoxW runs a nested message loop. wmDone may have completed the
+		// operation while the confirmation was open, so re-check UI-thread state
+		// before changing the completed wizard or calling its cleared cancel func.
+		return
+	}
+	w.cancelRequested = true
+	setText(w.heading, "Cancelling")
+	setText(w.description, "Stopping the active child process tree and rolling back at the next safe transaction boundary...")
+	procEnableWindow.Call(w.cancel, 0)
+	if w.operationCancel != nil {
+		w.operationCancel()
+	}
 }
 
 func (w *setupWizard) finish() {
 	w.running = false
+	w.operationCancel = nil
 	procShutdownBlockDestroy.Call(w.hwnd)
 	w.done = true
 	w.enableInputs(false)
@@ -615,6 +665,14 @@ func (w *setupWizard) finish() {
 		w.logPath = logPath
 	}
 	if resultErr != nil {
+		if wizardCancellationCompleted(code, resultErr) {
+			setText(w.heading, "Setup was cancelled")
+			setText(w.description, "The operation was cancelled and every uncommitted change was rolled back. The private setup log records the final durable transaction state.")
+			w.show(w.openTerm, false)
+			w.show(w.openLog, w.logPath != "")
+			procEnableWindow.Call(w.openLog, boolToUintptr(w.logPath != ""))
+			return
+		}
 		setText(w.heading, "Setup could not finish")
 		message := wizardFailureDescription(code, resultErr, w.logPath, logErr)
 		setText(w.description, message)
@@ -638,6 +696,10 @@ func (w *setupWizard) finish() {
 		setText(w.heading, "DefenseClaw is installed")
 		setText(w.description, wizardCompletionDescription(w.opts.Connector))
 	}
+}
+
+func wizardCancellationCompleted(code int, err error) bool {
+	return code == userExitCode && errors.Is(err, errSetupCancelled)
 }
 
 func wizardCompletionDescription(connector string) string {
@@ -894,8 +956,22 @@ func centerWindow(hwnd uintptr, width, height int32) {
 	procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0)
 }
 
+func messageBoxResult(hwnd uintptr, text, title string, flags uintptr) uintptr {
+	textPtr := windows.StringToUTF16Ptr(text)
+	titlePtr := windows.StringToUTF16Ptr(title)
+	result, _, _ := procMessageBox.Call(
+		hwnd,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
+		flags,
+	)
+	runtime.KeepAlive(textPtr)
+	runtime.KeepAlive(titlePtr)
+	return result
+}
+
 func messageBox(hwnd uintptr, text, title string, flags uintptr) {
-	procMessageBox.Call(hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(text))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(title))), flags)
+	_ = messageBoxResult(hwnd, text, title, flags)
 }
 
 func boolToUintptr(value bool) uintptr {

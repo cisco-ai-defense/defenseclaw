@@ -749,6 +749,22 @@ $setupSourceItem = Get-Item -LiteralPath $setupSource -Force -ErrorAction Stop
 if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
+$resourceVerifierInputs = @(
+    'DefenseClawWindowsResourceVerifier-x64.exe',
+    'DefenseClawWindowsResourceIcon.png',
+    'DefenseClawWindowsResourceVersion.txt'
+)
+foreach ($resourceInputName in $resourceVerifierInputs) {
+    $resourceInput = Join-Path $artifactSource $resourceInputName
+    $null = Assert-DisposableNoReparseAncestors -Path $resourceInput `
+        -AllowedRoot $artifactSource -RequireExists
+    $resourceInputItem = Get-Item -LiteralPath $resourceInput -Force -ErrorAction Stop
+    if (-not $resourceInputItem.PSIsContainer -and
+        -not ($resourceInputItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        continue
+    }
+    throw "Windows resource verifier input must be a regular file: $resourceInput"
+}
 $expectedSetupHash = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
     $setupSource,
     1073741824
@@ -883,6 +899,13 @@ try {
         $null = Assert-DisposableNoReparseAncestors -Path $destination `
             -AllowedRoot $scripts
         [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+        [IO.File]::Copy($source, $destination, $false)
+    }
+    foreach ($resourceInputName in $resourceVerifierInputs) {
+        $source = Join-Path $artifactSource $resourceInputName
+        $destination = Join-Path $scripts $resourceInputName
+        $null = Assert-DisposableNoReparseAncestors -Path $destination `
+            -AllowedRoot $scripts
         [IO.File]::Copy($source, $destination, $false)
     }
     $childSetup = Join-Path $childArtifacts 'DefenseClawSetup-x64.exe'

@@ -829,6 +829,14 @@ try {
         $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
         $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
         'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($nativeHarnessText -match 'DefenseClawWindowsResourceVerifier-x64\.exe' -and
+        $nativeHarnessText -match "'build', '-trimpath', '-buildvcs=false'" -and
+        $nativeHarnessText -match '\./internal/tools/windowsresources' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
+        $standardUserCIText -match '\$resourceVerifierInputs = @\(' -and
+        $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
+        'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
         $standardUserCIText -match 'Read-BoundedDisposableResult \$SourcePath \$SourceRoot 1048576' -and
         $standardUserCIText -match '\[string\]\$record\.os -cne ''windows''' -and
@@ -1027,7 +1035,21 @@ try {
     $windowsLiveJob = [regex]::Match($liveWorkflowText, '(?s)  windows-live:.*?(?=\r?\n  # -+\r?\n  # Report)').Value
     Assert-True ($windowsLiveJob -notmatch 'continue-on-error') 'Windows live jobs are not advisory'
     Assert-True ($windowsLiveJob -notmatch 'shell:\s*bash') 'Windows live jobs never select Bash'
-    Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") 'provider-secret Windows tests are manual-only'
+    Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") `
+        'Connector Live Windows radar remains manual-only'
+    $releaseCertificationJob = [regex]::Match(
+        $releaseWorkflowText,
+        '(?s)  windows-real-client-certification:.*?(?=\r?\n  publish:)'
+    ).Value
+    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release,\s*windows-installer\]' -and
+        $releaseCertificationJob -match '-Operation release-certification' -and
+        $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
+        $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
+        $releaseCertificationJob -notmatch 'continue-on-error') `
+        'production release has a required provider-backed Windows real-client gate'
+    Assert-True ($releaseWorkflowText -match 'needs: \[release, windows-real-client-certification\]' -and
+        $releaseWorkflowText -match 'name: release-dist-windows-certified') `
+        'immutable release publication consumes only the certified Windows artifact bundle'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'

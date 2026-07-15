@@ -1476,6 +1476,9 @@ func validateCommittedInstallForUninstallHandoff(transaction setupTransaction) e
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
 	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
+	}
 	return nil
 }
 
@@ -1629,6 +1632,9 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
 	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
+	}
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
 	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
@@ -1708,13 +1714,25 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			}
 		}
 	}
+	persistReconciliation := func() error {
+		if err := retryPendingConnectorReconciliation(
+			transaction,
+			gatewayPath,
+			&reconciliation,
+			readConnectorReconciliation,
+			runConnectorLifecycleWithEnv,
+		); err != nil {
+			return fmt.Errorf("retry pending connector reconciliation: %w", err)
+		}
+		return reconciliation.persist()
+	}
 	connectorReconciliationPending, err := settleInstallConnectorReconciliation(
 		transaction.ID,
 		gatewayPath,
 		transaction.DataRoot,
 		transaction.TargetServices,
 		len(reconciliation.failures) != 0,
-		reconciliation.persist,
+		persistReconciliation,
 		connectorReconciliationSummary,
 		nativeInstallRuntimeConvergenceOps(),
 	)

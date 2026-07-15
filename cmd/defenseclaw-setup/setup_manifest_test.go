@@ -5,9 +5,10 @@ package main
 
 import (
 	"encoding/xml"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/windowsresources"
 )
 
 type setupManifestDocument struct {
@@ -24,7 +25,7 @@ type setupManifestDocument struct {
 }
 
 func TestSetupManifestRequiresAsInvoker(t *testing.T) {
-	contents, err := os.ReadFile("setup.manifest")
+	contents, err := windowsresources.Manifest(windowsresources.ComponentSetup, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +41,16 @@ func TestSetupManifestRequiresAsInvoker(t *testing.T) {
 	for _, forbidden := range []string{"requireadministrator", "highestavailable", "autoelevate"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("setup manifest contains forbidden elevation marker %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		`processorarchitecture="amd64"`,
+		`permonitorv2,permonitor`,
+		`<longpathaware xmlns="http://schemas.microsoft.com/smi/2016/windowssettings">true</longpathaware>`,
+		`microsoft.windows.common-controls`,
+	} {
+		if !strings.Contains(lower, required) {
+			t.Fatalf("setup manifest is missing required Windows contract %q", required)
 		}
 	}
 }

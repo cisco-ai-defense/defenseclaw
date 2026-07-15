@@ -1743,6 +1743,19 @@ class DefenseClawTUI(App[None]):
             event.prevent_default()
             return
 
+        # Textual treats Tab/Shift+Tab as focus traversal before ordinary
+        # bindings can reliably route them.  Handle the advertised panel
+        # navigation here, after command-palette and panel-local handlers have
+        # had first refusal (Setup forms, for example, use Tab between fields).
+        if event.key in {"tab", "shift+tab"}:
+            if event.key == "tab":
+                self.action_next_panel()
+            else:
+                self.action_previous_panel()
+            event.stop()
+            event.prevent_default()
+            return
+
         panel = PANEL_SHORTCUTS.get(event.key.lower())
         if panel is None:
             return
@@ -11895,6 +11908,11 @@ def _panel_key(event: events.Key) -> str:
     if event.key == "escape":
         return "escape"
     if event.key in {"up", "down"}:
+        return event.key
+    # Textual supplies Tab's control character (\t) in ``event.character``.
+    # Preserve the logical key before generic character handling so Setup
+    # forms and menus can consume Tab/Shift+Tab locally.
+    if event.key in {"tab", "shift+tab"}:
         return event.key
     # Normalize backspace/delete BEFORE the event.character branch. Textual
     # delivers the DEL control char (\x7f) as event.character, so without this
