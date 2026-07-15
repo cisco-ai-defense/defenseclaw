@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -146,10 +147,33 @@ func TestClaudeManagedContractUsesWinningManagedSource(t *testing.T) {
 }
 
 func TestClaudeEnterpriseScriptContractUsesUserSettings(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows enterprise policy requires a pinned native launcher")
+	}
 	conn, opts, _, _ := isolatedClaudePolicyFixture(t)
 	opts.ManagedEnterprise = true
 	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
 		t.Fatalf("enterprise script contract = (present=%v, err=%v), want user-settings hook", present, err)
+	}
+}
+
+func TestClaudeManagedAuditRejectsUnpinnedWindowsLauncher(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows native launcher contract")
+	}
+	conn, opts, _, _ := isolatedClaudePolicyFixture(t)
+	opts.ManagedEnterprise = true
+	for name, executable := range map[string]string{
+		"empty":    "",
+		"relative": "defenseclaw-hook.exe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts.HookExecutable = executable
+			present, err := OwnedHooksPresent(conn, opts)
+			if present || err == nil || !strings.Contains(err.Error(), "requires an absolute native hook executable") {
+				t.Fatalf("managed audit with HookExecutable=%q = (present=%v, err=%v)", executable, present, err)
+			}
+		})
 	}
 }
 

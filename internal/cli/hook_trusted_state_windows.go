@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ const (
 // hookExecutableOverride is a test seam for an immutable packaged layout.
 var (
 	hookExecutableOverride           string
+	nativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
 	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsClaudeManagedHookRuntime
 )
 
@@ -67,8 +69,14 @@ func nativeHookExecutable() string {
 // strict-availability block.
 func NativeHookRuntimeNoop() bool {
 	enterpriseManaged := hookArgsContainEnterpriseManaged(os.Args[1:])
+	if enterpriseManaged {
+		// The machine-managed policy is authoritative for this invocation. It
+		// must be resolved before stale, inactive, or corrupt per-user launcher
+		// state can turn an administrator-managed hook into a permissive no-op.
+		return enterpriseManagedHookRuntimeNoop()
+	}
 	executable := nativeHookExecutable()
-	state, recognized, err := hookruntime.ReadTrustedForExecutable(executable)
+	state, recognized, err := nativeHookRuntimeReader(executable)
 	nativeHookRuntimeSnapshot.Lock()
 	nativeHookRuntimeSnapshot.prepared = true
 	nativeHookRuntimeSnapshot.executable = executable
@@ -77,9 +85,6 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
 	if !recognized {
-		if enterpriseManaged {
-			return enterpriseManagedHookRuntimeNoop()
-		}
 		return false
 	}
 	if err != nil {
@@ -87,9 +92,6 @@ func NativeHookRuntimeNoop() bool {
 	}
 	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
 		return true
-	}
-	if enterpriseManaged {
-		return enterpriseManagedHookRuntimeNoop()
 	}
 	return false
 }
@@ -115,6 +117,9 @@ func enterpriseManagedHookRuntimeNoop() bool {
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 
 	home, registered, err := enterpriseManagedRuntimeResolver(executable)
+	if err == nil && registered && !filepath.IsAbs(strings.TrimSpace(home)) {
+		err = errors.New("enterprise managed hook runtime home is not absolute")
+	}
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	nativeEnterpriseHookRuntimeSnapshot.prepared = true
 	nativeEnterpriseHookRuntimeSnapshot.executable = executable
@@ -156,6 +161,12 @@ func trustedNativeHookHome() (string, bool) {
 	enterpriseHome := nativeEnterpriseHookRuntimeSnapshot.home
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	if enterprisePrepared {
+		if !filepath.IsAbs(strings.TrimSpace(enterpriseHome)) {
+			// filepath.Clean("") is ".". Preserve an empty/invalid managed home
+			// as unavailable so the fail-closed path never reads project-relative
+			// hook state.
+			return "", true
+		}
 		return filepath.Clean(enterpriseHome), true
 	}
 	nativeHookRuntimeSnapshot.Lock()
@@ -174,7 +185,7 @@ func trustedNativeHookHome() (string, bool) {
 		// without performing a second state read across the uninstall boundary.
 		return "", true
 	}
-	if state, recognized, stateErr := hookruntime.ReadTrustedForExecutable(executable); recognized {
+	if state, recognized, stateErr := nativeHookRuntimeReader(executable); recognized {
 		if stateErr == nil && state.Active() && filepath.IsAbs(state.DataRoot) &&
 			windowsHookPathHasNoReparsePoints(state.DataRoot) {
 			return filepath.Clean(state.DataRoot), true

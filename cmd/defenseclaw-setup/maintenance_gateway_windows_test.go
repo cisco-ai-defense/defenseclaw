@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,5 +135,46 @@ func TestPrepareConnectorMaintenanceGatewayRejectsCorruptEmbeddedExecutable(t *t
 	}
 	if _, err := os.Lstat(tempParent); !os.IsNotExist(err) {
 		t.Fatalf("rejected maintenance payload survived cleanup: %v", err)
+	}
+}
+
+func TestPrepareConnectorMaintenanceGatewayRejectsReparseRootBeforeExtraction(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "redirect-target")
+	if err := os.MkdirAll(filepath.Join(target, "payload"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tempParent := filepath.Join(t.TempDir(), "InstallerTemp")
+	if err := os.MkdirAll(tempParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	redirect := filepath.Join(tempParent, ".DefenseClawSetup.redirect")
+	t.Cleanup(func() { _ = os.Remove(redirect) })
+
+	loader := func(string) (loadedPayload, error) {
+		if err := os.Symlink(target, redirect); err != nil {
+			if output, junctionErr := exec.Command(
+				"cmd.exe", "/D", "/C", "mklink", "/J", redirect, target,
+			).CombinedOutput(); junctionErr != nil {
+				return loadedPayload{}, fmt.Errorf(
+					"create maintenance reparse fixture after symlink error %v: %w: %s",
+					err, junctionErr, output,
+				)
+			}
+		}
+		return loadedPayload{
+			Root:     filepath.Join(redirect, "payload"),
+			TempRoot: redirect,
+			Manifest: payloadManifest{
+				Version:        maintenanceGatewayTestVersion,
+				GatewayArchive: "gateway.zip",
+			},
+		}, nil
+	}
+	if _, err := prepareConnectorMaintenanceGatewayAt(tempParent, loader); err == nil ||
+		!strings.Contains(err.Error(), "before extraction") {
+		t.Fatalf("reparse maintenance root error = %v, want pre-extraction validation failure", err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "maintenance")); !os.IsNotExist(err) {
+		t.Fatalf("maintenance extraction wrote through rejected reparse root: %v", err)
 	}
 }

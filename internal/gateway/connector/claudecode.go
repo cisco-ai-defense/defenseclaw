@@ -610,6 +610,12 @@ var hookGroups = []claudeCodeHookGroup{
 // Claude can keep that command under an irrelevant event, a narrow matcher, or
 // an asynchronous handler while all blockable surfaces remain unprotected.
 func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		hookExecutable := strings.TrimSpace(opts.HookExecutable)
+		if hookExecutable == "" || !filepath.IsAbs(hookExecutable) {
+			return false, fmt.Errorf("Claude Code managed hook audit requires an absolute native hook executable")
+		}
+	}
 	return claudeCodeEffectiveHookContract(opts)
 }
 

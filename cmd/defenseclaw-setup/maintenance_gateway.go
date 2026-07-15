@@ -55,6 +55,16 @@ func prepareConnectorMaintenanceGatewayAt(
 		cleanup()
 		return connectorMaintenanceGateway{}, cause
 	}
+	// loadPayload creates and verifies this root, but validate it again at the
+	// extraction boundary before creating any child paths. A swapped or custom
+	// loader result must not redirect the maintenance binary write through a
+	// reparse point or a directory writable by another principal.
+	if err := validatePrivateTransactionPath(payload.TempRoot, true); err != nil {
+		return fail(fmt.Errorf("validate connector maintenance payload root before extraction: %w", err))
+	}
+	if err := rejectReparseTree(payload.TempRoot); err != nil {
+		return fail(fmt.Errorf("validate connector maintenance payload tree before extraction: %w", err))
+	}
 
 	binDir := filepath.Join(payload.TempRoot, "maintenance", "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
