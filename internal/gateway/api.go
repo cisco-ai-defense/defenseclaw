@@ -3150,6 +3150,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// Native OTLP exporters such as Codex normalize their configured URL
+		// to the standard /v1/<signal> route. Accept a connector-scoped token
+		// there only when the request is loopback, the declared source names a
+		// registered connector, and that connector owns the presented token.
+		// This grants telemetry-ingest authority without exposing the gateway
+		// master credential or allowing the scoped token onto admin routes.
+		if connector.IsLoopback(r) && token != "" && isNativeOTLPIngestPath(r.URL.Path) {
+			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Source")))
+			registered := false
+			if a.connectorRegistry != nil {
+				_, registered = a.connectorRegistry.Get(hookScope)
+			}
+			if registered && a.hookAPITokenMatches(hookScope, token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -3169,6 +3186,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isNativeOTLPIngestPath(path string) bool {
+	switch path {
+	case "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	default:
+		return false
+	}
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking
@@ -3210,7 +3236,12 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, ro
 	}
 	msg := fmt.Sprintf("sidecar API auth failure (actor=%s client_ip=%s ua=%q)",
 		actor, ClientIPRedacted(r), TruncateUserAgent256(r.UserAgent()))
-	emitGatewayError(ctx, gatewaylog.SubsystemAuth, code, msg, nil)
+	// Route and reason are bounded, non-secret enums. Preserve them in the
+	// structured error cause so operators can distinguish a stale generic
+	// OTLP endpoint from hook-token or scoped-path failures without exposing
+	// credentials, request bodies, or raw path tokens.
+	emitGatewayError(ctx, gatewaylog.SubsystemAuth, code, msg,
+		fmt.Errorf("route=%s reason=%s", route, metricReason))
 	if a.otel != nil {
 		a.otel.RecordHTTPAuthFailure(ctx, route, metricReason)
 	}
