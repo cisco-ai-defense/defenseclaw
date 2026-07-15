@@ -721,9 +721,12 @@ try {
     Assert-True ($autoStartAssertion -match 'defenseclaw-startup\.exe' -and
         $autoStartAssertion -notmatch '\$Gateway \+ ''" start') `
         'setup acceptance binds logon startup to the no-console startup sibling without gateway CLI arguments'
-    Assert-True ($nativeHarnessText -match '\[IO\.FileShare\]::None' -and
-        $nativeHarnessText -notmatch 'import time; time\.sleep\(60\)') `
-        'setup locked-file acceptance uses a deterministic non-shareable handle'
+    Assert-True ($nativeHarnessText -match 'installed-runtime lock fixture' -and
+        $nativeHarnessText -match 'import time; time\.sleep\(300\)' -and
+        $nativeHarnessText -match 'setup killed the foreground installed-runtime process' -and
+        $nativeHarnessText -match 'stateHashBeforeLockedRepair' -and
+        $nativeHarnessText -match 'transactionTreesAfterLockedRepair') `
+        'setup locked-process acceptance preserves the foreground process and committed install tree'
     $contractFunction = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Invoke-Contract\b.*?(?=\r?\nfunction Get-StateProcesses)'

@@ -14,6 +14,9 @@ import (
 )
 
 func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
+func liveProcessWithinInstallRoot(_ string) (uint32, string, error) {
+	return 0, "", nil
+}
 func acquireSetupLock() (func() error, error) {
 	return func() error { return nil }, nil
 }

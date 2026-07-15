@@ -55,6 +55,8 @@ const (
 	maxRunCommandUTF16Units    = 260
 )
 
+var errInstalledProcessRunning = errors.New("an installed DefenseClaw process is still running")
+
 func newCapturedSetupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return processutil.CommandContext(ctx, name, args...)
 }
@@ -358,7 +360,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		if rollbackErr != nil {
 			return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
 		}
-		if isSharingViolation(cause) {
+		if errors.Is(cause, errInstalledProcessRunning) || isSharingViolation(cause) {
 			return retryRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
 		}
 		return 1, cause
@@ -390,6 +392,13 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
 			return tryRestore(errors.New("installed state changed after the setup transaction began"))
+		}
+		pid, imagePath, err := liveProcessWithinInstallRoot(installRoot)
+		if err != nil {
+			return tryRestore(fmt.Errorf("inspect running DefenseClaw processes: %w", err))
+		}
+		if pid != 0 {
+			return tryRestore(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
 		}
 		if err := renameInstallTree(installRoot, transaction.BackupPath); err != nil {
 			if isTransientInstallTreeRenameError(err) {
@@ -468,7 +477,7 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 		if rollbackErr != nil {
 			return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
 		}
-		if isSharingViolation(cause) {
+		if errors.Is(cause, errInstalledProcessRunning) || isSharingViolation(cause) {
 			return retryRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
 		}
 		return 1, cause
@@ -485,6 +494,13 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
 			return rollbackUninstall(errors.New("installed state changed after the uninstall transaction began"))
+		}
+		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
+		if processErr != nil {
+			return rollbackUninstall(fmt.Errorf("inspect running DefenseClaw processes: %w", processErr))
+		}
+		if pid != 0 {
+			return rollbackUninstall(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
 		}
 		if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
 			if isTransientInstallTreeRenameError(err) {

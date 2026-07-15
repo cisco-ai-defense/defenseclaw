@@ -447,6 +447,53 @@ func processIdentity(pid uint32) (string, string, error) {
 	return windows.UTF16ToString(buffer[:size]), strconv.FormatInt(creation.Nanoseconds(), 10), nil
 }
 
+func liveProcessWithinInstallRoot(installRoot string) (uint32, string, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return 0, "", fmt.Errorf("snapshot processes: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	if err := windows.Process32First(snapshot, &entry); err != nil {
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return 0, "", nil
+		}
+		return 0, "", fmt.Errorf("read process snapshot: %w", err)
+	}
+	for {
+		if entry.ProcessID != 0 {
+			imagePath, _, queryErr := processIdentity(entry.ProcessID)
+			// Processes may exit or deny inspection while the snapshot is being
+			// walked. A query failure does not prove that the process executes from
+			// this ACL-protected per-user install tree, so only an observed image
+			// path can block activation.
+			if queryErr == nil && pathWithinRoot(imagePath, installRoot) {
+				return entry.ProcessID, imagePath, nil
+			}
+		}
+		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
+		if err := windows.Process32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				return 0, "", nil
+			}
+			return 0, "", fmt.Errorf("advance process snapshot: %w", err)
+		}
+	}
+}
+
+func pathWithinRoot(path, root string) bool {
+	for directory := filepath.Dir(filepath.Clean(path)); ; directory = filepath.Dir(directory) {
+		if pathidentity.Same(directory, root) {
+			return true
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return false
+		}
+	}
+}
+
 func rejectReparseAncestors(path string) error {
 	full, err := filepath.Abs(path)
 	if err != nil {

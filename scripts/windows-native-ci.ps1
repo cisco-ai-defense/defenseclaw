@@ -2652,17 +2652,63 @@ function Invoke-SetupAcceptance {
             throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
         }
 
-        $lockStream = [IO.FileStream]::new(
-            $python,
-            [IO.FileMode]::Open,
-            [IO.FileAccess]::Read,
-            [IO.FileShare]::None
+        $stateHashBeforeLockedRepair = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $installParent = Split-Path -Parent $installRoot
+        $transactionTreesBeforeLockedRepair = @(
+            Get-ChildItem -LiteralPath $installParent -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^DefenseClaw\.(backup|staging|trash)\.' } |
+                ForEach-Object Name |
+                Sort-Object
         )
+        $lockStart = [Diagnostics.ProcessStartInfo]::new()
+        $lockStart.FileName = $python
+        $lockStart.UseShellExecute = $false
+        $lockStart.CreateNoWindow = $true
+        [void]$lockStart.ArgumentList.Add('-I')
+        [void]$lockStart.ArgumentList.Add('-c')
+        [void]$lockStart.ArgumentList.Add('import time; time.sleep(300)')
+        $lockedInstallProcess = [Diagnostics.Process]::new()
+        $lockedInstallProcess.StartInfo = $lockStart
+        if (-not $lockedInstallProcess.Start()) {
+            $lockedInstallProcess.Dispose()
+            throw 'failed to start installed-runtime lock fixture'
+        }
         try {
-            Invoke-WindowsSetupStandardUserProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
-                -AllowedExitCodes @(1603) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
+            Start-Sleep -Milliseconds 100
+            if ($lockedInstallProcess.HasExited) {
+                throw "installed-runtime lock fixture exited $($lockedInstallProcess.ExitCode)"
+            }
+            $lockedRepair = Invoke-WindowsSetupStandardUserProcess $setup @(
+                '/repair', '/quiet', 'INSTALLSCOPE=user'
+            ) -AllowedExitCodes @(1603) -TimeoutSeconds 1200 `
+                -LogPath (Join-Path $logs 'setup-locked-file.log')
+            if ($lockedInstallProcess.HasExited) {
+                throw 'setup killed the foreground installed-runtime process'
+            }
+            if ((@($lockedRepair.StdOut, $lockedRepair.StdErr) -join "`n") -notmatch
+                'close running DefenseClaw terminals and retry') {
+                throw 'locked repair did not return actionable close-and-retry guidance'
+            }
+            if ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -cne
+                $stateHashBeforeLockedRepair) {
+                throw 'locked repair changed committed install state before returning 1603'
+            }
+            $transactionTreesAfterLockedRepair = @(
+                Get-ChildItem -LiteralPath $installParent -Directory -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^DefenseClaw\.(backup|staging|trash)\.' } |
+                    ForEach-Object Name |
+                    Sort-Object
+            )
+            if ((@($transactionTreesAfterLockedRepair) -join "`0") -cne
+                (@($transactionTreesBeforeLockedRepair) -join "`0")) {
+                throw 'locked repair left a staging, backup, or trash install tree'
+            }
         } finally {
-            $lockStream.Dispose()
+            if (-not $lockedInstallProcess.HasExited) {
+                try { $lockedInstallProcess.Kill($true) } catch { }
+                $null = $lockedInstallProcess.WaitForExit(5000)
+            }
+            $lockedInstallProcess.Dispose()
         }
         Invoke-Installed $launcher @('--version') -Timeout 120 | Out-Null
 
