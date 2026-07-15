@@ -742,6 +742,10 @@ try {
         'required lifecycle certification no longer routes through the legacy wheel materializer'
     $standardUserSafetyText = Get-Content -LiteralPath $standardUserSafety -Raw
     $standardUserFileGuardText = Get-Content -LiteralPath $standardUserFileGuard -Raw
+    $sameLiveProcessFunction = [regex]::Match(
+        $standardUserCIText,
+        '(?s)function Get-SameLiveProcess\b.*?(?=\r?\nfunction )'
+    ).Value
     Assert-True ($standardUserCIText -match 'New-LocalUser' -and
         $standardUserCIText -match 'Remove-DisposableProfileAndAccount' -and
         $standardUserCIText -match 'DefenseClaw disposable Setup CI account' -and
@@ -787,6 +791,8 @@ try {
             '\$unverifiableProcessBaseline = Get-UnverifiableProcessBaseline'
         ).Count -ge 2 -and
         $standardUserCIText -match 'Get-DisposableProcessIdentityKey' -and
+        $sameLiveProcessFunction -match '\$processId = \[int\]\$Process\.ProcessId' -and
+        $sameLiveProcessFunction -match 'if \(\$processId -le 0\) \{ return \$null \}' -and
         $standardUserSafetyText -match 'Assert-UnverifiableProcessWasBaselined' -and
         $standardUserCIText -match 'owner SID became unverifiable for exact-SID process') `
         'process teardown baselines exact PID/CreationDate unknowns before launch and fails closed on reuse or second-check errors'

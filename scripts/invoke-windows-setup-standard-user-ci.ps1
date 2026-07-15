@@ -319,8 +319,10 @@ function New-RandomSecurePassword {
 }
 
 function Get-SameLiveProcess([object]$Process) {
+    $processId = [int]$Process.ProcessId
+    if ($processId -le 0) { return $null }
     $current = @(Get-CimInstance Win32_Process `
-        -Filter "ProcessId = $([int]$Process.ProcessId)" -ErrorAction Stop)
+        -Filter "ProcessId = $processId" -ErrorAction Stop)
     if ($current.Count -ne 1) { return $null }
     if ((Get-DisposableProcessIdentityKey $current[0]) -cne
         (Get-DisposableProcessIdentityKey $Process)) {
