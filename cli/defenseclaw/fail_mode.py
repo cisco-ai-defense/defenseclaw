@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import config as config_module
-from defenseclaw.connector_paths import connector_config_files, normalize
+from defenseclaw.connector_paths import codex_home, connector_config_files, normalize
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
@@ -224,10 +224,14 @@ def _claude_registration_state(workspace: str = "") -> tuple[str | None, bool]:
 
 
 def _codex_registration_current(workspace: str = "") -> bool:
-    paths = connector_config_files("codex", workspace_dir=workspace)
-    if not paths:
-        return False
-    data = _read_small_file(Path(paths[0]))
+    if _is_windows():
+        config_path = Path(codex_home()) / "managed_config.toml"
+    else:
+        paths = connector_config_files("codex", workspace_dir=workspace)
+        if not paths:
+            return False
+        config_path = Path(paths[0])
+    data = _read_small_file(config_path)
     if data is None:
         return False
     return "[hooks]" in data and "defenseclaw" in data.lower()
@@ -350,11 +354,17 @@ def _windows_registration_freshness(
 
     workspace = _connector_workspace(cfg)
     paths = connector_config_files(connector, workspace_dir=workspace)
-    config_path = (
-        paths[0]
-        if paths
-        else str(Path.home() / (".codex/config.toml" if connector == "codex" else ".claude/settings.json"))
-    )
+    if connector == "codex" and _is_windows():
+        # Native Setup registers Codex hooks in the supported managed layer so
+        # they are source-trusted without a manual /hooks approval. Keep the
+        # fail-mode freshness guard on that effective source as well.
+        config_path = str(Path(codex_home()) / "managed_config.toml")
+    else:
+        config_path = (
+            paths[0]
+            if paths
+            else str(Path.home() / (".codex/config.toml" if connector == "codex" else ".claude/settings.json"))
+        )
     install_root = _packaged_windows_install_root(str(cfg.data_dir))
     if install_root is None:
         install_root = str(Path.home() / ".local" / "bin")

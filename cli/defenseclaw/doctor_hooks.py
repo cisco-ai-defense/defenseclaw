@@ -1029,7 +1029,7 @@ _codex_effective_policy_inspector = _inspect_codex_effective_hook_policy
 
 
 def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> str:
-    """Fail closed when current effective policy ignores user hook config."""
+    """Fail closed when current effective policy ignores this hook source."""
 
     try:
         managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
@@ -1037,13 +1037,22 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> st
         raise
     except Exception as exc:
         raise _InspectionError("policy-blocked", f"cannot inspect effective Codex policy: {exc}") from exc
-    if managed_only:
+    managed_source = _is_codex_managed_hook_config(config_path)
+    if managed_only and not managed_source:
         raise _InspectionError(
             "policy-blocked",
             "Codex effective policy sets allow_managed_hooks_only=true from "
             f"{source}, so the user-scoped DefenseClaw hooks are ignored",
         )
+    if managed_source:
+        return f"{source}; DefenseClaw hooks are source-trusted from managed_config.toml"
     return source
+
+
+def _is_codex_managed_hook_config(config_path: str) -> bool:
+    """Return whether *config_path* is Codex's documented managed layer."""
+
+    return ntpath.basename(config_path).casefold() == "managed_config.toml"
 
 
 def _default_claude_managed_settings_paths() -> tuple[str, ...]:
@@ -1554,16 +1563,18 @@ def _validate_codex_hook_contract(
     Setup deliberately renders the current ten-row registration on every
     supported version. Older clients expose only the contract-tier subset at
     runtime, but keeping the installed superset makes upgrades deterministic.
-    Codex 0.129+ understands ``hooks.state``; for those tiers Doctor also
-    reproduces the vendor's positional hash contract instead of merely checking
-    that some state value exists.
+    User-scoped hooks on Codex 0.129+ require ``hooks.state``; for those sources
+    Doctor reproduces the vendor's positional hash contract instead of merely
+    checking that some state value exists. Managed configuration is trusted by
+    source and intentionally carries no private trust-state records.
     """
 
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "hook registration has no hooks table")
+    managed_source = _is_codex_managed_hook_config(config_path)
     state = hooks.get("state")
-    if contract_id in _CODEX_TRUSTED_CONTRACTS and not isinstance(state, dict):
+    if contract_id in _CODEX_TRUSTED_CONTRACTS and not managed_source and not isinstance(state, dict):
         raise _InspectionError("stale", "Codex hook trust state is missing or malformed")
 
     key_source = _codex_hook_state_key_source(config_path)
@@ -1630,7 +1641,7 @@ def _validate_codex_hook_contract(
                 f"Codex {event} timeout is {timeout!r}; expected {expected_timeout}",
             )
         current_hash = _codex_command_hook_hash(event_key, actual_matcher, hook)
-        if contract_id in _CODEX_TRUSTED_CONTRACTS:
+        if contract_id in _CODEX_TRUSTED_CONTRACTS and not managed_source:
             key = f"{key_source}:{event_key}:{group_index}:{handler_index}"
             trust = state.get(key) if isinstance(state, dict) else None
             if not isinstance(trust, dict):
@@ -1819,8 +1830,9 @@ def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> i
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "Codex hook registration has no hooks table")
+    managed_source = _is_codex_managed_hook_config(config_path)
     state = hooks.get("state")
-    if not isinstance(state, dict):
+    if not managed_source and not isinstance(state, dict):
         raise _InspectionError("stale", "Codex hook registration has no trusted hooks.state table")
 
     generic_commands: set[str] = set()
@@ -1885,15 +1897,16 @@ def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> i
         generic_commands.add(generic)
         windows_commands.add(windows_command)
 
-        key = f"{source}:{event_key}:{group_index}:{handler_index}"
-        trust = state.get(key)
-        if not isinstance(trust, dict):
-            raise _InspectionError("stale", f"Codex event {event} trust state is missing: {key}")
-        if trust.get("enabled") is False:
-            raise _InspectionError("stale", f"Codex event {event} is disabled in trust state")
-        expected_hash = _codex_trusted_hash(event_key, matcher, handler)
-        if trust.get("trusted_hash") != expected_hash:
-            raise _InspectionError("stale", f"Codex event {event} is not trusted for its current definition")
+        if not managed_source:
+            key = f"{source}:{event_key}:{group_index}:{handler_index}"
+            trust = state.get(key) if isinstance(state, dict) else None
+            if not isinstance(trust, dict):
+                raise _InspectionError("stale", f"Codex event {event} trust state is missing: {key}")
+            if trust.get("enabled") is False:
+                raise _InspectionError("stale", f"Codex event {event} is disabled in trust state")
+            expected_hash = _codex_trusted_hash(event_key, matcher, handler)
+            if trust.get("trusted_hash") != expected_hash:
+                raise _InspectionError("stale", f"Codex event {event} is not trusted for its current definition")
         count += 1
 
     if len(generic_commands) != 1 or len(windows_commands) != 1:

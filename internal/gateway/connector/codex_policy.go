@@ -59,15 +59,16 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 }
 
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
-// will ignore the user-level hook table we are about to write. Managed-only
-// fleets must deploy DefenseClaw through their administrator-owned managed hook
-// source; silently bypassing that policy would be both ineffective and unsafe.
+// will ignore the hook source DefenseClaw is about to write. Native Windows
+// setup writes managed_config.toml, which is itself a Codex-managed source and
+// remains effective under allow_managed_hooks_only. Other platforms still use
+// config.toml and must reject that policy.
 func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 	policy, err := codexPolicyInspector(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
 	}
-	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly {
+	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && runtime.GOOS != "windows" {
 		return fmt.Errorf(
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,

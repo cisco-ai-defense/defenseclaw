@@ -43,6 +43,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_paths import (
+    codex_home,
     connector_config_files,
     hermes_config_path,
     hermes_legacy_config_path,
@@ -1386,7 +1387,12 @@ def _windows_native_hook_check(
     """
     paths = _hook_health_paths_from_lock(cfg, connector)
     if config_path is None:
-        config_path = paths[0] if paths else connector_config_files(connector)[0]
+        if paths:
+            config_path = paths[0]
+        elif connector == "codex":
+            config_path = os.path.join(codex_home(), "managed_config.toml")
+        else:
+            config_path = connector_config_files(connector)[0]
     if install_root is None:
         install_root = _packaged_windows_install_root(getattr(cfg, "data_dir", "") or "")
     if install_root is None:
