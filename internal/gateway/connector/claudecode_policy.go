@@ -83,10 +83,13 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	}
 
 	activeManaged := managed.active()
-	if err := validateClaudeCodeManagedHookControls(activeManaged, opts.ManagedEnterprise); err != nil {
+	// Unix guardian installs harden per-user hook scripts. Only the native
+	// enterprise path pins an administrator-owned executable in managed policy.
+	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	if err := validateClaudeCodeManagedHookControls(activeManaged, managedPolicy); err != nil {
 		return false, err
 	}
-	if opts.ManagedEnterprise {
+	if managedPolicy {
 		if activeManaged == nil {
 			// The managed file/drop-in may have been removed. Report ordinary
 			// absence so the guardian can re-run Setup; Doctor independently

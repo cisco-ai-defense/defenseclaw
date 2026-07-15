@@ -87,8 +87,11 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
-	if !strings.Contains(string(data), "/otlp/codex/"+otlpToken+"/v1/") {
-		t.Fatalf("codex config does not reference supplied service OTLP token:\n%s", string(data))
+	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
+		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), `authorization = "Bearer `+otlpToken+`"`) {
+		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
 	}
 	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
 	if err != nil {

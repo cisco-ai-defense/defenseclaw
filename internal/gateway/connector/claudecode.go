@@ -697,7 +697,7 @@ func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAs
 			return false
 		}
 		expectedArgs := []string{"hook", "--connector", "claudecode"}
-		if opts.ManagedEnterprise {
+		if opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != "" {
 			expectedArgs = append(expectedArgs, "--enterprise-managed")
 		}
 		return codexValueMatches(args, expectedArgs)

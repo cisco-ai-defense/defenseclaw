@@ -145,6 +145,14 @@ func TestClaudeManagedContractUsesWinningManagedSource(t *testing.T) {
 	}
 }
 
+func TestClaudeEnterpriseScriptContractUsesUserSettings(t *testing.T) {
+	conn, opts, _, _ := isolatedClaudePolicyFixture(t)
+	opts.ManagedEnterprise = true
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("enterprise script contract = (present=%v, err=%v), want user-settings hook", present, err)
+	}
+}
+
 func TestClaudeManagedContractMissingFileTierIsRepairable(t *testing.T) {
 	_, opts, _, managedRoot := isolatedClaudePolicyFixture(t)
 	opts.ManagedEnterprise = true
