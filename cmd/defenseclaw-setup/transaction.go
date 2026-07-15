@@ -1408,8 +1408,15 @@ func rollbackSetupTransactionWithRuntime(
 		// losing them to the intent's now-stale pre-operation snapshot.
 		restoreServices = mergeServiceStates(restoreServices, stopped)
 	}
-	restoreRuntime := func() error {
-		if transaction.PreviousState == nil {
+	restoreRuntime := func(restoreStoppedFreshRuntime bool) error {
+		if !restoreServices.Gateway && !restoreServices.Watchdog {
+			return nil
+		}
+		// A successful fresh-install rollback deliberately leaves no runtime to
+		// restore. If file rollback failed, however, the transaction-owned
+		// payload is still present and services stopped above must be restarted
+		// even though there was no pre-install state snapshot.
+		if transaction.PreviousState == nil && !restoreStoppedFreshRuntime {
 			return nil
 		}
 		gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
@@ -1420,13 +1427,13 @@ func rollbackSetupTransactionWithRuntime(
 		// File rollback can fail on a late sharing violation or ACL error after
 		// owned services were stopped. Restore the pre-operation runtime even
 		// though the durable intent must remain pending for a later retry.
-		return errors.Join(err, restoreRuntime())
+		return errors.Join(err, restoreRuntime(true))
 	}
 	var restoreErrors []error
 	if err := rollbackMaintenancePublication(transaction); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
-	if err := restoreRuntime(); err != nil {
+	if err := restoreRuntime(false); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
 	return errors.Join(restoreErrors...)

@@ -10,8 +10,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func junctionsUnavailable(output []byte) bool {
+	message := strings.ToLower(string(output))
+	for _, marker := range []string{
+		"the file system does not support reparse points",
+		"the requested operation requires elevation",
+		"you do not have sufficient privilege",
+		"a required privilege is not held by the client",
+		"access is denied",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 func TestLoadAtRejectsInstallerJunctionSwappedBeforeStateOpen(t *testing.T) {
 	state, executable := fixtureState(t)
@@ -30,12 +47,14 @@ func TestLoadAtRejectsInstallerJunctionSwappedBeforeStateOpen(t *testing.T) {
 	}
 
 	var junctionErr error
+	var junctionOutput []byte
 	nativeInstallStateBeforeOpen = func(string) error {
 		if err := os.Rename(installer, parked); err != nil {
 			return err
 		}
 		output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", installer, malicious).CombinedOutput()
 		if err != nil {
+			junctionOutput = output
 			junctionErr = fmt.Errorf("mklink /J: %w: %s", err, output)
 			return junctionErr
 		}
@@ -51,6 +70,30 @@ func TestLoadAtRejectsInstallerJunctionSwappedBeforeStateOpen(t *testing.T) {
 		t.Fatal("state opened through a junction swapped in after path validation")
 	}
 	if junctionErr != nil {
-		t.Skipf("directory junctions are unavailable: %v", junctionErr)
+		if junctionsUnavailable(junctionOutput) {
+			t.Skipf("directory junctions are unavailable: %v", junctionErr)
+		}
+		t.Fatalf("create directory junction: %v", junctionErr)
+	}
+}
+
+func TestJunctionsUnavailableRecognizesOnlyEnvironmentLimitations(t *testing.T) {
+	for _, output := range []string{
+		"The file system does not support reparse points.",
+		"A required privilege is not held by the client.",
+		"Access is denied.",
+	} {
+		if !junctionsUnavailable([]byte(output)) {
+			t.Fatalf("recognized junction limitation was not classified: %q", output)
+		}
+	}
+	for _, output := range []string{
+		"The syntax of the command is incorrect.",
+		"Cannot create a file when that file already exists.",
+		"The system cannot find the path specified.",
+	} {
+		if junctionsUnavailable([]byte(output)) {
+			t.Fatalf("unexpected mklink failure was classified as unavailable: %q", output)
+		}
 	}
 }
