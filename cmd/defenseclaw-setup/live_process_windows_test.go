@@ -31,8 +31,8 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.Command(target, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
 	cmd.Env = append(os.Environ(),
-		"DEFENSECLAW_SETUP_PROCESS_HELPER=1",
-		"DEFENSECLAW_SETUP_PROCESS_READY="+ready,
+		"GO_WANT_SETUP_PROCESS_HELPER=1",
+		"GO_SETUP_PROCESS_READY="+ready,
 	)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start installed process helper: %v", err)
@@ -68,10 +68,10 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 }
 
 func TestLiveProcessWithinInstallRootHelper(t *testing.T) {
-	if os.Getenv("DEFENSECLAW_SETUP_PROCESS_HELPER") != "1" {
+	if os.Getenv("GO_WANT_SETUP_PROCESS_HELPER") != "1" {
 		return
 	}
-	ready := os.Getenv("DEFENSECLAW_SETUP_PROCESS_READY")
+	ready := os.Getenv("GO_SETUP_PROCESS_READY")
 	if ready == "" {
 		os.Exit(2)
 	}
