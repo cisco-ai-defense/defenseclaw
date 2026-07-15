@@ -82,7 +82,7 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
         ),
         encoding="utf-8",
     )
-    (home / ".codex" / "config.toml").write_text(
+    (home / ".codex" / "managed_config.toml").write_text(
         '[hooks]\ndefenseclaw = "defenseclaw hook --connector codex"\n', encoding="utf-8"
     )
     shared_digests = {}
@@ -96,7 +96,7 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
         script_path = hook_dir / script_name
         script_body = f'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n'.encode()
         script_path.write_bytes(script_body)
-        config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/config.toml")
+        config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/managed_config.toml")
         entries[name] = {
             "connector": name,
             "contract_id": "claudecode-hooks-v1" if name == "claudecode" else "codex-hooks-v1",
@@ -129,7 +129,10 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 ) -> None:
     data_dir = tmp_path / "data"
     install_root = tmp_path / "Programs" / "DefenseClaw"
+    codex_home = tmp_path / "Configured Codex Home"
     observed: dict[str, str] = {}
+
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     monkeypatch.setattr(
         "defenseclaw.doctor_hooks._packaged_windows_install_root",
@@ -145,6 +148,7 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 
     assert _WINDOWS_REGISTRATION_FRESHNESS(cfg, "codex") is None
     assert observed["install_root"] == str(install_root)
+    assert observed["config_path"] == str(codex_home / "managed_config.toml")
 
 
 def test_windows_registration_freshness_surfaces_codex_effective_policy_block(

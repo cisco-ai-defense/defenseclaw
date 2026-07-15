@@ -66,9 +66,13 @@ func TestEnforceCodexUserHookPolicy(t *testing.T) {
 		}, nil
 	}
 	err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{})
-	if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("managed-only Windows policy rejected source-trusted registration: %v", err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
 		!strings.Contains(err.Error(), `C:\ProgramData\OpenAI\Codex\requirements.toml`) {
-		t.Fatalf("blocked policy error = %v", err)
+		t.Fatalf("blocked user-hook policy error = %v", err)
 	}
 
 	blocked = false

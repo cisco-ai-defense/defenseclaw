@@ -993,7 +993,11 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if err := tt.conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
-			data, err := os.ReadFile(configPath)
+			generatedConfigPath := configPath
+			if tt.name == "codex" {
+				generatedConfigPath = filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+			}
+			data, err := os.ReadFile(generatedConfigPath)
 			if err != nil {
 				t.Fatalf("read generated config: %v", err)
 			}

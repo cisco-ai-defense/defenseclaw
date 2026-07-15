@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -349,7 +350,7 @@ func installedCodexConnectorForPresence(t *testing.T) (Connector, SetupOpts, str
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Codex Setup: %v", err)
 	}
-	return conn, opts, configPath
+	return conn, opts, codexHookConfigPathForTest(configPath)
 }
 
 func mutateCodexConfig(t *testing.T, path string, mutate func(map[string]interface{})) {
@@ -413,12 +414,6 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 		"missing-event": func(config map[string]interface{}) {
 			delete(config["hooks"].(map[string]interface{}), "PreToolUse")
 		},
-		"altered-trusted-hash": func(config map[string]interface{}) {
-			firstCodexTrustEntry(t, config)["trusted_hash"] = "sha256:tampered"
-		},
-		"disabled-trust-entry": func(config map[string]interface{}) {
-			firstCodexTrustEntry(t, config)["enabled"] = false
-		},
 		"asynchronous-handler": func(config map[string]interface{}) {
 			firstCodexHandler(t, config, "PreToolUse")["async"] = true
 		},
@@ -434,6 +429,14 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 		"legacy-hooks-feature-disabled": func(config map[string]interface{}) {
 			config["features"] = map[string]interface{}{"codex_hooks": false}
 		},
+	}
+	if runtime.GOOS != "windows" {
+		tests["altered-trusted-hash"] = func(config map[string]interface{}) {
+			firstCodexTrustEntry(t, config)["trusted_hash"] = "sha256:tampered"
+		}
+		tests["disabled-trust-entry"] = func(config map[string]interface{}) {
+			firstCodexTrustEntry(t, config)["enabled"] = false
+		}
 	}
 
 	for name, mutate := range tests {

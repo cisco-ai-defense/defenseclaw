@@ -159,9 +159,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
         extra_command: str = "",
         windows_command: str | None = None,
         codex_features: bool = True,
+        codex_managed: bool = False,
     ) -> Path:
         if connector == "codex":
-            path = self.profile / ".codex" / "config.toml"
+            path = self.profile / ".codex" / ("managed_config.toml" if codex_managed else "config.toml")
             path.parent.mkdir(exist_ok=True)
             selected_windows = windows_command or command
             escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
@@ -187,16 +188,17 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 if event == "PostToolUse" and escaped_extra:
                     groups += f', {{ hooks = [{{ type = "command", command = "{escaped_extra}", timeout = 30 }}] }}'
                 rows.append(groups + "]")
-            rows.extend(
-                [
-                    "",
-                    "[hooks.state]",
-                    *(
-                        f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(trusted_hash)} }}"
-                        for key, trusted_hash in trust_rows
-                    ),
-                ]
-            )
+            if not codex_managed:
+                rows.extend(
+                    [
+                        "",
+                        "[hooks.state]",
+                        *(
+                            f"{json.dumps(key)} = {{ trusted_hash = {json.dumps(trusted_hash)} }}"
+                            for key, trusted_hash in trust_rows
+                        ),
+                    ]
+                )
             path.write_text(
                 (("[features]\nhooks = true\n\n" if codex_features else "") + "[hooks]\n") + "\n".join(rows) + "\n",
                 encoding="utf-8",
@@ -1275,6 +1277,24 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "policy-blocked", check.detail)
         self.assertIn(str(requirements), check.detail)
         self.assertIn("allow_managed_hooks_only=true", check.detail)
+
+    def test_codex_managed_source_is_automatically_trusted_without_state(self) -> None:
+        runtime = self._runtime()
+        config = self._config(
+            "codex",
+            f'"{runtime}" hook --connector codex',
+            codex_managed=True,
+        )
+        self._lock("codex", config, contract="codex-hooks-v3")
+        requirements = self.root / "ProgramData" / "OpenAI" / "Codex" / "requirements.toml"
+        self.policy_inspector_mock.return_value = (True, str(requirements))
+
+        self.assertNotIn("trusted_hash", config.read_text(encoding="utf-8"))
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("source-trusted from managed_config.toml", check.detail)
+        self.assertIn(str(requirements), check.detail)
 
     def test_codex_cloud_effective_policy_uses_protected_setup_binary(self) -> None:
         runtime = self._runtime()

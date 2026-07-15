@@ -1525,9 +1525,11 @@ func TestCodexSetupCASPreservesConcurrentEdit(t *testing.T) {
 	if concurrent["kept"] != true {
 		t.Fatalf("concurrent Codex setup edit was lost: %#v", config)
 	}
-	hooks, _ := config["hooks"].(map[string]interface{})
-	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks")); err != nil {
-		t.Fatalf("Codex hooks not installed/trusted after retry: %v", err)
+	managedPath := codexHookConfigPathForTest(configPath)
+	managed := readCASTOML(t, managedPath)
+	hooks, _ := managed["hooks"].(map[string]interface{})
+	if err := verifyInstalledCodexHooksForTest(hooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
+		t.Fatalf("Codex hooks not installed/source-trusted after retry: %v", err)
 	}
 	if _, err := os.Stat(managedFileBackupPath(dir, connector.Name(), "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("exact managed backup survived concurrent setup edit: %v", err)
@@ -1561,21 +1563,32 @@ func TestCodexTeardownCASPreservesConcurrentEdit(t *testing.T) {
 		t.Fatalf("Setup: %v", err)
 	}
 
+	managedPath := codexHookConfigPathForTest(configPath)
+	managed := readCASTOML(t, managedPath)
+	managed["operator_before_teardown"] = map[string]interface{}{"kept": true}
+	drifted, err := toml.Marshal(managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(managedPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	hookCalls := 0
-	restoreHook := setAtomicTransformBeforeCompareHookForTest(configPath, func(attempt int) {
+	restoreHook := setAtomicTransformBeforeCompareHookForTest(managedPath, func(attempt int) {
 		hookCalls++
 		if attempt != 0 {
 			return
 		}
 		// Replace the file atomically: both identity and bytes change after
 		// teardown computed its first (exact-backup) result.
-		config := readCASTOML(t, configPath)
+		config := readCASTOML(t, managedPath)
 		config["concurrent_teardown"] = map[string]interface{}{"kept": true}
 		out, err := toml.Marshal(config)
 		if err != nil {
 			t.Fatalf("marshal concurrent Codex teardown edit: %v", err)
 		}
-		if err := atomicWriteFile(configPath, out, 0o600); err != nil {
+		if err := atomicWriteFile(managedPath, out, 0o600); err != nil {
 			t.Fatalf("inject concurrent Codex teardown edit: %v", err)
 		}
 	})
@@ -1587,10 +1600,14 @@ func TestCodexTeardownCASPreservesConcurrentEdit(t *testing.T) {
 	if hookCalls < 2 {
 		t.Fatalf("CAS hook calls = %d, want retry after concurrent edit", hookCalls)
 	}
-	config := readCASTOML(t, configPath)
+	config := readCASTOML(t, managedPath)
 	concurrent, _ := config["concurrent_teardown"].(map[string]interface{})
 	if concurrent["kept"] != true {
 		t.Fatalf("concurrent Codex teardown edit was lost: %#v", config)
+	}
+	operator, _ := config["operator_before_teardown"].(map[string]interface{})
+	if operator["kept"] != true {
+		t.Fatalf("pre-teardown Codex managed edit was lost: %#v", config)
 	}
 	if hooks, ok := config["hooks"].(map[string]interface{}); ok {
 		if locations := codexOwnedHookCount(t, hooks, filepath.Join(dir, "hooks")); locations != 0 {
