@@ -1,12 +1,12 @@
 # DefenseClaw Observability v8 — Codex Execution Manifest
 
 ```yaml
-spec_status: implemented-awaiting-exact-head-ci
-goal_status: in_progress
-current_phase: P8-WP05
+spec_status: implemented-and-verified
+goal_status: complete
+current_phase: complete
 target_config_version: 8
 baseline_commit: fd13acedfcffc0cc431d5a72f329b56b50b22baa
-last_verified_commit: working-tree-above-28b4dc9c0
+last_verified_commit: a8dabc35f864d65e31f1c02e1cced6073cf4a2f3
 last_updated: 2026-07-15
 ```
 
@@ -32,10 +32,10 @@ or a plausible-looking dashboard is not completion.
 
 | Field | Value |
 |---|---|
-| Active work package | `P8-WP05` — publish the final PR #490 candidate and close exact-head CI |
+| Active work package | None |
 | Ready queue | None |
 | Blocked | None |
-| Next phase gate | `P8-GATE` — exact-head CI and final ledger closure |
+| Next phase gate | None |
 | Root coordinator | Primary Codex thread |
 | Implementation branch | `codex/observability-v8-hard-cut` from current `main` |
 
@@ -345,10 +345,10 @@ agent/model shapes while native phase detail remains destination-neutral.
 |---|---|---|---|---|---|
 | `P8-WP01` | `DONE` | root | `P0..P7` | Security/fuzz/network/redaction/canary audit | V-0199: all six required fuzz targets completed their ten-second runs; network, redaction, delivery, and destination suites passed normally and under race; the deterministic security corpus passed; the strict Galileo and generic-OTLP canaries passed without partial rejection or cross-export; every branch secret candidate was inspected and proved synthetic. |
 | `P8-WP02` | `DONE` | root | `P0..P7` | Race/performance/cardinality/queue/reaper benchmarks | V-0199: cardinality and queue isolation passed normally and under race, count/byte pressure proved newest-drop plus FIFO recovery, the reaper sustained exact 1,000-row batches, and the recorded three-sample runtime/redaction/projection medians establish the first approved v8 baseline. No comparable canonical v8 runtime exists on `main`, so the baseline is recorded without inventing a before/after percentage. |
-| `P8-WP03` | `DONE` | root | `P0..P7` | E2E-1 through E2E-9 and final command suite | V-0205: exact-tree normal Go, sequential race, repository/spec/schema/dashboard/docs/static-analysis, macOS packaging/application, and live Linux/macOS upgrade/correlation/rollback gates passed. The complete CLI run passed 7,094 tests and exposed only two static expectation failures; both were corrected and their exact tests plus affected suites passed, closing all 7,096 collected tests with 42 intentional skips and 368 passing subtests. |
-| `P8-WP04` | `DONE` | root | `P8-WP01..03` | Final legacy/duplicate-path/generated-drift/secret review | V-0205: the expanded single-PR correlation candidate passed a fresh hard-cut scan over 1,275 source files, generated-output drift, 112-decision spec, 14-dashboard/330-panel, secret, governance, release-contract, and documentation-consistency audits. The frozen pre-commit diff is 1,211 files, +414,671/-57,685 (net +356,986) versus current `main`; the expansion is the user-requested v8 plus durable correlation scope rather than accidental files. |
-| `P8-WP05` | `IN_PROGRESS` | root | `P7-GATE`, `P8-WP01..04` | Detailed PR against current `main`, targeted review/fixes, exact-head CI/CD green | PR [#490](https://github.com/cisco-ai-defense/defenseclaw/pull/490) is the single v8 hard-cut PR. Targeted Claude Opus review and live Linux/macOS validation have been completed and their confirmed findings fixed. Local final gates are running before the candidate is force-pushed with lease; completion requires every actionable check on that exact head to be green. |
-| `P8-GATE` | `IN_PROGRESS` | root | `P7-GATE`, `P8-WP01..05` | Every requirement proven; active goal may be completed | The staged release gate is closed. Final completion waits only for the intentional PR #490 candidate commit, exact-head CI/CD, and a truthful final ledger closure. |
+| `P8-WP03` | `DONE` | root | `P0..P7` | E2E-1 through E2E-9 and final command suite | V-0205 records the complete local/live suite and all 7,096 collected CLI tests. V-0206 proves the exact committed code head: all 27 CI jobs, the 27-cell connector contract matrix plus selection/report gates, the docs build, and both macOS application gates passed. |
+| `P8-WP04` | `DONE` | root | `P8-WP01..03` | Final legacy/duplicate-path/generated-drift/secret review | V-0205 records the final hard-cut, generated-drift, secret, governance, release-contract, and documentation audits. V-0206 supersedes its pre-commit scope count with the exact code head: 1,211 files, +415,040/-57,685 (net +357,355) against base `7544f6157a9fea37ef7f1230495f35582b4ed833`; exact-head CI and targeted Claude reviews found no remaining actionable code defect. |
+| `P8-WP05` | `DONE` | root | `P7-GATE`, `P8-WP01..04` | Detailed PR against current `main`, targeted review/fixes, exact-head CI/CD green | PR [#490](https://github.com/cisco-ai-defense/defenseclaw/pull/490) is the single v8 hard-cut PR. V-0206 pins exact code head `a8dabc35f864d65e31f1c02e1cced6073cf4a2f3` and its green CI, connector, docs, and macOS workflows. The sole actionable review issue is code-addressed and verified; no implementation follow-up remains. GitHub discussion resolution and required human approval remain reviewer-owned. |
+| `P8-GATE` | `DONE` | root | `P7-GATE`, `P8-WP01..05` | Every requirement proven; active goal may be completed | V-0204 closes the published staged-release gate, V-0205 closes local/live final-candidate verification, and V-0206 closes exact-code-head CI/CD. No required implementation or release work remains. |
 
 ## Agent Coordination Protocol
 
@@ -599,6 +599,7 @@ only “passed.” A relevant change invalidates old evidence.
 | `V-0203` | 2026-07-10 | working tree after `c841ccbf6` | P7/P8 release-safety audit and architecture correction | Live PR/head/check inspection; published `0.8.3` controller rehearsal; targeted Claude Opus 4.8 high architecture review; focused shell resolver tests; controller health review | The prior green matrix applies to remote head `ce29be4239474009f6c9ea61080ffd58a620dab7`, not the current local work, and PR #451 reports a conflicting/dirty merge state. A real published `0.8.3` controller can complete target migration yet time out its in-process health check and still report success; it also cannot safely preserve native Windows DACLs. Therefore V-0195/V-0200/V-0202 remain historical converter/runtime evidence but no longer close publication. C-0041 reopens P7/P8 until the published bridge, fresh-process staged handoff, exact rollback, Windows resolver/DACL transaction, sealed-artifact gates, and exact-head CI pass. |
 | `V-0204` | 2026-07-15 | working tree above `28b4dc9c0` | P7-WP01..06/P7-GATE published staged-release closure | Successful POSIX-only `0.8.4` release run `29266150106` and immutable asset audit; public-release Linux and macOS staged upgrade, fault-injected rollback, immediate retry, and fresh-install runs; manifest/protocol/refusal/lease/SQLite/correlation gates; Windows installer/refusal static tests and cross-compilation; unsigned-macOS fallback audit. | The published config-v7 `0.8.4` bridge advertises protocol 2 and contains verified Linux/macOS artifacts with no Windows binary, gateway, refusal binary, or Windows SBOM. The authenticated target-release shell resolver selected the bridge and re-executed under a fresh controller before the `0.8.5` migration. Both live hosts reached healthy v8 with all ten correlation tables and preserved history; deliberate post-migration failure restored healthy `0.8.4` state with no journal or lease residue, and the same command then succeeded. Windows now truthfully refuses before service stop or installed-state mutation because no bridge was published. This supersedes V-0203's proposed native-Windows bridge obligation and closes P7; exact-head PR #490 CI remains the P8 completion gate. |
 | `V-0205` | 2026-07-15 | final pre-commit candidate above `28b4dc9c0` | P8-WP01..04 local and live final-candidate closure | `go test ./...`; sequential `go test -race` over audit, gateway, observability, daemon, and CLI; `make check`; spec/schema/telemetry/version/manifest/dashboard/docs gates; `go vet ./...`; macOS packaging and unsigned application build; 7,096-test CLI corpus with exact reruns of the two corrected static failures; targeted Claude Opus 4.8 review; final scope/secret/governance audit; local, remote macOS, and Linux runtime canaries. | The complete v8 plus durable correlation tree is locally and live-host verified. Hook/native exact joins, replay/conflict/ambiguity semantics, restart persistence, correlation APIs, ten-table SQLite integrity, cold-row preservation, redaction, custody, fresh install, staged upgrade, rollback, and retry passed. Review findings for stale-process identity and restart preflight were fixed and live-tested with zero extra children or service interruption. The frozen pre-commit diff is 1,211 files, +414,671/-57,685 versus current `main`; no accidental artifact, credential, governance mutation, Windows bridge claim, or unsigned-macOS fallback regression remains. Exact-head PR #490 CI is the only remaining P8-WP05/P8-GATE condition. |
+| `V-0206` | 2026-07-15 | `a8dabc35f864d65e31f1c02e1cced6073cf4a2f3` | P8-WP03..05/P8-GATE exact-code-head acceptance | GitHub CI `29402556121`; Connector Live E2E `29402556155`; Docs site `29402556169`; macOS App `29402555976`; native Linux/arm64 daemon identity stress; focused config recovery regressions; targeted Claude Opus 4.8 reviews. | CI completed 27/27 jobs successfully, including full Go coverage, unified `make test`, Python coverage, Windows refusal/installer, local-observability, upgrade, schema, and release gates. Connector Live E2E completed 27 OS/connector contract cells plus selector/report successfully, with only the expected template job skipped; the docs static build passed with PR deployment skipped as designed; both macOS build/test and license jobs passed. Native Linux/arm64 passed 1,000 normal and 1,000 race contaminated-identity repetitions plus full daemon cases. The exact code diff is 1,211 files, +415,040/-57,685 against base `7544f6157a9fea37ef7f1230495f35582b4ed833`. POSIX-only `0.8.4`, the signed PowerShell resolver, Windows pre-mutation refusal, and the unsigned macOS fallback remain intact. | root + CI + live-validation/review subagents |
 
 Final integration requires, at minimum:
 
