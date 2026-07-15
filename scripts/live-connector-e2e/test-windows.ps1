@@ -670,8 +670,9 @@ try {
     Assert-True ($wizardHarnessText -match "wizard-driver\.log" -and
         $wizardHarnessText -match "Write-WizardTrace 'install-progress'" -and
         $wizardHarnessText -match "Write-WizardTrace 'install-timeout'" -and
+        $wizardHarnessText -notmatch 'if \(-not \$ActivateInstall\) \{ return \}' -and
         $nativeHarnessText -match "Name -eq 'wizard-driver\.log'") `
-        'wizard automation records and prioritizes bounded install-transition diagnostics'
+        'wizard automation records and prioritizes bounded install and cancel diagnostics'
     foreach ($controlID in @(1001, 1002, 1003, 1009, 1011)) {
         Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window $controlID") `
             "wizard automation reaches required real control id $controlID"
@@ -789,6 +790,9 @@ try {
         $standardUserCIText -match '-OperationTimeoutSec 30' -and
         $standardUserCIText -match "(?s)if \(\`$Mode -eq 'setup-acceptance'\) \{\s*\`$arguments \+= '-ExerciseWmiEscape'" -and
         $standardUserCIText -match 'wmi-escape-pid\.txt' -and
+        $standardUserCIText -match 'progress\.log' -and
+        $standardUserCIText -match 'child-cleanup-delegated-to-parent' -and
+        $standardUserCIText -match 'wizard trace:' -and
         $standardUserCIText -match 'Complete-DisposableExecutionBoundary' -and
         $standardUserCIText -notmatch 'Copy-Item[^\r\n]*-Recurse') `
         'privileged handoff drains the job, disables the account, sweeps exact-SID escapes, and avoids recursive copies'

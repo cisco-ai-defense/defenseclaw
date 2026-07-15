@@ -287,7 +287,6 @@ function Send-WizardCommand([IntPtr]$Window, [int]$ControlId, [string]$Label) {
 }
 
 function Write-WizardTrace([string]$Event, [System.Collections.IDictionary]$Fields = $null) {
-    if (-not $ActivateInstall) { return }
     $record = [ordered]@{
         timestamp_utc = [DateTime]::UtcNow.ToString('o')
         elapsed_ms    = [Math]::Round($total.Elapsed.TotalMilliseconds, 1)
@@ -389,15 +388,13 @@ $observedConfigPath = Join-Path $observedDataRoot 'config.yaml'
 $observedGatewayPID = Join-Path $observedDataRoot 'gateway.pid'
 $observedWatchdogPID = Join-Path $observedDataRoot 'watchdog.pid'
 $observedARPKey = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
-if ($ActivateInstall) {
-    [IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
-    Write-WizardTrace 'driver-start' ([ordered]@{
-        connector      = $Connector
-        mode           = $Mode
-        start_gateway  = $StartGateway.IsPresent
-        timeout_seconds = $InstallTimeoutSeconds
-    })
-}
+[IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
+Write-WizardTrace 'driver-start' ([ordered]@{
+    connector      = $Connector
+    mode           = $Mode
+    start_gateway  = $StartGateway.IsPresent
+    timeout_seconds = $(if ($ActivateInstall) { $InstallTimeoutSeconds } else { $TimeoutSeconds })
+})
 $unicodeInterop = [Diagnostics.Stopwatch]::StartNew()
 Assert-UnicodeWindowTextInterop
 $unicodeInterop.Stop()

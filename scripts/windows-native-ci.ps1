@@ -2995,14 +2995,14 @@ function Get-StateProcesses([string]$Root) {
     $ancestorId = $PID
     while ($ancestorId -gt 0 -and $excluded.Add($ancestorId)) {
         $ancestor = Get-CimInstance Win32_Process -Filter "ProcessId=$ancestorId" `
-            -ErrorAction SilentlyContinue
+            -OperationTimeoutSec 30 -ErrorAction SilentlyContinue
         if ($null -eq $ancestor) { break }
         $ancestorId = [int]$ancestor.ParentProcessId
     }
     $rootPattern = [regex]::Escape($full)
     $rootedCommandPattern = '(?i)(?:^|\s|")' + $rootPattern + '\\'
     $stateArgumentPattern = '(?i)-StateRoot\s+"?' + $rootPattern + '(?:\s|"|$)'
-    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    return @(Get-CimInstance Win32_Process -OperationTimeoutSec 30 -ErrorAction Stop | Where-Object {
         if ($excluded.Contains([int]$_.ProcessId)) { return $false }
         $executableInRoot = $_.ExecutablePath -and (Test-PathWithin $_.ExecutablePath $full)
         $rootedCommand = $_.CommandLine -and

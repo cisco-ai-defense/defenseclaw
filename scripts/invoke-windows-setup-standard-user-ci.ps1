@@ -52,6 +52,18 @@ function Write-ChildResult([string]$Path, [bool]$Succeeded, [string]$Detail) {
     [IO.File]::WriteAllText($Path, $payload, [Text.UTF8Encoding]::new($false))
 }
 
+function Write-ChildProgress([string]$Path, [string]$Phase) {
+    try {
+        [IO.File]::AppendAllText(
+            $Path,
+            (([DateTime]::UtcNow.ToString('o') + ' ' + $Phase) + [Environment]::NewLine),
+            [Text.UTF8Encoding]::new($false)
+        )
+    } catch {
+        # Progress is diagnostic only and must never change lifecycle behavior.
+    }
+}
+
 function Test-ActualChildFilesystemBoundary {
     param(
         [string]$SandboxRoot,
@@ -183,6 +195,8 @@ function Invoke-ChildMode {
         } | Select-Object -First 1)) {
         throw 'child mode paths do not match the private disposable-user sandbox layout'
     }
+    $progress = Join-Path $expectedResults 'progress.log'
+    Write-ChildProgress $progress 'layout-validated'
     $interactive = [Security.Principal.SecurityIdentifier]::new('S-1-5-4')
     $groupSids = if ($null -eq $identity.Groups) { @() } else { @(
         $identity.Groups | ForEach-Object {
@@ -192,13 +206,16 @@ function Invoke-ChildMode {
     if ($null -eq $identity.User -or $interactive.Value -notin $groupSids) {
         throw 'disposable Setup acceptance child is not an interactive standard user'
     }
+    Write-ChildProgress $progress 'identity-validated'
 
     $originalChildDirectory = [Environment]::CurrentDirectory
     try {
         [Environment]::CurrentDirectory = $state
+        Write-ChildProgress $progress 'filesystem-boundary-start'
         Test-ActualChildFilesystemBoundary $sandboxRoot `
             (Split-Path -Parent $PSScriptRoot) $PSScriptRoot $artifacts $state `
             $expectedResults $ExpectedSetupSha256
+        Write-ChildProgress $progress 'filesystem-boundary-complete'
     } finally {
         [Environment]::CurrentDirectory = $originalChildDirectory
     }
@@ -213,6 +230,7 @@ function Invoke-ChildMode {
     $env:RUNNER_TEMP = Split-Path -Parent $state
     Remove-Item Env:DC_WINDOWS_NATIVE_BASE_ROOT -ErrorAction SilentlyContinue
     $nativeHarness = Join-Path $PSScriptRoot 'windows-native-ci.ps1'
+    Write-ChildProgress $progress 'environment-ready'
     if ($ExerciseWmiEscape) {
         # Win32_Process.Create is serviced outside the launcher's job object.
         # The harmless sleeper proves that the parent account-SID sweep catches
@@ -234,9 +252,11 @@ function Invoke-ChildMode {
             ([string][uint32]$created.ProcessId),
             [Text.UTF8Encoding]::new($false)
         )
+        Write-ChildProgress $progress 'wmi-fixture-ready'
     }
     $failure = $null
     try {
+        Write-ChildProgress $progress "${Mode}-start"
         if ($Mode -eq 'setup-acceptance') {
             & $nativeHarness -Operation setup-acceptance `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
@@ -247,7 +267,9 @@ function Invoke-ChildMode {
             & (Join-Path $PSScriptRoot 'test-windows-setup-wizard.ps1') `
                 -SetupPath $setup -StateRoot (Join-Path $state 'wizard-smoke')
         }
+        Write-ChildProgress $progress "${Mode}-complete"
     } catch {
+        Write-ChildProgress $progress "${Mode}-failed"
         $failure = $_
         if (-not [string]::IsNullOrWhiteSpace($DiagnosticsRoot)) {
             try {
@@ -266,29 +288,40 @@ function Invoke-ChildMode {
             }
         }
     } finally {
-        try {
-            & $nativeHarness -Operation cleanup -StateRoot $state
-        } catch {
-            if ($null -eq $failure) {
-                $failure = $_
-            } else {
-                $failure = [Management.Automation.ErrorRecord]::new(
-                    [InvalidOperationException]::new(
-                        "$($failure.Exception.Message); child cleanup failed: $($_.Exception.Message)",
-                        $failure.Exception
-                    ),
-                    'DisposableUserCleanupFailed',
-                    [Management.Automation.ErrorCategory]::OperationStopped,
-                    $state
-                )
+        Write-ChildProgress $progress 'child-cleanup-start'
+        if ($Mode -eq 'setup-acceptance') {
+            try {
+                & $nativeHarness -Operation cleanup -StateRoot $state
+            } catch {
+                if ($null -eq $failure) {
+                    $failure = $_
+                } else {
+                    $failure = [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new(
+                            "$($failure.Exception.Message); child cleanup failed: $($_.Exception.Message)",
+                            $failure.Exception
+                        ),
+                        'DisposableUserCleanupFailed',
+                        [Management.Automation.ErrorCategory]::OperationStopped,
+                        $state
+                    )
+                }
             }
+        } else {
+            # Cancel-only never enters Setup's mutation path. The parent owns
+            # the stronger job-object drain, exact-SID sweep, profile removal,
+            # and sandbox deletion, so a second CIM-based child cleanup adds no
+            # coverage and can strand the disposable child in a sick provider.
+            Write-ChildProgress $progress 'child-cleanup-delegated-to-parent'
         }
+        Write-ChildProgress $progress 'child-cleanup-complete'
     }
 
     if ($null -ne $failure) {
         Write-ChildResult $result $false ($failure | Out-String)
         throw $failure
     }
+    Write-ChildProgress $progress 'result-writing'
     Write-ChildResult $result $true "$Mode passed under a disposable standard user"
 }
 
@@ -613,6 +646,8 @@ $childResults = ''
 $childSetup = ''
 $result = ''
 $wmiFixtureRecord = ''
+$progressRecord = ''
+$wizardTraceRecord = ''
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $executionBoundaryComplete = $false
@@ -702,6 +737,8 @@ try {
 
     $result = Join-Path $childResults 'result.json'
     $wmiFixtureRecord = Join-Path $childResults 'wmi-escape-pid.txt'
+    $progressRecord = Join-Path $childResults 'progress.log'
+    $wizardTraceRecord = Join-Path $childState 'wizard-smoke\wizard-driver.log'
     $desktopGrant = [DefenseClaw.DisposableStandardUserLauncher]::GrantInteractiveDesktop($accountSid)
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
     $arguments = @(
@@ -741,7 +778,17 @@ try {
         $childProcess $accountName $accountSid $unverifiableProcessBaseline)
     $executionBoundaryComplete = $true
     if ($timedOut) {
-        throw "disposable standard-user $Mode timed out after $TimeoutSeconds seconds"
+        $progressDetail = if (Test-Path -LiteralPath $progressRecord -PathType Leaf) {
+            Read-BoundedDisposableResult $progressRecord $childResults 32768
+        } else {
+            '[no child progress record]'
+        }
+        $wizardTraceDetail = if (Test-Path -LiteralPath $wizardTraceRecord -PathType Leaf) {
+            Read-BoundedDisposableResult $wizardTraceRecord $childState 65536
+        } else {
+            '[no wizard trace record]'
+        }
+        throw "disposable standard-user $Mode timed out after $TimeoutSeconds seconds`nchild progress:`n$progressDetail`nwizard trace:`n$wizardTraceDetail"
     }
 
     $null = Assert-DisposableNoReparseAncestors -Path $setupSource `
