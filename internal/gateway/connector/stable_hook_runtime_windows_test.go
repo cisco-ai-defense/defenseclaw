@@ -233,6 +233,25 @@ func TestMaintenanceTeardownRecognizesCanonicalHookWithoutInstalledLayout(t *tes
 	}
 }
 
+func TestManagedHookExecutableRejectsRelativeOwnedBasename(t *testing.T) {
+	dir := t.TempDir()
+	owned := filepath.Join(dir, windowsHookBinaryName)
+	defenseclawHookBinaryOverride = owned
+	t.Cleanup(func() { defenseclawHookBinaryOverride = "" })
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	if isDefenseClawManagedHookExecutable(windowsHookBinaryName) {
+		t.Fatalf("managed executable predicate accepted relative PATH command %q", windowsHookBinaryName)
+	}
+}
+
 func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, "codex", "config.toml")

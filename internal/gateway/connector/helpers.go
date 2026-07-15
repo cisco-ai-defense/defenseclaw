@@ -574,6 +574,9 @@ func isDefenseClawHookExecutable(exe string) bool {
 // command is never claimed merely because its basename resembles ours.
 func isDefenseClawManagedHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
+	if exe == "" || !filepath.IsAbs(exe) {
+		return false
+	}
 	for _, owned := range uniqueNonEmptyStrings([]string{
 		defenseclawHookBinary(),
 		canonicalNativeWindowsHookBinary(),

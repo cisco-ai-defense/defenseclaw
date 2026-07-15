@@ -870,7 +870,7 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 	if name := strings.TrimSpace(userName); name != "" {
 		u, err := user.Lookup(name)
 		if err != nil {
-			return target, fmt.Errorf("enterprise hooks install: lookup user %q: %w", name, err)
+			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}
 		if target.home == "" {
 			target.home = u.HomeDir
@@ -883,7 +883,7 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 			} else {
 				uid, err := strconv.Atoi(u.Uid)
 				if err != nil {
-					return target, fmt.Errorf("enterprise hooks install: parse uid for %q: %w", name, err)
+					return target, fmt.Errorf("enterprise hooks: parse uid for %q: %w", name, err)
 				}
 				target.uid = uid
 			}
@@ -892,7 +892,7 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 			if runtime.GOOS != "windows" {
 				gid, err := strconv.Atoi(u.Gid)
 				if err != nil {
-					return target, fmt.Errorf("enterprise hooks install: parse gid for %q: %w", name, err)
+					return target, fmt.Errorf("enterprise hooks: parse gid for %q: %w", name, err)
 				}
 				target.gid = gid
 			}
@@ -901,15 +901,15 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 	if target.home == "" && target.sid != "" {
 		home, err := enterpriseHookSIDProfilePath(target.sid)
 		if err != nil {
-			return target, fmt.Errorf("enterprise hooks install: resolve profile for SID %s: %w", target.sid, err)
+			return target, fmt.Errorf("enterprise hooks: resolve profile for SID %s: %w", target.sid, err)
 		}
 		target.home = strings.TrimSpace(home)
 	}
 	if target.home == "" {
-		return target, fmt.Errorf("enterprise hooks install: --user, --user-home, or --sid is required")
+		return target, fmt.Errorf("enterprise hooks: --user, --user-home, or --sid is required")
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
-		return target, fmt.Errorf("enterprise hooks install: --data-dir must be absolute")
+		return target, fmt.Errorf("enterprise hooks: --data-dir must be absolute")
 	}
 	return target, nil
 }

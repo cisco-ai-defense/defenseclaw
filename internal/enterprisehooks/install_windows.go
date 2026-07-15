@@ -7,8 +7,11 @@ package enterprisehooks
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,14 +137,19 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 	}
 	defer runtimeDirectories.close()
 	runtimePaths := windowsClaudeRuntimePaths(setupOpts, conn)
-	runtimeSnapshot, err := snapshotWindowsRuntimeFiles(runtimePaths)
+	runtimeSnapshot, err := snapshotWindowsRuntimeFiles(runtimeDirectories, dataDir, runtimePaths)
 	if err != nil {
 		_ = runtimeDirectories.rollback()
 		return InstallResult{}, err
 	}
+	defer closeWindowsRuntimeSnapshots(runtimeSnapshot)
+	runtimePublished := false
 	rollbackRuntime := func(cause error) error {
-		if restoreErr := restoreWindowsRuntimeFiles(runtimeSnapshot); restoreErr != nil {
-			cause = fmt.Errorf("%v (runtime rollback failed: %v)", cause, restoreErr)
+		closeWindowsRuntimeSnapshots(runtimeSnapshot)
+		if runtimePublished {
+			if restoreErr := restoreWindowsRuntimeFiles(runtimeDirectories, dataDir, runtimeSnapshot, targetSID); restoreErr != nil {
+				cause = fmt.Errorf("%v (runtime rollback failed: %v)", cause, restoreErr)
+			}
 		}
 		if restoreErr := runtimeDirectories.rollback(); restoreErr != nil {
 			cause = fmt.Errorf("%v (runtime security rollback failed: %v)", cause, restoreErr)
@@ -149,9 +157,16 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 		return cause
 	}
 
-	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(hookDir, setupOpts, conn); err != nil {
-		return InstallResult{}, rollbackRuntime(fmt.Errorf("enterprise hooks: write managed Claude Code hook runtime: %w", err))
+	desiredRuntime, cleanupRuntimeStage, err := stageWindowsManagedRuntime(setupOpts, conn, runtimeSnapshot)
+	if err != nil {
+		return InstallResult{}, rollbackRuntime(fmt.Errorf("enterprise hooks: stage managed Claude Code hook runtime: %w", err))
 	}
+	defer cleanupRuntimeStage()
+	runtimePublished = true
+	if err := publishWindowsRuntimeFiles(runtimeDirectories, dataDir, runtimeSnapshot, desiredRuntime, targetSID); err != nil {
+		return InstallResult{}, rollbackRuntime(fmt.Errorf("enterprise hooks: publish managed Claude Code hook runtime: %w", err))
+	}
+
 	policyPath, rollbackPolicy, err := installWindowsClaudeManagedPolicy(policyBody, setupOpts, targetSID)
 	if err != nil {
 		return InstallResult{}, rollbackRuntime(err)
@@ -163,11 +178,7 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 		return rollbackRuntime(cause)
 	}
 
-	lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
-		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
-	}
-	if err := hardenWindowsManagedRuntimeFiles(runtimePaths, targetSID); err != nil {
+	if err := verifyWindowsManagedRuntime(dataDir, runtimePaths, targetSID); err != nil {
 		return InstallResult{}, rollbackAll(err)
 	}
 	persistedPolicy, err := os.ReadFile(policyPath)
@@ -177,12 +188,10 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 	if err := provider.VerifyManagedHookPolicy(persistedPolicy, setupOpts); err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: persisted Claude Code managed policy is inactive: %w", err))
 	}
-	if err := verifyWindowsManagedRuntime(dataDir, runtimePaths, targetSID); err != nil {
-		return InstallResult{}, rollbackAll(err)
-	}
 	if err := verifyWindowsClaudeManagedPolicy(policyPath, policyBody); err != nil {
 		return InstallResult{}, rollbackAll(err)
 	}
+	lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
 	_ = ctx // reserved for future bounded live-client verification
 	hookScripts := []string{}
 	if scriptProvider, ok := conn.(connector.HookScriptProvider); ok {
@@ -695,17 +704,18 @@ func openWindowsManagedRuntimeChild(parent *os.File, name string, target *window
 		_ = directory.rollback()
 		return windowsManagedRuntimeDirectory{}, err
 	}
+	if err := file.Close(); err != nil {
+		return windowsManagedRuntimeDirectory{}, err
+	}
+	directory.file = nil
 	held, err := openWindowsManagedRuntimeDirectoryByIdentity(
 		parent, name, directory.identity,
-		windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windowsFileAddFile|windowsFileAddSubdirectory|windowsFileDeleteChild|
+			windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 	)
 	if err != nil {
 		_ = directory.rollback()
-		return windowsManagedRuntimeDirectory{}, err
-	}
-	if err := file.Close(); err != nil {
-		held.Close()
 		return windowsManagedRuntimeDirectory{}, err
 	}
 	directory.file = held
@@ -766,13 +776,12 @@ func validateWindowsRuntimeDirectoryHandle(file *os.File, label string, target *
 }
 
 func (directory *windowsManagedRuntimeDirectory) rollback() error {
-	if directory.file == nil {
-		return nil
-	}
-	err := directory.file.Close()
-	directory.file = nil
-	if err != nil {
-		return err
+	if directory.file != nil {
+		err := directory.file.Close()
+		directory.file = nil
+		if err != nil {
+			return err
+		}
 	}
 	file, err := openWindowsManagedRuntimeDirectoryByIdentity(
 		directory.parent, directory.name, directory.identity,
@@ -861,10 +870,33 @@ func (directories *windowsManagedRuntimeDirectories) close() {
 
 type windowsRuntimeFileSnapshot struct {
 	path     string
+	parent   *os.File
+	name     string
+	existed  bool
+	data     []byte
+	security *windows.SECURITY_DESCRIPTOR
+	file     *os.File
+}
+
+type windowsRuntimeFileDesired struct {
 	existed  bool
 	data     []byte
 	security *windows.SECURITY_DESCRIPTOR
 }
+
+type windowsRuntimeFileRenameInfo struct {
+	ReplaceIfExists uint32
+	RootDirectory   windows.Handle
+	FileNameLength  uint32
+	FileName        [1]uint16
+}
+
+const (
+	windowsManagedRuntimeFileLimit = 4 << 20
+	windowsFileAddFile             = 0x0002
+	windowsFileAddSubdirectory     = 0x0004
+	windowsFileDeleteChild         = 0x0040
+)
 
 func windowsClaudeRuntimePaths(opts connector.SetupOpts, conn connector.Connector) []string {
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -883,62 +915,502 @@ func windowsClaudeRuntimePaths(opts connector.SetupOpts, conn connector.Connecto
 	return sortedUnique(paths)
 }
 
-func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, error) {
+func snapshotWindowsRuntimeFiles(
+	directories *windowsManagedRuntimeDirectories, dataDir string, paths []string,
+) ([]windowsRuntimeFileSnapshot, error) {
 	snapshots := make([]windowsRuntimeFileSnapshot, 0, len(paths))
 	for _, path := range paths {
-		snapshot := windowsRuntimeFileSnapshot{path: path}
-		info, err := os.Lstat(path)
+		parent, name, err := windowsRuntimePathBinding(directories, dataDir, path)
+		if err != nil {
+			closeWindowsRuntimeSnapshots(snapshots)
+			return nil, err
+		}
+		snapshot := windowsRuntimeFileSnapshot{path: path, parent: parent, name: name}
+		snapshot.file, err = openWindowsManagedRuntimeFile(parent, name)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("enterprise hooks: snapshot runtime file %s: %w", path, err)
+			closeWindowsRuntimeSnapshots(snapshots)
+			return nil, fmt.Errorf("enterprise hooks: bind runtime file %s: %w", path, err)
 		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 4<<20 {
-			return nil, fmt.Errorf("enterprise hooks: refusing unsafe runtime file during snapshot: %s", path)
-		}
-		data, err := os.ReadFile(path)
+		snapshot.data, snapshot.security, err = readWindowsManagedRuntimeFile(snapshot.file, path)
 		if err != nil {
+			_ = snapshot.file.Close()
+			closeWindowsRuntimeSnapshots(snapshots)
 			return nil, err
 		}
 		snapshot.existed = true
-		snapshot.data = data
-		snapshot.security, err = windows.GetNamedSecurityInfo(
-			path, windows.SE_FILE_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("enterprise hooks: snapshot runtime security %s: %w", path, err)
-		}
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
 }
 
-func restoreWindowsRuntimeFiles(snapshots []windowsRuntimeFileSnapshot) error {
-	var failures []string
+func windowsRuntimePathBinding(
+	directories *windowsManagedRuntimeDirectories, dataDir, path string,
+) (*os.File, string, error) {
+	if directories == nil || directories.closed {
+		return nil, "", fmt.Errorf("enterprise hooks: managed runtime directories are unavailable")
+	}
+	path = filepath.Clean(path)
+	name := filepath.Base(path)
+	if name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, "", fmt.Errorf("enterprise hooks: invalid runtime file name %q", name)
+	}
+	parentPath := filepath.Dir(path)
+	switch {
+	case sameWindowsEnterprisePath(parentPath, dataDir):
+		return directories.children[0].file, name, nil
+	case sameWindowsEnterprisePath(parentPath, filepath.Join(dataDir, "hooks")):
+		return directories.children[1].file, name, nil
+	default:
+		return nil, "", fmt.Errorf("enterprise hooks: runtime file escapes bound directories: %s", path)
+	}
+}
+
+func openWindowsManagedRuntimeFile(parent *os.File, name string) (*os.File, error) {
+	attributes, err := windowsManagedRuntimeObjectAttributes(parent, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE,
+		attributes,
+		&status,
+		nil,
+		0,
+		windows.FILE_SHARE_READ,
+		windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_WRITE_THROUGH|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0,
+		0,
+	)
+	if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), name)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("wrap managed runtime file handle: %s", name)
+	}
+	return file, nil
+}
+
+func readWindowsManagedRuntimeFile(file *os.File, label string) ([]byte, *windows.SECURITY_DESCRIPTOR, error) {
+	handle := windows.Handle(file.Fd())
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || info.NumberOfLinks != 1 {
+		return nil, nil, fmt.Errorf("enterprise hooks: refusing unsafe runtime file during snapshot: %s", label)
+	}
+	size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+	if size < 0 || size > windowsManagedRuntimeFileLimit {
+		return nil, nil, fmt.Errorf("enterprise hooks: refusing oversized runtime file during snapshot: %s", label)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, windowsManagedRuntimeFileLimit+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) > windowsManagedRuntimeFileLimit || int64(len(data)) != size {
+		return nil, nil, fmt.Errorf("enterprise hooks: runtime file changed while bound: %s", label)
+	}
+	security, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("enterprise hooks: snapshot runtime security %s: %w", label, err)
+	}
+	return data, security, nil
+}
+
+func closeWindowsRuntimeSnapshots(snapshots []windowsRuntimeFileSnapshot) {
+	for index := range snapshots {
+		if snapshots[index].file != nil {
+			_ = snapshots[index].file.Close()
+			snapshots[index].file = nil
+		}
+	}
+}
+
+func stageWindowsManagedRuntime(
+	setupOpts connector.SetupOpts, conn connector.Connector, snapshots []windowsRuntimeFileSnapshot,
+) (map[string]windowsRuntimeFileDesired, func(), error) {
+	stageRoot, err := os.MkdirTemp("", "defenseclaw-enterprise-runtime-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(stageRoot) }
+	stageDataDir := filepath.Join(stageRoot, "data")
+	stageHookDir := filepath.Join(stageDataDir, "hooks")
+	if err := os.MkdirAll(stageHookDir, 0o700); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 	for _, snapshot := range snapshots {
-		if snapshot.existed {
-			err := os.MkdirAll(filepath.Dir(snapshot.path), 0o700)
-			if err == nil {
-				err = os.WriteFile(snapshot.path, snapshot.data, 0o600)
-			}
-			if err != nil {
-				failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
-			} else if err := restoreWindowsSecurityDescriptor(snapshot.path, snapshot.security); err != nil {
-				failures = append(failures, fmt.Sprintf("%s security: %v", snapshot.path, err))
-			}
+		if !snapshot.existed {
 			continue
 		}
-		if err := os.Remove(snapshot.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+		relative, relErr := filepath.Rel(setupOpts.DataDir, snapshot.path)
+		if relErr != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			cleanup()
+			return nil, nil, fmt.Errorf("invalid staged runtime path %s", snapshot.path)
+		}
+		destination := filepath.Join(stageDataDir, relative)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if err := os.WriteFile(destination, snapshot.data, 0o600); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+	}
+
+	stageOpts := setupOpts
+	stageOpts.DataDir = stageDataDir
+	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(stageHookDir, stageOpts, conn); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	lockEntry := connector.NewHookContractLockEntry(stageOpts, conn, version.Current().BinaryVersion)
+	lockEntry.Locations = connector.ResolvedConnectorLocations(setupOpts, conn)
+	if err := connector.SaveHookContractLockEntry(stageDataDir, lockEntry); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
+	desired := make(map[string]windowsRuntimeFileDesired, len(snapshots))
+	for _, snapshot := range snapshots {
+		relative, relErr := filepath.Rel(setupOpts.DataDir, snapshot.path)
+		if relErr != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			cleanup()
+			return nil, nil, fmt.Errorf("invalid staged runtime path %s", snapshot.path)
+		}
+		stagedPath := filepath.Join(stageDataDir, relative)
+		info, statErr := os.Lstat(stagedPath)
+		if errors.Is(statErr, os.ErrNotExist) {
+			desired[snapshot.path] = windowsRuntimeFileDesired{}
+			continue
+		}
+		if statErr != nil {
+			cleanup()
+			return nil, nil, statErr
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > windowsManagedRuntimeFileLimit {
+			cleanup()
+			return nil, nil, fmt.Errorf("unsafe staged runtime file: %s", stagedPath)
+		}
+		data, readErr := os.ReadFile(stagedPath)
+		if readErr != nil {
+			cleanup()
+			return nil, nil, readErr
+		}
+		desired[snapshot.path] = windowsRuntimeFileDesired{existed: true, data: data}
+	}
+	return desired, cleanup, nil
+}
+
+func publishWindowsRuntimeFiles(
+	directories *windowsManagedRuntimeDirectories,
+	dataDir string,
+	snapshots []windowsRuntimeFileSnapshot,
+	desired map[string]windowsRuntimeFileDesired,
+	target *windows.SID,
+) error {
+	for index := range snapshots {
+		if err := publishWindowsRuntimeFile(&snapshots[index], desired[snapshots[index].path], target); err != nil {
+			closeWindowsRuntimeSnapshots(snapshots)
+			restoreErr := restoreWindowsRuntimeFiles(directories, dataDir, snapshots, target)
+			if restoreErr != nil {
+				return fmt.Errorf("%w (runtime publication rollback failed: %v)", err, restoreErr)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreWindowsRuntimeFiles(
+	directories *windowsManagedRuntimeDirectories,
+	dataDir string,
+	snapshots []windowsRuntimeFileSnapshot,
+	target *windows.SID,
+) error {
+	var failures []string
+	for index := len(snapshots) - 1; index >= 0; index-- {
+		original := snapshots[index]
+		parent, name, err := windowsRuntimePathBinding(directories, dataDir, original.path)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", original.path, err))
+			continue
+		}
+		current := windowsRuntimeFileSnapshot{path: original.path, parent: parent, name: name}
+		current.file, err = openWindowsManagedRuntimeFile(parent, name)
+		if errors.Is(err, os.ErrNotExist) {
+			current.file = nil
+		} else if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", original.path, err))
+			continue
+		} else {
+			current.existed = true
+			if _, _, validateErr := readWindowsManagedRuntimeFile(current.file, original.path); validateErr != nil {
+				_ = current.file.Close()
+				failures = append(failures, fmt.Sprintf("%s: %v", original.path, validateErr))
+				continue
+			}
+		}
+		desired := windowsRuntimeFileDesired{existed: original.existed, data: original.data, security: original.security}
+		if err := publishWindowsRuntimeFile(&current, desired, target); err != nil {
+			if current.file != nil {
+				_ = current.file.Close()
+			}
+			failures = append(failures, fmt.Sprintf("%s: %v", original.path, err))
 		}
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func publishWindowsRuntimeFile(
+	current *windowsRuntimeFileSnapshot, desired windowsRuntimeFileDesired, target *windows.SID,
+) error {
+	var replacement *os.File
+	stageName := ""
+	if desired.existed {
+		var err error
+		replacement, stageName, err = createWindowsManagedRuntimeFile(current.parent, target)
+		if err != nil {
+			return err
+		}
+		cleanupReplacement := func() {
+			_ = deleteWindowsRuntimeFileHandle(replacement)
+			_ = replacement.Close()
+		}
+		if _, err := replacement.Write(desired.data); err != nil {
+			cleanupReplacement()
+			return err
+		}
+		if err := replacement.Sync(); err != nil {
+			cleanupReplacement()
+			return err
+		}
+		if err := setWindowsManagedRuntimeHandleProtection(replacement, target, false); err != nil {
+			cleanupReplacement()
+			return err
+		}
+		if err := validateWindowsManagedRuntimeReplacement(replacement, len(desired.data)); err != nil {
+			cleanupReplacement()
+			return err
+		}
+	}
+
+	tombstoneName := ""
+	if current.file != nil {
+		var err error
+		tombstoneName, err = renameWindowsRuntimeFileUnique(current.parent, current.file, ".defenseclaw-old-")
+		if err != nil {
+			if replacement != nil {
+				_ = deleteWindowsRuntimeFileHandle(replacement)
+				_ = replacement.Close()
+			}
+			return fmt.Errorf("detach existing runtime file %s: %w", current.path, err)
+		}
+	}
+
+	restoreOriginal := func(cause error) error {
+		if replacement != nil {
+			if deleteErr := deleteWindowsRuntimeFileHandle(replacement); deleteErr != nil {
+				cause = fmt.Errorf("%v (discard replacement failed: %v)", cause, deleteErr)
+			}
+			_ = replacement.Close()
+			replacement = nil
+		}
+		if current.file != nil && tombstoneName != "" {
+			if restoreErr := renameWindowsRuntimeFile(current.parent, current.file, current.name); restoreErr != nil {
+				cause = fmt.Errorf("%v (restore original runtime name failed: %v)", cause, restoreErr)
+			}
+		}
+		return cause
+	}
+
+	if replacement != nil {
+		if err := renameWindowsRuntimeFile(current.parent, replacement, current.name); err != nil {
+			return restoreOriginal(fmt.Errorf("publish replacement runtime file %s: %w", current.path, err))
+		}
+		stageName = ""
+		if desired.security != nil {
+			if err := restoreWindowsSecurityDescriptorHandle(replacement, desired.security); err != nil {
+				return restoreOriginal(fmt.Errorf("restore runtime security %s: %w", current.path, err))
+			}
+		}
+	}
+
+	if current.file != nil {
+		if err := deleteWindowsRuntimeFileHandle(current.file); err != nil {
+			return restoreOriginal(fmt.Errorf("remove replaced runtime identity %s: %w", current.path, err))
+		}
+		_ = current.file.Close()
+		current.file = nil
+	}
+	if replacement != nil {
+		_ = replacement.Close()
+	}
+	_ = stageName
+	return nil
+}
+
+func createWindowsManagedRuntimeFile(parent *os.File, target *windows.SID) (*os.File, string, error) {
+	descriptor, err := windowsManagedRuntimeSecurityDescriptor(target, false)
+	if err != nil {
+		return nil, "", err
+	}
+	for attempt := 0; attempt < 16; attempt++ {
+		name, err := randomWindowsRuntimeName(".defenseclaw-new-")
+		if err != nil {
+			return nil, "", err
+		}
+		attributes, err := windowsManagedRuntimeObjectAttributes(parent, name, descriptor)
+		if err != nil {
+			return nil, "", err
+		}
+		var handle windows.Handle
+		var status windows.IO_STATUS_BLOCK
+		err = windows.NtCreateFile(
+			&handle,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE,
+			attributes,
+			&status,
+			nil,
+			windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_SHARE_READ,
+			windows.FILE_CREATE,
+			windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_WRITE_THROUGH|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+			0,
+			0,
+		)
+		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.STATUS_OBJECT_NAME_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		file := os.NewFile(uintptr(handle), name)
+		if file == nil {
+			_ = windows.CloseHandle(handle)
+			return nil, "", fmt.Errorf("wrap staged managed runtime file")
+		}
+		return file, name, nil
+	}
+	return nil, "", fmt.Errorf("allocate unique managed runtime stage name")
+}
+
+func validateWindowsManagedRuntimeReplacement(file *os.File, expectedSize int) error {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || info.NumberOfLinks != 1 {
+		return fmt.Errorf("staged managed runtime file is not a private regular file")
+	}
+	size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
+	if size != uint64(expectedSize) {
+		return fmt.Errorf("staged managed runtime file size changed: got %d, want %d", size, expectedSize)
+	}
+	return nil
+}
+
+func randomWindowsRuntimeName(prefix string) (string, error) {
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(entropy[:]), nil
+}
+
+func renameWindowsRuntimeFileUnique(parent, file *os.File, prefix string) (string, error) {
+	for attempt := 0; attempt < 16; attempt++ {
+		name, err := randomWindowsRuntimeName(prefix)
+		if err != nil {
+			return "", err
+		}
+		if err := renameWindowsRuntimeFile(parent, file, name); err != nil {
+			if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.STATUS_OBJECT_NAME_EXISTS) {
+				continue
+			}
+			return "", err
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("allocate unique managed runtime tombstone name")
+}
+
+func renameWindowsRuntimeFile(parent, file *os.File, targetName string) error {
+	name, err := windows.UTF16FromString(targetName)
+	if err != nil {
+		return err
+	}
+	name = name[:len(name)-1]
+	var layout windowsRuntimeFileRenameInfo
+	bufferSize := int(unsafe.Offsetof(layout.FileName)) + len(name)*2
+	buffer := make([]byte, bufferSize)
+	info := (*windowsRuntimeFileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	info.RootDirectory = windows.Handle(parent.Fd())
+	info.FileNameLength = uint32(len(name) * 2)
+	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
+	var status windows.IO_STATUS_BLOCK
+	if err := windows.NtSetInformationFile(
+		windows.Handle(file.Fd()),
+		&status,
+		&buffer[0],
+		uint32(len(buffer)),
+		windows.FileRenameInformation,
+	); err != nil {
+		return err
+	}
+	return windows.FlushFileBuffers(windows.Handle(file.Fd()))
+}
+
+func deleteWindowsRuntimeFileHandle(file *os.File) error {
+	if file == nil {
+		return nil
+	}
+	flags := uint32(
+		windows.FILE_DISPOSITION_DELETE |
+			windows.FILE_DISPOSITION_POSIX_SEMANTICS |
+			windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+	)
+	err := windows.SetFileInformationByHandle(
+		windows.Handle(file.Fd()),
+		windows.FileDispositionInfoEx,
+		(*byte)(unsafe.Pointer(&flags)),
+		uint32(unsafe.Sizeof(flags)),
+	)
+	if err == nil || (!errors.Is(err, windows.ERROR_INVALID_PARAMETER) && !errors.Is(err, windows.ERROR_NOT_SUPPORTED)) {
+		return err
+	}
+	deleteFile := uint32(1)
+	return windows.SetFileInformationByHandle(
+		windows.Handle(file.Fd()),
+		windows.FileDispositionInfo,
+		(*byte)(unsafe.Pointer(&deleteFile)),
+		uint32(unsafe.Sizeof(deleteFile)),
+	)
 }
 
 func restoreWindowsSecurityDescriptor(path string, descriptor *windows.SECURITY_DESCRIPTOR) error {

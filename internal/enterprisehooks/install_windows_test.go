@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -514,6 +515,32 @@ func TestWriteWindowsManagedFileReappliesRequestedACLWhenBytesMatch(t *testing.T
 	}
 }
 
+func TestInstallWindowsClaudeManagedPolicyRejectsOversizedPayloadBeforeWrite(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	originalWriter := windowsManagedPolicyWriter
+	writes := 0
+	windowsManagedPolicyWriter = func(string, []byte, bool) error {
+		writes++
+		return nil
+	}
+	t.Cleanup(func() { windowsManagedPolicyWriter = originalWriter })
+
+	_, rollback, err := installWindowsClaudeManagedPolicy(
+		bytes.Repeat([]byte{'x'}, windowsClaudeManagedStateLimit+1),
+		connector.SetupOpts{HookExecutable: fixture.hookExe},
+		fixture.targetSID,
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("installWindowsClaudeManagedPolicy error = %v, want size refusal", err)
+	}
+	if rollback != nil {
+		t.Fatal("oversized managed policy unexpectedly returned rollback")
+	}
+	if writes != 0 {
+		t.Fatalf("managed policy writes = %d, want zero", writes)
+	}
+}
+
 func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	hookDir := filepath.Join(fixture.home, ".defenseclaw", "hooks")
@@ -564,6 +591,110 @@ func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 			t.Fatalf("managed policy artifact survived rollback at %s: %v", path, err)
 		}
 	}
+}
+
+func TestInstallWindowsClaudePublishesFreshRuntimeFileIdentity(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	hookDir := filepath.Join(fixture.home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Dir(hookDir), hookDir} {
+		if err := setWindowsUserPathProtection(dir, fixture.targetSID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokenPath := filepath.Join(hookDir, ".hook-claudecode.token")
+	if err := os.WriteFile(tokenPath, []byte("preexisting-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(tokenPath, fixture.targetSID, false); err != nil {
+		t.Fatal(err)
+	}
+	before := windowsTestFileIdentity(t, tokenPath)
+
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	after := windowsTestFileIdentity(t, tokenPath)
+	if before == after {
+		t.Fatalf("managed runtime token reused existing file identity: %#v", after)
+	}
+}
+
+func TestInstallWindowsClaudeRejectsRuntimeFileWithRetainedWritableHandle(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	hookDir := filepath.Join(fixture.home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Dir(hookDir), hookDir} {
+		if err := setWindowsUserPathProtection(dir, fixture.targetSID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokenPath := filepath.Join(hookDir, ".hook-claudecode.token")
+	const sentinel = "retained-writable-handle\n"
+	if err := os.WriteFile(tokenPath, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(tokenPath, fixture.targetSID, false); err != nil {
+		t.Fatal(err)
+	}
+	pathPtr, err := winpath.UTF16Ptr(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+
+	_, err = Install(context.Background(), windowsManagedInstallOptions(fixture))
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "share") {
+		t.Fatalf("Install error = %v, want retained-handle sharing refusal", err)
+	}
+	if got, readErr := os.ReadFile(tokenPath); readErr != nil || string(got) != sentinel {
+		t.Fatalf("runtime file changed after retained-handle refusal: %q err=%v", got, readErr)
+	}
+	if _, statErr := os.Lstat(fixture.policyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("managed policy published after retained-handle refusal: %v", statErr)
+	}
+}
+
+func windowsTestFileIdentity(t *testing.T, path string) [3]uint32 {
+	t.Helper()
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		t.Fatal(err)
+	}
+	return [3]uint32{info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow}
 }
 
 func TestInstallWindowsClaudeRollsBackNewManagedPolicyDirectories(t *testing.T) {
@@ -680,7 +811,7 @@ func TestRemoveWindowsClaudeManagedPolicyRefusesTamperedPolicy(t *testing.T) {
 	if err := RemoveManagedPolicy(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "changed outside DefenseClaw") {
 		t.Fatalf("RemoveManagedPolicy error = %v, want tamper refusal", err)
 	}
-	if got, err := os.ReadFile(fixture.policyPath); err != nil || !strings.EqualFold(string(got), string(tampered)) {
+	if got, err := os.ReadFile(fixture.policyPath); err != nil || string(got) != string(tampered) {
 		t.Fatalf("tampered policy changed during refused cleanup: %q err=%v", got, err)
 	}
 }

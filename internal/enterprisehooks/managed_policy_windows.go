@@ -260,6 +260,9 @@ func installWindowsClaudeManagedPolicy(body []byte, opts connector.SetupOpts, ta
 }
 
 func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.SetupOpts, targetSID *windows.SID) (string, func() error, error) {
+	if len(body) > windowsClaudeManagedStateLimit {
+		return "", nil, fmt.Errorf("enterprise hooks: Claude Code managed policy exceeds %d bytes", windowsClaudeManagedStateLimit)
+	}
 	if err := windowsClaudeHigherPolicyCheck(); err != nil {
 		return "", nil, err
 	}
@@ -295,11 +298,6 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 			_ = os.Remove(policyRoot)
 		}
 	}
-	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
-		removeCreatedDirs()
-		return "", nil, err
-	}
-
 	targets := append([]string(nil), existingState.TargetSIDs...)
 	targets = append(targets, targetSID.String())
 	targets = sortedUnique(targets)
@@ -314,6 +312,13 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 		return "", nil, err
 	}
 	stateBody = append(stateBody, '\n')
+	if len(stateBody) > windowsClaudeManagedStateLimit {
+		return "", nil, fmt.Errorf("enterprise hooks: Claude Code managed policy state exceeds %d bytes", windowsClaudeManagedStateLimit)
+	}
+	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
+		removeCreatedDirs()
+		return "", nil, err
+	}
 
 	rollback := func() error {
 		var failures []string

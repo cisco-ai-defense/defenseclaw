@@ -107,7 +107,7 @@ func reconcileRemovedConnectorsWithMaintenance(
 		for _, connectorName := range transaction.PreviousConnectors {
 			configHome := connectorConfigHome(transaction, connectorName, true)
 			reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-				return fmt.Errorf("Setup-owned connector maintenance payload is unavailable; cleanup was not attempted: %w", err)
+				return fmt.Errorf("setup-owned connector maintenance payload is unavailable; cleanup was not attempted: %w", err)
 			})
 		}
 		return reconciliation
@@ -121,7 +121,7 @@ func reconcileRemovedConnectorsWithMaintenance(
 		for _, connectorName := range transaction.PreviousConnectors {
 			configHome := connectorConfigHome(transaction, connectorName, true)
 			reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-				return errors.New("Setup-owned connector maintenance gateway path is empty")
+				return errors.New("setup-owned connector maintenance gateway path is empty")
 			})
 		}
 		return reconciliation

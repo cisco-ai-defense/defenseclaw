@@ -134,12 +134,41 @@ func setEnterpriseWindowsManagedProtection(path string, owner *windows.SID, dire
 	if err != nil {
 		return err
 	}
-	extended, err := winpath.Extended(path)
+	pathPtr, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return err
 	}
-	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if directory {
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		flags,
+		0,
+	)
+	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	defer windows.CloseHandle(handle)
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("refusing to apply ACL to a reparse point")
+	}
+	isDirectory := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	if isDirectory != directory {
+		return fmt.Errorf("managed path type changed while applying ACL")
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
