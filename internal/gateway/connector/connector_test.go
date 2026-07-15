@@ -6811,6 +6811,88 @@ func TestClaudeCode_TeardownCleansManagedStateFromStalePristineSnapshot(t *testi
 	}
 }
 
+func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	oldOpts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "old-api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	pristine := map[string]interface{}{
+		"autoUpdatesChannel": "latest",
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": oldManaged["OTEL_EXPORTER_OTLP_ENDPOINT"],
+			"OTEL_RESOURCE_ATTRIBUTES":    oldManaged["OTEL_RESOURCE_ATTRIBUTES"],
+			"OTEL_LOGS_EXPORTER":          "console",
+			"OTEL_SERVICE_NAME":           "operator-claude",
+			"PATH":                        "/operator/bin",
+		},
+	}
+	data, err := json.MarshalIndent(pristine, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce mixed-connector repair after an older Claude registration lost
+	// its restore metadata: the new Setup captures the old DefenseClaw env as
+	// pristine, then writes a new connector-scoped endpoint over it.
+	newOpts := oldOpts
+	newOpts.APIToken = "new-api-token"
+	newOpts.OTLPPathToken = strings.Repeat("b", 64)
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), newOpts); err != nil {
+		t.Fatalf("Setup over stale Claude env: %v", err)
+	}
+	if err := c.Teardown(context.Background(), newOpts); err != nil {
+		t.Fatalf("Teardown after mixed-connector repair: %v", err)
+	}
+	// Teardown discards exact ownership metadata after its internal check. This
+	// second verification is the installer's independent reconciliation gate.
+	if err := c.VerifyClean(newOpts); err != nil {
+		t.Fatalf("installer VerifyClean after teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := map[string]interface{}{}
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored["autoUpdatesChannel"] != "latest" {
+		t.Fatalf("unrelated top-level setting changed: %v", restored)
+	}
+	env, ok := restored["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("operator env missing after teardown: %v", restored)
+	}
+	for key, want := range map[string]interface{}{
+		"OTEL_LOGS_EXPORTER": "console",
+		"OTEL_SERVICE_NAME":  "operator-claude",
+		"PATH":               "/operator/bin",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("env[%s] = %v, want preserved %v", key, got, want)
+		}
+	}
+	for _, key := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"} {
+		if _, present := env[key]; present {
+			t.Errorf("stale DefenseClaw env[%s] survived teardown: %v", key, env)
+		}
+	}
+}
+
 func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")

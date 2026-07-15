@@ -1092,7 +1092,7 @@ try {
         $isolatedCleanup -match '\$livePath, \$recordedPath, \[StringComparison\]::OrdinalIgnoreCase') `
         'isolated process cleanup strongly identifies detached product processes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and
-        $harnessText -match 'obsolete gateway launcher' -and
+        $harnessText -match 'cannot be resolved' -and
         $harnessText -match 'does not use the native hook runtime' -and
         $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) `
         'Doctor connector contract rejects connector-specific tampered hook commands with exit 1'

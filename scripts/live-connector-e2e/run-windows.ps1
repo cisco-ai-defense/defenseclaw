@@ -911,7 +911,7 @@ function Assert-DoctorWindowsHookRegistration {
         if ($tamperedChecks.Count -ne 1) { throw "Tampered Doctor run returned $($tamperedChecks.Count) '$label' checks, expected one" }
         $tamperedCheck = $tamperedChecks[0]
         $expectedTamperDetail = if ($Connector -eq 'codex') {
-            'obsolete gateway launcher'
+            'cannot be resolved'
         } else {
             'does not use the native hook runtime'
         }

@@ -2829,6 +2829,12 @@ function Invoke-SetupAcceptance {
         Invoke-Installed $launcher @('--version') -Timeout 120 | Out-Null
 
         Assert-PackagedDoctorSmoke $launcher $logs
+        # The seeded upgrade above restores the previously running services.
+        # Stop that owned runtime before changing its API port so Startup is
+        # tested against one coherent configuration instead of a live PID that
+        # was launched with the prior port.
+        Invoke-Installed $gateway @('stop') @(0, 1) 90 `
+            (Join-Path $logs 'setup-before-minimal-config-stop.log') | Out-Null
         Set-MinimalGatewayAcceptanceConfig $python
         Invoke-Installed $startup @() -Timeout 90 -Log (Join-Path $logs 'setup-gateway-startup.log') | Out-Null
         Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null

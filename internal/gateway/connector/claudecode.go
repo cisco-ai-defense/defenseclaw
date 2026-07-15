@@ -203,7 +203,11 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 							originalString, originalIsString := original.(string)
 							valueString, valueIsString := value.(string)
 							if originalIsString && valueIsString && originalString == valueString {
-								owned = false
+								// An upgrade predecessor may have captured an already-managed
+								// env block as pristine. Do not let that stale snapshot exempt
+								// an explicit DefenseClaw endpoint or resource marker from the
+								// teardown contract; generic operator OTel values remain exempt.
+								owned = claudeCodeOtelValueLooksManaged(key, value, managedEnv[key])
 							}
 						}
 					}
@@ -1447,9 +1451,14 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if !owned {
 						continue
 					}
-					if original, existed := originalEnv[key]; existed {
+					if original, existed := originalEnv[key]; existed &&
+						!claudeCodeOtelValueLooksManaged(key, original, written) {
 						envMap[key] = original
 					} else {
+						// A predecessor can lose its ownership metadata and later
+						// capture DefenseClaw's own env as pristine. Strong ownership
+						// markers must be removed instead of resurrected; conservative
+						// classification preserves generic/user-defined OTel values.
 						delete(envMap, key)
 					}
 				}
