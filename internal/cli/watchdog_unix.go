@@ -134,3 +134,46 @@ func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
 	}
 	return false, watchdogPIDInfo{}, nil
 }
+
+func removeWatchdogPIDFileIf(path string, matches func(watchdogPIDInfo) bool) error {
+	if matches == nil {
+		return errors.New("watchdog: nil PID file matcher")
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	current, err := readWatchdogPIDInfoFile(f)
+	if err != nil || !matches(current) {
+		return err
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	named, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !os.SameFile(opened, named) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}

@@ -31,6 +31,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -296,4 +297,82 @@ func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
 		return false, watchdogPIDInfo{}, err
 	}
 	return false, watchdogPIDInfo{}, nil
+}
+
+// watchdogPIDRemovalBeforeDelete is a Windows-only test seam invoked while
+// the exact PID-file handle and ownership byte are locked. Production never
+// installs it.
+var watchdogPIDRemovalBeforeDelete func(string) error
+
+// removeWatchdogPIDFileIf binds ownership verification and deletion to one
+// Windows file object. The sentinel lock excludes a replacement watchdog,
+// FILE_SHARE_READ excludes pathname writers/replacers, and handle disposition
+// removes the object that was actually verified rather than a later occupant
+// of the pathname.
+func removeWatchdogPIDFileIf(path string, matches func(watchdogPIDInfo) bool) error {
+	if matches == nil {
+		return errors.New("watchdog: nil PID file matcher")
+	}
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ|windows.DELETE,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) ||
+			errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			return nil
+		}
+		return err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return fmt.Errorf("watchdog: wrap PID file handle: %s", path)
+	}
+	defer file.Close()
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return fmt.Errorf("watchdog: PID file is a reparse point or directory: %s", path)
+	}
+	overlapped := &windows.Overlapped{OffsetHigh: watchdogLockOffsetHigh}
+	if err := windows.LockFileEx(
+		handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, overlapped,
+	); err != nil {
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped) }()
+
+	current, err := readWatchdogPIDInfoFile(file)
+	if err != nil || !matches(current) {
+		return err
+	}
+	if watchdogPIDRemovalBeforeDelete != nil {
+		if err := watchdogPIDRemovalBeforeDelete(path); err != nil {
+			return err
+		}
+	}
+	deleteFile := uint32(1)
+	return windows.SetFileInformationByHandle(
+		handle,
+		windows.FileDispositionInfo,
+		(*byte)(unsafe.Pointer(&deleteFile)),
+		uint32(unsafe.Sizeof(deleteFile)),
+	)
 }

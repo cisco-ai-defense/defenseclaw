@@ -88,6 +88,49 @@ func TestWindowsWatchdogLockStateIsAuthoritative(t *testing.T) {
 	}
 }
 
+func TestWindowsWatchdogOwnedRemovalLocksThroughExactDelete(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	old := watchdogPIDInfo{PID: 111, StartIdentity: "old", ControlName: "old-control"}
+	holder, err := acquireWatchdogPIDFile(pidPath, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := watchdogPIDInfo{PID: 222, StartIdentity: "replacement", ControlName: "replacement-control"}
+	var concurrentAcquireErr error
+	watchdogPIDRemovalBeforeDelete = func(string) error {
+		var replacementHolder *os.File
+		replacementHolder, concurrentAcquireErr = acquireWatchdogPIDFile(pidPath, replacement)
+		if replacementHolder != nil {
+			_ = replacementHolder.Close()
+		}
+		return nil
+	}
+	t.Cleanup(func() { watchdogPIDRemovalBeforeDelete = nil })
+
+	removeWatchdogPIDIfOwned(pidPath, old)
+	if concurrentAcquireErr == nil {
+		t.Fatal("replacement watchdog acquired ownership during verified deletion")
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("verified old PID file still exists: %v", err)
+	}
+
+	replacementHolder, err := acquireWatchdogPIDFile(pidPath, replacement)
+	if err != nil {
+		t.Fatalf("replacement could not acquire ownership after exact deletion: %v", err)
+	}
+	defer replacementHolder.Close()
+	removeWatchdogPIDIfOwned(pidPath, old)
+	got, err := readWatchdogPIDInfo(pidPath)
+	if err != nil || got.PID != replacement.PID || got.StartIdentity != replacement.StartIdentity {
+		t.Fatalf("locked replacement was changed: info=%+v err=%v", got, err)
+	}
+}
+
 func TestWindowsWatchdogControlEventRequestsGracefulStop(t *testing.T) {
 	name, triggered, cleanup, err := watchdogCreateControl()
 	if err != nil {

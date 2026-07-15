@@ -232,19 +232,20 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	if exeErr != nil {
 		exe = ""
 	}
-	pidFile, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{
+	pidInfo := watchdogPIDInfo{
 		PID:           os.Getpid(),
 		Executable:    exe,
 		StartTime:     time.Now().Unix(),
 		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
 		ControlName:   controlName,
-	})
+	}
+	pidFile, err := acquireWatchdogPIDFile(pidPath, pidInfo)
 	if err != nil {
 		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
 	}
 	defer func() {
 		_ = pidFile.Close()
-		_ = os.Remove(pidPath)
+		removeWatchdogPIDIfOwned(pidPath, pidInfo)
 	}()
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
@@ -696,17 +697,15 @@ type watchdogPIDInfo struct {
 }
 
 func removeWatchdogPIDIfOwned(path string, stopped watchdogPIDInfo) {
-	current, err := readWatchdogPIDInfo(path)
-	if err != nil || current.PID != stopped.PID {
-		return
-	}
-	if stopped.StartIdentity != "" && current.StartIdentity != stopped.StartIdentity {
-		return
-	}
-	if stopped.ControlName != "" && current.ControlName != stopped.ControlName {
-		return
-	}
-	_ = os.Remove(path)
+	_ = removeWatchdogPIDFileIf(path, func(current watchdogPIDInfo) bool {
+		if current.PID != stopped.PID {
+			return false
+		}
+		if stopped.StartIdentity != "" && current.StartIdentity != stopped.StartIdentity {
+			return false
+		}
+		return stopped.ControlName == "" || current.ControlName == stopped.ControlName
+	})
 }
 
 func watchdogUnlockedLiveProcess(path string) (bool, watchdogPIDInfo) {
