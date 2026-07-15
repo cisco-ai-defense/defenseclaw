@@ -66,7 +66,7 @@ func removeDirectoryAfterExit(_, _ string, _ int, _ string) error {
 	return errors.New("windows-only operation")
 }
 func publishStableHookRuntime(_, _, _, _ string) error { return errors.New("windows-only operation") }
-func disableStableHookRuntime(_ string) error       { return errors.New("windows-only operation") }
+func disableStableHookRuntime(_ string) error          { return errors.New("windows-only operation") }
 
 // These pure helpers keep the transaction package cross-compilable for the
 // repository-wide Linux/macOS test lanes. Production setup is Windows-only,
