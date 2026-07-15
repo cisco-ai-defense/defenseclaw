@@ -205,7 +205,11 @@ func TestOwnedUserPathRegistryRemovalRestoresValueExistence(t *testing.T) {
 			if err := setValue("Path", test.current); err != nil {
 				t.Fatal(err)
 			}
-			if err := removeOwnedUserPathValue(key, commandDir, false, test.valueCreated); err != nil {
+			if _, err := mutateRegistryUserPath(
+				registry.CURRENT_USER,
+				keyPath,
+				removeUserPathMutation(commandDir, false, test.valueCreated),
+			); err != nil {
 				t.Fatal(err)
 			}
 			got, gotType, err := key.GetStringValue("Path")
@@ -254,15 +258,23 @@ func TestOwnedUserPathRegistryRemovalRetriesAfterLaterFailures(t *testing.T) {
 
 	// The first mutation can be durable even when the subsequent desktop
 	// broadcast fails. A committed retry must accept the already-absent entry.
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	removeOwned := func() error {
+		_, mutationErr := mutateRegistryUserPath(
+			registry.CURRENT_USER,
+			keyPath,
+			removeUserPathMutation(commandDir, false, false),
+		)
+		return mutationErr
+	}
+	if err := removeOwned(); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	if err := removeOwned(); err != nil {
 		t.Fatalf("retry after post-mutation broadcast failure: %v", err)
 	}
 	// If Apps & Features removal then fails, the next committed retry reaches
 	// PATH removal once more and must remain idempotent.
-	if err := removeOwnedUserPathValue(key, commandDir, false, false); err != nil {
+	if err := removeOwned(); err != nil {
 		t.Fatalf("retry after later Apps & Features failure: %v", err)
 	}
 	got, _, err := key.GetStringValue("Path")
