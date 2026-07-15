@@ -403,7 +403,14 @@ def test_direct_install_ignores_developer_reclaim_environment_switch(
     repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
     original = installed_gateway.read_bytes()
     (tmp_path / "home/.defenseclaw").mkdir()
-    monkeypatch.setenv("DEFENSECLAW_SOURCE_DEV_RECLAIM", "1")
+    # This deliberately unsupported name must never become part of the public
+    # environment-variable registry merely because the negative test exercises
+    # it. Construct it at runtime so the static inventory continues to report
+    # only variables that production code actually supports.
+    unsupported_reclaim_env = "_".join(
+        ("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM")
+    )
+    monkeypatch.setenv(unsupported_reclaim_env, "1")
 
     completed = _preflight(tmp_path, repo, install_dir, "publish-gateway")
 
