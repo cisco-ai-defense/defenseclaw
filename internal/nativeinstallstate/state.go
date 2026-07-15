@@ -19,6 +19,10 @@ import (
 
 const maxStateBytes = 128 << 10
 
+// nativeInstallStateBeforeOpen is a test seam for replacing a validated path
+// immediately before the state file is opened. Production never installs it.
+var nativeInstallStateBeforeOpen func(string) error
+
 type State struct {
 	SchemaVersion   int    `json:"schema_version"`
 	InstallKind     string `json:"install_kind"`
@@ -82,7 +86,12 @@ func loadAt(executable, installRoot string) (State, error) {
 			return state, fmt.Errorf("native install path is missing, redirected, or unsafe: %s", path)
 		}
 	}
-	file, err := os.Open(statePath)
+	if nativeInstallStateBeforeOpen != nil {
+		if err := nativeInstallStateBeforeOpen(statePath); err != nil {
+			return state, fmt.Errorf("prepare native install state open: %w", err)
+		}
+	}
+	file, err := openStateFile(statePath)
 	if err != nil {
 		return state, fmt.Errorf("open native install state: %w", err)
 	}
@@ -97,12 +106,16 @@ func loadAt(executable, installRoot string) (State, error) {
 	}
 	body, readErr := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
 	after, statErr := file.Stat()
+	validationErr := validateOpenedStateFile(file, statePath)
 	closeErr := file.Close()
 	if readErr != nil {
 		return state, fmt.Errorf("read native install state: %w", readErr)
 	}
 	if statErr != nil {
 		return state, fmt.Errorf("reinspect native install state: %w", statErr)
+	}
+	if validationErr != nil {
+		return state, fmt.Errorf("validate opened native install state: %w", validationErr)
 	}
 	if closeErr != nil {
 		return state, fmt.Errorf("close native install state: %w", closeErr)
