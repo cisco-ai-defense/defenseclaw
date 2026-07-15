@@ -7,10 +7,16 @@ import json
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
 LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+
+
+def _workflow() -> dict[str, object]:
+    return yaml.load(RELEASE, Loader=yaml.BaseLoader)
 
 
 def _function(name: str) -> str:
@@ -70,9 +76,12 @@ def test_release_sbom_binds_setup_bytes_version_and_source_commit() -> None:
 
 def test_release_version_is_independently_bound_end_to_end() -> None:
     gate = _function("Invoke-WindowsReleaseCertification")
-    workflow = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
-    assert "WINDOWS_RELEASE_VERSION: ${{ needs.release.outputs.tag }}" in workflow
-    assert "needs: [release, windows-installer]" in workflow
+    certification = _workflow()["jobs"]["windows-real-client-certification"]
+    assert certification["needs"] == ["release-preflight", "windows-installer"]
+    certify_step = next(
+        step for step in certification["steps"] if "-Operation release-certification" in step.get("run", "")
+    )
+    assert certify_step["env"]["WINDOWS_RELEASE_VERSION"] == ("${{ needs.release-preflight.outputs.tag }}")
     assert "provenance.version -cne $releaseVersion" in gate
     assert "installedIdentity.version -cne $releaseVersion" in gate
     assert "$sbomPath $setupHash $releaseVersion" in gate
@@ -134,26 +143,35 @@ def test_release_gate_fails_closed_without_secrets_or_exact_clients() -> None:
 
 
 def test_publish_has_a_non_advisory_real_client_dependency() -> None:
-    certification = re.search(r"(?ms)^  windows-real-client-certification:.*?(?=^  publish:)", RELEASE)
-    publish = re.search(r"(?ms)^  publish:.*", RELEASE)
-    assert certification and publish
-    job = certification.group(0)
-    assert "needs: [release, windows-installer]" in job
-    assert "continue-on-error" not in job
-    assert "-Operation release-certification" in job
-    assert "secrets.OPENAI_API_KEY" in job and "secrets.ANTHROPIC_API_KEY" in job
-    assert "artifact-ids: ${{ needs.windows-installer.outputs.artifact-id }}" in job
-    assert "WINDOWS_RELEASE_ARTIFACT_DIGEST" in job
-    assert "artifact-digest: ${{ steps.windows-installer-artifact.outputs.artifact-digest }}" in RELEASE
-    assert "DefenseClawSetup-x64.exe.certification.json" in job
-    assert job.index("-Operation release-certification") < job.index(
-        "Upload certified native Windows installer artifacts"
+    jobs = _workflow()["jobs"]
+    certification = jobs["windows-real-client-certification"]
+    publish = jobs["publish-release"]
+    rendered = str(certification)
+
+    assert certification["needs"] == ["release-preflight", "windows-installer"]
+    assert "continue-on-error" not in rendered
+    assert "-Operation release-certification" in rendered
+    assert "secrets.OPENAI_API_KEY" in rendered
+    assert "secrets.ANTHROPIC_API_KEY" in rendered
+    assert "${{ needs.windows-installer.outputs.artifact_id }}" in rendered
+    assert "${{ needs.windows-installer.outputs.artifact_digest }}" in rendered
+    assert "DefenseClawSetup-x64.exe.certification.json" in rendered
+    certification_index = next(
+        index
+        for index, step in enumerate(certification["steps"])
+        if "-Operation release-certification" in step.get("run", "")
     )
-    assert "needs: [release, windows-real-client-certification]" in publish.group(0)
-    assert "name: release-dist-windows-certified" in publish.group(0)
-    assert "dist/*.certification.json" in publish.group(0)
-    timeout = re.search(r"timeout-minutes:\s*(\d+)", job)
-    assert timeout and int(timeout.group(1)) >= 90
+    upload_index = next(
+        index for index, step in enumerate(certification["steps"]) if step.get("id") == "windows-certified-artifact"
+    )
+    assert certification_index < upload_index
+    assert int(certification["timeout-minutes"]) >= 90
+
+    assert "windows-real-client-certification" in publish["needs"]
+    assert "windows-fresh-install" in publish["needs"]
+    assert "needs.windows-real-client-certification.result == 'success'" in publish["if"]
+    assert "needs.windows-fresh-install.result == 'success'" in publish["if"]
+    assert "needs.windows-upgrade.result == 'skipped'" in publish["if"]
 
 
 def test_certification_evidence_is_not_faked_in_validated_versions() -> None:
@@ -176,5 +194,5 @@ def test_release_documentation_matches_the_enforced_gate() -> None:
         "DefenseClawSetup-x64.exe.certification.json",
     ):
         assert claim in installer
-    assert "`publish` depends on that cell" in ci_flat
+    assert "`publish-release` job depends directly on that cell" in ci_flat
     assert "never builds or installs DefenseClaw from the source checkout" in ci_flat
