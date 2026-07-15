@@ -1411,9 +1411,9 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				}
 			}
 
-			// Restore each env key only when its current value is still the exact
-			// value written by the most recent Setup. An operator edit after Setup
-			// transfers ownership back to the operator and must survive teardown.
+			// Exact managed metadata makes ownership literal, so an operator edit
+			// after Setup survives teardown. Older or missing metadata falls back
+			// to conservative DefenseClaw-specific ownership recognition.
 			if envMap, ok := settings["env"].(map[string]interface{}); ok {
 				originalEnv := map[string]interface{}{}
 				if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
@@ -1422,15 +1422,23 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 				}
 				managedEnv := backup.ManagedEnv
-				if len(managedEnv) == 0 {
+				exactManagedEnv := len(managedEnv) > 0
+				if !exactManagedEnv {
 					// Compatibility for backups created before exact managed values
 					// were recorded, and for best-effort backupless cleanup.
 					managedEnv = buildClaudeCodeOtelEnv(opts)
 				}
 				for _, key := range claudeCodeOtelEnvKeys {
 					written, managed := managedEnv[key]
-					current, present := envMap[key].(string)
-					if !managed || !present || current != written {
+					current, present := envMap[key]
+					if !managed || !present {
+						continue
+					}
+					owned := claudeCodeOtelValueIsManaged(current, written)
+					if !exactManagedEnv {
+						owned = owned || claudeCodeOtelValueLooksManaged(key, current, written)
+					}
+					if !owned {
 						continue
 					}
 					if original, existed := originalEnv[key]; existed {

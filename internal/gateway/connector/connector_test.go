@@ -6858,19 +6858,49 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token",
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		OTLPPathToken: strings.Repeat("a", 64),
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings before stale endpoint injection: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings before stale endpoint injection: %v", err)
+	}
+	env := settings["env"].(map[string]interface{})
+	staleOpts := opts
+	staleOpts.OTLPPathToken = strings.Repeat("b", 64)
+	staleEnv := buildClaudeCodeOtelEnv(staleOpts)
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	} {
+		env[key] = staleEnv[key]
+	}
+	data, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings with stale endpoints: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatalf("write settings with stale endpoints: %v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
 		t.Fatalf("remove backup: %v", err)
 	}
 	discardManagedFileBackup(dir, c.Name(), "settings.json")
 
+	// Without exact backup metadata, teardown must still recognize stale
+	// DefenseClaw-scoped endpoints while leaving unrelated operator env untouched.
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown without backup: %v", err)
 	}
@@ -6878,18 +6908,18 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 		t.Fatalf("VerifyClean after backupless teardown: %v", err)
 	}
 
-	data, err := os.ReadFile(settingsPath)
+	data, err = os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("read settings: %v", err)
 	}
-	var settings map[string]interface{}
+	settings = map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
 	if hooks, ok := settings["hooks"].(map[string]interface{}); ok && len(hooks) > 0 {
 		t.Fatalf("DefenseClaw hooks survived teardown without backup: %v", hooks)
 	}
-	env, _ := settings["env"].(map[string]interface{})
+	env, _ = settings["env"].(map[string]interface{})
 	if env["PATH"] != "/usr/bin" {
 		t.Fatalf("non-OTel env key was not preserved: %v", env)
 	}
