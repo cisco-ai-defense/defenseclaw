@@ -21,6 +21,8 @@ namespace DefenseClaw
         private const uint CREATE_SUSPENDED = 0x00000004;
         private const uint CREATE_NO_WINDOW = 0x08000000;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const uint SEM_FAILCRITICALERRORS = 0x0001;
+        private const uint SEM_NOGPFAULTERRORBOX = 0x0002;
         private const uint TOKEN_QUERY = 0x0008;
         private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         private const int JobObjectBasicAccountingInformation = 1;
@@ -234,6 +236,9 @@ namespace DefenseClaw
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
+        [DllImport("kernel32.dll")]
+        private static extern uint SetErrorMode(uint mode);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
@@ -351,21 +356,34 @@ namespace DefenseClaw
                 STARTUPINFO startupInfo = new STARTUPINFO();
                 startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
                 startupInfo.lpDesktop = @"winsta0\default";
-                if (!CreateProcessWithLogon(
-                    username,
-                    domain,
-                    passwordBuffer,
-                    LOGON_WITH_PROFILE,
-                    applicationPath,
-                    BuildCommandLine(applicationPath, arguments),
-                    CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                    IntPtr.Zero,
-                    workingDirectory,
-                    ref startupInfo,
-                    out processInfo))
+                bool created;
+                int createError = 0;
+                uint previousErrorMode = SetErrorMode(
+                    SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+                try
+                {
+                    created = CreateProcessWithLogon(
+                        username,
+                        domain,
+                        passwordBuffer,
+                        LOGON_WITH_PROFILE,
+                        applicationPath,
+                        BuildCommandLine(applicationPath, arguments),
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        IntPtr.Zero,
+                        workingDirectory,
+                        ref startupInfo,
+                        out processInfo);
+                    if (!created) createError = Marshal.GetLastWin32Error();
+                }
+                finally
+                {
+                    SetErrorMode(previousErrorMode);
+                }
+                if (!created)
                 {
                     throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
+                        createError,
                         "CreateProcessWithLogonW failed for the disposable standard user");
                 }
 
@@ -379,13 +397,20 @@ namespace DefenseClaw
                         "AssignProcessToJobObject failed for the disposable standard-user harness");
                 }
                 process = Process.GetProcessById(checked((int)processInfo.dwProcessId));
-                if (ResumeThread(processInfo.hThread) == UInt32.MaxValue)
+                uint previousSuspendCount = ResumeThread(processInfo.hThread);
+                if (previousSuspendCount == UInt32.MaxValue)
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed");
                 }
+                if (previousSuspendCount != 1)
+                {
+                    throw new InvalidOperationException(
+                        "disposable standard-user primary thread had unexpected suspend count " +
+                        previousSuspendCount);
+                }
                 resumed = true;
                 DisposableStandardUserProcess result =
-                    new DisposableStandardUserProcess(process, job);
+                    new DisposableStandardUserProcess(process, job, previousSuspendCount);
                 process = null;
                 job = IntPtr.Zero;
                 return result;
@@ -757,13 +782,18 @@ namespace DefenseClaw
         public sealed class DisposableStandardUserProcess : IDisposable
         {
             private readonly Process process;
+            private readonly uint initialSuspendCount;
             private IntPtr job;
             private bool disposed;
 
-            internal DisposableStandardUserProcess(Process process, IntPtr job)
+            internal DisposableStandardUserProcess(
+                Process process,
+                IntPtr job,
+                uint initialSuspendCount)
             {
                 this.process = process;
                 this.job = job;
+                this.initialSuspendCount = initialSuspendCount;
             }
 
             public int Id { get { return process.Id; } }
@@ -778,6 +808,52 @@ namespace DefenseClaw
             public uint ActiveProcessCount
             {
                 get { return job == IntPtr.Zero ? 0 : GetActiveJobProcessCount(job); }
+            }
+
+            public string GetStartupDiagnostics()
+            {
+                StringBuilder diagnostic = new StringBuilder();
+                diagnostic.Append("pid=").Append(process.Id);
+                diagnostic.Append(" resume_previous_count=").Append(initialSuspendCount);
+                try
+                {
+                    process.Refresh();
+                    diagnostic.Append(" has_exited=").Append(process.HasExited);
+                    if (process.HasExited)
+                    {
+                        diagnostic.Append(" exit_code=").Append(process.ExitCode);
+                        return diagnostic.ToString();
+                    }
+                    diagnostic.Append(" cpu_ms=").Append(
+                        (long)process.TotalProcessorTime.TotalMilliseconds);
+                    int emitted = 0;
+                    foreach (ProcessThread thread in process.Threads)
+                    {
+                        if (emitted++ == 16)
+                        {
+                            diagnostic.Append(" threads=truncated");
+                            break;
+                        }
+                        diagnostic.Append(" thread[").Append(thread.Id).Append("]=");
+                        try
+                        {
+                            diagnostic.Append(thread.ThreadState);
+                            if (thread.ThreadState == ThreadState.Wait)
+                            {
+                                diagnostic.Append('/').Append(thread.WaitReason);
+                            }
+                        }
+                        catch (Exception error)
+                        {
+                            diagnostic.Append("unavailable(").Append(error.Message).Append(')');
+                        }
+                    }
+                }
+                catch (Exception error)
+                {
+                    diagnostic.Append(" inspection_error=").Append(error.Message);
+                }
+                return diagnostic.ToString();
             }
 
             // Closing a kill-on-close handle is not enough evidence for a

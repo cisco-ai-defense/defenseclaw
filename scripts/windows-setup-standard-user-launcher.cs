@@ -5,11 +5,192 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DefenseClaw
 {
+    public sealed class RestrictedSetupProcess : IDisposable
+    {
+        public const int MaxCapturedBytesPerStream = 1048576;
+
+        private sealed class CaptureResult
+        {
+            public string Text;
+            public int CapturedBytes;
+            public bool Truncated;
+            public string Error;
+        }
+
+        private readonly Process process;
+        private readonly Stream stdoutStream;
+        private readonly Stream stderrStream;
+        private readonly Task<CaptureResult> stdoutTask;
+        private readonly Task<CaptureResult> stderrTask;
+        private CaptureResult stdout;
+        private CaptureResult stderr;
+        private bool outputCompleted;
+        private bool outputHealthy;
+        private bool disposed;
+
+        internal RestrictedSetupProcess(Process process, Stream stdoutStream, Stream stderrStream)
+        {
+            this.process = process;
+            this.stdoutStream = stdoutStream;
+            this.stderrStream = stderrStream;
+            stdoutTask = StartCapture(stdoutStream);
+            stderrTask = StartCapture(stderrStream);
+        }
+
+        private static Task<CaptureResult> StartCapture(Stream stream)
+        {
+            return Task.Factory.StartNew(
+                () => DrainBounded(stream),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+        }
+
+        private static CaptureResult DrainBounded(Stream stream)
+        {
+            byte[] captured = new byte[MaxCapturedBytesPerStream];
+            byte[] buffer = new byte[8192];
+            int stored = 0;
+            bool truncated = false;
+            string error = "";
+            try
+            {
+                int count;
+                while ((count = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    int available = MaxCapturedBytesPerStream - stored;
+                    int keep = Math.Min(available, count);
+                    if (keep > 0)
+                    {
+                        Buffer.BlockCopy(buffer, 0, captured, stored, keep);
+                        stored += keep;
+                    }
+                    if (keep != count) truncated = true;
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                error = "redirected output stream closed before drain completed";
+            }
+            catch (IOException exception)
+            {
+                error = exception.Message;
+            }
+            return new CaptureResult
+            {
+                Text = new UTF8Encoding(false, false).GetString(captured, 0, stored),
+                CapturedBytes = stored,
+                Truncated = truncated,
+                Error = error
+            };
+        }
+
+        public int Id { get { return process.Id; } }
+        public bool HasExited { get { return process.HasExited; } }
+        public int ExitCode { get { return process.ExitCode; } }
+
+        public bool WaitForExit(int milliseconds)
+        {
+            return process.WaitForExit(milliseconds);
+        }
+
+        public void Kill(bool entireProcessTree)
+        {
+            process.Kill(entireProcessTree);
+        }
+
+        public bool CompleteOutput(int timeoutMilliseconds)
+        {
+            if (timeoutMilliseconds < 0) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
+            if (outputCompleted) return outputHealthy;
+
+            bool drained = Task.WaitAll(
+                new Task[] { stdoutTask, stderrTask },
+                timeoutMilliseconds);
+            if (!drained)
+            {
+                stdoutStream.Dispose();
+                stderrStream.Dispose();
+                Task.WaitAll(new Task[] { stdoutTask, stderrTask }, 1000);
+            }
+
+            stdout = stdoutTask.IsCompleted
+                ? stdoutTask.GetAwaiter().GetResult()
+                : new CaptureResult { Text = "", Error = "stdout drain did not complete" };
+            stderr = stderrTask.IsCompleted
+                ? stderrTask.GetAwaiter().GetResult()
+                : new CaptureResult { Text = "", Error = "stderr drain did not complete" };
+            outputHealthy = drained && String.IsNullOrEmpty(stdout.Error) && String.IsNullOrEmpty(stderr.Error);
+            outputCompleted = true;
+            return outputHealthy;
+        }
+
+        private void RequireCompletedOutput()
+        {
+            if (!outputCompleted)
+            {
+                throw new InvalidOperationException("CompleteOutput must be called before reading redirected output");
+            }
+        }
+
+        public string StdOut
+        {
+            get { RequireCompletedOutput(); return stdout.Text; }
+        }
+
+        public string StdErr
+        {
+            get { RequireCompletedOutput(); return stderr.Text; }
+        }
+
+        public bool StdOutTruncated
+        {
+            get { RequireCompletedOutput(); return stdout.Truncated; }
+        }
+
+        public bool StdErrTruncated
+        {
+            get { RequireCompletedOutput(); return stderr.Truncated; }
+        }
+
+        public int StdOutCapturedBytes
+        {
+            get { RequireCompletedOutput(); return stdout.CapturedBytes; }
+        }
+
+        public int StdErrCapturedBytes
+        {
+            get { RequireCompletedOutput(); return stderr.CapturedBytes; }
+        }
+
+        public string OutputCaptureError
+        {
+            get
+            {
+                RequireCompletedOutput();
+                return String.Join("; ", new string[] { stdout.Error, stderr.Error })
+                    .Trim(' ', ';');
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            stdoutStream.Dispose();
+            stderrStream.Dispose();
+            process.Dispose();
+        }
+    }
+
     // Native release jobs need administrator authority for machine policy, but
     // user-scope Setup deliberately rejects elevation. This helper prefers the
     // elevated user's linked limited primary token. A filtered LUA token is
@@ -24,8 +205,11 @@ namespace DefenseClaw
         private const uint DISABLE_MAX_PRIVILEGE = 0x0001;
         private const uint LUA_TOKEN = 0x0004;
         private const uint CREATE_SUSPENDED = 0x00000004;
+        private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         private const uint CREATE_NO_WINDOW = 0x08000000;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const int STARTF_USESTDHANDLES = 0x00000100;
+        private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
         private const int TokenTypeInformation = 8;
         private const int TokenElevationType = 18;
         private const int TokenLinkedToken = 19;
@@ -77,6 +261,13 @@ namespace DefenseClaw
             public IntPtr hStdError;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct PROCESS_INFORMATION
         {
@@ -99,6 +290,28 @@ namespace DefenseClaw
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            int attributeCount,
+            int flags,
+            ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            IntPtr attribute,
+            IntPtr value,
+            IntPtr size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -191,6 +404,26 @@ namespace DefenseClaw
             IntPtr environment,
             string currentDirectory,
             ref STARTUPINFO startupInfo,
+            out PROCESS_INFORMATION processInformation);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "CreateProcessAsUserW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcessAsUserExtended(
+            IntPtr token,
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string currentDirectory,
+            ref STARTUPINFOEX startupInfo,
             out PROCESS_INFORMATION processInformation);
 
         private static IntPtr OpenToken(IntPtr process, uint access)
@@ -533,6 +766,65 @@ namespace DefenseClaw
             return Marshal.StringToHGlobalUni(block);
         }
 
+        private static IntPtr BuildInheritedHandleList(
+            IntPtr stdinHandle,
+            IntPtr stdoutHandle,
+            IntPtr stderrHandle,
+            out IntPtr handleListBuffer)
+        {
+            IntPtr attributeListSize = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+            if (attributeListSize == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "InitializeProcThreadAttributeList did not report a buffer size");
+            }
+
+            IntPtr attributeList = Marshal.AllocHGlobal(attributeListSize);
+            handleListBuffer = IntPtr.Zero;
+            bool initialized = false;
+            try
+            {
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "InitializeProcThreadAttributeList failed");
+                }
+                initialized = true;
+                handleListBuffer = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(handleListBuffer, 0, stdinHandle);
+                Marshal.WriteIntPtr(handleListBuffer, IntPtr.Size, stdoutHandle);
+                Marshal.WriteIntPtr(handleListBuffer, IntPtr.Size * 2, stderrHandle);
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                    handleListBuffer,
+                    new IntPtr(IntPtr.Size * 3),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "UpdateProcThreadAttribute(handle list) failed");
+                }
+                return attributeList;
+            }
+            catch
+            {
+                if (handleListBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(handleListBuffer);
+                    handleListBuffer = IntPtr.Zero;
+                }
+                if (initialized) DeleteProcThreadAttributeList(attributeList);
+                Marshal.FreeHGlobal(attributeList);
+                throw;
+            }
+        }
+
         public static Process StartRestricted(
             string applicationPath,
             string[] arguments,
@@ -540,6 +832,50 @@ namespace DefenseClaw
             string[] environmentEntries,
             bool allowRestrictedLuaFallback)
         {
+            RestrictedSetupProcess ignored;
+            return StartRestrictedInternal(
+                applicationPath,
+                arguments,
+                workingDirectory,
+                environmentEntries,
+                allowRestrictedLuaFallback,
+                false,
+                out ignored);
+        }
+
+        public static RestrictedSetupProcess StartRestrictedWithCapture(
+            string applicationPath,
+            string[] arguments,
+            string workingDirectory,
+            string[] environmentEntries,
+            bool allowRestrictedLuaFallback)
+        {
+            RestrictedSetupProcess captured;
+            StartRestrictedInternal(
+                applicationPath,
+                arguments,
+                workingDirectory,
+                environmentEntries,
+                allowRestrictedLuaFallback,
+                true,
+                out captured);
+            if (captured == null)
+            {
+                throw new InvalidOperationException("restricted Setup capture was not initialized");
+            }
+            return captured;
+        }
+
+        private static Process StartRestrictedInternal(
+            string applicationPath,
+            string[] arguments,
+            string workingDirectory,
+            string[] environmentEntries,
+            bool allowRestrictedLuaFallback,
+            bool captureOutput,
+            out RestrictedSetupProcess capturedProcess)
+        {
+            capturedProcess = null;
             if (String.IsNullOrWhiteSpace(applicationPath) || !Path.IsPathRooted(applicationPath))
             {
                 throw new ArgumentException("restricted Setup application path must be absolute");
@@ -561,6 +897,11 @@ namespace DefenseClaw
             IntPtr launchToken = IntPtr.Zero;
             IntPtr childToken = IntPtr.Zero;
             IntPtr environment = IntPtr.Zero;
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr handleListBuffer = IntPtr.Zero;
+            AnonymousPipeServerStream stdinPipe = null;
+            AnonymousPipeServerStream stdoutPipe = null;
+            AnonymousPipeServerStream stderrPipe = null;
             PROCESS_INFORMATION processInfo = new PROCESS_INFORMATION();
             Process process = null;
             bool resumed = false;
@@ -581,23 +922,78 @@ namespace DefenseClaw
                     out launchTokenKind);
 
                 environment = BuildEnvironment(environmentEntries);
-                STARTUPINFO startupInfo = new STARTUPINFO();
-                startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-                startupInfo.lpDesktop = @"winsta0\default";
-                if (!CreateProcessAsUser(
-                    launchToken,
-                    applicationPath,
-                    BuildCommandLine(applicationPath, arguments),
-                    IntPtr.Zero,
-                    IntPtr.Zero,
-                    false,
-                    CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                    environment,
-                    workingDirectory,
-                    ref startupInfo,
-                    out processInfo))
+                bool created;
+                if (captureOutput)
+                {
+                    stdinPipe = new AnonymousPipeServerStream(
+                        PipeDirection.Out,
+                        HandleInheritability.Inheritable);
+                    stdoutPipe = new AnonymousPipeServerStream(
+                        PipeDirection.In,
+                        HandleInheritability.Inheritable);
+                    stderrPipe = new AnonymousPipeServerStream(
+                        PipeDirection.In,
+                        HandleInheritability.Inheritable);
+                    IntPtr stdinHandle = stdinPipe.ClientSafePipeHandle.DangerousGetHandle();
+                    IntPtr stdoutHandle = stdoutPipe.ClientSafePipeHandle.DangerousGetHandle();
+                    IntPtr stderrHandle = stderrPipe.ClientSafePipeHandle.DangerousGetHandle();
+                    attributeList = BuildInheritedHandleList(
+                        stdinHandle,
+                        stdoutHandle,
+                        stderrHandle,
+                        out handleListBuffer);
+                    STARTUPINFOEX startupInfo = new STARTUPINFOEX();
+                    startupInfo.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                    startupInfo.StartupInfo.lpDesktop = @"winsta0\default";
+                    startupInfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                    startupInfo.StartupInfo.hStdInput = stdinHandle;
+                    startupInfo.StartupInfo.hStdOutput = stdoutHandle;
+                    startupInfo.StartupInfo.hStdError = stderrHandle;
+                    startupInfo.lpAttributeList = attributeList;
+                    created = CreateProcessAsUserExtended(
+                        launchToken,
+                        applicationPath,
+                        BuildCommandLine(applicationPath, arguments),
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        true,
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                            EXTENDED_STARTUPINFO_PRESENT,
+                        environment,
+                        workingDirectory,
+                        ref startupInfo,
+                        out processInfo);
+                }
+                else
+                {
+                    STARTUPINFO startupInfo = new STARTUPINFO();
+                    startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+                    startupInfo.lpDesktop = @"winsta0\default";
+                    created = CreateProcessAsUser(
+                        launchToken,
+                        applicationPath,
+                        BuildCommandLine(applicationPath, arguments),
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        false,
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        environment,
+                        workingDirectory,
+                        ref startupInfo,
+                        out processInfo);
+                }
+                if (!created)
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessAsUserW failed");
+                }
+
+                if (captureOutput)
+                {
+                    stdinPipe.DisposeLocalCopyOfClientHandle();
+                    stdoutPipe.DisposeLocalCopyOfClientHandle();
+                    stderrPipe.DisposeLocalCopyOfClientHandle();
+                    stdinPipe.Dispose();
+                    stdinPipe = null;
                 }
 
                 childToken = OpenToken(processInfo.hProcess, TOKEN_QUERY);
@@ -606,6 +1002,12 @@ namespace DefenseClaw
                     launchTokenKind,
                     "suspended Setup child");
                 process = Process.GetProcessById(checked((int)processInfo.dwProcessId));
+                if (captureOutput)
+                {
+                    capturedProcess = new RestrictedSetupProcess(process, stdoutPipe, stderrPipe);
+                    stdoutPipe = null;
+                    stderrPipe = null;
+                }
                 if (ResumeThread(processInfo.hThread) == UInt32.MaxValue)
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed");
@@ -622,10 +1024,30 @@ namespace DefenseClaw
                 if (processInfo.hThread != IntPtr.Zero) CloseHandle(processInfo.hThread);
                 if (processInfo.hProcess != IntPtr.Zero) CloseHandle(processInfo.hProcess);
                 if (childToken != IntPtr.Zero) CloseHandle(childToken);
+                if (attributeList != IntPtr.Zero)
+                {
+                    DeleteProcThreadAttributeList(attributeList);
+                    Marshal.FreeHGlobal(attributeList);
+                }
+                if (handleListBuffer != IntPtr.Zero) Marshal.FreeHGlobal(handleListBuffer);
+                if (stdinPipe != null) stdinPipe.Dispose();
+                if (stdoutPipe != null) stdoutPipe.Dispose();
+                if (stderrPipe != null) stderrPipe.Dispose();
                 if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
                 if (launchToken != IntPtr.Zero) CloseHandle(launchToken);
                 if (sourceToken != IntPtr.Zero) CloseHandle(sourceToken);
-                if (!resumed && process != null) process.Dispose();
+                if (!resumed)
+                {
+                    if (capturedProcess != null)
+                    {
+                        capturedProcess.Dispose();
+                        capturedProcess = null;
+                    }
+                    else if (process != null)
+                    {
+                        process.Dispose();
+                    }
+                }
             }
         }
     }

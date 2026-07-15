@@ -47,6 +47,23 @@ function Write-ChildProgress([string]$Path, [string]$Phase) {
 
 $earlyProgress = ''
 if ($Child) {
+    $earlyIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $earlyAccountName = ($earlyIdentity.Name -split '\\')[-1]
+    if ($earlyAccountName -notmatch '^dcacc[0-9a-f]{10}$') {
+        throw 'child readiness is restricted to a DefenseClaw disposable Setup CI account'
+    }
+    $earlyReadinessName = 'Local\DefenseClaw-Disposable-' + $earlyAccountName
+    $earlyReadiness = [Threading.EventWaitHandleAcl]::OpenExisting(
+        $earlyReadinessName,
+        [Security.AccessControl.EventWaitHandleRights]::Modify
+    )
+    try {
+        if (-not $earlyReadiness.Set()) {
+            throw 'disposable child readiness event could not be signaled'
+        }
+    } finally {
+        $earlyReadiness.Dispose()
+    }
     $earlyResult = [IO.Path]::GetFullPath($ResultPath)
     $earlyResultDirectory = [IO.Path]::GetDirectoryName($earlyResult)
     if ([string]::IsNullOrWhiteSpace($earlyResultDirectory)) {
@@ -662,6 +679,7 @@ $accountSid = ''
 $accountCreated = $false
 $sandbox = ''
 $desktopGrant = $null
+$readinessEvent = $null
 $childProcess = $null
 $workspace = ''
 $scripts = ''
@@ -695,6 +713,36 @@ try {
     $userMembers = @(Get-LocalGroupMember -SID $usersSid -ErrorAction Stop)
     if (@($userMembers | Where-Object { $_.SID -eq $sidObject }).Count -eq 0) {
         Add-LocalGroupMember -SID $usersSid -Member $accountName -ErrorAction Stop
+    }
+
+    $readinessName = 'Local\DefenseClaw-Disposable-' + $accountName
+    $readinessSecurity = [Security.AccessControl.EventWaitHandleSecurity]::new()
+    $readinessSecurity.SetAccessRuleProtection($true, $false)
+    $parentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $readinessSecurity.AddAccessRule(
+        [Security.AccessControl.EventWaitHandleAccessRule]::new(
+            $parentSid,
+            [Security.AccessControl.EventWaitHandleRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+    $readinessSecurity.AddAccessRule(
+        [Security.AccessControl.EventWaitHandleAccessRule]::new(
+            $sidObject,
+            [Security.AccessControl.EventWaitHandleRights]::Modify,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+    $createdReadiness = $false
+    $readinessEvent = [Threading.EventWaitHandleAcl]::Create(
+        $false,
+        [Threading.EventResetMode]::ManualReset,
+        $readinessName,
+        [ref]$createdReadiness,
+        $readinessSecurity
+    )
+    if (-not $createdReadiness) {
+        throw 'disposable child readiness event name unexpectedly already exists'
     }
 
     $sandbox = Join-Path $stateBase ('disposable-user-' + [guid]::NewGuid().ToString('N'))
@@ -787,14 +835,21 @@ try {
     $unverifiableProcessBaseline = Get-UnverifiableProcessBaseline
     $childProcess = [DefenseClaw.DisposableStandardUserLauncher]::Start(
         $accountName,
-        $env:COMPUTERNAME,
+        '.',
         $password,
         $pwsh,
         [string[]]$arguments,
         $childState,
         $accountSid
     )
-    $timedOut = -not $childProcess.WaitForExit($TimeoutSeconds * 1000)
+    $startupFailed = -not $readinessEvent.WaitOne(15000)
+    $startupDiagnostic = if ($startupFailed) {
+        $childProcess.GetStartupDiagnostics()
+    } else {
+        ''
+    }
+    $timedOut = $startupFailed -or
+        -not $childProcess.WaitForExit($TimeoutSeconds * 1000)
     $exitCode = if ($timedOut) { 124 } else { $childProcess.ExitCode }
 
     # No elevated file enumeration, hash, result read, diagnostics copy, or
@@ -804,6 +859,14 @@ try {
     $terminatedSidProcessIds = @(Complete-DisposableExecutionBoundary `
         $childProcess $accountName $accountSid $unverifiableProcessBaseline)
     $executionBoundaryComplete = $true
+    if ($startupFailed) {
+        $progressDetail = if (Test-Path -LiteralPath $progressRecord -PathType Leaf) {
+            Read-BoundedDisposableResult $progressRecord $childResults 32768
+        } else {
+            '[no child progress record]'
+        }
+        throw "disposable standard-user $Mode did not enter its child script within 15 seconds`nlauncher diagnostics: $startupDiagnostic`nchild progress:`n$progressDetail"
+    }
     if ($timedOut) {
         $progressDetail = if (Test-Path -LiteralPath $progressRecord -PathType Leaf) {
             Read-BoundedDisposableResult $progressRecord $childResults 32768
@@ -866,6 +929,7 @@ try {
         try { $desktopGrant.Restore() }
         catch { $cleanupFailures.Add("interactive desktop ACL restore: $($_.Exception.Message)") }
     }
+    if ($null -ne $readinessEvent) { $readinessEvent.Dispose() }
     if ($executionBoundaryComplete -and
         -not [string]::IsNullOrWhiteSpace($DiagnosticsRoot) -and
         -not [string]::IsNullOrWhiteSpace($childDiagnostics) -and

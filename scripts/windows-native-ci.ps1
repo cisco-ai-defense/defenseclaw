@@ -614,7 +614,8 @@ function Invoke-WindowsSetupStandardUserProcess {
         [ValidateRange(1, 1800)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
         [string]$WorkingDirectory = '',
-        [switch]$AllowRestrictedLuaFallback
+        [switch]$AllowRestrictedLuaFallback,
+        [switch]$SuppressOutput
     )
     if ($FilePath.IndexOf([char]0) -ge 0 -or $WorkingDirectory.IndexOf([char]0) -ge 0 -or
         @($ArgumentList | Where-Object { $null -eq $_ -or $_.IndexOf([char]0) -ge 0 }).Count -ne 0) {
@@ -634,10 +635,24 @@ function Invoke-WindowsSetupStandardUserProcess {
     }
 
     if (-not [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
-        $result = Invoke-WindowsNativeProcess -FilePath $application -ArgumentList $ArgumentList `
-            -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds $TimeoutSeconds `
-            -LogPath $LogPath -WorkingDirectory $working
+        if ($SuppressOutput) {
+            $result = Invoke-WindowsNativeProcess -FilePath $application -ArgumentList $ArgumentList `
+                -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds $TimeoutSeconds `
+                -LogPath $LogPath -WorkingDirectory $working 6>$null
+        } else {
+            $result = Invoke-WindowsNativeProcess -FilePath $application -ArgumentList $ArgumentList `
+                -AllowedExitCodes $AllowedExitCodes -TimeoutSeconds $TimeoutSeconds `
+                -LogPath $LogPath -WorkingDirectory $working
+        }
         $result | Add-Member -NotePropertyName LaunchContext -NotePropertyValue 'inherited-standard'
+        $result | Add-Member -NotePropertyName StdOutTruncated `
+            -NotePropertyValue ([string]$result.StdOut -match '(?m)^\[truncated\]$')
+        $result | Add-Member -NotePropertyName StdErrTruncated `
+            -NotePropertyValue ([string]$result.StdErr -match '(?m)^\[truncated\]$')
+        $result | Add-Member -NotePropertyName StdOutCapturedBytes `
+            -NotePropertyValue ([Text.Encoding]::UTF8.GetByteCount([string]$result.StdOut))
+        $result | Add-Member -NotePropertyName StdErrCapturedBytes `
+            -NotePropertyValue ([Text.Encoding]::UTF8.GetByteCount([string]$result.StdErr))
         return $result
     }
 
@@ -655,7 +670,7 @@ function Invoke-WindowsSetupStandardUserProcess {
     } else {
         'verified-restricted-lua-default-token-noncertification'
     }
-    $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestricted(
+    $process = [DefenseClaw.SetupStandardUserLauncher]::StartRestrictedWithCapture(
         $application,
         [string[]]$ArgumentList,
         $working,
@@ -663,6 +678,7 @@ function Invoke-WindowsSetupStandardUserProcess {
         [bool]$AllowRestrictedLuaFallback
     )
     $timedOut = $false
+    $outputHealthy = $false
     $cleanupFailure = $null
     try {
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
@@ -672,11 +688,19 @@ function Invoke-WindowsSetupStandardUserProcess {
                 throw 'restricted Setup process tree did not exit within 30 seconds after timeout termination'
             }
         }
+        $outputHealthy = $process.CompleteOutput(5000)
+        $stdout = Limit-WindowsNativeText ([string]$process.StdOut)
+        $stderr = Limit-WindowsNativeText ([string]$process.StdErr)
         $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $result = [pscustomobject]@{
             ExitCode = $exitCode
-            StdOut = ''
-            StdErr = ''
+            StdOut = $stdout
+            StdErr = $stderr
+            StdOutTruncated = [bool]$process.StdOutTruncated
+            StdErrTruncated = [bool]$process.StdErrTruncated
+            StdOutCapturedBytes = [int]$process.StdOutCapturedBytes
+            StdErrCapturedBytes = [int]$process.StdErrCapturedBytes
+            OutputCaptureError = [string]$process.OutputCaptureError
             TimedOut = $timedOut
             ProcessId = $process.Id
             LaunchContext = $launchContext
@@ -718,13 +742,31 @@ function Invoke-WindowsSetupStandardUserProcess {
         timeout_seconds = $TimeoutSeconds
         executable = $application
         arguments = @($ArgumentList)
+        stdout_truncated = $result.StdOutTruncated
+        stderr_truncated = $result.StdErrTruncated
+        stdout_captured_bytes = $result.StdOutCapturedBytes
+        stderr_captured_bytes = $result.StdErrCapturedBytes
     } | ConvertTo-Json -Depth 4
     $summary = Protect-WindowsNativeText $summary
+    $combined = @($result.StdOut, $result.StdErr | Where-Object { $_ }) -join [Environment]::NewLine
+    if ($combined -and -not $SuppressOutput) { Write-Host $combined }
     Write-Host $summary
-    if ($LogPath) { Write-BoundedText -Path $LogPath -Text $summary }
+    if ($LogPath) {
+        $logText = @(
+            $summary,
+            '--- stdout ---',
+            (Limit-WindowsNativeText $result.StdOut 393216),
+            '--- stderr ---',
+            (Limit-WindowsNativeText $result.StdErr 393216)
+        ) -join [Environment]::NewLine
+        Write-BoundedText -Path $LogPath -Text $logText
+    }
+    if (-not $outputHealthy) {
+        throw "$application redirected output capture failed: $($result.OutputCaptureError)"
+    }
     if ($result.ExitCode -notin $AllowedExitCodes) {
         $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $($result.ExitCode)" }
-        throw "$application $reason under a verified standard-user token"
+        throw "$application $reason under a verified standard-user token`n$combined"
     }
     return $result
 }
@@ -750,6 +792,12 @@ $payload = [ordered]@{
     ($payload | ConvertTo-Json -Compress),
     [Text.UTF8Encoding]::new($false)
 )
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::Out.WriteLine('captured stdout → Ω')
+[Console]::Error.WriteLine('captured stderr → Ж')
+$overflow = [DefenseClaw.RestrictedSetupProcess]::MaxCapturedBytesPerStream + 4096
+[Console]::Out.Write(('O' * $overflow))
+[Console]::Error.Write(('E' * $overflow))
 '@
     [IO.File]::WriteAllText($scriptPath, $scriptBody, [Text.UTF8Encoding]::new($false))
     $expectedArgument = 'Setup → quote " and trailing slash \'
@@ -779,7 +827,7 @@ $payload = [ordered]@{
             '-NoProfile', '-File', $scriptPath,
             '-Argument', $expectedArgument,
             '-LauncherSource', $setupStandardUserLauncherSource
-        ) -TimeoutSeconds 30 -LogPath $logPath -WorkingDirectory $Root
+        ) -TimeoutSeconds 30 -LogPath $logPath -WorkingDirectory $Root -SuppressOutput
     } finally {
         [Environment]::SetEnvironmentVariable('DC_SETUP_LAUNCH_OUTPUT', $previousOutput, 'Process')
         [Environment]::SetEnvironmentVariable('DC_SETUP_LAUNCH_UNICODE', $previousUnicode, 'Process')
@@ -805,6 +853,26 @@ $payload = [ordered]@{
     }
     if ([string]$result.LaunchContext -cne $expectedContext) {
         throw "standard-user Setup launcher context was $($result.LaunchContext), expected $expectedContext"
+    }
+    if ([string]$result.StdOut -notmatch 'captured stdout → Ω' -or
+        [string]$result.StdErr -notmatch 'captured stderr → Ж') {
+        throw 'standard-user Setup launcher did not preserve Unicode stdout/stderr'
+    }
+    if (-not [bool]$result.StdOutTruncated -or -not [bool]$result.StdErrTruncated) {
+        throw 'standard-user Setup launcher did not report bounded stdout/stderr truncation'
+    }
+    if ($parentElevated -and
+        ([int]$result.StdOutCapturedBytes -gt
+            [DefenseClaw.RestrictedSetupProcess]::MaxCapturedBytesPerStream -or
+         [int]$result.StdErrCapturedBytes -gt
+            [DefenseClaw.RestrictedSetupProcess]::MaxCapturedBytesPerStream)) {
+        throw 'restricted Setup launcher exceeded its per-stream capture bound'
+    }
+    if ($parentElevated) {
+        $log = Get-Content -LiteralPath $logPath -Raw -Encoding UTF8
+        if ($log -notmatch 'captured stdout → Ω' -or $log -notmatch 'captured stderr → Ж') {
+            throw 'restricted Setup launcher log did not include captured stdout/stderr'
+        }
     }
 }
 
