@@ -1323,13 +1323,34 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":
 		return (managed != "" && got == managed) ||
-			got == "x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode"
+			claudeCodeOtelHeadersAreDefenseClawOnly(got)
 	case "OTEL_RESOURCE_ATTRIBUTES":
 		return (managed != "" && got == managed) ||
 			got == "defenseclaw.connector=claudecode,service.name=claudecode"
 	default:
 		return false
 	}
+}
+
+func claudeCodeOtelHeadersAreDefenseClawOnly(value string) bool {
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		name, headerValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || strings.TrimSpace(headerValue) == "" {
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "x-defenseclaw-client", "x-defenseclaw-source", "x-defenseclaw-token":
+		default:
+			// A mixed block belongs to the operator even when it also contains
+			// DefenseClaw headers; teardown must not discard the other headers.
+			return false
+		}
+	}
+	return true
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
@@ -1421,9 +1442,9 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				}
 			}
 
-			// Exact managed metadata makes ownership literal, so an operator edit
-			// after Setup survives teardown. Older or missing metadata falls back
-			// to conservative DefenseClaw-specific ownership recognition.
+			// Exact managed metadata makes generic ownership literal, so an
+			// operator edit after Setup survives teardown. Conservative strong
+			// markers also recognize stale DefenseClaw values from older installs.
 			if envMap, ok := settings["env"].(map[string]interface{}); ok {
 				originalEnv := map[string]interface{}{}
 				if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
@@ -1444,10 +1465,8 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if !managed || !present {
 						continue
 					}
-					owned := claudeCodeOtelValueIsManaged(current, written)
-					if !exactManagedEnv {
-						owned = owned || claudeCodeOtelValueLooksManaged(key, current, written)
-					}
+					owned := claudeCodeOtelValueIsManaged(current, written) ||
+						claudeCodeOtelValueLooksManaged(key, current, written)
 					if !owned {
 						continue
 					}

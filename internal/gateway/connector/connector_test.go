@@ -6825,14 +6825,19 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 		OTLPPathToken: strings.Repeat("a", 64),
 	}
 	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
+		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + strings.Repeat("c", 64)
+	operatorMixedHeaders := "x-defenseclaw-source=claudecode,x-operator-trace=keep"
 	pristine := map[string]interface{}{
 		"autoUpdatesChannel": "latest",
 		"env": map[string]interface{}{
-			"OTEL_EXPORTER_OTLP_ENDPOINT": oldManaged["OTEL_EXPORTER_OTLP_ENDPOINT"],
-			"OTEL_RESOURCE_ATTRIBUTES":    oldManaged["OTEL_RESOURCE_ATTRIBUTES"],
-			"OTEL_LOGS_EXPORTER":          "console",
-			"OTEL_SERVICE_NAME":           "operator-claude",
-			"PATH":                        "/operator/bin",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":     oldManaged["OTEL_EXPORTER_OTLP_ENDPOINT"],
+			"OTEL_EXPORTER_OTLP_HEADERS":      oldDefenseClawHeaders,
+			"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+			"OTEL_RESOURCE_ATTRIBUTES":        oldManaged["OTEL_RESOURCE_ATTRIBUTES"],
+			"OTEL_LOGS_EXPORTER":              "console",
+			"OTEL_SERVICE_NAME":               "operator-claude",
+			"PATH":                            "/operator/bin",
 		},
 	}
 	data, err := json.MarshalIndent(pristine, "", "  ")
@@ -6878,15 +6883,20 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 		t.Fatalf("operator env missing after teardown: %v", restored)
 	}
 	for key, want := range map[string]interface{}{
-		"OTEL_LOGS_EXPORTER": "console",
-		"OTEL_SERVICE_NAME":  "operator-claude",
-		"PATH":               "/operator/bin",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+		"OTEL_LOGS_EXPORTER":              "console",
+		"OTEL_SERVICE_NAME":               "operator-claude",
+		"PATH":                            "/operator/bin",
 	} {
 		if got := env[key]; got != want {
 			t.Errorf("env[%s] = %v, want preserved %v", key, got, want)
 		}
 	}
-	for _, key := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"} {
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
 		if _, present := env[key]; present {
 			t.Errorf("stale DefenseClaw env[%s] survived teardown: %v", key, env)
 		}
