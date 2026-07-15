@@ -136,6 +136,23 @@ t_install_bad_env_exits_nonzero() {
   assert_contains "${out}" "--env must be 'prod' or 'preview'" "explains valid env values"
 }
 
+t_install_help_documents_override_endpoint() {
+  local out
+  out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
+  assert_contains "${out}" "--override-endpoint URL" "override-endpoint flag in help"
+  assert_contains "${out}" "Takes precedence"        "override-endpoint precedence note in help"
+}
+
+t_install_bad_override_endpoint_exits_nonzero() {
+  # A malformed --override-endpoint must be rejected at arg-validation
+  # time (before the root check) and name the offending flag so operators
+  # don't silently install a daemon pointed at a bogus host.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "not-a-url" 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "malformed --override-endpoint should exit non-zero"
+  assert_contains "${out}" "--override-endpoint must be a full http(s) URL" "explains override URL requirement"
+}
+
 t_install_default_env_is_prod() {
   # Parse install.sh's own defaults directly to catch a silent flip
   # from prod to preview or vice versa.
@@ -177,6 +194,8 @@ run_case "install non-root rejected"      t_install_requires_root
 run_case "install default redaction on"   t_install_default_redaction_is_on
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
+run_case "install --override-endpoint documented" t_install_help_documents_override_endpoint
+run_case "install --override-endpoint garbage rejected" t_install_bad_override_endpoint_exits_nonzero
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall --bogus"              t_uninstall_unknown_flag

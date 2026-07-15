@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -239,9 +240,19 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		return
 	}
 	stampEventCorrelation(&e, ctx)
+	// Resolve the cloud-controlled per-inspection redaction directive
+	// (managed_enterprise only) once and apply it to every field below.
+	// An explicit directive stamped on the event wins over the
+	// ctx-carried one so async re-emits keep their decision; we also
+	// stamp it back so the audit-mirror path (sanitizeGatewayLogEvent)
+	// can honor the same decision without the request ctx.
+	policy := sinkPolicyFor(ctx, e.RedactionEnabled)
+	if e.RedactionEnabled == nil {
+		e.RedactionEnabled = redactionDecisionFromContext(ctx)
+	}
 	if v := e.Verdict; v != nil {
 		cp := *v
-		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		e.Verdict = &cp
 	}
 	if j := e.Judge; j != nil {
@@ -251,49 +262,49 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		// redacted form. ParseError is short caller-owned
 		// metadata but we redact it too in case a parser
 		// embeds a snippet of the offending body.
-		cp.RawResponse = redaction.ForSinkString(cp.RawResponse)
-		cp.ParseError = redaction.ForSinkString(cp.ParseError)
+		cp.RawResponse = redaction.StringForSink(cp.RawResponse, policy)
+		cp.ParseError = redaction.StringForSink(cp.ParseError, policy)
 		e.Judge = &cp
 	}
 	if er := e.Error; er != nil {
 		cp := *er
-		cp.Message = redaction.ForSinkString(cp.Message)
-		cp.Cause = redaction.ForSinkString(cp.Cause)
+		cp.Message = redaction.StringForSink(cp.Message, policy)
+		cp.Cause = redaction.StringForSink(cp.Cause, policy)
 		e.Error = &cp
 	}
 	if p := e.LLMPrompt; p != nil {
 		cp := *p
 		if cp.Prompt != "" {
-			cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+			cp.Prompt = redaction.MessageContentForSink(cp.Prompt, policy)
 		}
 		if cp.RawRequestBody != "" {
-			cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+			cp.RawRequestBody = redaction.MessageContentForSink(cp.RawRequestBody, policy)
 		}
 		e.LLMPrompt = &cp
 	}
 	if r := e.LLMResponse; r != nil {
 		cp := *r
 		if cp.Response != "" {
-			cp.Response = redaction.ForSinkMessageContent(cp.Response)
+			cp.Response = redaction.MessageContentForSink(cp.Response, policy)
 		}
 		if cp.RawResponseBody != "" {
-			cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+			cp.RawResponseBody = redaction.MessageContentForSink(cp.RawResponseBody, policy)
 		}
 		e.LLMResponse = &cp
 	}
 	if t := e.Tool; t != nil {
 		cp := *t
 		if cp.ToolInput != "" {
-			cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+			cp.ToolInput = redaction.MessageContentForSink(cp.ToolInput, policy)
 		}
 		if cp.ToolOutput != "" {
-			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+			cp.ToolOutput = redaction.MessageContentForSink(cp.ToolOutput, policy)
 		}
 		e.Tool = &cp
 	}
 	if h := e.HookDecision; h != nil {
 		cp := *h
-		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		e.HookDecision = &cp
 	}
 	w.EmitContext(ctx, e)
@@ -611,6 +622,11 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	if len(p.TargetHost) > 253 {
 		p.TargetHost = p.TargetHost[:253]
 	}
+	if ip := net.ParseIP(p.ResolvedIP); ip != nil {
+		p.ResolvedIP = ip.String()
+	} else {
+		p.ResolvedIP = ""
+	}
 	if len(p.Reason) > 512 {
 		p.Reason = p.Reason[:512]
 	}
@@ -621,7 +637,7 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	// shipping a leak. In production we log and continue — the
 	// canary fires once, the operator reads the warning, and the
 	// follow-up fix lands without an outage.
-	redaction.MustAssertNoCredentials(p.TargetHost, p.TargetPath, p.Reason)
+	redaction.MustAssertNoCredentials(p.TargetHost, p.ResolvedIP, p.TargetPath, p.Reason)
 	// BodyShape is a known enum — reject anything else so a
 	// malformed TS client cannot inject arbitrary strings into the
 	// downstream contract. validEgressBranch / validEgressDecision

@@ -39,6 +39,7 @@ EXPECTED_ENVELOPE_EVENT_TYPES = {
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
     "hook_decision", "ai_discovery",
+    "connector_inventory", "mcp_inventory", "agent_inventory",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {

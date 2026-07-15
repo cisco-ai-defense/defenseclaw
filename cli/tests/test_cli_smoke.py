@@ -51,6 +51,97 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Initialize DefenseClaw environment", result.output)
 
+    def test_direct_upgrade_refuses_active_recovery_and_points_to_resolver(self):
+        from defenseclaw.main import cli
+
+        for journal_name in ("phase-one-active.json", "phase-two-active.json"):
+            with self.subTest(journal_name=journal_name):
+                argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
+                runner = CliRunner()
+                with runner.isolated_filesystem():
+                    home = Path.cwd() / ".defenseclaw"
+                    journal = home / ".upgrade-recovery" / journal_name
+                    journal.parent.mkdir(parents=True)
+                    journal.write_text("{}\n", encoding="utf-8")
+                    before = {path.relative_to(home) for path in home.rglob("*")}
+                    with patch.object(sys, "argv", argv), patch.dict(
+                        os.environ,
+                        {"DEFENSECLAW_HOME": str(home)},
+                    ):
+                        result = runner.invoke(cli, argv[1:])
+                    self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
+                    self.assertEqual(
+                        {path.relative_to(home) for path in home.rglob("*")},
+                        before,
+                    )
+
+                self.assertEqual(result.exit_code, 1)
+                self.assertIn("requires the release-owned resolver", result.output)
+                self.assertIn("without --version/-Version", result.output)
+                self.assertIn("mktemp -d", result.output)
+                self.assertIn("cosign verify-blob", result.output)
+                self.assertIn("releases/download/", result.output)
+                self.assertIn("defenseclaw-upgrade.sh", result.output)
+                self.assertIn("DefenseClaw upgrade resolver complete v1", result.output)
+                self.assertIn("bash -n \"$d/defenseclaw-upgrade.sh\"", result.output)
+                self.assertNotIn("upgrade.sh | bash", result.output)
+                self.assertIn("[Guid]::NewGuid()", result.output)
+                self.assertIn("-ErrorAction Stop", result.output)
+                self.assertIn("finally", result.output)
+                self.assertIn("& $r -Yes", result.output)
+                self.assertIn("no recovery mutation was attempted", result.output)
+
+    def test_upgrade_help_never_triggers_interrupted_recovery(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--help"]
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            home = Path.cwd() / ".defenseclaw"
+            journal = home / ".upgrade-recovery/phase-two-active.json"
+            journal.parent.mkdir(parents=True)
+            journal.write_text("{}\n", encoding="utf-8")
+            before = {path.relative_to(home) for path in home.rglob("*")}
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"DEFENSECLAW_HOME": str(home)},
+            ):
+                result = runner.invoke(cli, argv[1:])
+            self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual(
+                {path.relative_to(home) for path in home.rglob("*")},
+                before,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Usage:", result.output)
+
+    def test_upgrade_preflight_does_not_initialize_audit_store(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.3"]
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            home = Path.cwd() / ".defenseclaw"
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_HOME": str(home), "HOME": str(Path.cwd())},
+                ),
+                patch("defenseclaw.config.load", return_value=object()) as load,
+                patch("defenseclaw.db.Store") as store,
+            ):
+                result = runner.invoke(cli, argv[1:])
+
+            self.assertFalse(home.exists())
+            load.assert_called_once_with()
+            store.assert_not_called()
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Refusing to downgrade", result.output)
+        self.assertIn("No changes were made", result.output)
+
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
         from defenseclaw.main import cli
 

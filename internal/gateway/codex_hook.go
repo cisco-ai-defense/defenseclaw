@@ -81,6 +81,11 @@ type codexHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive back through the unified dispatch so
+	// finalizeAgentHook can honor it on the hook_decision event +
+	// audit row. Never serialized on the hook response wire.
+	RedactionEnabled *bool `json:"-"`
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -198,6 +203,13 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		}
 	}
 
+	// Inject the cloud-controlled per-inspection redaction directive
+	// onto the context so the downstream emit choke points (findings,
+	// verdict/hook_decision events) and the OS toast honor it. No-op
+	// outside managed_enterprise / when the AID lane returned no
+	// directive.
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
@@ -232,11 +244,13 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
 }
 
@@ -246,7 +260,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -254,7 +268,10 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 	if target == "" {
 		target = req.HookEventName
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	// Honor the cloud-controlled per-inspection redaction policy
+	// (all-sinks scope, managed_enterprise only) when a caller passes
+	// one; otherwise default to the historical ForSinkReason behavior.
+	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -345,7 +362,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	safeReason := redaction.ReasonForAgent(reason)
 	additional := codexAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,

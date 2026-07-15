@@ -1078,7 +1078,19 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
-		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
+		passthroughPromptID = meta.PromptID
+
+		// Managed Cisco AI Defense carve-out (scoped to managed_enterprise
+		// only): defer the llm_prompt emit until after Inspect so this
+		// prompt's own is_redaction_enabled directive governs its content
+		// fields, instead of failing closed to redact because the directive
+		// doesn't exist yet. See the structured chat-completion path for the
+		// full rationale. Outside managed_enterprise ordering/behavior are
+		// byte-for-byte unchanged.
+		deferManagedPrompt := managedEnterpriseActive.Load()
+		if !deferManagedPrompt {
+			passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
+		}
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
@@ -1091,6 +1103,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
+		if deferManagedPrompt {
+			// AID directive from this prompt's inspection is now known;
+			// stamp it so the deferred llm_prompt honors is_redaction_enabled
+			// (still fails closed to redact when AID returned no directive).
+			passthroughPromptID = emitLLMPromptEvent(
+				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
+				meta, userText, body)
+		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
 		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, nil, nil,
@@ -1293,7 +1313,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
-	resp, err := providerHTTPClient.Do(upstreamReq)
+	resp, err := doProviderRequest(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -2373,21 +2393,23 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
 		return true
 	}
-	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
-		!passthroughAllowPrivateForTest {
-		emitEgress(r.Context(), gatewaylog.EgressPayload{
-			TargetHost:   host,
-			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
-			Decision:     "block",
-			Reason:       "private-ip",
-			Source:       "go",
-		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-		return true
+	if host := u.Hostname(); host != "" {
+		if isPrivateHost(host) &&
+			!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+			!passthroughAllowPrivateForTest {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   host,
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "chat",
+				Decision:     "block",
+				Reason:       "private-ip",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+			return true
+		}
 	}
 	return false
 }
@@ -2641,7 +2663,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
-		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
+		promptID = meta.PromptID
+
+		// Managed Cisco AI Defense carve-out (scoped to managed_enterprise
+		// only): the per-inspection is_redaction_enabled directive does not
+		// exist until AID has inspected THIS prompt, so emitting llm_prompt
+		// up front — as the OSS path does — forces the event to fail closed
+		// to redact even when the cloud directive would allow raw. In
+		// managed_enterprise we defer the llm_prompt emit until after Inspect
+		// so the prompt's own directive governs its content fields. Outside
+		// managed_enterprise the ordering and redaction behavior are
+		// byte-for-byte unchanged (directive is always nil there anyway).
+		deferManagedPrompt := managedEnterpriseActive.Load()
+		if !deferManagedPrompt {
+			promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
+		}
 
 		t0 := time.Now()
 
@@ -2664,6 +2700,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
+		if deferManagedPrompt {
+			// The AID directive from this prompt's inspection is now known.
+			// Stamp it onto the emit context so the deferred llm_prompt event
+			// honors is_redaction_enabled (still fails closed to redact when
+			// AID returned no directive). Emitted before the block-return
+			// below so the prompt event is captured even on a block.
+			promptID = emitLLMPromptEvent(
+				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
+				meta, userText, req.RawBody)
+		}
 		elapsed := time.Since(t0)
 
 		// End guardrail span with decision.
@@ -3301,6 +3347,13 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	if verdict.Findings != nil {
 		findings = len(verdict.Findings)
 	}
+	// Cloud-controlled per-inspection redaction (phase 1, all-sinks
+	// scope): in managed_enterprise the inspect response's
+	// is_redaction_enabled directive overrides local privacy config for
+	// this verdict's reason. Outside managed_enterprise this resolves to
+	// SinkPolicyDefault, so the existing ForSinkReason behavior is
+	// preserved.
+	policy := sinkPolicyFor(context.Background(), verdict.RedactionEnabled)
 	if p.notify != nil {
 		p.notify.Push(SecurityNotification{
 			SubjectType: subject,
@@ -3313,10 +3366,10 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 			Findings:  findings,
 			Actions:   []string{"block"},
 			// verdict.Reason is minted from user content in the regex
-			// path and can carry literal secrets/PII. Always scrub
-			// before the text lands in a system message that gets
-			// shipped off-box to the LLM provider.
-			Reason: redaction.ForSinkReason(verdict.Reason),
+			// path and can carry literal secrets/PII. Scrub before the
+			// text lands in a system message that gets shipped off-box to
+			// the LLM provider — unless the cloud directive says raw.
+			Reason: redaction.ReasonForSink(verdict.Reason, policy),
 		})
 	}
 	// Also fire a user-session OS notification so the operator sees
@@ -3326,7 +3379,7 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	p.notifier.OnBlock(notifier.BlockEvent{
 		Source:       notifier.SourceGuardrail,
 		Target:       model,
-		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Reason:       redaction.ReasonForSink(verdict.Reason, policy),
 		Severity:     verdict.Severity,
 		Connector:    p.connectorName(),
 		Event:        direction,
@@ -3347,10 +3400,11 @@ func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, dir
 	if verdict == nil {
 		return
 	}
+	policy := sinkPolicyFor(context.Background(), verdict.RedactionEnabled)
 	p.notifier.OnWouldBlock(notifier.BlockEvent{
 		Source:       notifier.SourceGuardrail,
 		Target:       model,
-		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Reason:       redaction.ReasonForSink(verdict.Reason, policy),
 		Severity:     verdict.Severity,
 		Connector:    p.connectorName(),
 		Event:        direction,
@@ -4358,6 +4412,17 @@ func patchRawResponseModel(raw json.RawMessage, model string) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model string, verdict *ScanVerdict, elapsed time.Duration, tokIn, tokOut *int64, rawFields ...rawTelemetryField) {
+	// Cloud-controlled per-inspection redaction (phase 1): stamp the
+	// managed inspect response's is_redaction_enabled directive onto the
+	// ctx so every ctx-aware sink this telemetry choke point fans out to
+	// — the scanner scan/scan_finding emit path
+	// (emitGuardrailScanVerdictFindings) and the audit verdict rows —
+	// honors the same decision. Outside managed_enterprise this resolves
+	// to SinkPolicyDefault (behavior unchanged). The webhook/store rows
+	// below carry the directive on the event itself for the sinks that do
+	// not share this ctx.
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	policy := sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	requestID := RequestIDFromContext(ctx)
 	elapsedMs := float64(elapsed.Milliseconds())
 
@@ -4481,29 +4546,37 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// unredacted form to whichever forwarder reads from
 		// audit.Store.
 		evt := audit.Event{
-			Action:    string(audit.ActionGuardrailInspection),
-			Target:    model,
-			Severity:  verdict.Severity,
-			Details:   redaction.ForSinkReason(details),
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-			Connector: p.connectorName(),
+			Action:           string(audit.ActionGuardrailInspection),
+			Target:           model,
+			Severity:         verdict.Severity,
+			Details:          redaction.ReasonForSink(details, policy),
+			Timestamp:        time.Now().UTC(),
+			RequestID:        requestID,
+			Connector:        p.connectorName(),
+			RedactionEnabled: verdict.RedactionEnabled,
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
 	}
 
-	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
-	}
+	// NB: the canonical guardrail-verdict row is emitted above via
+	// LogActionCtx, which threads the request ctx (and thus the
+	// per-inspection redaction SinkPolicy stamped by
+	// withRedactionDecision) into the logger sink chain. The former
+	// legacy LogActionWithCorrelationConnector emission here was a
+	// duplicate that dropped both the extra envelope dimensions and the
+	// redaction directive, so it emitted raw details under the default
+	// sink policy. It is intentionally removed to keep this path in
+	// lockstep with api.go and the store twin above.
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
-		Action:    string(audit.ActionGuardrailInspection),
-		Target:    model,
-		Severity:  verdict.Severity,
-		Details:   details,
-		Timestamp: time.Now().UTC(),
-		RequestID: requestID,
-		Connector: p.connectorName(),
+		Action:           string(audit.ActionGuardrailInspection),
+		Target:           model,
+		Severity:         verdict.Severity,
+		Details:          details,
+		Timestamp:        time.Now().UTC(),
+		RequestID:        requestID,
+		Connector:        p.connectorName(),
+		RedactionEnabled: verdict.RedactionEnabled,
 	})
 
 	if p.otel != nil {
@@ -4526,14 +4599,15 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 
 	if p.webhooks != nil && verdict.Action == "block" {
 		event := audit.Event{
-			ID:        uuid.New().String(),
-			Timestamp: time.Now().UTC(),
-			Action:    string(audit.ActionGuardrailBlock),
-			Target:    model,
-			Actor:     "defenseclaw-guardrail",
-			Details:   details,
-			Severity:  verdict.Severity,
-			Connector: p.connectorName(),
+			ID:               uuid.New().String(),
+			Timestamp:        time.Now().UTC(),
+			Action:           string(audit.ActionGuardrailBlock),
+			Target:           model,
+			Actor:            "defenseclaw-guardrail",
+			Details:          details,
+			Severity:         verdict.Severity,
+			Connector:        p.connectorName(),
+			RedactionEnabled: verdict.RedactionEnabled,
 		}
 		// v7: webhook payloads are one of the five external-facing
 		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same
@@ -5222,7 +5296,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
-	resp, err := providerHTTPClient.Do(upReq)
+	resp, err := doProviderRequest(upReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return

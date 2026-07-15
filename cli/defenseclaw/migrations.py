@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 import click
 import yaml
 
+from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 
 
@@ -1046,7 +1047,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     tmp_path: str | None = None
     try:
         fd, tmp_path = tempfile.mkstemp(
-            prefix=".tmp.",
+            prefix=f".tmp.{migration_state_helpers.upgrade_mutation_temp_suffix()}",
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
@@ -2348,7 +2349,13 @@ def run_migrations(
     """
     from defenseclaw import migration_state
 
-    if not all(hasattr(migration_state, attr) for attr in ("detect_schema", "is_future_schema", "FutureSchemaError")):
+    required_state_apis = (
+        "detect_schema",
+        "is_future_schema",
+        "FutureSchemaError",
+        "upgrade_mutation_temp_suffix",
+    )
+    if not all(hasattr(migration_state, attr) for attr in required_state_apis):
         migration_state = importlib.reload(migration_state)
     import defenseclaw as defenseclaw_pkg
 

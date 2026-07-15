@@ -140,3 +140,7 @@ outputs/
 
 # UDS sockets created by the local IPC server or its e2e tests.
 *.sock
+
+# Locally built mock AI Defense ingest server (scripts/build-managed-bundle.sh
+# / manual testing). Compiled artifact — never commit.
+/mock-aid-ingest

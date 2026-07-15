@@ -463,10 +463,46 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 				attrs = append(attrs, log.String("defenseclaw.hook.rule_ids", strings.Join(h.RuleIDs, ",")))
 			}
 		}
+	case gatewaylog.EventConnectorInventory:
+		// event.name / defenseclaw.gateway.event_type already carry
+		// the dispatch key; add the count + device anchor as flat
+		// attributes so AI Defense can filter without parsing the body.
+		if ci := e.ConnectorInventory; ci != nil {
+			attrs = append(attrs, log.Int("defenseclaw.inventory.connector.count", ci.Count))
+			attrs = appendInventoryAnchor(attrs, ci.DeviceID, ci.Hostname)
+		}
+	case gatewaylog.EventMCPInventory:
+		if mi := e.MCPInventory; mi != nil {
+			attrs = append(attrs, log.Int("defenseclaw.inventory.mcp.count", mi.Count))
+			attrs = appendInventoryAnchor(attrs, mi.DeviceID, mi.Hostname)
+		}
+	case gatewaylog.EventAgentInventory:
+		if ai := e.AgentInventory; ai != nil {
+			attrs = append(attrs,
+				log.Int("defenseclaw.inventory.agent.count", ai.Count),
+				log.Int("defenseclaw.inventory.agent.installed", ai.Installed),
+			)
+			attrs = appendInventoryAnchor(attrs, ai.DeviceID, ai.Hostname)
+		}
 	}
 
 	rec.AddAttributes(attrs...)
 	p.logger.Emit(ctx, rec)
+}
+
+// appendInventoryAnchor adds the endpoint device.id / host.name anchor
+// as flat log attributes for the discovery-inventory event types. These
+// mirror the resource-level defenseclaw.device.id / host.name so a
+// consumer keying on the log record (not the resource) can still bind an
+// inventory event to its endpoint.
+func appendInventoryAnchor(attrs []log.KeyValue, deviceID, hostname string) []log.KeyValue {
+	if deviceID != "" {
+		attrs = append(attrs, log.String("defenseclaw.device.id", deviceID))
+	}
+	if hostname != "" {
+		attrs = append(attrs, log.String("host.name", hostname))
+	}
+	return attrs
 }
 
 // gatewaySeverityToOTel maps the gatewaylog severity enum onto the

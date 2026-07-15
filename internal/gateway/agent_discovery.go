@@ -123,6 +123,12 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 		"duration_ms":     fmt.Sprintf("%d", report.DurationMs),
 	})
 
+	// managed_enterprise: ship the installed-agent roster to AI Defense
+	// as an agent_inventory discovery event. Built from the validated
+	// (sanitized) report we already hold — no new scan or store. No-op
+	// outside managed mode.
+	a.emitAgentInventory(r.Context(), &report, installed)
+
 	a.writeJSON(w, http.StatusOK, agentDiscoveryResponse{
 		Status:    "ok",
 		Agents:    len(report.Agents),

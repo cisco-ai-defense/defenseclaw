@@ -4,8 +4,15 @@ DefenseClaw has two CLI binaries:
 
 | Binary | Language | Install |
 |--------|----------|---------|
-| `defenseclaw` | Python (Click) | `make pycli` or `uv pip install -e .` |
-| `defenseclaw-gateway` | Go (Cobra) | `make gateway` |
+| `defenseclaw` | Python (Click) | Signed installer; `make pycli` only in an isolated contributor checkout |
+| `defenseclaw-gateway` | Go (Cobra) | Signed installer; `make gateway` only in an isolated contributor checkout |
+
+The `make` targets are contributor tooling, not operator installation or
+upgrade paths. Do not point raw `pip`, `uv`, editable-install, or package-copy
+commands at a release-managed host or its `~/.defenseclaw/.venv`; those tools
+cannot select a bridge, retain rollback custody, or prove fresh-process health.
+Use the signed fresh installer on a new host and the authenticated release-owned
+resolver below on an existing host.
 
 Use `<binary> --help` for any command.
 
@@ -481,16 +488,43 @@ is required.
 
 **Upgrade steps:**
 
-1. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
-2. Stop `defenseclaw-gateway`
-3. Download and replace gateway binary from the GitHub release tarball
-4. Download and replace Python CLI from the GitHub release wheel
-5. Run release-required migrations through the durable migration cursor
-6. Start `defenseclaw-gateway`, restart OpenClaw gateway, and poll health
+1. Detect the installed version and verify the target release contract before stopping anything.
+2. If the contract names a bridge, either select it from the reviewed baseline matrix or refuse with the exact supported path.
+3. Create durable, private rollback custody for the complete managed state and its pre-upgrade running/stopped status.
+4. Install and health-check the bridge, then start the target phase in a fresh bridge controller process.
+5. Install the target, run release-required migrations through the durable migration cursor, and restart services.
+6. Report success only after version-bound health checks pass; otherwise restore and verify the exact source state.
+
+Crossing the observability-v8 hard cut requires the `0.8.4` bridge. The
+release-owned shell and PowerShell resolvers perform the supported one-command
+path when invoked without an explicit target:
+
+```text
+reviewed 0.8.3-or-older source
+    -> 0.8.4 bridge
+    -> fresh 0.8.4 controller
+    -> 0.8.5 hard cut
+```
+
+An already-published `0.8.3`-or-older built-in CLI cannot be taught this
+two-process orchestration retroactively. Its protocol check therefore refuses
+a hard-cut latest release before stopping services. Some frozen releases print
+an obsolete raw-network shell hint after that safe refusal; it must not be
+executed. Use the authenticated resolver-asset bootstrap below instead.
+Likewise, an explicit request for `0.8.5` from a pre-bridge source
+refuses before mutation; explicit targets never hide an intermediate release.
+
+POSIX rollback retains any plan-owned inode that might still receive a late
+open-descriptor write. The payload is placed in a plan-scoped, mode-0700
+same-filesystem custody directory; the timestamped backup records its path in
+`phase1-state/retained-quarantines.json`. Do not remove either one until the
+restored release and any retained evidence have been inspected.
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
-and run automatically even during same-version upgrades. Each migration is
-keyed to the release it ships with. For example, the v0.3.0 migration removes
+and run while an authenticated upgrade advances across the release boundary
+that owns them. An authenticated same-version request is a no-op: it does not
+reinstall artifacts or run migrations. Each migration is keyed to the release
+it ships with. For example, the v0.3.0 migration removes
 legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
@@ -507,38 +541,145 @@ a write-free in-memory fallback so an interrupted migration can still start.
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — upgrade to a specific release (default: latest)
 - `--allow-unverified` — unsafe override for releases whose checksum manifest
-  is missing, unsigned, incomplete, or otherwise unverifiable
+  is missing, unsigned, incomplete, or otherwise unverifiable; applies only to
+  legacy releases older than `0.8.4`
 
-Signed releases can be upgraded on hosts without `cosign`; the command warns
-and continues with SHA-256 checksum validation only. Install `cosign` to verify
-Sigstore provenance in addition to checksums.
+Release `0.8.4` and later require `cosign` and the protected release-workflow
+identity. `--allow-unverified` cannot bypass that requirement.
 
 **Known recovery paths:**
 
 | Installed version | Recommendation |
 | --- | --- |
-| `0.8.0` or `0.8.1` | These versions can require local `cosign` before the fixed wheel is installed. Install `cosign` first (`brew install cosign` on macOS) and then run plain `defenseclaw upgrade`, or use `defenseclaw upgrade --allow-unverified` only if you accept the reduced provenance check for that one bridge upgrade. |
-| `0.7.x` | Upgrade directly to the latest release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`. Do not pass `--allow-unverified`; `0.7.x` clients do not know that option. |
-| `0.7.0` release tag | No downloadable release assets were published for this tag, so release-asset smoke cannot cover it. Upgrade from a locally installed `0.7.0` directly to the latest release without `--allow-unverified`. |
-| `0.2.0` | This predates the `defenseclaw upgrade` command. Use the installer documented in `docs/INSTALL.md` to bridge to a modern release. |
+| `0.8.4` | Run `defenseclaw upgrade --yes`. A coherent bridge controller authenticates and privately acquires its exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. |
+| A source listed for its platform in `release/upgrade-baselines.json` | Install `cosign`, then run the current release-owned shell or PowerShell resolver without `--version`. It performs `source → 0.8.4 → fresh controller → latest` as one command. |
+| `0.8.0` or `0.8.1` | Install `cosign` before invoking the resolver. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
+| Windows older than `0.8.0` | The native Windows published-baseline matrix currently covers `0.8.0`–`0.8.3` only. The resolver fails closed before stopping services and prints those exact supported Windows sources. |
+| A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
 
 **Examples:**
 
-```bash
-# Upgrade to the latest release
-defenseclaw upgrade --yes
+The bootstrap intentionally uses `releases/latest/download` to locate the
+current resolver rather than the `0.8.4` bridge's older resolver. That URL is
+only a locator: the signed checksum identity, exact resolver digest,
+completeness marker, and syntax check authenticate the bytes before execution.
 
-# Upgrade to a specific release
-defenseclaw upgrade --version 0.3.0 --yes
+```bash
+# POSIX: one-command staged resolver (do not add --version)
+(
+  set -eu
+  umask 077
+  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  command -v cosign >/dev/null
+  for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --output "$d/$name" \
+      "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/$name"
+  done
+  cosign verify-blob \
+    --certificate "$d/checksums.txt.pem" \
+    --signature "$d/checksums.txt.sig" \
+    --certificate-identity \
+      'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' \
+    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+    "$d/checksums.txt"
+  line="$(grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$' "$d/checksums.txt")"
+  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ]
+  expected="${line%% *}"
+  if command -v sha256sum >/dev/null; then
+    actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+  fi
+  [ "$actual" = "$expected" ]
+  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = \
+    '# DefenseClaw upgrade resolver complete v1' ]
+  bash -n "$d/defenseclaw-upgrade.sh"
+  bash "$d/defenseclaw-upgrade.sh" --yes
+)
 ```
 
-The equivalent shell script `scripts/upgrade.sh` accepts the same flags:
+```powershell
+# PowerShell: download the current resolver, then run latest mode
+& {
+  $ErrorActionPreference = 'Stop'
+  $d = Join-Path ([IO.Path]::GetTempPath()) ('defenseclaw-upgrade-' + [Guid]::NewGuid().ToString('N'))
+  [void](New-Item -ItemType Directory -Path $d)
+  try {
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $directoryAcl = New-Object Security.AccessControl.DirectorySecurity
+    $directoryAcl.SetOwner($current)
+    $directoryAcl.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+      [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($sid in @($current, $system)) {
+      $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $sid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+      )
+      [void]$directoryAcl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $d -AclObject $directoryAcl -ErrorAction Stop
+    $directoryItem = Get-Item -LiteralPath $d -Force -ErrorAction Stop
+    $verifiedAcl = Get-Acl -LiteralPath $d -ErrorAction Stop
+    $accessSection = [Security.AccessControl.AccessControlSections]::Access
+    if (-not $directoryItem.PSIsContainer -or `
+        ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or `
+        -not $verifiedAcl.AreAccessRulesProtected -or `
+        $verifiedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value -or `
+        $verifiedAcl.GetSecurityDescriptorSddlForm($accessSection) -cne `
+          $directoryAcl.GetSecurityDescriptorSddlForm($accessSection)) {
+      throw 'Resolver temporary directory owner/DACL validation failed before download.'
+    }
+    [void](Get-Command cosign -ErrorAction Stop)
+    foreach ($name in @('defenseclaw-upgrade.ps1', 'checksums.txt', 'checksums.txt.sig', 'checksums.txt.pem')) {
+      Invoke-WebRequest -Uri ('https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/' + $name) -OutFile (Join-Path $d $name) -UseBasicParsing -ErrorAction Stop
+    }
+    & cosign verify-blob --certificate (Join-Path $d 'checksums.txt.pem') --signature (Join-Path $d 'checksums.txt.sig') `
+      --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' `
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' (Join-Path $d 'checksums.txt')
+    if ($LASTEXITCODE -ne 0) { throw 'Resolver checksum signature is invalid.' }
+    $checksumRows = @(Get-Content -LiteralPath (Join-Path $d 'checksums.txt') | Where-Object { $_ -match '^[0-9a-f]{64}  defenseclaw-upgrade[.]ps1$' })
+    if ($checksumRows.Count -ne 1) { throw 'Resolver checksum entry is missing or duplicated.' }
+    $expected = ($checksumRows[0] -split '\s+', 2)[0]
+    $r = Join-Path $d 'defenseclaw-upgrade.ps1'
+    $actual = (Get-FileHash -LiteralPath $r -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { throw 'Resolver checksum does not match.' }
+    if ((Get-Content -LiteralPath $r -Tail 1) -ne '# DefenseClaw upgrade resolver complete v1') {
+      throw 'Downloaded DefenseClaw resolver is incomplete.'
+    }
+    [void][scriptblock]::Create((Get-Content -LiteralPath $r -Raw))
+    & $r -Yes
+  } finally {
+    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+```
+
+From a checkout of the current release, invoke the resolver in latest mode:
 
 ```bash
 ./scripts/upgrade.sh --yes
-./scripts/upgrade.sh --version 0.3.0 --yes
-VERSION=0.3.0 ./scripts/upgrade.sh --yes
 ```
+
+The release wheel, gateway archive, and local installers are not independent
+upgrade mechanisms. `install.sh --local` and `install.ps1 -Local` refuse an
+existing installation before dependency or artifact changes. Package-manager
+replacement of the managed wheel and manual copying of release artifacts are
+unsupported because they bypass bridge selection, rollback custody, and
+post-upgrade health checks; use the release-owned resolver instead.
+
+Protocol-2 releases expose their authenticated installable payloads only as
+manifest-bound `.dcwheel` and `.dcgateway` envelopes. Those files are not
+directly consumable by package or archive tools; the release-owned resolver
+decodes them into private conventional files only after signature and digest
+verification. Conventional release filenames contain signed refusal text, so
+manual artifact URLs fail closed instead of silently bypassing the bridge.
 
 ### doctor
 

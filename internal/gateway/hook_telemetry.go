@@ -131,6 +131,10 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// Carry the cloud-controlled per-inspection redaction directive
+		// (re-injected onto ctx before finalizeAgentHook) so the audit
+		// sanitize + webhook fan-out honor it on the Details surface.
+		RedactionEnabled: redactionDecisionFromContext(ctx),
 	})
 }
 

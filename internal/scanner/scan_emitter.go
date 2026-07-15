@@ -19,12 +19,16 @@ import (
 
 // redactedScanResultJSON serializes a copy of “result“ whose finding
 // description / location / remediation fields have been passed through
-// redaction.ForSinkString. ("Raw scan JSON stores
-// unredacted secret-bearing findings"): callers persist this JSON into
-// scan_results.raw_json, which is read back through GetScanRawJSON and
-// LatestScansByScanner -- both surfaces had previously leaked the raw
-// matched source line.
-func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
+// redaction.StringForSink under the supplied policy. ("Raw scan JSON
+// stores unredacted secret-bearing findings"): callers persist this
+// JSON into scan_results.raw_json, which is read back through
+// GetScanRawJSON and LatestScansByScanner -- both surfaces had
+// previously leaked the raw matched source line.
+//
+// policy is the cloud-controlled per-inspection SinkPolicy resolved
+// from the request context (SinkPolicyDefault for classic file scans,
+// which preserves the historical ForSinkString behavior).
+func redactedScanResultJSON(r *ScanResult, policy redaction.SinkPolicy) ([]byte, error) {
 	if r == nil {
 		return []byte(`{}`), nil
 	}
@@ -33,9 +37,9 @@ func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
 		safe := make([]Finding, len(r.Findings))
 		for i, f := range r.Findings {
 			cf := f
-			cf.Description = redaction.ForSinkString(cf.Description)
-			cf.Location = redaction.ForSinkString(cf.Location)
-			cf.Remediation = redaction.ForSinkString(cf.Remediation)
+			cf.Description = redaction.StringForSink(cf.Description, policy)
+			cf.Location = redaction.StringForSink(cf.Location, policy)
+			cf.Remediation = redaction.StringForSink(cf.Remediation, policy)
 			safe[i] = cf
 		}
 		clone.Findings = safe
@@ -151,6 +155,14 @@ type ScanFindingMeta struct {
 	// onto every scan_findings row so SIEM queries can pivot on it
 	// without joining to scan_results.
 	EvaluationID string
+	// SinkPolicy is the cloud-controlled per-inspection redaction
+	// policy resolved from the request context. InsertScanFindings
+	// honors it when redacting the persisted description / location /
+	// remediation columns so a managed_enterprise "store raw" /
+	// "force redact" directive applies to the SQLite scan_findings
+	// sink too. Zero value (SinkPolicyDefault) preserves the historical
+	// ForSinkString behavior for classic file scans.
+	SinkPolicy redaction.SinkPolicy
 }
 
 // EmitScanResult fans out one EventScan + N EventScanFinding events (when w
@@ -169,6 +181,15 @@ func EmitScanResult(
 		return "", fmt.Errorf("scanner: EmitScanResult: nil result")
 	}
 	scanID = uuid.New().String()
+
+	// Cloud-controlled per-inspection redaction policy resolved from
+	// the request context (SinkPolicyDefault for classic file scans /
+	// out-of-request emissions, which keeps the historical behavior).
+	// Applied to the persisted raw_json and the emitted
+	// EventScanFinding string fields so a managed_enterprise
+	// "store raw" / "force redact" directive is honored on the scan
+	// sinks too.
+	policy := redaction.SinkPolicyFromContext(ctx)
 
 	for i := range result.Findings {
 		result.Findings[i].RuleID = EnsureRuleID(&result.Findings[i], result.Scanner)
@@ -226,6 +247,7 @@ func EmitScanResult(
 		Generation:        prov.Generation,
 		BinaryVersion:     prov.BinaryVersion,
 		EvaluationID:      agent.EvaluationID,
+		SinkPolicy:        policy,
 	}
 
 	if pers != nil {
@@ -241,7 +263,7 @@ func EmitScanResult(
 		// fetchable via GetScanRawJSON. Redact a copy of the
 		// findings before serialising so raw_json reflects the
 		// same sanitised view as the per-finding rows.
-		raw, jerr := redactedScanResultJSON(result)
+		raw, jerr := redactedScanResultJSON(result, policy)
 		if jerr != nil {
 			raw = []byte(`{}`)
 		}
@@ -322,6 +344,17 @@ func EmitScanResult(
 			if f.LineNumber != nil {
 				ln = *f.LineNumber
 			}
+			// Only rewrite the string fields when a cloud directive is
+			// active (SinkPolicyRaw/Redact). SinkPolicyDefault leaves
+			// them untouched so classic scans keep their existing wire
+			// shape (these fields are populated already-sanitized by the
+			// upstream detectors / callers).
+			desc, loc, rem := f.Description, f.Location, f.Remediation
+			if policy != redaction.SinkPolicyDefault {
+				desc = redaction.StringForSink(desc, policy)
+				loc = redaction.StringForSink(loc, policy)
+				rem = redaction.StringForSink(rem, policy)
+			}
 			w.Emit(gatewaylog.Event{
 				Timestamp:         time.Now().UTC(),
 				EventType:         gatewaylog.EventScanFinding,
@@ -342,11 +375,11 @@ func EmitScanResult(
 					RuleID:       f.RuleID,
 					Category:     f.Category,
 					Title:        f.Title,
-					Description:  f.Description,
+					Description:  desc,
 					Severity:     toGatewaySeverity(f.Severity),
-					Location:     f.Location,
+					Location:     loc,
 					LineNumber:   ln,
-					Remediation:  f.Remediation,
+					Remediation:  rem,
 					Tags:         f.Tags,
 					Confidence:   f.Confidence,
 					EvaluationID: agent.EvaluationID,

@@ -50,7 +50,12 @@ import (
 // flows through unchanged; the action/details/reason surfaces are
 // where free-form user content historically leaks.
 func sanitizeEvent(e Event) Event {
-	e.Details = redaction.ForSinkReason(e.Details)
+	// Honor the cloud-controlled per-inspection redaction directive
+	// carried on the audit event. nil (the common case) yields
+	// SinkPolicyDefault and preserves the historical ForSinkReason
+	// behavior; a managed_enterprise directive forces raw (cloud=false)
+	// or redaction (cloud=true) for this event's details surface.
+	e.Details = redaction.ReasonForSink(e.Details, redaction.SinkPolicyForDirective(e.RedactionEnabled))
 	return e
 }
 
@@ -355,27 +360,37 @@ func gatewayEventForwardedToSinks(eventType gatewaylog.EventType) bool {
 }
 
 func sanitizeGatewayLogEvent(ev gatewaylog.Event) gatewaylog.Event {
+	// Honor the cloud-controlled per-inspection redaction directive
+	// carried on the event (this audit-mirror path does not share the
+	// originating request context). A non-nil RedactionEnabled only
+	// ever comes from a managed Cisco AI Defense inspect response, so
+	// the SinkPolicyForDirective mapping is inherently
+	// managed_enterprise-scoped; nil yields SinkPolicyDefault and
+	// preserves today's behavior. Honoring it here means the mirror
+	// path won't re-redact content the emit choke point deliberately
+	// left raw (cloud=false) and force-redacts when cloud=true.
+	policy := redaction.SinkPolicyForDirective(ev.RedactionEnabled)
 	if v := ev.Verdict; v != nil {
 		cp := *v
-		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
 		ev.Verdict = &cp
 	}
 	if p := ev.LLMPrompt; p != nil {
 		cp := *p
-		cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
-		cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		cp.Prompt = redaction.MessageContentForSink(cp.Prompt, policy)
+		cp.RawRequestBody = redaction.MessageContentForSink(cp.RawRequestBody, policy)
 		ev.LLMPrompt = &cp
 	}
 	if r := ev.LLMResponse; r != nil {
 		cp := *r
-		cp.Response = redaction.ForSinkMessageContent(cp.Response)
-		cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		cp.Response = redaction.MessageContentForSink(cp.Response, policy)
+		cp.RawResponseBody = redaction.MessageContentForSink(cp.RawResponseBody, policy)
 		ev.LLMResponse = &cp
 	}
 	if t := ev.Tool; t != nil {
 		cp := *t
-		cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
-		cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		cp.ToolInput = redaction.MessageContentForSink(cp.ToolInput, policy)
+		cp.ToolOutput = redaction.MessageContentForSink(cp.ToolOutput, policy)
 		ev.Tool = &cp
 	}
 	return ev
