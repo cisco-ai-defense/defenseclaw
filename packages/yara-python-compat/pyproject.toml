@@ -1,0 +1,15 @@
+[project]
+name = "yara-python"
+version = "4.5.4.post1"
+description = "DefenseClaw's Windows CPython 3.14 adapter for MCP Scanner's yara-python API subset"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = ["yara-x>=1.13.0,<2"]
+
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["yara"]

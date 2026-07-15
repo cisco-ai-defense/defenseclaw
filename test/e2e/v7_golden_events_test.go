@@ -16,6 +16,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if handled, code := runCodexPolicyFixtureIfRequested(); handled {
+		os.Exit(code)
+	}
 	flag.BoolVar(&updateGolden, "update", false, "rewrite test/e2e/testdata/v7/golden/*.json")
 	flag.Parse()
 	os.Exit(m.Run())

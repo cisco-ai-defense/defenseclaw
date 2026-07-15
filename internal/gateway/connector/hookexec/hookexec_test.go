@@ -20,12 +20,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -33,12 +36,13 @@ import (
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
 // transport error) and capturing the outbound request for assertions.
 type stubRT struct {
-	status   int
-	body     string
-	err      error
-	gotReq   *http.Request
-	gotBody  []byte
-	requests int
+	status    int
+	body      string
+	err       error
+	gotReq    *http.Request
+	gotBody   []byte
+	requests  int
+	onRequest func(*stubRT, *http.Request) (*http.Response, error)
 }
 
 func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -47,6 +51,9 @@ func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		s.gotBody, _ = io.ReadAll(req.Body)
 	}
 	s.gotReq = req
+	if s.onRequest != nil {
+		return s.onRequest(s, req)
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -66,6 +73,16 @@ type runResult struct {
 
 // run executes a hook against a stub gateway with a temp Home + .token file.
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
+	return runWithContext(t, context.Background(), connector, rt, mutate)
+}
+
+func runWithContext(
+	t *testing.T,
+	ctx context.Context,
+	connector string,
+	rt *stubRT,
+	mutate func(*Options),
+) runResult {
 	t.Helper()
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")
@@ -93,7 +110,7 @@ func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runR
 	if mutate != nil {
 		mutate(&opts)
 	}
-	code := Run(context.Background(), opts)
+	code := Run(ctx, opts)
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code, rt: rt}
 }
 
@@ -451,6 +468,132 @@ func TestUnreachable(t *testing.T) {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
 	})
+}
+
+func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
+	rt := &stubRT{}
+	rt.onRequest = func(state *stubRT, _ *http.Request) (*http.Response, error) {
+		if state.requests == 1 {
+			return nil, syscall.ECONNREFUSED
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"action":"allow"}`)),
+			Header:     make(http.Header),
+		}, nil
+	}
+	recoveries := 0
+	r := run(t, "codex", rt, func(opts *Options) {
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 0 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	recoveries := 0
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestForeignOrResponsiveListenerNeverTriggersColdStart(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+	}{
+		{name: "foreign-auth", status: http.StatusUnauthorized},
+		{name: "responsive-server-error", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rt := &stubRT{status: test.status, body: "foreign"}
+			recoveries := 0
+			r := run(t, "codex", rt, func(opts *Options) {
+				opts.GatewayRecovery = func(context.Context, error) error {
+					recoveries++
+					return nil
+				}
+			})
+			if r.code != 0 || recoveries != 0 || rt.requests != 1 {
+				t.Fatalf("foreign listener result code=%d recoveries=%d requests=%d", r.code, recoveries, rt.requests)
+			}
+		})
+	}
+}
+
+func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			return errors.New("foreign process owns gateway state")
+		}
+	})
+	if r.code != 2 || rt.requests != 1 {
+		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	r := runWithContext(t, ctx, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
+	}
+	if r.code != 2 {
+		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
+	}
+}
+
+func TestDefaultTransportColdStartReceivesRegisteredHookDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining time.Duration
+	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+		opts.Event = "MessageDisplay"
+		opts.APIAddr = addr
+		opts.HTTPClient = nil
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("cold-start context has no registered hook deadline")
+			}
+			remaining = time.Until(deadline)
+			return errors.New("test stops before gateway start")
+		}
+	})
+	if r.code != 0 {
+		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
+	}
+	if remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s, want within registered request budget", remaining)
+	}
 }
 
 // --- Response-layer failure (4xx / bad JSON): honors FAIL_MODE ---
@@ -872,6 +1015,48 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 	}
 }
 
+func TestStrictOrManagedAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
+	tests := []struct {
+		name    string
+		home    func(*testing.T) string
+		strict  bool
+		managed bool
+	}{
+		{name: "strict missing", strict: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "managed missing", managed: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "strict disabled", strict: true, home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "managed disabled", managed: true, home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:          "claudecode",
+				Home:               tt.home(t),
+				StrictAvailability: tt.strict,
+				ManagedEnterprise:  tt.managed,
+				Stdout:             &stdout,
+				Stderr:             &stderr,
+			})
+			if code != blockExit || !strings.Contains(stderr.String(), "availability") {
+				t.Fatalf("strict unavailable home = (code=%d, stdout=%q, stderr=%q)", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -947,6 +1132,56 @@ func TestSupportedConnectorsSorted(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeRequestTimeoutUsesPayloadEventBudget(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  time.Duration
+	}{
+		{event: "MessageDisplay", want: 9 * time.Second},
+		{event: "PreToolUse", want: 29 * time.Second},
+		{event: "SessionEnd", want: 59 * time.Second},
+		{event: "PostToolBatch", want: 89 * time.Second},
+		{event: "Stop", want: 89 * time.Second},
+		{event: "SubagentStop", want: 89 * time.Second},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"hook_event_name":%q}`, tc.event))
+			event := resolveHookEvent("", payload)
+			if event != tc.event {
+				t.Fatalf("resolved event=%q, want %q", event, tc.event)
+			}
+			if got := hookRequestTimeout("claudecode", event); got != tc.want {
+				t.Fatalf("request timeout=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveHookEventPrefersExplicitFlagAndRejectsMalformedPayload(t *testing.T) {
+	if got := resolveHookEvent("PreToolUse", []byte(`{"hook_event_name":"Stop"}`)); got != "PreToolUse" {
+		t.Fatalf("explicit event was not preserved: %q", got)
+	}
+	if got := resolveHookEvent("", []byte(`{"hook_event_name":`)); got != "" {
+		t.Fatalf("malformed payload event=%q, want empty", got)
+	}
+	if got := hookRequestTimeout("claudecode", ""); got != 9*time.Second {
+		t.Fatalf("missing Claude event timeout=%s, want shortest safe budget 9s", got)
+	}
+	if got := hookRequestTimeout("claudecode", "FutureEvent"); got != 29*time.Second {
+		t.Fatalf("future Claude event timeout=%s, want ordinary budget 29s", got)
+	}
+	if got := hookRequestTimeout("codex", "Stop"); got != 10*time.Second {
+		t.Fatalf("non-Claude timeout=%s, want 10s", got)
+	}
+}
+
+func TestDefaultHTTPClientUsesSuppliedTotalTimeout(t *testing.T) {
+	client := defaultHTTPClient(89 * time.Second)
+	if client.Timeout != 89*time.Second {
+		t.Fatalf("client timeout=%s, want 89s", client.Timeout)
+	}
+}
+
 // TestDefaultHTTPClientDoesNotFollowRedirects pins the no-follow-redirect
 // contract: the native hook must behave like `curl` without `-L` (the .sh
 // hooks never passed -L). A gateway hook endpoint never legitimately
@@ -967,7 +1202,7 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	resp, err := defaultHTTPClient().Get(redirector.URL)
+	resp, err := defaultHTTPClient(10 * time.Second).Get(redirector.URL)
 	if err != nil {
 		t.Fatalf("Get returned error (redirect should not be followed, not error): %v", err)
 	}

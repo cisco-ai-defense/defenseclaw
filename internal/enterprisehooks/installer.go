@@ -35,14 +35,19 @@ import (
 // guardian/MDM step that targets one real interactive user's home directory and
 // then exits.
 type InstallOptions struct {
-	ConnectorName  string
-	UserHome       string
-	OwnerUID       int
-	OwnerGID       int
+	ConnectorName string
+	UserHome      string
+	OwnerUID      int
+	OwnerGID      int
+	// OwnerSID identifies the target Windows user. It is ignored on Unix. When
+	// empty on Windows, the guardian resolves the owner from UserHome and then
+	// pins every subsequent owner/DACL check to that SID.
+	OwnerSID       string
 	DataDir        string
 	APIAddr        string
 	ProxyAddr      string
 	APIToken       string
+	OTLPPathToken  string
 	MasterKey      string
 	HookFailMode   string
 	GuardrailMode  string
@@ -72,7 +77,20 @@ type InstallResult struct {
 	HookContractID  string   `json:"hook_contract_id,omitempty"`
 }
 
+// RemoveManagedPolicy removes one target user's administrator-managed vendor
+// policy registration. Per-user runtime files are intentionally retained as
+// recovery evidence; the protected SID allow-list makes them inert for a
+// removed target even while other registered users share the machine policy.
+// The platform implementation removes only artifacts whose protected ownership
+// metadata still matches the live policy bytes.
+func RemoveManagedPolicy(ctx context.Context, opts InstallOptions) error {
+	return platformRemoveManagedPolicy(ctx, opts)
+}
+
 func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if result, handled, err := platformInstall(ctx, opts); handled {
+		return result, err
+	}
 	if errEnterpriseHooksUnsupportedWindows != nil {
 		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
 	}
@@ -126,6 +144,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
 		APIAddr:           strings.TrimSpace(opts.APIAddr),
 		APIToken:          strings.TrimSpace(opts.APIToken),
+		OTLPPathToken:     strings.TrimSpace(opts.OTLPPathToken),
 		Interactive:       false,
 		ManagedEnterprise: true,
 		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
