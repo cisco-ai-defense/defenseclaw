@@ -149,7 +149,10 @@ class MCPServerEntry:
 
 
 def infer_mcp_transport(
-    transport: Any = "", *, url: Any = "", command: Any = "",
+    transport: Any = "",
+    *,
+    url: Any = "",
+    command: Any = "",
 ) -> str:
     """Return an MCP transport label without misclassifying URL entries.
 
@@ -240,6 +243,27 @@ def _omnigent_config_home() -> str:
     return os.path.join(str(Path.home()), ".omnigent")
 
 
+def _connector_env_home(variable: str, default_dir: str) -> str:
+    """Resolve a connector-owned home using the variable its client honors."""
+
+    configured = (os.environ.get(variable) or "").strip()
+    if configured:
+        return os.path.abspath(os.path.expanduser(_expand(configured)))
+    return os.path.join(os.path.abspath(str(Path.home())), default_dir)
+
+
+def claude_config_dir() -> str:
+    """Return Claude Code's effective user configuration directory."""
+
+    return _connector_env_home("CLAUDE_CONFIG_DIR", ".claude")
+
+
+def codex_home() -> str:
+    """Return Codex's effective home directory."""
+
+    return _connector_env_home("CODEX_HOME", ".codex")
+
+
 def _resolve_hermes_home(
     *,
     platform_name: str,
@@ -263,9 +287,7 @@ def _resolve_hermes_home(
     if platform_name == "nt":
         windows_root = (local_app_data or "").strip()
         if windows_root:
-            return os.path.abspath(
-                os.path.join(os.path.expanduser(windows_root), "hermes")
-            )
+            return os.path.abspath(os.path.join(os.path.expanduser(windows_root), "hermes"))
     return os.path.join(home, ".hermes")
 
 
@@ -329,9 +351,9 @@ def connector_home(
     name = normalize(connector)
     home = str(Path.home())
     if name == "claudecode":
-        return os.path.join(home, ".claude")
+        return claude_config_dir()
     if name == "codex":
-        return os.path.join(home, ".codex")
+        return codex_home()
     if name == "zeptoclaw":
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "geminicli":
@@ -401,12 +423,12 @@ def connector_config_files(
     paths: list[str] = []
     if name == "claudecode":
         paths = [
-            os.path.join(home, ".claude", "settings.json"),
+            os.path.join(claude_config_dir(), "settings.json"),
             _workspace_path(workspace_dir, ".claude", "settings.json"),
         ]
     elif name == "codex":
         paths = [
-            os.path.join(home, ".codex", "config.toml"),
+            os.path.join(codex_home(), "config.toml"),
             _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "zeptoclaw":
@@ -637,20 +659,18 @@ def mcp_servers(
 
 
 def _claudecode_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".claude", "skills"),
+            os.path.join(claude_config_dir(), "skills"),
             _workspace_path(workspace_dir, ".claude", "skills"),
         ]
     )
 
 
 def _codex_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".codex", "skills"),
+            os.path.join(codex_home(), "skills"),
             _workspace_path(workspace_dir, ".codex", "skills"),
         ]
     )
@@ -787,18 +807,16 @@ def _openclaw_skill_dirs(
 
 
 def _claudecode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".claude", "plugins"),
+            os.path.join(claude_config_dir(), "plugins"),
             _workspace_path(workspace_dir, ".claude", "plugins"),
         ]
     )
 
 
 def _codex_plugin_dirs() -> list[str]:
-    home = str(Path.home())
-    base = os.path.join(home, ".codex", "plugins")
+    base = os.path.join(codex_home(), "plugins")
     return _dedup(
         [
             base,
@@ -889,11 +907,10 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 
 
 def _claudecode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
-    home = str(Path.home())
     entries: list[MCPServerEntry] = []
     entries.extend(
         _read_mcp_settings_block(
-            os.path.join(home, ".claude", "settings.json"),
+            os.path.join(claude_config_dir(), "settings.json"),
             keys=("mcpServers",),
         )
     )
@@ -919,9 +936,8 @@ def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]
     project-local file override matching names, mirroring how Codex
     itself layers them at runtime.
     """
-    home = str(Path.home())
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_codex_config_toml(os.path.join(home, ".codex", "config.toml")))
+    entries.extend(_read_codex_config_toml(os.path.join(codex_home(), "config.toml")))
     project_mcp = _workspace_path(workspace_dir, ".mcp.json")
     if project_mcp:
         entries.extend(_read_dotmcp_json(project_mcp))
@@ -1494,7 +1510,7 @@ def set_mcp_server(
         openclaw_config_setter(f"mcp.servers.{name}", json.dumps(entry))
         return
     if name_n == "claudecode":
-        path = os.path.join(str(Path.home()), ".claude", "settings.json")
+        path = os.path.join(claude_config_dir(), "settings.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "codex":
@@ -1592,7 +1608,7 @@ def unset_mcp_server(
         openclaw_config_unsetter(f"mcp.servers.{name}")
         return
     if name_n == "claudecode":
-        path = os.path.join(str(Path.home()), ".claude", "settings.json")
+        path = os.path.join(claude_config_dir(), "settings.json")
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "codex":
@@ -1665,7 +1681,7 @@ def unset_mcp_server(
 
 
 def _codex_config_toml_path() -> str:
-    return os.path.join(str(Path.home()), ".codex", "config.toml")
+    return os.path.join(codex_home(), "config.toml")
 
 
 def _toml_string(value: Any) -> str:
@@ -2252,10 +2268,7 @@ def _capture_managed_mcp_backup(path: str) -> None:
             target = os.readlink(path)
         except OSError:
             target = "<unreadable>"
-        sys.stderr.write(
-            f"[defenseclaw] refusing to back up MCP config: {path} is a symlink "
-            f"-> {target!r}\n"
-        )
+        sys.stderr.write(f"[defenseclaw] refusing to back up MCP config: {path} is a symlink -> {target!r}\n")
         return
     if not stat.S_ISREG(st.st_mode):
         return
