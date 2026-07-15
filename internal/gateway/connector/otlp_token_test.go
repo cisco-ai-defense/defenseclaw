@@ -96,14 +96,27 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			name: "symlink",
 			setup: func(t *testing.T, path string) {
 				t.Helper()
+				if runtime.GOOS == "windows" {
+					hooksDir := filepath.Dir(path)
+					targetHooksDir := filepath.Join(t.TempDir(), "hooks")
+					if err := os.Mkdir(targetHooksDir, 0o700); err != nil {
+						t.Fatalf("create redirected hooks directory: %v", err)
+					}
+					target := filepath.Join(targetHooksDir, filepath.Base(path))
+					if err := safefile.WritePrivate(target, []byte(token)); err != nil {
+						t.Fatalf("write redirected token: %v", err)
+					}
+					if err := os.Remove(hooksDir); err != nil {
+						t.Fatalf("remove empty hooks directory: %v", err)
+					}
+					createTestDirectoryRedirect(t, hooksDir, targetHooksDir)
+					return
+				}
 				target := filepath.Join(filepath.Dir(path), "target.token")
 				if err := os.WriteFile(target, []byte(token), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Symlink(target, path); err != nil {
-					if runtime.GOOS == "windows" {
-						t.Skipf("symlink privilege unavailable; reparse-point rejection has dedicated Windows coverage: %v", err)
-					}
 					t.Fatal(err)
 				}
 			},
