@@ -2246,6 +2246,63 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED",
+      "category": "test_fixture",
+      "purpose": "Carries the observation marker used to prove the daemon graceful-stop fixture received its shutdown request.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Carries the release marker used to let the daemon graceful-stop fixture finish after observing shutdown.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_READY",
+      "category": "test_fixture",
+      "purpose": "Carries the readiness marker used by the native watchdog original-handle wait fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/watchdog_pidfile_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT",
       "category": "test_fixture",
       "purpose": "Selects the native watchdog original-handle wait fixture.",
