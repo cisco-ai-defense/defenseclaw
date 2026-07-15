@@ -100,12 +100,12 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-INJ-INSTRUCT":   {AxisIngressUntrusted},
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
 		// Command rules that open an egress channel
-		"CMD-CURL-UPLOAD": {AxisEgressExternal},
+		"CMD-CURL-UPLOAD":       {AxisEgressExternal},
 		"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
-		"CMD-ARCHIVE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
-		"CMD-ENCODE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
-		"JUDGE-EXFIL-REPO": {AxisSensitiveAccess, AxisEgressExternal},
-		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+		"CMD-ARCHIVE-EXFIL":     {AxisSensitiveAccess, AxisEgressExternal},
+		"CMD-ENCODE-EXFIL":      {AxisSensitiveAccess, AxisEgressExternal},
+		"JUDGE-EXFIL-REPO":      {AxisSensitiveAccess, AxisEgressExternal},
+		"CMD-ENV-DUMP":          {AxisSensitiveAccess},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members
@@ -169,12 +169,12 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-CHILD-PROC":    CapExecShell,
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
-		"CMD-CURL-UPLOAD": CapNetworkFetch,
-		"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
-		"CMD-ENCODE-EXFIL": CapNetworkFetch,
+		"CMD-CURL-UPLOAD":       CapNetworkFetch,
+		"CMD-ARCHIVE-EXFIL":     CapNetworkFetch,
+		"CMD-ENCODE-EXFIL":      CapNetworkFetch,
 		"CMD-WORKSPACE-ARCHIVE": CapWriteFS,
-		"SRC-FETCH":       CapNetworkFetch,
-		"SRC-FS-WRITE": CapWriteFS,
+		"SRC-FETCH":             CapNetworkFetch,
+		"SRC-FS-WRITE":          CapWriteFS,
 		// No capability for a bare secret / injection finding
 		"SEC-AWS-KEY":    CapUnknown,
 		"INJ-IGNORE-ALL": CapUnknown,
