@@ -75,6 +75,20 @@ func TestLiveProcessWithinInstallRoot(t *testing.T) {
 	}
 }
 
+func TestProcessIdentityReportsExitedProcess(t *testing.T) {
+	cmd := exec.Command("cmd.exe", "/c", "exit", "0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
+	pid := uint32(cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for process: %v", err)
+	}
+	if _, _, err := processIdentity(pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("processIdentity(%d) error = %v, want os.ErrProcessDone", pid, err)
+	}
+}
+
 func TestPreflightInstalledClientsRejectsForegroundAndIgnoresGateway(t *testing.T) {
 	installRoot := t.TempDir()
 	binDir := filepath.Join(installRoot, "bin")

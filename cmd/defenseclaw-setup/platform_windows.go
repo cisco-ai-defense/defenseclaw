@@ -424,14 +424,27 @@ try {
 
 func processIdentity(pid uint32) (string, string, error) {
 	handle, err := windows.OpenProcess(
-		windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
 		false,
 		pid,
 	)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return "", "", os.ErrProcessDone
+		}
 		return "", "", err
 	}
 	defer windows.CloseHandle(handle)
+	waitResult, err := windows.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return "", "", err
+	}
+	if waitResult == uint32(windows.WAIT_OBJECT_0) {
+		return "", "", os.ErrProcessDone
+	}
+	if waitResult != uint32(windows.WAIT_TIMEOUT) {
+		return "", "", fmt.Errorf("unexpected process wait result %#x", waitResult)
+	}
 
 	// QueryFullProcessImageNameW accepts the full NT path limit. A fixed
 	// MAX_PATH buffer breaks service ownership checks when the per-user install
