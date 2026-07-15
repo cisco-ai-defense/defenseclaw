@@ -1,0 +1,13 @@
+[Unit]
+Description=DefenseClaw mandatory AXIS telemetry collector
+PartOf=defenseclaw-axis.target
+[Service]
+Type=simple
+User=defenseclaw-axis
+Group=defenseclaw-axis
+ExecStart=/opt/defenseclaw-axis/current/bin/otelcol --config=/etc/defenseclaw-axis/collector.yaml
+Restart=on-failure
+ProtectSystem=strict
+ProtectHome=tmpfs
+NoNewPrivileges=yes
+PrivateTmp=yes

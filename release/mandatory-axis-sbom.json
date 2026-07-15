@@ -1,0 +1,21 @@
+{
+  "format": "minimal-review-sbom-v1",
+  "components": [
+    {
+      "name": "axis",
+      "source_commit": "e32f69b3c411f25975940cbcfd1101a3682783c9"
+    },
+    {
+      "name": "go",
+      "version": "go1.26.4"
+    },
+    {
+      "name": "rust",
+      "version": "rustc 1.95.0"
+    },
+    {
+      "name": "defenseclaw-axis-broker",
+      "sha256": "f12d8f70809f45dfbd036f13b4617557eed6077078115503d9986f086e7d7f9b"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "release_id": "mandatory-axis-halo-v1",
+  "protocol_version": "axis-execution/v1",
+  "origin_main_sha": "7544f6157a9fea37ef7f1230495f35582b4ed833",
+  "axis_repository": "https://github.com/axis-sandbox/axis.git",
+  "axis_commit": "e32f69b3c411f25975940cbcfd1101a3682783c9",
+  "axis_mode": "standalone",
+  "axis_daemon_installed": false,
+  "codex_version": "0.144.4",
+  "model": "Qwen3.6-27B-GGUF",
+  "provider": "defenseclaw",
+  "approved_tools": ["run", "run_write", "apply_patch"],
+  "approval_policy": "never",
+  "execution_lane": "mandatory-axis",
+  "network": "private-worker-only",
+  "claims": {"signed_build": false, "offline_build": false, "byte_reproducible_build": false}
+}

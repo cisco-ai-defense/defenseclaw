@@ -1,0 +1,26 @@
+version: 1
+id: mandatory-axis-v1
+mode: action
+default: deny
+network:
+  mode: private
+  allow_loopback: false
+  allow_external: false
+filesystem:
+  registered_workspace_only: true
+  repository_read_only_for_run: true
+  git_metadata_read_only: true
+  deny:
+    - /proc/*/environ
+    - /run/docker.sock
+    - /run/podman/podman.sock
+    - /run/containerd/containerd.sock
+    - /home/*/.ssh
+    - /home/*/.aws
+    - /home/*/.config/gh
+syscalls:
+  deny: [mount, ptrace, bpf, io_uring_setup, unshare]
+limits:
+  timeout_seconds: 900
+  max_processes: 128
+  memory_bytes: 4294967296

@@ -1,0 +1,24 @@
+[Unit]
+Description=DefenseClaw mandatory AXIS broker
+PartOf=defenseclaw-axis.target
+[Service]
+Type=simple
+User=defenseclaw-axis
+Group=defenseclaw-axis
+ExecStart=/opt/defenseclaw-axis/current/bin/defenseclaw-axis-broker
+Restart=on-failure
+StateDirectory=defenseclaw-axis
+RuntimeDirectory=defenseclaw-axis
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=4G
+CPUQuota=200%
+TasksMax=256
+KillMode=control-group
+Delegate=cpu memory pids
+DelegateSubgroup=broker
+ReadWritePaths=/var/lib/defenseclaw-axis /run/defenseclaw-axis

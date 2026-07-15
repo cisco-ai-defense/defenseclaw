@@ -1,0 +1,12 @@
+{
+  "axis_commit": "e32f69b3c411f25975940cbcfd1101a3682783c9",
+  "codex": "codex-cli 0.144.4",
+  "go": "go1.26.4",
+  "origin_main": "7544f6157a9fea37ef7f1230495f35582b4ed833",
+  "policies/axis/mandatory-v1.yaml": "35792f3c864db874fa6128dc81245e9876923e6b76a5cc07216da515c3b6f2e0",
+  "release/mandatory-axis-halo-v1/bin/axis-cli": "b3a49b8792579873889aff3846f65e65eecc1b129c0902d09729625bf64ca9da",
+  "release/mandatory-axis-halo-v1/bin/defenseclaw-axis-broker": "f12d8f70809f45dfbd036f13b4617557eed6077078115503d9986f086e7d7f9b",
+  "rust": "rustc 1.95.0",
+  "schemas/axis-execution.schema.json": "d136ec3658e9c2aadbe600dfa257a85a26073e55b95ee2467d121017982564ca",
+  "third_party/axis/Cargo.lock": "e6bb4684e90db7851c1e8114ba88a8fefe620d20f72d6e32cd598aeda56a9cca"
+}
