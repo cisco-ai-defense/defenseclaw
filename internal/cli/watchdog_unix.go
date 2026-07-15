@@ -123,7 +123,7 @@ func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			return false, watchdogPIDInfo{}, err
 		}
-		info, readErr := readWatchdogPIDInfo(path)
+		info, readErr := readWatchdogPIDInfoFile(f)
 		if readErr != nil {
 			return false, watchdogPIDInfo{}, readErr
 		}

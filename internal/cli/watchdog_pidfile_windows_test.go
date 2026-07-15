@@ -144,12 +144,16 @@ func TestWindowsWatchdogControlRejectsForgedName(t *testing.T) {
 func TestWindowsWatchdogWaitConfirmsOriginalProcessExit(t *testing.T) {
 	const helperEnv = "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT"
 	if os.Getenv(helperEnv) == "1" {
+		if err := os.WriteFile(os.Getenv("DEFENSECLAW_TEST_WATCHDOG_WAIT_READY"), []byte("ready"), 0o600); err != nil {
+			os.Exit(2)
+		}
 		time.Sleep(150 * time.Millisecond)
 		os.Exit(0)
 	}
 
+	ready := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.Command(os.Args[0], "-test.run=TestWindowsWatchdogWaitConfirmsOriginalProcessExit")
-	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	cmd.Env = append(os.Environ(), helperEnv+"=1", "DEFENSECLAW_TEST_WATCHDOG_WAIT_READY="+ready)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +164,18 @@ func TestWindowsWatchdogWaitConfirmsOriginalProcessExit(t *testing.T) {
 	identity := watchdogProcessStartIdentity(cmd.Process.Pid)
 	if identity == "" {
 		t.Fatal("helper process has no start identity")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper process did not signal readiness")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	info := watchdogPIDInfo{PID: cmd.Process.Pid, StartIdentity: identity}
 	started := time.Now()

@@ -528,20 +528,37 @@ func TestRemovePIDFileIfStartedPreservesStrongReplacementAfterLegacyRead(t *test
 func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
 	const helperEnv = "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER"
 	if marker := os.Getenv(helperEnv); marker != "" {
+		observed := os.Getenv("DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED")
+		release := os.Getenv("DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE")
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			if _, err := os.Stat(marker); err == nil {
-				os.Exit(0)
+				if err := os.WriteFile(observed, []byte("observed"), 0o600); err != nil {
+					os.Exit(2)
+				}
+				for time.Now().Before(deadline) {
+					if _, err := os.Stat(release); err == nil {
+						os.Exit(0)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				os.Exit(3)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		os.Exit(2)
+		os.Exit(4)
 	}
 
 	dataDir := t.TempDir()
 	marker := filepath.Join(dataDir, "graceful-stop.requested")
+	observed := filepath.Join(dataDir, "graceful-stop.observed")
+	release := filepath.Join(dataDir, "graceful-stop.release")
 	cmd := exec.Command(os.Args[0], "-test.run=TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID")
-	cmd.Env = append(os.Environ(), helperEnv+"="+marker)
+	cmd.Env = append(os.Environ(),
+		helperEnv+"="+marker,
+		"DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED="+observed,
+		"DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE="+release,
+	)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -572,10 +589,32 @@ func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	callbackPID := 0
-	if err := d.StopGracefully(5*time.Second, func(pid int) error {
-		callbackPID = pid
-		return os.WriteFile(marker, []byte("stop"), 0o600)
-	}); err != nil {
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- d.StopGracefully(5*time.Second, func(pid int) error {
+			callbackPID = pid
+			return os.WriteFile(marker, []byte("stop"), 0o600)
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(observed); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper did not observe the accepted stop request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(d.PIDFile()); err != nil {
+		t.Fatalf("PID file was removed before the accepted request drained: %v", err)
+	}
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopCh; err != nil {
 		t.Fatal(err)
 	}
 	if callbackPID != cmd.Process.Pid {

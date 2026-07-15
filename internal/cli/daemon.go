@@ -335,7 +335,11 @@ func requestGatewayShutdown(client *http.Client, cfg *config.Config, token strin
 	req.Header.Set("X-DefenseClaw-Token", token)
 	req.Header.Set("X-DefenseClaw-Client", "daemon-stop")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request gateway shutdown: %w", err)
 	}

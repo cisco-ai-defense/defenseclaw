@@ -746,7 +746,19 @@ func writeWatchdogPIDInfo(f *os.File, info watchdogPIDInfo) error {
 // Executable / StartTime / StartIdentity and verifyWatchdogProcess only does
 // the liveness check.
 func readWatchdogPIDInfo(path string) (watchdogPIDInfo, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return watchdogPIDInfo{}, err
+	}
+	defer f.Close()
+	return readWatchdogPIDInfoFile(f)
+}
+
+func readWatchdogPIDInfoFile(f *os.File) (watchdogPIDInfo, error) {
+	if _, err := f.Seek(0, 0); err != nil {
+		return watchdogPIDInfo{}, err
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return watchdogPIDInfo{}, err
 	}

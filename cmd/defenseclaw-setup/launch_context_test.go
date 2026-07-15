@@ -119,6 +119,26 @@ func TestProbeFailureRetainsSafeInteractiveDialog(t *testing.T) {
 	}
 }
 
+func TestProbeFailureSuppressesDialogForUnsafeContext(t *testing.T) {
+	for _, mutate := range []func(*setupLaunchFacts){
+		func(facts *setupLaunchFacts) { facts.ServiceIdentity = true },
+		func(facts *setupLaunchFacts) { facts.SessionID = 0 },
+	} {
+		original := inspectCurrentSetupLaunchContext
+		inspectCurrentSetupLaunchContext = func() (setupLaunchFacts, error) {
+			facts := allowedSetupLaunchFacts()
+			mutate(&facts)
+			return facts, errors.New("partial context probe failed")
+		}
+		err := requireCurrentUserInteractiveSetup()
+		inspectCurrentSetupLaunchContext = original
+		var launchErr *setupLaunchContextError
+		if !errors.As(err, &launchErr) || launchErr.Decision.AllowDialog {
+			t.Fatalf("unsafe probe failure = %#v, want dialog suppressed", launchErr)
+		}
+	}
+}
+
 func TestRunHelpDoesNotProbeOrAcquireLock(t *testing.T) {
 	originalProbe := inspectCurrentSetupLaunchContext
 	originalLock := acquireSetupOperationLock

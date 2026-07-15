@@ -833,6 +833,11 @@ namespace DefenseClaw
                 }
                 finally
                 {
+                    if (job != IntPtr.Zero)
+                    {
+                        CloseHandle(job);
+                        job = IntPtr.Zero;
+                    }
                     process.Dispose();
                     disposed = true;
                 }

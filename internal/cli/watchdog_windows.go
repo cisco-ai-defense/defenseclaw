@@ -286,7 +286,7 @@ func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
 		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 			return false, watchdogPIDInfo{}, err
 		}
-		info, readErr := readWatchdogPIDInfo(path)
+		info, readErr := readWatchdogPIDInfoFile(f)
 		if readErr != nil {
 			return false, watchdogPIDInfo{}, readErr
 		}

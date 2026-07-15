@@ -89,12 +89,12 @@ func runCommandUTF16Units(command string) int {
 
 func validateRunCommand(command string) error {
 	if strings.ContainsRune(command, '\x00') {
-		return errors.New("Windows Run command contains an embedded NUL")
+		return errors.New("windows Run command contains an embedded NUL")
 	}
 	units := runCommandUTF16Units(command)
 	if units > maxRunCommandUTF16Units {
 		return fmt.Errorf(
-			"Windows Run command is %d UTF-16 code units; the supported maximum is %d",
+			"windows Run command is %d UTF-16 code units; the supported maximum is %d",
 			units,
 			maxRunCommandUTF16Units,
 		)

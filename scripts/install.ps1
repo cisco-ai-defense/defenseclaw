@@ -715,7 +715,7 @@ function Get-Artifact {
     }
     $url = "https://github.com/$Repo/releases/download/$script:ReleaseVersion/$Name"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $Dest -UseBasicParsing
+        Invoke-WebRequest -Uri $url -OutFile $Dest -UseBasicParsing -TimeoutSec 120
     } catch {
         Die "Failed to download: $url"
     }
@@ -765,7 +765,7 @@ function Initialize-ReleaseVerification {
         @{ Url = $CosignUrl; Path = $cosign; Label = "pinned Sigstore verifier" }
     )) {
         try {
-            Invoke-WebRequest -Uri $download.Url -OutFile $download.Path -UseBasicParsing
+            Invoke-WebRequest -Uri $download.Url -OutFile $download.Path -UseBasicParsing -TimeoutSec 120
         } catch {
             Die "Could not download required $($download.Label) from $($download.Url): $($_.Exception.Message)"
         }

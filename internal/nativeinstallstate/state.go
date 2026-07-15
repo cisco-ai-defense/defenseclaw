@@ -38,12 +38,8 @@ func (state State) Environment(base []string) []string {
 	owned := map[string]bool{
 		"DEFENSECLAW_INSTALL_ROOT": true,
 		"DEFENSECLAW_HOME":         true,
-	}
-	if state.CodexHome != "" {
-		owned["CODEX_HOME"] = true
-	}
-	if state.ClaudeConfigDir != "" {
-		owned["CLAUDE_CONFIG_DIR"] = true
+		"CODEX_HOME":               true,
+		"CLAUDE_CONFIG_DIR":        true,
 	}
 	result := make([]string, 0, len(base)+4)
 	for _, entry := range base {

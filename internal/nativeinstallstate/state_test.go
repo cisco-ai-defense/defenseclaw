@@ -75,6 +75,20 @@ func TestLoadAtAndEnvironmentRehydrateConnectorHomes(t *testing.T) {
 	}
 }
 
+func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
+	state := State{InstallRoot: `C:\Program Files\DefenseClaw`, DataRoot: `C:\Users\fixture\.defenseclaw`}
+	env := state.Environment([]string{
+		"PATH=fixture",
+		"CODEX_HOME=project-codex",
+		"claude_config_dir=project-claude",
+	})
+	joined := strings.Join(env, "\n")
+	if strings.Contains(strings.ToUpper(joined), "CODEX_HOME=") ||
+		strings.Contains(strings.ToUpper(joined), "CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("ambient connector home survived legacy state: %v", env)
+	}
+}
+
 func TestLoadAtRejectsRelocatedOrMalformedState(t *testing.T) {
 	state, executable := fixtureState(t)
 	state.InstallRoot = filepath.Join(t.TempDir(), "foreign")

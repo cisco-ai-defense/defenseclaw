@@ -34,8 +34,7 @@ type setupLaunchDecision struct {
 }
 
 func decideSetupLaunchContext(facts setupLaunchFacts) setupLaunchDecision {
-	dialog := facts.DialogSafe && !facts.ServiceIdentity && facts.SessionID != 0 &&
-		facts.InteractiveToken && facts.InteractiveWindowStation
+	dialog := setupDialogSafe(facts)
 	switch {
 	case facts.ServiceIdentity:
 		return setupLaunchDecision{Reason: setupLaunchService, AllowDialog: dialog}
@@ -48,6 +47,11 @@ func decideSetupLaunchContext(facts setupLaunchFacts) setupLaunchDecision {
 	default:
 		return setupLaunchDecision{Reason: setupLaunchAllowed}
 	}
+}
+
+func setupDialogSafe(facts setupLaunchFacts) bool {
+	return facts.DialogSafe && !facts.ServiceIdentity && facts.SessionID != 0 &&
+		facts.InteractiveToken && facts.InteractiveWindowStation
 }
 
 type setupLaunchContextError struct {
@@ -86,7 +90,7 @@ func requireCurrentUserInteractiveSetup() error {
 	facts, err := inspectCurrentSetupLaunchContext()
 	if err != nil {
 		return &setupLaunchContextError{
-			Decision: setupLaunchDecision{Reason: setupLaunchProbeFailed, AllowDialog: facts.DialogSafe},
+			Decision: setupLaunchDecision{Reason: setupLaunchProbeFailed, AllowDialog: setupDialogSafe(facts)},
 			Cause:    err,
 		}
 	}

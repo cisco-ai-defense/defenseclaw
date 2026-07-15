@@ -109,3 +109,28 @@ func TestRequestGatewayShutdownNeverSendsTokenOffLoopback(t *testing.T) {
 		t.Fatalf("non-loopback shutdown error = %v", err)
 	}
 }
+
+func TestRequestGatewayShutdownDoesNotFollowRedirects(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(origin.URL, "http://"))
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	err := requestGatewayShutdown(origin.Client(), cfg, "must-not-leak", os.Getpid())
+	if err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("redirect response error = %v, want 307 rejection", err)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("redirect target received %d authenticated request(s)", got)
+	}
+}
