@@ -46,6 +46,7 @@ $CosignVersion = '2.6.2'
 $CosignName = 'cosign-windows-amd64.exe'
 $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignName"
 $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
+$WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -171,19 +172,76 @@ function Copy-RequiredFile([string]$Source, [string]$Destination) {
 function Write-ZipFromDirectory(
     [string]$Source,
     [string]$Destination,
+    [string]$PythonExecutable,
+    [string]$Epoch,
+    [string]$VerificationRoot,
     [switch]$IncludeSourceDirectory
 ) {
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Force
+    foreach ($required in @($WindowsArtifactHelper, $PythonExecutable)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Deterministic ZIP dependency is missing: $required"
+        }
     }
-    $items = @(Get-ChildItem -LiteralPath $Source -Force)
-    if (-not $items) {
-        throw "Cannot zip empty directory: $Source"
+    if ($Epoch -notmatch '^\d{9,}$') {
+        throw "Invalid deterministic ZIP epoch: $Epoch"
     }
+    [IO.Directory]::CreateDirectory($VerificationRoot) | Out-Null
+    $verification = Join-Path $VerificationRoot "$(Split-Path -Leaf $Destination).verify.zip"
+    $arguments = @(
+        $WindowsArtifactHelper, 'zip', '--source', $Source,
+        '--output', $Destination, '--epoch', $Epoch
+    )
     if ($IncludeSourceDirectory) {
-        Compress-Archive -LiteralPath $Source -DestinationPath $Destination -Force
-    } else {
-        Compress-Archive -LiteralPath ($items | ForEach-Object { $_.FullName }) -DestinationPath $Destination -Force
+        $arguments += '--include-root'
+    }
+    Invoke-CheckedProcess $PythonExecutable $arguments
+    $verificationArguments = @($arguments)
+    $outputIndex = [Array]::IndexOf($verificationArguments, '--output') + 1
+    $verificationArguments[$outputIndex] = $verification
+    try {
+        Invoke-CheckedProcess $PythonExecutable $verificationArguments
+        $primaryHash = Get-FileHashHex $Destination
+        $verificationHash = Get-FileHashHex $verification
+        if ($primaryHash -ne $verificationHash) {
+            throw "Deterministic ZIP self-check failed for $(Split-Path -Leaf $Destination): $primaryHash != $verificationHash"
+        }
+    } finally {
+        Remove-Item -LiteralPath $verification -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Build-VerifiedGoBinary(
+    [string]$Output,
+    [string]$Package,
+    [string]$LdFlags,
+    [string]$VerificationRoot
+) {
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Output)) | Out-Null
+    [IO.Directory]::CreateDirectory($VerificationRoot) | Out-Null
+    $verification = Join-Path $VerificationRoot "$(Split-Path -Leaf $Output).verify.exe"
+    $go = (Get-Command 'go.exe' -ErrorAction Stop).Source
+    $savedCgo = [Environment]::GetEnvironmentVariable('CGO_ENABLED')
+    try {
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', '0')
+        $hashes = @()
+        # Build the disposable comparison first and the artifact second. Hash
+        # each immediately so endpoint scanners cannot turn a successful,
+        # byte-identical build into a misleading comparison race.
+        foreach ($target in @($verification, $Output)) {
+            Invoke-CheckedProcess $go @(
+                'build', '-trimpath', '-buildvcs=false', '-ldflags', $LdFlags,
+                '-o', $target, $Package
+            )
+            $hashes += Get-FileHashHex $target
+        }
+        $verificationHash = $hashes[0]
+        $primaryHash = $hashes[1]
+        if ($primaryHash -ne $verificationHash) {
+            throw "Reproducible Go build self-check failed for $(Split-Path -Leaf $Output): $primaryHash != $verificationHash"
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', $savedCgo)
+        Remove-Item -LiteralPath $verification -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -332,7 +390,7 @@ if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 $resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
-foreach ($requiredSetupInput in @($resourceIcon)) {
+foreach ($requiredSetupInput in @($resourceIcon, $WindowsArtifactHelper)) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
         throw "Required Windows installer input is missing: $requiredSetupInput"
     }
@@ -396,6 +454,8 @@ if ([string]$upgradePolicy.release_version -ne $Version -or
 $build = Join-Path $state "build"
 Remove-SafeTree $build $state
 [IO.Directory]::CreateDirectory($build) | Out-Null
+$reproducibilityRoot = Join-Path $build 'reproducibility-checks'
+[IO.Directory]::CreateDirectory($reproducibilityRoot) | Out-Null
 $payload = Join-Path $build "payload"
 [IO.Directory]::CreateDirectory($payload) | Out-Null
 
@@ -519,6 +579,14 @@ if ($pth.Count -ne 1) { throw 'Pinned CPython runtime did not contain exactly on
 $stdlibZip = [IO.Path]::GetFileNameWithoutExtension($pth[0].Name) + '.zip'
 "$stdlibZip`r`n.`r`nLib\site-packages`r`nimport site`r`n" |
     Set-Content -LiteralPath $pth[0].FullName -Encoding ascii -NoNewline
+$validationPython = Join-Path $validationRuntime 'python.exe'
+# uv targets can inherit bytecode from a shared cache and PEP 610 file://
+# origins for locally supplied wheels. Both encode host-specific absolute
+# paths. Remove those optional artifacts and repair RECORD before validating
+# or archiving the runtime; exact input hashes remain in manifest/provenance.
+Invoke-CheckedProcess $validationPython @(
+    '-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages
+)
 $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 [IO.Directory]::CreateDirectory($validationSite) | Out-Null
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
@@ -556,20 +624,16 @@ if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
     raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
 print(f'validated {len(installed)} embedded distributions')
 '@
-Invoke-CheckedProcess (Join-Path $validationRuntime 'python.exe') @('-I', '-c', $dependencyCheck)
+Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck)
 
 $siteZip = Join-Path $payload "site-packages.zip"
-Write-ZipFromDirectory $sitePackages $siteZip
+Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot
 
 $launcher = Join-Path $payload "defenseclaw-launcher.exe"
-Invoke-CheckedProcess "go" @(
-    "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
-)
+Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot
 Set-WindowsExecutableResource $launcher 'launcher'
 $startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
-Invoke-CheckedProcess "go" @(
-    "build", "-ldflags", "-s -w -H=windowsgui", "-o", $startupLauncher, "./cmd/defenseclaw-startup"
-)
+Build-VerifiedGoBinary $startupLauncher './cmd/defenseclaw-startup' "-s -w -buildid=defenseclaw-startup-$sourceCommit -H=windowsgui" $reproducibilityRoot
 Set-WindowsExecutableResource $startupLauncher 'startup'
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
@@ -590,7 +654,7 @@ foreach ($resourceContract in @(
     Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
 }
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
-Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
+Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip $validationPython $sourceDateEpoch $reproducibilityRoot
 
 Copy-RequiredFile $wheel (Join-Path $payload (Split-Path -Leaf $wheel))
 Copy-RequiredFile $pythonZip (Join-Path $payload $PythonEmbedName)
@@ -642,7 +706,7 @@ $embeddedPayload = Join-Path $repoRoot "cmd\defenseclaw-setup\payload\installer-
 # loadPayload deliberately extracts into a private parent and resolves the
 # manifest below a single payload/ directory. Preserve that root in the ZIP;
 # the other archives built above intentionally contain only their children.
-Write-ZipFromDirectory $payload $embeddedPayload -IncludeSourceDirectory
+Write-ZipFromDirectory $payload $embeddedPayload $validationPython $sourceDateEpoch $reproducibilityRoot -IncludeSourceDirectory
 $embeddedArchive = [IO.Compression.ZipFile]::OpenRead($embeddedPayload)
 try {
     $embeddedEntryNames = @($embeddedArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
@@ -654,66 +718,115 @@ try {
 }
 
 $setupPath = Join-Path $out "DefenseClawSetup-x64.exe"
+$shaPath = "$setupPath.sha256"
+$provenancePath = Join-Path $out "DefenseClawSetup-x64.exe.provenance.json"
+$sbomPath = "$setupPath.sbom.json"
+$setupVerification = Join-Path $reproducibilityRoot 'DefenseClawSetup-x64.exe.manifest.verify.exe'
 try {
-    Invoke-CheckedProcess "go" @(
-        "build", "-ldflags", "-s -w -H=windowsgui", "-o", $setupPath, "./cmd/defenseclaw-setup"
-    )
-    # Resource mutation is deliberately the last PE-writing step before
-    # Authenticode. The tool rejects already-signed files and reads the final
-    # manifest, icon, and VERSIONINFO set back through an independent parser.
+    Build-VerifiedGoBinary $setupPath './cmd/defenseclaw-setup' "-s -w -buildid=defenseclaw-setup-$sourceCommit -H=windowsgui" $reproducibilityRoot
+    Copy-RequiredFile $setupPath $setupVerification
+    # Resource mutation is the last PE-writing step before Authenticode. Apply
+    # the deterministic manifest, icon, and VERSIONINFO contract to both
+    # byte-identical builds and compare the complete unsigned executables.
     Set-WindowsExecutableResource $setupPath 'setup'
+    Set-WindowsExecutableResource $setupVerification 'setup'
+    $setupPreSignHash = Get-FileHashHex $setupPath
+    $setupVerificationHash = Get-FileHashHex $setupVerification
+    if ($setupPreSignHash -ne $setupVerificationHash) {
+        throw "Deterministic setup resource self-check failed: $setupPreSignHash != $setupVerificationHash"
+    }
+    Remove-Item -LiteralPath $setupVerification -Force
+
+    # Signing order is security-sensitive: all inner executable bytes and the
+    # deterministic embedded payload are finalized before the outer Setup EXE
+    # is signed. The merged SBOM is generated only after this signature, so
+    # its top-level checksum names the exact artifact accepted by lifecycle CI.
+    $setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
+    Set-WindowsExecutableResource $setupPath 'setup' -VerifyOnly
+    $signed = $setupSigned -and $payloadSigned
+
+    $setupSha256 = Get-FileHashHex $setupPath
+    "$setupSha256  $(Split-Path -Leaf $setupPath)" |
+        Set-Content -LiteralPath $shaPath -Encoding ascii
+
+    $goInventoryPath = Join-Path $build 'go-component-inventory.json'
+    $goExecutable = (Get-Command 'go.exe' -ErrorAction Stop).Source
+    Invoke-CheckedProcess $validationPython @(
+        '-I', $WindowsArtifactHelper, 'go-inventory',
+        '--go', $goExecutable,
+        '--output', $goInventoryPath,
+        '--component', "setup=$setupPath",
+        '--component', "gateway=$gatewayBinary",
+        '--component', "hook=$hookBinary",
+        '--component', "launcher=$launcher",
+        '--component', "startup-launcher=$startupLauncher",
+        '--component', "cosign=$(Join-Path $payload 'cosign.exe')"
+    )
+
+    $reproducibleBuiltAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$sourceDateEpoch).UtcDateTime.ToString('o')
+    $provenance = [ordered]@{
+        schema_version = 1
+        artifact = (Split-Path -Leaf $setupPath)
+        artifact_sha256 = $setupSha256
+        version = $Version
+        source_commit = $sourceCommit
+        distribution_flavor = $DistributionFlavor
+        built_at_utc = if ($signed) { [DateTime]::UtcNow.ToString('o') } else { $reproducibleBuiltAt }
+        unsigned = -not $signed
+        inputs = [ordered]@{
+            gateway_archive = (Split-Path -Leaf $gatewayZip)
+            gateway_archive_sha256 = Get-FileHashHex $gatewayZip
+            embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
+            embedded_payload_sha256 = Get-FileHashHex $embeddedPayload
+            product_executables_authenticode_signed = $payloadSigned
+            wheel = (Split-Path -Leaf $wheel)
+            wheel_sha256 = Get-FileHashHex $wheel
+            python_embed = $PythonEmbedName
+            python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+            site_packages_sha256 = Get-FileHashHex $siteZip
+            yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
+            yara_compat_wheel_sha256 = $yaraCompatSha256
+            cosign_sha256 = Get-FileHashHex (Join-Path $payload 'cosign.exe')
+            payload_manifest_sha256 = Get-FileHashHex (Join-Path $payload 'manifest.json')
+            go_component_inventory_sha256 = Get-FileHashHex $goInventoryPath
+            payload_files = $files
+            windows_resource_policy = 'internal/windowsresources'
+            windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
+            windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
+        }
+        toolchain = $manifest.toolchain
+    }
+    $provenance | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
+
+    Invoke-CheckedProcess $validationPython @(
+        $WindowsArtifactHelper, 'sbom',
+        '--setup', $setupPath,
+        '--payload-root', $payload,
+        '--embedded-payload', $embeddedPayload,
+        '--output', $sbomPath,
+        '--version', $Version,
+        '--source-commit', $sourceCommit,
+        '--source-epoch', $sourceDateEpoch,
+        '--python-version', $PythonVersion,
+        '--cosign-version', $CosignVersion,
+        '--go-inventory', $goInventoryPath
+    )
+    $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sbom.spdxVersion -ne 'SPDX-2.3' -or
+        [string]$sbom.dataLicense -ne 'CC0-1.0' -or
+        @($sbom.documentDescribes).Count -ne 1) {
+        throw 'Merged Windows installer SBOM failed the release validity gate.'
+    }
 } catch {
-    # Never leave a setup-named executable without its complete resource
-    # contract in an otherwise valid-looking output directory.
-    Remove-Item -LiteralPath $setupPath -Force -ErrorAction SilentlyContinue
+    # Never leave a setup-named executable or incomplete sidecars in an
+    # otherwise valid-looking output directory.
+    foreach ($incomplete in @($setupPath, $shaPath, $provenancePath, $sbomPath)) {
+        Remove-Item -LiteralPath $incomplete -Force -ErrorAction SilentlyContinue
+    }
     throw
 } finally {
+    Remove-Item -LiteralPath $setupVerification -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
-}
-
-$setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
-Set-WindowsExecutableResource $setupPath 'setup' -VerifyOnly
-$signed = $setupSigned -and $payloadSigned
-
-$shaPath = "$setupPath.sha256"
-"$(Get-FileHashHex $setupPath)  $(Split-Path -Leaf $setupPath)" |
-    Set-Content -LiteralPath $shaPath -Encoding ascii
-
-$provenance = [ordered]@{
-    schema_version = 1
-    artifact = (Split-Path -Leaf $setupPath)
-    version = $Version
-    source_commit = $sourceCommit
-    distribution_flavor = $DistributionFlavor
-    built_at_utc = [DateTime]::UtcNow.ToString("o")
-    unsigned = -not $signed
-    inputs = [ordered]@{
-        gateway_archive = (Split-Path -Leaf $gatewayZip)
-        gateway_archive_sha256 = Get-FileHashHex $gatewayZip
-        embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
-        product_executables_authenticode_signed = $payloadSigned
-        wheel = (Split-Path -Leaf $wheel)
-        wheel_sha256 = Get-FileHashHex $wheel
-        python_embed = $PythonEmbedName
-        python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
-        yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
-        yara_compat_wheel_sha256 = $yaraCompatSha256
-        windows_resource_policy = 'internal/windowsresources'
-        windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
-        windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
-    }
-    toolchain = $manifest.toolchain
-}
-$provenancePath = Join-Path $out "DefenseClawSetup-x64.exe.provenance.json"
-$provenance | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
-
-$syft = Get-Command "syft" -ErrorAction SilentlyContinue
-if ($syft) {
-    Invoke-CheckedProcess $syft.Source @(
-        "scan", $setupPath, "-o", "spdx-json=$setupPath.sbom.json"
-    )
-} else {
-    Write-Warning "syft not found; setup SBOM generation skipped for local build."
 }
 
 $artifact = Get-Item -LiteralPath $setupPath

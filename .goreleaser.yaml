@@ -15,11 +15,14 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
     ignore:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -buildid=defenseclaw-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
     hooks:
       post:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component gateway -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
@@ -34,8 +37,11 @@ builds:
       - windows
     goarch:
       - amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
     ldflags:
-      - -s -w -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -buildid=defenseclaw-hook-{{.Commit}}-{{.Os}}-{{.Arch}} -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
     hooks:
       post:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png

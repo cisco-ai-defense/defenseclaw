@@ -61,7 +61,7 @@ builder then embeds:
 - the GoReleaser Windows archive;
 - the DefenseClaw wheel used for provenance;
 - CPython 3.14.6 embeddable x64, pinned by URL and SHA-256
-  `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`;
+  `df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c`;
 - cosign 2.6.2 for offline availability of release-manifest verification,
   pinned to the official Windows x64 release SHA-256
   `dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d40feb07be`;
@@ -76,6 +76,33 @@ staging directory. The manifest, external provenance record, and installed
 state also carry the exact 40-character Git source commit and distribution
 flavor, so an installer cannot silently lose its build identity between the
 release inputs and the installed product.
+
+Every generated ZIP is ordered by its UTF-8 archive path and uses the source
+commit timestamp, normalized permissions, and a fixed compression level. The
+builder creates each archive twice and requires byte-for-byte equality. Native
+Go launchers and Setup use `-trimpath`, disable ambient VCS stamping, pin a
+component- and commit-specific Go build ID, and are also built twice before
+signing. The unsigned provenance
+timestamp is the source commit timestamp, so local unsigned outputs do not gain
+a wall-clock difference. Before archiving Python, the builder removes optional
+bytecode caches, local `file://` installation origins, and uv's wall-clock cache
+metadata, then repairs the affected wheel `RECORD` files. Release CI pins Go
+through `go.mod`, pins `uv`, and executes ZIP generation with the pinned
+embedded CPython runtime.
+
+The Setup SBOM is one merged SPDX 2.3 JSON document generated after the outer
+EXE is signed. It describes the exact outer checksum and exact embedded payload
+archive, records every payload digest, and expands the CPython standard
+library, complete `site-packages.zip`, project and YARA compatibility wheels,
+and signed gateway archive. Python distribution metadata, dependencies,
+licenses, and every embedded file are included alongside the gateway, hook,
+launchers, and pinned Cosign verifier. Go build information is read from the
+exact signed Setup, gateway, hook, launchers, and Cosign bytes; their runtime
+and transitive modules are emitted with purls and Go module sums. Generation
+fails closed if the staged payload differs from its manifest, an expected
+component is absent, a Python distribution lacks metadata, a Go binary digest
+does not match its component, or any relationship/digest is missing from the
+SPDX inventory.
 
 The public Windows build is explicitly the `oss` distribution flavor. Passing
 `-DistributionFlavor managed-enterprise` fails before artifact processing or
@@ -226,12 +253,10 @@ Those installations must be serviced by the enterprise deployment channel.
 ## Release and certification gate
 
 The release workflow builds setup on `windows-latest`, requires real signing
-credentials, emits SHA-256, SBOM, and provenance outputs, and adds the signed
-EXE to the final checksum manifest before the immutable release is created.
-Running the full native install/repair/connector/uninstall acceptance suite
-against that exact signed EXE (including installed-publisher validation) remains
-a required certification follow-up; it is not yet an active release-workflow
-gate.
+credentials, runs the full native install/repair/connector/uninstall acceptance
+suite against that exact signed EXE (including installed-publisher validation),
+emits SHA-256, merged SPDX SBOM, and provenance outputs, and adds the signed EXE
+to the final checksum manifest before the immutable release is created.
 macOS and Linux artifacts continue through their existing build path.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the

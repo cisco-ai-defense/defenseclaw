@@ -1025,17 +1025,50 @@ function Invoke-BuildArtifacts {
     [IO.Directory]::CreateDirectory($dist) | Out-Null
     $go = Get-RequiredCommand 'go.exe'
     $uv = Get-RequiredCommand 'uv.exe'
+    $git = Get-RequiredCommand 'git.exe'
+    $epochResult = Invoke-WindowsNativeProcess $git @(
+        '-C', $WorkspaceRoot, 'show', '-s', '--format=%ct', 'HEAD'
+    ) -TimeoutSeconds 30
+    $sourceDateEpoch = $epochResult.StdOut.Trim()
+    if ($sourceDateEpoch -notmatch '^\d{9,}$') {
+        throw "git returned an invalid source epoch: $sourceDateEpoch"
+    }
+    $commitResult = Invoke-WindowsNativeProcess $git @(
+        '-C', $WorkspaceRoot, 'rev-parse', '--verify', 'HEAD'
+    ) -TimeoutSeconds 30
+    $sourceCommit = $commitResult.StdOut.Trim().ToLowerInvariant()
+    if ($sourceCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "git returned an invalid source commit: $sourceCommit"
+    }
+    $artifactHelper = Join-Path $WorkspaceRoot 'scripts\windows_installer_artifacts.py'
+    if (-not (Test-Path -LiteralPath $artifactHelper -PathType Leaf)) {
+        throw "deterministic Windows artifact helper is missing: $artifactHelper"
+    }
     $stage = Join-Path $root 'gateway-stage'
+    $gatewayVerificationStage = Join-Path $root 'gateway-stage-verification'
     [IO.Directory]::CreateDirectory($stage) | Out-Null
+    [IO.Directory]::CreateDirectory($gatewayVerificationStage) | Out-Null
     $previousCgo = $env:CGO_ENABLED
     try {
         $env:CGO_ENABLED = '0'
-        $gateway = Join-Path $stage 'defenseclaw.exe'
-        $hook = Join-Path $stage 'defenseclaw-hook.exe'
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', $gateway, './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', $hook, './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
-        Assert-WindowsExecutableResource -Path $gateway -Component 'gateway' -Version $packageVersion -Apply
-        Assert-WindowsExecutableResource -Path $hook -Component 'hook' -Version $packageVersion -Apply
+        foreach ($binary in @(
+            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion", 'gateway'),
+            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion", 'hook')
+        )) {
+            foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
+                $target = Join-Path $targetRoot $binary[0]
+                Invoke-WindowsNativeProcess $go @(
+                    'build', '-trimpath', '-buildvcs=false', '-ldflags', $binary[2],
+                    '-o', $target, $binary[1]
+                ) -TimeoutSeconds 900 | Out-Null
+                Assert-WindowsExecutableResource -Path $target -Component $binary[3] -Version $packageVersion -Apply
+            }
+            $primaryHash = (Get-FileHash -LiteralPath (Join-Path $stage $binary[0]) -Algorithm SHA256).Hash
+            $verificationHash = (Get-FileHash -LiteralPath (Join-Path $gatewayVerificationStage $binary[0]) -Algorithm SHA256).Hash
+            if ($primaryHash -ne $verificationHash) {
+                throw "reproducible Go build self-check failed for $($binary[0])"
+            }
+        }
         Invoke-WindowsNativeProcess $go @(
             'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w',
             '-o', (Join-Path $dist $windowsResourceVerifierName),
@@ -1053,8 +1086,24 @@ function Invoke-BuildArtifacts {
         if ($null -eq $previousCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
         else { $env:CGO_ENABLED = $previousCgo }
     }
-    Compress-Archive -LiteralPath (Join-Path $stage 'defenseclaw.exe'), (Join-Path $stage 'defenseclaw-hook.exe') `
-        -DestinationPath (Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip") -Force
+    $gatewayArchive = Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip"
+    $gatewayArchiveVerification = Join-Path $root 'gateway-archive-verification.zip'
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--frozen', 'python', $artifactHelper, 'zip',
+        '--source', $stage,
+        '--output', $gatewayArchive,
+        '--epoch', $sourceDateEpoch
+    ) -TimeoutSeconds 900 -WorkingDirectory $WorkspaceRoot | Out-Null
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--frozen', 'python', $artifactHelper, 'zip',
+        '--source', $stage,
+        '--output', $gatewayArchiveVerification,
+        '--epoch', $sourceDateEpoch
+    ) -TimeoutSeconds 900 -WorkingDirectory $WorkspaceRoot | Out-Null
+    if ((Get-FileHash -LiteralPath $gatewayArchive -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $gatewayArchiveVerification -Algorithm SHA256).Hash) {
+        throw 'deterministic gateway ZIP self-check failed'
+    }
 
     $packageStage = Join-Path $root 'package-source'
     if (Test-Path -LiteralPath $packageStage) {
@@ -1067,10 +1116,27 @@ function Invoke-BuildArtifacts {
     [IO.Directory]::CreateDirectory((Join-Path $packageStage 'cli')) | Out-Null
     Copy-Tree (Join-Path $WorkspaceRoot 'cli\defenseclaw') (Join-Path $packageStage 'cli\defenseclaw')
     Stage-PackageData (Join-Path $packageStage 'cli\defenseclaw')
-    Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $dist) -TimeoutSeconds 900 -WorkingDirectory $packageStage | Out-Null
+    $packageVerificationStage = Join-Path $root 'package-source-verification'
+    Copy-Tree $packageStage $packageVerificationStage
+    $wheelVerificationRoot = Join-Path $root 'wheel-verification'
+    [IO.Directory]::CreateDirectory($wheelVerificationRoot) | Out-Null
+    $previousSourceDateEpoch = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH')
+    try {
+        [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $sourceDateEpoch)
+        Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $dist) -TimeoutSeconds 900 -WorkingDirectory $packageStage | Out-Null
+        Invoke-WindowsNativeProcess $uv @('build', '--wheel', '--out-dir', $wheelVerificationRoot) -TimeoutSeconds 900 -WorkingDirectory $packageVerificationStage | Out-Null
+    } finally {
+        [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $previousSourceDateEpoch)
+    }
     $wheel = Get-ChildItem -LiteralPath $dist -Filter 'defenseclaw-*.whl' -File | Select-Object -First 1
     if (-not $wheel) {
         throw 'wheel build did not produce a DefenseClaw wheel'
+    }
+    $verificationWheels = @(Get-ChildItem -LiteralPath $wheelVerificationRoot -Filter $wheel.Name -File)
+    if ($verificationWheels.Count -ne 1 -or
+        (Get-FileHash -LiteralPath $wheel.FullName -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $verificationWheels[0].FullName -Algorithm SHA256).Hash) {
+        throw 'reproducible DefenseClaw wheel self-check failed'
     }
     $archive = [IO.Compression.ZipFile]::OpenRead($wheel.FullName)
     try {
