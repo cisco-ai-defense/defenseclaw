@@ -135,9 +135,9 @@ def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> N
     assert "--certificate-identity-regexp" in text
     assert '"--offline"' in text
     assert (
-        "^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/"
-        "release\\.yaml@refs/(tags/$escapedVersion|heads/main)$" in text
+        "^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/release\\.yaml@refs/heads/main$" in text
     )
+    assert "tags/$escapedVersion" not in text
     assert "Release checksum signature verification failed" in text
     assert 'Status -ne "Valid"' in text
     assert '$ExpectedPublisher = "Cisco Systems, Inc."' in text
@@ -146,10 +146,11 @@ def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> N
 
 def test_release_publishes_offline_sigstore_verification_material() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    assert workflow.count("cosign-release: v2.6.2") == 2
-    assert workflow.count("--bundle=dist/checksums.txt.bundle") == 2
-    assert "! -name checksums.txt.bundle" in workflow
-    assert "dist/checksums.txt.bundle" in workflow
+    bundle = "--bundle=release-candidate/dist/checksums.txt.bundle"
+    assert "cosign sign-blob" in workflow
+    assert workflow.count(bundle) >= 2
+    assert "--offline" in workflow
+    assert "scripts/release_candidate.py list-assets" in workflow
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
