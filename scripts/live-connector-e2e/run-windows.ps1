@@ -944,7 +944,7 @@ function Assert-NativeEnterpriseHooksRequireElevation {
     ) -TimeoutSeconds 10 -AllowedExitCodes @(1) -LogPath (Join-Path $script:LogRoot 'enterprise-hooks-install.log')
     $after = Get-TreeFingerprint $root
     if ($result.ExitCode -ne 1 -or $result.TimedOut) { throw 'enterprise hooks install did not return bounded exit 1' }
-    if (($result.StdOut + $result.StdErr) -notmatch 'requires an elevated administrator or LocalSystem token') { throw 'enterprise hooks install did not require native Windows elevation' }
+    if (($result.StdOut + $result.StdErr) -notmatch 'require an elevated administrator or LocalSystem token') { throw 'enterprise hooks install did not require native Windows elevation' }
     if ($before -ne $after) { throw 'enterprise hooks install modified the disposable target tree' }
     Write-Result 'enterprise-hooks:install:elevation-required' pass 'exit=1 bounded=true target-tree=unchanged'
 }
