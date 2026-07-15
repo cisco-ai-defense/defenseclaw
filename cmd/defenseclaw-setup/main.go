@@ -262,6 +262,25 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := validateManagedRoot(filepath.Dir(maintenancePath)); err != nil {
 		return 1, err
 	}
+	hadInstall := pathExists(installRoot)
+	if hadInstall {
+		// Recovery can rename or remove an interrupted staging tree. Reject an
+		// active CLI/TUI before recovery so a locked installed executable cannot
+		// turn safe journal rollback into a partial service outage.
+		gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot, gatewayPath)
+		if processErr != nil {
+			return 1, fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
+		}
+		if pid != 0 {
+			return retryRequiredCode, fmt.Errorf(
+				"%w (PID %d, %s); close running DefenseClaw terminals and retry",
+				errInstalledProcessRunning,
+				pid,
+				imagePath,
+			)
+		}
+	}
 	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
 		return retryRequiredCode, err
 	}
@@ -276,7 +295,8 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	hadInstall := pathExists(installRoot)
+	// Recovery may publish, restore, or remove a transaction-owned tree.
+	hadInstall = pathExists(installRoot)
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
@@ -290,25 +310,6 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		if opts.Action == "upgrade" && opts.FromVersion == "" {
 			opts.FromVersion = oldState.Version
-		}
-	}
-	if hadInstall {
-		// Reject foreground CLI/TUI/runtime processes before unpacking the large
-		// offline payload. The managed gateway is intentionally ignored here: it
-		// remains available during staging and is stopped through its owned,
-		// authenticated lifecycle immediately before the final race-closing check.
-		gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot, gatewayPath)
-		if processErr != nil {
-			return 1, fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
-		}
-		if pid != 0 {
-			return retryRequiredCode, fmt.Errorf(
-				"%w (PID %d, %s); close running DefenseClaw terminals and retry",
-				errInstalledProcessRunning,
-				pid,
-				imagePath,
-			)
 		}
 	}
 	// Every install/repair/upgrade refreshes either the explicit selection or the

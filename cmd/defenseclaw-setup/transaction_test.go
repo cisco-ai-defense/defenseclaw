@@ -1331,6 +1331,52 @@ func TestRollbackRestoreIncludesOwnedRuntimeStartedAfterIntent(t *testing.T) {
 	}
 }
 
+func TestRollbackRestoresOwnedRuntimeWhenFileRollbackFails(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"1.0.0",
+	)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		&previous,
+	)
+	current := previous
+	current.Version = "9.9.9"
+	writeInstallTree(t, installRoot, current)
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("fixture"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	liveDuringRecovery := serviceState{Gateway: true, Watchdog: true}
+	var restored serviceState
+	err := rollbackSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(_ string, _ string, wanted serviceState) (serviceState, error) {
+			restored = wanted
+			return wanted, nil
+		},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "previous installation is missing") {
+		t.Fatalf("rollback error = %v, want recorded-state mismatch", err)
+	}
+	if restored != liveDuringRecovery {
+		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)
+	}
+}
+
 func TestUninstallHandoffSurvivesInjectedCrashAndResumesIntent(t *testing.T) {
 	t.Parallel()
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
