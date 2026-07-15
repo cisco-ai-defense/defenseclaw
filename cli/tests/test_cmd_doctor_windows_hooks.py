@@ -617,6 +617,23 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(raised.exception.state, "policy-blocked")
         self.assertIn("protected Codex executable evidence", raised.exception.detail)
 
+    def test_codex_registration_ignores_stale_discovery_wrapper_after_protected_policy_check(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        wrapper = self.root / "node" / "codex.CMD"
+        wrapper.parent.mkdir()
+        wrapper.write_text("@echo off\r\n", encoding="utf-8")
+        (self.data / "agent_discovery.json").write_text(
+            json.dumps({"agents": {"codex": {"installed": True, "binary_path": str(wrapper)}}}),
+            encoding="utf-8",
+        )
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("policy=test effective requirements", check.detail)
+        self.policy_inspector_mock.assert_called_once_with(str(self.data), str(config))
+
     def test_codex_contract_lock_cannot_downgrade_a_current_agent(self) -> None:
         runtime = self._runtime()
         config = self._config("codex", f'"{runtime}" hook --connector codex')
@@ -1006,30 +1023,28 @@ class WindowsHookDoctorTests(unittest.TestCase):
         requirements = self.root / "ProgramData" / "OpenAI" / "Codex" / "requirements.toml"
         requirements.parent.mkdir(parents=True)
         requirements.write_text("allow_managed_hooks_only = true\n", encoding="utf-8")
-        with patch("defenseclaw.doctor_hooks._codex_system_requirements_path", return_value=str(requirements)):
-            check = self._validate("codex", config)
-        self.assertEqual(check.state, "foreign", check.detail)
-        self.assertIn(str(requirements), check.detail)
-        self.assertIn("allow_managed_hooks_only", check.detail)
+        self.policy_inspector_mock.return_value = (True, str(requirements))
 
-    def test_codex_cloud_effective_policy_uses_trusted_discovered_binary(self) -> None:
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "policy-blocked", check.detail)
+        self.assertIn(str(requirements), check.detail)
+        self.assertIn("allow_managed_hooks_only=true", check.detail)
+
+    def test_codex_cloud_effective_policy_uses_protected_setup_binary(self) -> None:
         runtime = self._runtime()
         config = self._config("codex", f'"{runtime}" hook --connector codex')
         codex = self.root / "Codex" / "codex.exe"
         codex.parent.mkdir()
         codex.write_bytes(b"MZ")
-        (self.data / "agent_discovery.json").write_text(
-            json.dumps({"agents": {"codex": {"installed": True, "binary_path": str(codex)}}}),
-            encoding="utf-8",
-        )
         source = f"Codex app-server {codex} effective requirements"
-        with (
-            patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=True),
-            patch("defenseclaw.doctor_hooks._inspect_codex_app_server_policy", return_value=(True, source)),
-        ):
-            check = self._validate("codex", config)
-        self.assertEqual(check.state, "foreign", check.detail)
+        self.policy_inspector_mock.return_value = (True, source)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "policy-blocked", check.detail)
         self.assertIn(source, check.detail)
+        self.policy_inspector_mock.assert_called_once_with(str(self.data), str(config))
 
     def test_missing_registrations_have_only_native_repair_guidance(self) -> None:
         for connector, filename, repair in (
@@ -1292,6 +1307,40 @@ class WindowsHookDoctorTests(unittest.TestCase):
                     detail.lower(),
                     r"inspect-tool\.sh|codex-hook\.sh|claude-code-hook\.sh|\bbash\b|\bwsl\b|\bchmod\b",
                 )
+
+    def test_windows_codex_contract_ignores_other_discovered_installation(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        lock_path = self.data / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        entry = lock["connectors"]["codex"]
+        entry.update(
+            {
+                "agent_executable": str(self.install / "codex.exe"),
+                "agent_executable_source": "setup-selected",
+                "agent_executable_sha256": "a" * 64,
+            }
+        )
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        (self.data / "agent_discovery.json").write_text(
+            json.dumps({"agents": {"codex": {"version": "codex-cli 99.0.0"}}}),
+            encoding="utf-8",
+        )
+        result = _DoctorResult()
+
+        _check_hook_contract_lock(
+            self.cfg,
+            "codex",
+            result,
+            platform_name="nt",
+            config_path=str(config),
+            install_root=str(self.install),
+            search_path=str(self.install),
+            pathext=".EXE;.CMD",
+        )
+
+        self.assertEqual(result.checks[-1]["status"], "pass", result.checks[-1])
+        self.assertNotIn("99.0.0", result.checks[-1]["detail"])
 
     def test_windows_contract_preserves_access_denied_classification(self) -> None:
         runtime = self._runtime()

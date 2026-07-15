@@ -963,7 +963,7 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
 _codex_effective_policy_inspector = _inspect_codex_effective_hook_policy
 
 
-def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> None:
+def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> str:
     """Fail closed when current effective policy ignores user hook config."""
 
     try:
@@ -978,6 +978,7 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> No
             "Codex effective policy sets allow_managed_hooks_only=true from "
             f"{source}, so the user-scoped DefenseClaw hooks are ignored",
         )
+    return source
 
 
 def _default_claude_managed_settings_paths() -> tuple[str, ...]:
@@ -1911,12 +1912,11 @@ def validate_windows_hook_registration(
             connector,
             claude_managed_settings_paths=claude_managed_settings_paths,
         )
-        if connector == "codex" and inspect_effective_policy:
-            _validate_codex_effective_hook_policy(data_dir, config_path)
         command = commands[0]
         policy_detail = ""
         if connector == "codex":
-            policy_detail = _validate_codex_effective_policy(data_dir, config_path)
+            if inspect_effective_policy:
+                policy_detail = _validate_codex_effective_hook_policy(data_dir, config_path)
         else:
             matrix_entries = _validate_claude_hook_matrix(document)
         raw_target, _args, kind = _command_target(command, connector)
