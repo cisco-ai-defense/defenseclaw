@@ -170,11 +170,36 @@ def test_builtin_setup_roots_ignore_poisoned_profile_environment(
     }
     monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda identifier: known[identifier])
     monkeypatch.setattr(agent_selection, "_windows_system_directory", lambda: "")
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_windows_configured_package_manager_bin_prefixes",
+        lambda: (),
+    )
 
     roots = agent_selection._builtin_setup_trusted_prefixes()
 
     assert any(str(trusted_local) in root for root in roots)
     assert all(str(poisoned_local) not in root for root in roots)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows configured package-manager roots")
+def test_builtin_setup_roots_include_validated_configured_manager_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    configured = tmp_path / "LocalAppData" / "Programs" / "DevTools" / "node"
+    configured.mkdir(parents=True)
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: "")
+    monkeypatch.setattr(agent_selection, "_windows_system_directory", lambda: "")
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_windows_configured_package_manager_bin_prefixes",
+        lambda: (str(configured),),
+    )
+
+    roots = agent_selection._builtin_setup_trusted_prefixes()
+
+    assert os.path.normcase(str(configured)) in {os.path.normcase(root) for root in roots}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows token-bound Known Folder contract")
@@ -321,6 +346,74 @@ def test_setup_candidates_prefer_native_image_for_path_npm_wrapper_over_desktop(
 
     assert candidates[0] == str(native)
     assert candidates.index(str(native)) < candidates.index(str(desktop))
+
+
+def test_configured_devtools_npm_root_selects_upgraded_native_codex_despite_old_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    npm_root = tmp_path / "LocalAppData" / "Programs" / "DevTools" / "node"
+    package = npm_root / "node_modules" / "@openai" / "codex"
+    entrypoint = package / "bin" / "codex.js"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("// current Codex", encoding="utf-8")
+    native = (
+        package
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"current-native-codex")
+    wrapper = npm_root / "codex.cmd"
+    wrapper.write_text(
+        '@node "%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "state"
+    data_dir.mkdir()
+    (data_dir / "hook_contract_lock.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connectors": {
+                    "codex": {
+                        "raw_agent_version": "codex-cli 0.144.0-alpha.4",
+                        "normalized_agent_version": "0.144.0-alpha.4",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (str(wrapper),),
+    )
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_ai_discovery_trust_config",
+        lambda _data_dir: (True, ()),
+    )
+    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(npm_root),))
+    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_version_for_agent_binary",
+        lambda *_args, **_kwargs: ("codex-cli 0.144.3", ""),
+    )
+
+    selected = agent_selection._select_agent_executable(str(data_dir), "codex")
+
+    assert selected.executable == str(native.resolve())
+    assert selected.raw_version == "codex-cli 0.144.3"
+    assert selected.normalized_version == "0.144.3"
 
 
 def test_setup_candidates_follow_active_pnpm_package_not_stale_store_entry(

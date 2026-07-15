@@ -246,6 +246,26 @@ func TestAtomicTransformV2WindowsCanonicalDACLFromSDDL(t *testing.T) {
 	}
 }
 
+func TestAtomicTransformCanonicalPrivateDACLOrderIsNarrow(t *testing.T) {
+	user := "S-1-5-21-1-2-3-1001"
+	systemFirst := "D:P(A;;FA;;;SY)(A;;FA;;;" + user + ")"
+	userFirst := "D:P(A;;FA;;;" + user + ")(A;;FA;;;SY)"
+	if got := atomicTransformCanonicalPrivateDACLOrder(userFirst, user); got != systemFirst {
+		t.Fatalf("private user-first DACL = %q, want %q", got, systemFirst)
+	}
+	for _, dacl := range []string{
+		systemFirst,
+		"D:(A;;FA;;;" + user + ")(A;;FA;;;SY)",
+		"D:P(A;;GR;;;" + user + ")(A;;FA;;;SY)",
+		"D:P(A;;FA;;;" + user + ")(A;;FA;;;SY)(A;;GR;;;BA)",
+		"D:P(A;;FA;;;S-1-5-21-9-8-7-1002)(A;;FA;;;SY)",
+	} {
+		if got := atomicTransformCanonicalPrivateDACLOrder(dacl, user); got != dacl {
+			t.Errorf("custom DACL changed from %q to %q", dacl, got)
+		}
+	}
+}
+
 func TestAtomicTransformV2WindowsDACLIsReplaceNormalization(t *testing.T) {
 	explicit := "D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;OI;GR;;;SY)"
 	inherited := "D:AI(A;ID;FA;;;S-1-5-21-1-2-3-1001)(A;OIID;GR;;;SY)"

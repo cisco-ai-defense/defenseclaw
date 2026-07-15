@@ -1391,6 +1391,11 @@ def _windows_native_hook_check(
         install_root=install_root,
         search_path=os.environ.get("PATH", "") if search_path is None else search_path,
         pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
+        workspace_dir=_workspace_dir(cfg) if connector == "claudecode" else "",
+        managed_enterprise=(
+            connector == "claudecode"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
     )
 
 
@@ -4360,7 +4365,18 @@ def _check_hook_contract_lock(
     if native_runtime is not None:
         detail += f" {native_runtime.runtime_description}"
 
-    current_version = _discovered_agent_version(data_dir, connector)
+    # Native Codex setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_codex_agent = connector == "codex" and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
+    current_version = "" if protected_codex_agent else _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
         _emit(
             "fail",

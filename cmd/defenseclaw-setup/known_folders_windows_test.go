@@ -8,6 +8,8 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 )
 
 func TestSetupKnownFoldersIgnoreConnectorEnvironmentOverrides(t *testing.T) {
@@ -56,5 +58,21 @@ func assertSameSetupPath(t *testing.T, label string, resolve func() (string, err
 	}
 	if !samePath(got, want) {
 		t.Fatalf("token-bound %s changed with connector environment: got %q, want %q", label, got, want)
+	}
+}
+
+func TestDefaultInstallRootUsesUserProgramFilesKnownFolder(t *testing.T) {
+	wantRoot, err := winfolders.UserProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(wantRoot, "DefenseClaw")
+
+	got, err := defaultInstallRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, want) {
+		t.Fatalf("defaultInstallRoot() = %q, want UserProgramFiles path %q", got, want)
 	}
 }

@@ -14,6 +14,9 @@ import (
 )
 
 func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
+func liveProcessWithinInstallRoot(_ string, _ ...string) (uint32, string, error) {
+	return 0, "", nil
+}
 func acquireSetupLock() (func() error, error) {
 	return func() error { return nil }, nil
 }
@@ -48,6 +51,9 @@ func captureGatewayAutoStart() (gatewayAutoStartSnapshot, error) {
 func createExclusiveUnpublishedFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 }
+func gatewayAutoStartValueOwned(gatewayPath, value string) (bool, error) {
+	return value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath), nil
+}
 func defaultInstallRoot() (string, error)                   { return "", errors.New("windows-only operation") }
 func defaultDataRoot() (string, error)                      { return "", errors.New("windows-only operation") }
 func defaultProfileRoot() (string, error)                   { return "", errors.New("windows-only operation") }
@@ -62,8 +68,8 @@ func waitForProcessExit(_ uint32, _ time.Duration) error    { return errors.New(
 func removeDirectoryAfterExit(_, _ string, _ int, _ string) error {
 	return errors.New("windows-only operation")
 }
-func publishStableHookRuntime(_, _, _ string) error { return errors.New("windows-only operation") }
-func disableStableHookRuntime(_ string) error       { return errors.New("windows-only operation") }
+func publishStableHookRuntime(_, _, _, _ string) error { return errors.New("windows-only operation") }
+func disableStableHookRuntime(_ string) error          { return errors.New("windows-only operation") }
 
 // These pure helpers keep the transaction package cross-compilable for the
 // repository-wide Linux/macOS test lanes. Production setup is Windows-only,

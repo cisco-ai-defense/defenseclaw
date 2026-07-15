@@ -60,6 +60,39 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	assertNoUnauthorizedWindowsWriter(t, dir)
 }
 
+func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
+	const (
+		accessAllowedObjectACE         = 0x05
+		accessDeniedObjectACE          = 0x06
+		accessAllowedCallbackACE       = 0x09
+		accessDeniedCallbackACE        = 0x0A
+		accessAllowedCallbackObjectACE = 0x0B
+		accessDeniedCallbackObjectACE  = 0x0C
+	)
+
+	for _, tc := range []struct {
+		name    string
+		aceType byte
+		want    bool
+	}{
+		{name: "basic allow", aceType: windows.ACCESS_ALLOWED_ACE_TYPE, want: true},
+		{name: "basic deny", aceType: windows.ACCESS_DENIED_ACE_TYPE, want: true},
+		{name: "object allow", aceType: accessAllowedObjectACE},
+		{name: "object deny", aceType: accessDeniedObjectACE},
+		{name: "callback allow", aceType: accessAllowedCallbackACE},
+		{name: "callback deny", aceType: accessDeniedCallbackACE},
+		{name: "callback object allow", aceType: accessAllowedCallbackObjectACE},
+		{name: "callback object deny", aceType: accessDeniedCallbackObjectACE},
+		{name: "unknown future type", aceType: 0x7F},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSimpleDiscretionaryACE(tc.aceType); got != tc.want {
+				t.Fatalf("isSimpleDiscretionaryACE(0x%x) = %v, want %v", tc.aceType, got, tc.want)
+			}
+		})
+	}
+}
+
 func ownWindowsTestPath(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

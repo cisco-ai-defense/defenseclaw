@@ -22,20 +22,45 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
-// canonicalNativeWindowsInstallRoot returns the native setup's fixed per-user
-// application root. The Known Folder API is authoritative here: environment
-// variables and installer state are attacker-controlled inputs and cannot
-// establish trust in an otherwise arbitrary executable tree.
+// canonicalNativeWindowsInstallRoot returns the native setup's redirected
+// per-user Programs root. The Known Folder API is authoritative here:
+// environment variables and installer state cannot establish trust in an
+// otherwise arbitrary executable tree.
 func canonicalNativeWindowsInstallRoot() string {
-	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
-	if err != nil || strings.TrimSpace(localAppData) == "" {
+	programs, err := winfolders.UserProgramFiles()
+	if err != nil || strings.TrimSpace(programs) == "" {
 		return ""
 	}
-	return filepath.Join(localAppData, "Programs", "DefenseClaw")
+	return filepath.Join(programs, "DefenseClaw")
+}
+
+// canonicalNativeWindowsHookBinary is the stable launcher path native Setup
+// publishes outside both the replaceable install tree and the user data tree.
+// Only this path is authorized by hookruntime to cold-start the exact installed
+// gateway or become a disabled no-op during maintenance.
+func canonicalNativeWindowsHookBinary() string {
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(paths.Launcher)
+}
+
+// canonicalNativeWindowsInstalledHookBinary is the legacy install-tree
+// launcher path emitted by earlier native builds. It remains an owned teardown
+// target, but new registrations use canonicalNativeWindowsHookBinary.
+func canonicalNativeWindowsInstalledHookBinary() string {
+	root := canonicalNativeWindowsInstallRoot()
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(root, "bin", windowsHookBinaryName)
 }
 
 func nativeWindowsPathHasNoReparsePoints(path string) bool {

@@ -36,14 +36,33 @@ import (
 // repo and symlink ~/.codex/config.toml or ~/.claude/settings.json; preserving
 // that filesystem shape is part of the teardown contract.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileWithReplace(path, data, perm, safefile.ReplaceFile)
+	return atomicWriteFileWithPublisher(path, data, perm, atomicFilePublish)
 }
 
+// atomicWriteFileWithReplace preserves the injectable replacement seam used by
+// durability-failure tests. Production writes use atomicFilePublish so Windows
+// can bind private-file validation and publication to the staged file handle.
 func atomicWriteFileWithReplace(
 	path string,
 	data []byte,
 	perm os.FileMode,
 	replace func(string, string) error,
+) error {
+	return atomicWriteFileWithPublisher(
+		path, data, perm,
+		func(source, destination string, _ os.FileInfo, _ os.FileMode) error {
+			return replace(source, destination)
+		},
+	)
+}
+
+type atomicFilePublisher func(string, string, os.FileInfo, os.FileMode) error
+
+func atomicWriteFileWithPublisher(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	publish atomicFilePublisher,
 ) error {
 	writePath, err := resolveAtomicWritePath(path)
 	if err != nil {
@@ -54,12 +73,11 @@ func atomicWriteFileWithReplace(
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
-	// On Windows a previous MoveFileEx(MOVEFILE_WRITE_THROUGH) may have
-	// published these bytes and still reported a late flush failure. Visible
-	// equality cannot prove the directory entry is durable, so retry through a
-	// fresh write-through replacement. POSIX callers retain the metadata-stable
-	// no-op path after their parent-directory fsync succeeds.
-	if runtime.GOOS != "windows" && atomicFileAlreadyMatches(writePath, data, perm) {
+	// Avoid replacing an already-correct config. This is especially important
+	// on Windows, where a replacement is a file-identity transition and must not
+	// churn NTFS metadata. The platform helper validates the effective owner-only
+	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
+	if atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
@@ -73,6 +91,14 @@ func atomicWriteFileWithReplace(
 			tmp.Close()
 			os.Remove(tmpPath)
 			return fmt.Errorf("protect temp file: %w", err)
+		}
+		// ProtectFile must address the file opened by CreateTemp. Verify that
+		// exact handle before placing any sensitive bytes into it so a pathname
+		// swap cannot redirect the protection operation to a different file.
+		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("validate protected temp file: %w", err)
 		}
 	}
 
@@ -91,16 +117,22 @@ func atomicWriteFileWithReplace(
 		os.Remove(tmpPath)
 		return fmt.Errorf("sync temp file: %w", err)
 	}
+	stagedInfo, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("stat temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := replace(tmpPath, writePath); err != nil {
+	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}
-	// MoveFileEx(MOVEFILE_WRITE_THROUGH) supplies the Windows durability
-	// boundary. POSIX rename needs an explicit parent-directory fsync.
+	// The staged file was synced before publication. POSIX rename additionally
+	// needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {
 		directory, err := os.Open(dir)
 		if err != nil {
@@ -126,7 +158,7 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	defer file.Close()
 
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != perm.Perm() {
+	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
 		return false
 	}
 	pathInfo, err := os.Lstat(path)

@@ -3842,7 +3842,8 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // We assert log_user_prompt = false (privacy default; UserPromptSubmit
 // hook captures the prompt text with redaction control) and that the
 // otlp-http endpoint matches the gateway API address. Authentication uses a
-// connector-scoped path token so Codex never receives the master API bearer.
+// connector-scoped Authorization bearer so Codex never receives the master
+// API bearer and the credential never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -3899,8 +3900,8 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if err != nil || scoped == "" {
 		t.Fatalf("LoadOTLPPathToken(codex) = %q, %v", scoped, err)
 	}
-	if !strings.Contains(endpoint, "/otlp/codex/"+scoped+"/v1/logs") {
-		t.Errorf("otlp-http endpoint = %q, want connector-scoped Codex path", endpoint)
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/codex/") {
+		t.Errorf("otlp-http endpoint leaked connector-scoped Codex credential: %q", endpoint)
 	}
 	// protocol = "json" is REQUIRED by codex's deserializer
 	// (codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp). Omitting
@@ -3922,6 +3923,9 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	if _, leaked := headers["x-defenseclaw-token"]; leaked {
 		t.Errorf("Codex OTel headers leaked the general API token: %v", headers)
+	}
+	if got := headers["authorization"]; got != "Bearer "+scoped {
+		t.Errorf("Codex OTel Authorization = %q, want connector-scoped bearer", got)
 	}
 
 	traceExporter, _ := otelBlock["trace_exporter"].(map[string]interface{})
@@ -6668,8 +6672,8 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if err != nil || scoped == "" {
 		t.Fatalf("LoadOTLPPathToken(claudecode) = %q, %v", scoped, err)
 	}
-	if !strings.Contains(endpoint, "/otlp/claudecode/"+scoped) {
-		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want connector-scoped Claude path", endpoint)
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/claudecode/") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT leaked connector-scoped Claude credential: %q", endpoint)
 	}
 	headers, _ := env["OTEL_EXPORTER_OTLP_HEADERS"].(string)
 	if strings.Contains(headers, "x-defenseclaw-token=") || strings.Contains(headers, "test-token-claude-otel") {
@@ -6677,6 +6681,9 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	}
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
+	}
+	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
 	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
@@ -6756,6 +6763,178 @@ func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *test
 	}
 }
 
+func TestClaudeCode_TeardownCleansManagedStateFromStalePristineSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-stale-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	managed, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupPath := managedFileBackupPath(dir, c.Name(), "settings.json")
+	backup, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce an upgrade from a predecessor that captured an existing
+	// DefenseClaw registration as pristine while recording the same bytes as
+	// its post-Setup image. The exact restore must not resurrect that state.
+	backup.Existed = true
+	backup.Mode = 0o600
+	backup.PristineBytes = append([]byte(nil), managed...)
+	backup.PristineSHA256 = sha256Hex(managed)
+	if err := writeManagedFileBackup(backupPath, backup); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown with stale pristine snapshot: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after stale pristine cleanup: %v", err)
+	}
+}
+
+func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	oldOpts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "old-api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
+		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + strings.Repeat("c", 64)
+	operatorMixedHeaders := "x-defenseclaw-source=claudecode,x-operator-trace=keep"
+	pristine := map[string]interface{}{
+		"autoUpdatesChannel": "latest",
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_ENDPOINT":     oldManaged["OTEL_EXPORTER_OTLP_ENDPOINT"],
+			"OTEL_EXPORTER_OTLP_HEADERS":      oldDefenseClawHeaders,
+			"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+			"OTEL_RESOURCE_ATTRIBUTES":        oldManaged["OTEL_RESOURCE_ATTRIBUTES"],
+			"OTEL_LOGS_EXPORTER":              "console",
+			"OTEL_SERVICE_NAME":               "operator-claude",
+			"PATH":                            "/operator/bin",
+		},
+	}
+	data, err := json.MarshalIndent(pristine, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce mixed-connector repair after an older Claude registration lost
+	// its restore metadata: the new Setup captures the old DefenseClaw env as
+	// pristine, then writes a new connector-scoped endpoint over it.
+	newOpts := oldOpts
+	newOpts.APIToken = "new-api-token"
+	newOpts.OTLPPathToken = strings.Repeat("b", 64)
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), newOpts); err != nil {
+		t.Fatalf("Setup over stale Claude env: %v", err)
+	}
+	if err := c.Teardown(context.Background(), newOpts); err != nil {
+		t.Fatalf("Teardown after mixed-connector repair: %v", err)
+	}
+	// Teardown discards exact ownership metadata after its internal check. This
+	// second verification is the installer's independent reconciliation gate.
+	if err := c.VerifyClean(newOpts); err != nil {
+		t.Fatalf("installer VerifyClean after teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := map[string]interface{}{}
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored["autoUpdatesChannel"] != "latest" {
+		t.Fatalf("unrelated top-level setting changed: %v", restored)
+	}
+	env, ok := restored["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("operator env missing after teardown: %v", restored)
+	}
+	for key, want := range map[string]interface{}{
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+		"OTEL_LOGS_EXPORTER":              "console",
+		"OTEL_SERVICE_NAME":               "operator-claude",
+		"PATH":                            "/operator/bin",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("env[%s] = %v, want preserved %v", key, got, want)
+		}
+	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
+		if _, present := env[key]; present {
+			t.Errorf("stale DefenseClaw env[%s] survived teardown: %v", key, env)
+		}
+	}
+}
+
+func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	pristine := []byte("{\n\t\"operator\":true, \"env\" : { \"PATH\" : \"/custom/bin\" }\n}\n")
+	if err := os.WriteFile(settingsPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-exact-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, pristine) {
+		t.Fatalf("exact pristine bytes changed:\n got: %q\nwant: %q", got, pristine)
+	}
+}
+
 func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -6771,19 +6950,49 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token",
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		OTLPPathToken: strings.Repeat("a", 64),
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings before stale endpoint injection: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings before stale endpoint injection: %v", err)
+	}
+	env := settings["env"].(map[string]interface{})
+	staleOpts := opts
+	staleOpts.OTLPPathToken = strings.Repeat("b", 64)
+	staleEnv := buildClaudeCodeOtelEnv(staleOpts)
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	} {
+		env[key] = staleEnv[key]
+	}
+	data, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings with stale endpoints: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatalf("write settings with stale endpoints: %v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
 		t.Fatalf("remove backup: %v", err)
 	}
 	discardManagedFileBackup(dir, c.Name(), "settings.json")
 
+	// Without exact backup metadata, teardown must still recognize stale
+	// DefenseClaw-scoped endpoints while leaving unrelated operator env untouched.
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown without backup: %v", err)
 	}
@@ -6791,18 +7000,18 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 		t.Fatalf("VerifyClean after backupless teardown: %v", err)
 	}
 
-	data, err := os.ReadFile(settingsPath)
+	data, err = os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("read settings: %v", err)
 	}
-	var settings map[string]interface{}
+	settings = map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
 	if hooks, ok := settings["hooks"].(map[string]interface{}); ok && len(hooks) > 0 {
 		t.Fatalf("DefenseClaw hooks survived teardown without backup: %v", hooks)
 	}
-	env, _ := settings["env"].(map[string]interface{})
+	env, _ = settings["env"].(map[string]interface{})
 	if env["PATH"] != "/usr/bin" {
 		t.Fatalf("non-OTel env key was not preserved: %v", env)
 	}

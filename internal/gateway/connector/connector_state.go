@@ -214,10 +214,35 @@ func LoadHookContractLockEntry(dataDir, connectorName string) HookContractLockEn
 	if lock.Connectors == nil {
 		return HookContractLockEntry{}
 	}
-	return lock.Connectors[normalizeConnectorName(connectorName)]
+	connectorName = normalizeConnectorName(connectorName)
+	entry := lock.Connectors[connectorName]
+	if runtime.GOOS == "windows" && connectorName == "codex" {
+		if _, ok := supersedingCodexSetupSelection(dataDir, entry); ok {
+			// An explicit setup action selected and protected newer executable
+			// evidence. Treat the previous lock as absent for this one repair so
+			// the normal compatibility-drift gate does not block the operation
+			// whose purpose is to refresh that lock. The old bytes remain on disk
+			// until Setup succeeds and SaveFreshHookContractLockEntry atomically
+			// replaces only the Codex entry.
+			return HookContractLockEntry{}
+		}
+	}
+	return entry
 }
 
 func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, false)
+}
+
+// SaveFreshHookContractLockEntry persists the same contract evidence as
+// SaveHookContractLockEntry but forces an atomic rewrite when the evidence is
+// otherwise unchanged. Gateway boot uses this narrow variant as its durable
+// readiness acknowledgement; ordinary callers retain idempotent no-op saves.
+func SaveFreshHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
+	return saveHookContractLockEntry(dataDir, entry, true)
+}
+
+func saveHookContractLockEntry(dataDir string, entry HookContractLockEntry, forceRefresh bool) error {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
 	}
@@ -294,13 +319,21 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 				entry.UpdatedAt = previous.UpdatedAt
 			}
 		}
-		if !entryChanged && !lockChanged {
+		if !entryChanged && !lockChanged && !forceRefresh {
 			return nil
 		}
-		if entry.UpdatedAt == "" {
-			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		nowTime := time.Now().UTC()
+		now := nowTime.Format(time.RFC3339)
+		if forceRefresh {
+			now = nowTime.Format(time.RFC3339Nano)
+			if now == entry.UpdatedAt {
+				now = nowTime.Add(time.Nanosecond).Format(time.RFC3339Nano)
+			}
 		}
-		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if entry.UpdatedAt == "" || forceRefresh {
+			entry.UpdatedAt = now
+		}
+		lock.UpdatedAt = now
 		lock.Connectors[entry.Connector] = entry
 		data, err := json.MarshalIndent(lock, "", "  ")
 		if err != nil {
@@ -685,7 +718,54 @@ func loadProtectedCodexContractEntry(dataDir string) (HookContractLockEntry, boo
 	if !ok {
 		return HookContractLockEntry{}, false
 	}
+	if _, supersedes := supersedingCodexSetupSelection(dataDir, entry); supersedes {
+		// The short-lived receipt is explicit repair authority, not discovery
+		// cache authority. Returning exists=false makes the existing callers use
+		// that receipt and lets policy validation re-check its exact path, ACL,
+		// version, and digest before any hook registration is changed.
+		return HookContractLockEntry{}, false
+	}
 	return entry, true
+}
+
+// supersedingCodexSetupSelection returns a fresh explicit setup receipt only
+// when it can safely replace the existing Windows Codex lock. Invalid or
+// expired receipts are rejected by loadSetupAgentSelection. A valid lock keeps
+// authority unless the receipt is newer, or was written in the same timestamp
+// tick with different evidence. Matching evidence never displaces a freshly
+// persisted lock, which hands authority back to hook_contract_lock.json as soon
+// as Setup succeeds.
+func supersedingCodexSetupSelection(
+	dataDir string,
+	entry HookContractLockEntry,
+) (agentSelectionEvidence, bool) {
+	selection, ok := loadSetupAgentSelection(dataDir, "codex")
+	if !ok {
+		return agentSelectionEvidence{}, false
+	}
+	if !validCodexAgentExecutableEvidence(entry) {
+		return selection, true
+	}
+
+	selectedAt, selectedErr := time.Parse(time.RFC3339, selection.SelectedAt)
+	lockedAt, lockedErr := time.Parse(time.RFC3339, entry.UpdatedAt)
+	if selectedErr != nil {
+		return agentSelectionEvidence{}, false
+	}
+	if lockedErr != nil || selectedAt.After(lockedAt) {
+		return selection, true
+	}
+	if selectedAt.Equal(lockedAt) && !codexSelectionMatchesLock(selection, entry) {
+		return selection, true
+	}
+	return agentSelectionEvidence{}, false
+}
+
+func codexSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
+	return strings.TrimSpace(selection.RawVersion) == strings.TrimSpace(entry.RawAgentVersion) &&
+		strings.TrimSpace(selection.NormalizedVersion) == strings.TrimSpace(entry.NormalizedAgentVersion) &&
+		sameCodexExecutablePath(selection.Executable, entry.AgentExecutable) &&
+		strings.EqualFold(selection.SHA256, entry.AgentExecutableSHA256)
 }
 
 func validCodexAgentExecutableEvidence(entry HookContractLockEntry) bool {

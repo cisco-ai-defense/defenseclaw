@@ -29,7 +29,7 @@ jobs:
   windows-go:
     name: Windows x64 Go suite
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -61,11 +61,25 @@ jobs:
             'TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations',
             'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
             'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsReparsePointDirectory',
+            'TestHookAPITokenRejectsSymlinkedDataDirParent',
+            'TestLoadOTLPPathToken_RejectsUnsafeFiles',
             'TestLoadOTLPPathTokenWindowsRejectsWritableAncestor',
             'TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor'
           )
           $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
           Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
+      - name: Stress native single-flight and executable lifecycle contracts
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=10', '-run', '^TestRunScan_SingleFlight$', './internal/inventory'
+          ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-inventory-singleflight-stress.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
@@ -76,8 +90,7 @@ jobs:
           # private-DACL, and supported-connector coverage runs in this job.
           $windowsInapplicable = '^(' + (@(
             'TestAtomicWriteFile_PreservesSymlinkedDotfile',
-            'TestOpenHandsHookScript_BlockExitsTwo',
-            'TestLoadOTLPPathToken_RejectsUnsafeFiles'
+            'TestOpenHandsHookScript_BlockExitsTwo'
           ) -join '|') + ')$'
           # Keep package execution serial on the four-core hosted runner so
           # bounded discovery tests are not starved by concurrent packages.
@@ -88,6 +101,9 @@ jobs:
           $env:CGO_ENABLED = '0'
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
+          $packageVersion = Get-WorkspacePackageVersion
+          Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
+          Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -121,6 +137,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('py-' + $env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD)
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Sync locked Python environment
@@ -200,6 +217,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Parse every PowerShell script
@@ -214,6 +232,8 @@ jobs:
           if ($failures.Count) { throw ($failures -join "`n") }
       - name: Parser, mock timeout, redaction, isolation, and workflow contracts
         run: ./scripts/live-connector-e2e/test-windows.ps1
+      - name: Native Setup bootstrap delegation and offline contract
+        run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -245,6 +265,7 @@ jobs:
           cache: true
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Build release-shaped Windows x64 zip and Python wheel
@@ -252,7 +273,13 @@ jobs:
       - name: Build unsigned native Windows setup executable
         run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Verify native setup wizard responsiveness
-        run: ./scripts/test-windows-setup-wizard.ps1 -SetupPath (Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe') -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-smoke')
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode wizard-smoke
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-standard-user')
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 600
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -291,7 +318,13 @@ jobs:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
       - name: Native Setup EXE install, CLI/TUI smoke, repair, and uninstall
-        run: ./scripts/windows-native-ci.ps1 -Operation setup-acceptance -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 4200
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -326,6 +359,7 @@ jobs:
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -333,7 +367,14 @@ jobs:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
       - name: Required setup, allow/block, audit, telemetry, timeout, and teardown contract
-        run: ./scripts/windows-native-ci.ps1 -Operation contract -Connector $env:CONNECTOR -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode contract
+          -Connector $env:CONNECTOR
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 1800
       - name: Upload deterministic contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

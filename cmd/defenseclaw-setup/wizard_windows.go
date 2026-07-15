@@ -6,26 +6,38 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
 const (
 	setupWindowClass = "DefenseClawSetupWizard"
 
-	wmCreate  = 0x0001
-	wmDestroy = 0x0002
-	wmClose   = 0x0010
-	wmCommand = 0x0111
-	wmSetFont = 0x0030
-	wmUser    = 0x0400
-	wmDone    = wmUser + 1
+	wmCreate          = 0x0001
+	wmDestroy         = 0x0002
+	wmClose           = 0x0010
+	wmQueryEndSession = 0x0011
+	wmEndSession      = 0x0016
+	wmCommand         = 0x0111
+	wmSetFont         = 0x0030
+	wmUser            = 0x0400
+	wmApp             = 0x8000
+	dmGetDefID        = wmUser
+	dmSetDefID        = wmUser + 1
+	dcHasDefID        = 0x534B
+	wmDone            = wmApp + 1
 
 	wsOverlapped  = 0x00000000
 	wsCaption     = 0x00C00000
@@ -36,6 +48,7 @@ const (
 	wsTabStop     = 0x00010000
 	wsGroup       = 0x00020000
 	wsBorder      = 0x00800000
+	wsVScroll     = 0x00200000
 
 	wsExClientEdge    = 0x00000200
 	wsExControlParent = 0x00010000
@@ -43,6 +56,9 @@ const (
 	ssLeft          = 0x00000000
 	esReadOnly      = 0x0800
 	esAutoHScroll   = 0x0080
+	esAutoVScroll   = 0x0040
+	esMultiline     = 0x0004
+	esWantReturn    = 0x1000
 	bsPushButton    = 0x00000000
 	bsDefPushButton = 0x00000001
 	bsAutoCheckBox  = 0x00000003
@@ -70,17 +86,18 @@ const (
 
 	pbmSetMarquee = wmUser + 10
 
+	idPrimary     = 1
+	idCancel      = 2
 	idConnector   = 1001
 	idMode        = 1002
 	idStart       = 1003
 	idDeleteData  = 1004
-	idPrimary     = 1005
-	idCancel      = 1006
 	idOpenTerm    = 1007
 	idProgress    = 1008
 	idDescription = 1009
 	idPath        = 1010
 	idHeading     = 1011
+	idOpenLog     = 1012
 )
 
 var (
@@ -90,23 +107,27 @@ var (
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 	comctl32 = windows.NewLazySystemDLL("comctl32.dll")
 
-	procRegisterClassEx  = user32.NewProc("RegisterClassExW")
-	procCreateWindowEx   = user32.NewProc("CreateWindowExW")
-	procDefWindowProc    = user32.NewProc("DefWindowProcW")
-	procDestroyWindow    = user32.NewProc("DestroyWindow")
-	procDispatchMessage  = user32.NewProc("DispatchMessageW")
-	procEnableWindow     = user32.NewProc("EnableWindow")
-	procGetMessage       = user32.NewProc("GetMessageW")
-	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
-	procLoadCursor       = user32.NewProc("LoadCursorW")
-	procMessageBox       = user32.NewProc("MessageBoxW")
-	procPostMessage      = user32.NewProc("PostMessageW")
-	procSendMessage      = user32.NewProc("SendMessageW")
-	procSetWindowText    = user32.NewProc("SetWindowTextW")
-	procSetWindowPos     = user32.NewProc("SetWindowPos")
-	procShowWindow       = user32.NewProc("ShowWindow")
-	procTranslateMessage = user32.NewProc("TranslateMessage")
-	procUpdateWindow     = user32.NewProc("UpdateWindow")
+	procRegisterClassEx      = user32.NewProc("RegisterClassExW")
+	procCreateWindowEx       = user32.NewProc("CreateWindowExW")
+	procDefWindowProc        = user32.NewProc("DefWindowProcW")
+	procDestroyWindow        = user32.NewProc("DestroyWindow")
+	procDispatchMessage      = user32.NewProc("DispatchMessageW")
+	procEnableWindow         = user32.NewProc("EnableWindow")
+	procGetMessage           = user32.NewProc("GetMessageW")
+	procGetSystemMetrics     = user32.NewProc("GetSystemMetrics")
+	procIsDialogMessage      = user32.NewProc("IsDialogMessageW")
+	procLoadCursor           = user32.NewProc("LoadCursorW")
+	procMessageBox           = user32.NewProc("MessageBoxW")
+	procPostMessage          = user32.NewProc("PostMessageW")
+	procSendMessage          = user32.NewProc("SendMessageW")
+	procSetWindowText        = user32.NewProc("SetWindowTextW")
+	procSetWindowPos         = user32.NewProc("SetWindowPos")
+	procSetFocus             = user32.NewProc("SetFocus")
+	procShowWindow           = user32.NewProc("ShowWindow")
+	procShutdownBlockCreate  = user32.NewProc("ShutdownBlockReasonCreate")
+	procShutdownBlockDestroy = user32.NewProc("ShutdownBlockReasonDestroy")
+	procTranslateMessage     = user32.NewProc("TranslateMessage")
+	procUpdateWindow         = user32.NewProc("UpdateWindow")
 
 	procGetModuleHandle    = kernel32.NewProc("GetModuleHandleW")
 	procGetSystemDirectory = kernel32.NewProc("GetSystemDirectoryW")
@@ -164,12 +185,16 @@ type setupWizard struct {
 	primary        uintptr
 	cancel         uintptr
 	openTerm       uintptr
+	openLog        uintptr
+	logPath        string
 
-	running bool
-	done    bool
-	code    int
-	err     error
-	mu      sync.Mutex
+	running         bool
+	done            bool
+	cancelRequested bool
+	operationCancel context.CancelFunc
+	code            int
+	err             error
+	mu              sync.Mutex
 }
 
 type wizardChoice struct {
@@ -256,6 +281,11 @@ func runInteractiveWizard(opts options, installRoot, dataRoot string) (int, erro
 	centerWindow(hwnd, 560, 420)
 	procShowWindow.Call(hwnd, swShow)
 	procUpdateWindow.Call(hwnd)
+	if opts.Action == "install" {
+		procSetFocus.Call(wiz.connector)
+	} else {
+		procSetFocus.Call(wiz.primary)
+	}
 
 	var message msg
 	for {
@@ -269,6 +299,10 @@ func runInteractiveWizard(opts options, installRoot, dataRoot string) (int, erro
 			wiz.mu.Unlock()
 			return code, resultErr
 		default:
+			handled, _, _ := procIsDialogMessage.Call(hwnd, uintptr(unsafe.Pointer(&message)))
+			if handled != 0 {
+				continue
+			}
 			procTranslateMessage.Call(uintptr(unsafe.Pointer(&message)))
 			procDispatchMessage.Call(uintptr(unsafe.Pointer(&message)))
 		}
@@ -301,6 +335,13 @@ func registerSetupWindowClass() error {
 func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 	wiz := wizardFor(hwnd)
 	switch message {
+	case dmGetDefID:
+		return uintptr(dcHasDefID<<16 | idPrimary)
+	case dmSetDefID:
+		// The wizard has one stable default action. IsDialogMessageW still sends
+		// focus/navigation updates, but cannot replace that action with a child
+		// control ID that has no command handler.
+		return 1
 	case wmCommand:
 		if wiz != nil {
 			wiz.handleCommand(lowWord(uint32(wParam)), highWord(uint32(wParam)))
@@ -308,10 +349,23 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 		}
 	case wmClose:
 		if wiz != nil && wiz.running {
-			messageBox(hwnd, "Setup is still running. Wait for it to finish before closing this window.", "DefenseClaw Setup", 0x40)
+			wiz.requestCancellation()
 			return 0
 		}
 		procDestroyWindow.Call(hwnd)
+		return 0
+	case wmQueryEndSession:
+		if wiz != nil && wiz.running {
+			// Request a bounded shutdown delay while the active operation reaches a
+			// durable boundary. Windows may still end a critical session; the
+			// transaction journal then drives idempotent recovery on the next run.
+			setShutdownBlockReason(hwnd, "DefenseClaw Setup is committing an installation transaction.")
+			return 0
+		}
+		return 1
+	case wmEndSession:
+		// No unbounded cleanup belongs in the session-ending callback. A forced
+		// end is recovered from the fsynced transaction journal on the next run.
 		return 0
 	case wmDone:
 		if wiz != nil {
@@ -319,6 +373,7 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 			return 0
 		}
 	case wmDestroy:
+		procShutdownBlockDestroy.Call(hwnd)
 		wizardsMu.Lock()
 		delete(wizards, hwnd)
 		wizardsMu.Unlock()
@@ -332,20 +387,21 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 func (w *setupWizard) createControls() error {
 	font, _, _ := procGetStockObject.Call(defaultGUIFont)
 	w.heading = w.control("STATIC", "", wsChild|wsVisible|ssLeft, 24, 22, 500, 26, idHeading)
-	w.description = w.control("STATIC", "", wsChild|wsVisible|ssLeft, 24, 58, 500, 78, idDescription)
-	w.pathLabel = w.control("STATIC", "Install location", wsChild|wsVisible|ssLeft, 24, 130, 180, 18, 0)
-	w.pathEdit = w.controlEx(wsExClientEdge, "EDIT", w.installRoot, wsChild|wsVisible|wsBorder|esReadOnly|esAutoHScroll, 24, 150, 500, 24, idPath)
-	w.connectorLabel = w.control("STATIC", "Connector", wsChild|wsVisible|ssLeft, 24, 178, 180, 18, 0)
+	w.description = w.controlEx(wsExClientEdge, "EDIT", "", wsChild|wsVisible|wsTabStop|wsVScroll|esReadOnly|esMultiline|esAutoVScroll|esWantReturn, 24, 58, 500, 70, idDescription)
+	w.pathLabel = w.control("STATIC", "&Install location", wsChild|wsVisible|ssLeft, 24, 130, 180, 18, 0)
+	w.pathEdit = w.controlEx(wsExClientEdge, "EDIT", w.installRoot, wsChild|wsVisible|wsTabStop|wsBorder|esReadOnly|esAutoHScroll, 24, 150, 500, 24, idPath)
+	w.connectorLabel = w.control("STATIC", "&Connector", wsChild|wsVisible|ssLeft, 24, 178, 180, 18, 0)
 	w.connector = w.control("COMBOBOX", "", wsChild|wsVisible|wsTabStop|cbsDropDownList|cbsHasStrings, 24, 198, 230, 160, idConnector)
-	w.modeLabel = w.control("STATIC", "Mode", wsChild|wsVisible|ssLeft, 294, 178, 180, 18, 0)
+	w.modeLabel = w.control("STATIC", "&Mode", wsChild|wsVisible|ssLeft, 294, 178, 180, 18, 0)
 	w.mode = w.control("COMBOBOX", "", wsChild|wsVisible|wsTabStop|cbsDropDownList|cbsHasStrings, 294, 198, 230, 160, idMode)
-	w.start = w.control("BUTTON", "Start gateway now and at sign-in", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 300, 24, idStart)
-	w.deleteData = w.control("BUTTON", "Delete user data under %USERPROFILE%\\.defenseclaw", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 430, 24, idDeleteData)
+	w.start = w.control("BUTTON", "&Start gateway now and at sign-in", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 300, 24, idStart)
+	w.deleteData = w.control("BUTTON", "&Delete user data under %USERPROFILE%\\.defenseclaw", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 430, 24, idDeleteData)
 	w.progress = w.control("msctls_progress32", "", wsChild|pbsMarquee, 24, 286, 500, 20, idProgress)
 	w.primary = w.control("BUTTON", "", wsChild|wsVisible|wsTabStop|wsGroup|bsDefPushButton, 300, 334, 100, 30, idPrimary)
-	w.openTerm = w.control("BUTTON", "Open Terminal", wsChild|wsTabStop|bsPushButton, 284, 334, 116, 30, idOpenTerm)
-	w.cancel = w.control("BUTTON", "Cancel", wsChild|wsVisible|wsTabStop|bsPushButton, 416, 334, 100, 30, idCancel)
-	for _, hwnd := range []uintptr{w.heading, w.description, w.pathLabel, w.pathEdit, w.connectorLabel, w.connector, w.modeLabel, w.mode, w.start, w.deleteData, w.progress, w.primary, w.openTerm, w.cancel} {
+	w.openTerm = w.control("BUTTON", "Open &Terminal", wsChild|wsTabStop|bsPushButton, 284, 334, 116, 30, idOpenTerm)
+	w.openLog = w.control("BUTTON", "Open &Log", wsChild|wsTabStop|bsPushButton, 284, 334, 116, 30, idOpenLog)
+	w.cancel = w.control("BUTTON", "&Cancel", wsChild|wsVisible|wsTabStop|bsPushButton, 416, 334, 100, 30, idCancel)
+	for _, hwnd := range []uintptr{w.heading, w.description, w.pathLabel, w.pathEdit, w.connectorLabel, w.connector, w.modeLabel, w.mode, w.start, w.deleteData, w.progress, w.primary, w.openTerm, w.openLog, w.cancel} {
 		if hwnd == 0 {
 			return fmt.Errorf("create setup wizard control failed")
 		}
@@ -426,6 +482,7 @@ func (w *setupWizard) showOptions() {
 	}
 	w.show(w.progress, false)
 	w.show(w.openTerm, false)
+	w.show(w.openLog, false)
 	w.show(w.primary, true)
 	w.show(w.cancel, true)
 }
@@ -482,7 +539,9 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 			w.startAction()
 		}
 	case idCancel:
-		if !w.running {
+		if w.running {
+			w.requestCancellation()
+		} else {
 			w.mu.Lock()
 			w.code = userExitCode
 			w.mu.Unlock()
@@ -490,6 +549,8 @@ func (w *setupWizard) handleCommand(id, notification uint16) {
 		}
 	case idOpenTerm:
 		w.openTerminal()
+	case idOpenLog:
+		w.openSetupLog()
 	}
 }
 
@@ -506,6 +567,10 @@ func (w *setupWizard) syncGatewayChoice() {
 
 func (w *setupWizard) startAction() {
 	w.running = true
+	operationContext, operationCancel := context.WithCancel(context.Background())
+	w.operationCancel = operationCancel
+	w.cancelRequested = false
+	setShutdownBlockReason(w.hwnd, "DefenseClaw Setup is committing an installation transaction.")
 	w.opts.Quiet = true
 	if w.opts.Action == "uninstall" {
 		w.opts.DeleteUserData = checked(w.deleteData)
@@ -523,46 +588,102 @@ func (w *setupWizard) startAction() {
 	}
 	setText(w.heading, "Working")
 	w.enableInputs(false)
+	// Keep cancellation available while the worker advances to a rollback-safe
+	// journal boundary. The window remains open until rollback has completed.
+	procEnableWindow.Call(w.cancel, 1)
 	w.show(w.progress, true)
 	procSendMessage.Call(w.progress, pbmSetMarquee, 1, 30)
-	go func(opts options) {
+	go func(ctx context.Context, cancel context.CancelFunc, opts options) {
+		defer cancel()
 		var code int
 		var err error
 		if opts.Action == "uninstall" {
-			code, err = runUninstall(opts, w.installRoot, w.dataRoot)
+			code, err = runUninstallContext(ctx, opts, w.installRoot, w.dataRoot)
 		} else {
-			code, err = runInstall(opts, w.installRoot, w.dataRoot)
+			code, err = runInstallContext(ctx, opts, w.installRoot, w.dataRoot)
 		}
 		w.mu.Lock()
 		w.code = code
 		w.err = err
 		w.mu.Unlock()
 		procPostMessage.Call(w.hwnd, wmDone, 0, 0)
-	}(w.opts)
+	}(operationContext, operationCancel, w.opts)
+}
+
+func (w *setupWizard) requestCancellation() {
+	const (
+		mbYesNo        = 0x00000004
+		mbIconQuestion = 0x00000020
+		mbDefButton2   = 0x00000100
+		idYes          = 6
+	)
+	w.requestCancellationWithPrompt(func() bool {
+		return messageBoxResult(
+			w.hwnd,
+			"Cancel Setup at the next safe point?\r\n\r\nUncommitted changes will be rolled back before this window closes. If the transaction is already committed, Setup must finish its durable recovery steps.",
+			"Cancel DefenseClaw Setup",
+			mbYesNo|mbIconQuestion|mbDefButton2,
+		) == idYes
+	})
+}
+
+func (w *setupWizard) requestCancellationWithPrompt(confirm func() bool) {
+	if !w.running || w.cancelRequested {
+		return
+	}
+	if !confirm() || !w.running || w.cancelRequested {
+		// MessageBoxW runs a nested message loop. wmDone may have completed the
+		// operation while the confirmation was open, so re-check UI-thread state
+		// before changing the completed wizard or calling its cleared cancel func.
+		return
+	}
+	w.cancelRequested = true
+	setText(w.heading, "Cancelling")
+	setText(w.description, "Stopping the active child process tree and rolling back at the next safe transaction boundary...")
+	procEnableWindow.Call(w.cancel, 0)
+	if w.operationCancel != nil {
+		w.operationCancel()
+	}
 }
 
 func (w *setupWizard) finish() {
 	w.running = false
+	w.operationCancel = nil
+	procShutdownBlockDestroy.Call(w.hwnd)
 	w.done = true
 	w.enableInputs(false)
 	w.show(w.progress, false)
 	w.show(w.cancel, false)
-	w.show(w.openTerm, w.opts.Action != "uninstall")
+	w.move(w.primary, 416, 334, 100, 30)
 	setText(w.primary, "Finish")
 	procEnableWindow.Call(w.primary, 1)
 	w.mu.Lock()
 	code, resultErr := w.code, w.err
 	w.mu.Unlock()
+	logPath, logErr := writeWizardLog(w.opts.Action, code, resultErr)
+	if logErr == nil {
+		w.logPath = logPath
+	}
 	if resultErr != nil {
-		setText(w.heading, "Setup could not finish")
-		message := fmt.Sprintf("%v", resultErr)
-		if code == retryRequiredCode {
-			message += "\r\n\r\nClose running DefenseClaw terminals and run setup again."
+		if wizardCancellationCompleted(code, resultErr) {
+			setText(w.heading, "Setup was cancelled")
+			setText(w.description, "The operation was cancelled and every uncommitted change was rolled back. The private setup log records the final durable transaction state.")
+			w.show(w.openTerm, false)
+			w.show(w.openLog, w.logPath != "")
+			procEnableWindow.Call(w.openLog, boolToUintptr(w.logPath != ""))
+			return
 		}
+		setText(w.heading, "Setup could not finish")
+		message := wizardFailureDescription(code, resultErr, w.logPath, logErr)
 		setText(w.description, message)
 		w.show(w.openTerm, false)
+		w.show(w.openLog, w.logPath != "")
+		procEnableWindow.Call(w.openLog, boolToUintptr(w.logPath != ""))
 		return
 	}
+	w.show(w.openLog, false)
+	w.show(w.openTerm, w.opts.Action != "uninstall")
+	procEnableWindow.Call(w.openTerm, boolToUintptr(w.opts.Action != "uninstall"))
 	switch w.opts.Action {
 	case "uninstall":
 		setText(w.heading, "DefenseClaw was removed")
@@ -575,6 +696,10 @@ func (w *setupWizard) finish() {
 		setText(w.heading, "DefenseClaw is installed")
 		setText(w.description, wizardCompletionDescription(w.opts.Connector))
 	}
+}
+
+func wizardCancellationCompleted(code int, err error) bool {
+	return code == userExitCode && errors.Is(err, errSetupCancelled)
 }
 
 func wizardCompletionDescription(connector string) string {
@@ -590,9 +715,13 @@ func wizardCompletionDescription(connector string) string {
 }
 
 func (w *setupWizard) enableInputs(enabled bool) {
-	for _, hwnd := range []uintptr{w.pathEdit, w.connector, w.mode, w.start, w.deleteData, w.primary, w.cancel} {
+	for _, hwnd := range []uintptr{w.pathEdit, w.connector, w.mode, w.start, w.deleteData, w.primary, w.cancel, w.openTerm, w.openLog} {
 		procEnableWindow.Call(hwnd, boolToUintptr(enabled))
 	}
+}
+
+func (w *setupWizard) move(hwnd uintptr, x, y, width, height int32) {
+	procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0x0004)
 }
 
 func (w *setupWizard) show(hwnd uintptr, show bool) {
@@ -605,14 +734,15 @@ func (w *setupWizard) show(hwnd uintptr, show bool) {
 
 func (w *setupWizard) openTerminal() {
 	commandDir := filepath.Join(w.installRoot, "bin")
+	launcher := filepath.Join(commandDir, "defenseclaw.exe")
 	powerShell, err := systemPowerShellPath()
 	if err != nil {
-		messageBox(w.hwnd, "Setup could not locate the system PowerShell. Open a terminal and run defenseclaw init, then defenseclaw tui.", "DefenseClaw Setup", 0x30)
+		messageBox(w.hwnd, "Setup could not locate the system PowerShell. Open a new terminal and run defenseclaw.", "DefenseClaw Setup", 0x30)
 		return
 	}
 	verb := windows.StringToUTF16Ptr("open")
 	file := windows.StringToUTF16Ptr(powerShell)
-	params := windows.StringToUTF16Ptr("-NoExit")
+	params := windows.StringToUTF16Ptr(terminalPowerShellParams(launcher))
 	dir := windows.StringToUTF16Ptr(commandDir)
 	ret, _, _ := procShellExecute.Call(w.hwnd, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(file)), uintptr(unsafe.Pointer(params)), uintptr(unsafe.Pointer(dir)), swShowNormal)
 	runtime.KeepAlive(verb)
@@ -620,8 +750,91 @@ func (w *setupWizard) openTerminal() {
 	runtime.KeepAlive(params)
 	runtime.KeepAlive(dir)
 	if ret <= 32 {
-		messageBox(w.hwnd, "Setup could not open PowerShell. Open a terminal and run defenseclaw init, then defenseclaw tui.", "DefenseClaw Setup", 0x30)
+		messageBox(w.hwnd, "Setup could not open PowerShell. Open a new terminal and run defenseclaw.", "DefenseClaw Setup", 0x30)
 	}
+}
+
+func terminalPowerShellParams(launcher string) string {
+	return "-NoExit -NoProfile -Command \"& '" + strings.ReplaceAll(launcher, "'", "''") + "'\""
+}
+
+func (w *setupWizard) openSetupLog() {
+	if w.logPath == "" {
+		return
+	}
+	verb := windows.StringToUTF16Ptr("open")
+	file := windows.StringToUTF16Ptr(w.logPath)
+	ret, _, _ := procShellExecute.Call(
+		w.hwnd,
+		uintptr(unsafe.Pointer(verb)),
+		uintptr(unsafe.Pointer(file)),
+		0,
+		0,
+		swShowNormal,
+	)
+	runtime.KeepAlive(verb)
+	runtime.KeepAlive(file)
+	if ret <= 32 {
+		messageBox(w.hwnd, "Setup could not open the log. Copy the log path from the error details and open it manually.", "DefenseClaw Setup", 0x30)
+	}
+}
+
+func setShutdownBlockReason(hwnd uintptr, reason string) {
+	value := windows.StringToUTF16Ptr(reason)
+	procShutdownBlockCreate.Call(hwnd, uintptr(unsafe.Pointer(value)))
+	runtime.KeepAlive(value)
+}
+
+func writeWizardLog(action string, code int, resultErr error) (string, error) {
+	root, err := defaultTransactionRoot()
+	if err != nil {
+		return "", err
+	}
+	phase := "none"
+	journal, journalErr := readSetupJournal(journalPaths(root).Journal)
+	if journalErr != nil {
+		phase = "unreadable: " + boundedReconciliationMessage(journalErr.Error())
+	} else if journal != nil {
+		phase = journal.Phase
+	}
+	result := "success"
+	detail := "none"
+	if resultErr != nil {
+		result = "failure"
+		detail = resultErr.Error()
+	}
+	contents := fmt.Sprintf(
+		"DefenseClaw Setup\r\nTime (UTC): %s\r\nProcess: %d\r\nAction: %s\r\nResult: %s\r\nExit code: %d\r\nTransaction journal: %s\r\n\r\n%s\r\n",
+		time.Now().UTC().Format(time.RFC3339),
+		os.Getpid(),
+		action,
+		result,
+		code,
+		phase,
+		detail,
+	)
+	path := filepath.Join(root, "setup.log")
+	if err := safefile.WritePrivate(path, []byte(contents)); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func wizardFailureDescription(code int, resultErr error, logPath string, logErr error) string {
+	state := "Any committed file transition is recorded in the durable setup journal and will be recovered automatically when Setup runs again."
+	if strings.Contains(resultErr.Error(), "core installation completed") || strings.Contains(resultErr.Error(), "core uninstall completed") {
+		state = "The core product transaction completed; only the connector reconciliation named below remains pending."
+	}
+	message := fmt.Sprintf("Exit code: %d\r\n%s\r\n\r\n%v", code, state, resultErr)
+	if code == retryRequiredCode {
+		message += "\r\n\r\nClose running DefenseClaw or agent terminals, correct the reported condition, and run Setup again."
+	}
+	if logPath != "" {
+		message += "\r\n\r\nLog: " + logPath
+	} else if logErr != nil {
+		message += "\r\n\r\nThe private setup log could not be written: " + logErr.Error()
+	}
+	return message
 }
 
 func systemPowerShellPath() (string, error) {
@@ -743,8 +956,22 @@ func centerWindow(hwnd uintptr, width, height int32) {
 	procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0)
 }
 
+func messageBoxResult(hwnd uintptr, text, title string, flags uintptr) uintptr {
+	textPtr := windows.StringToUTF16Ptr(text)
+	titlePtr := windows.StringToUTF16Ptr(title)
+	result, _, _ := procMessageBox.Call(
+		hwnd,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
+		flags,
+	)
+	runtime.KeepAlive(textPtr)
+	runtime.KeepAlive(titlePtr)
+	return result
+}
+
 func messageBox(hwnd uintptr, text, title string, flags uintptr) {
-	procMessageBox.Call(hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(text))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(title))), flags)
+	_ = messageBoxResult(hwnd, text, title, flags)
 }
 
 func boolToUintptr(value bool) uintptr {

@@ -309,9 +309,7 @@ func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
 		if _, err := EnsureHookAPIToken(targetDataDir, "codex"); err != nil {
 			t.Fatalf("seed target token: %v", err)
 		}
-		if err := os.Symlink(filepath.Join(targetDataDir, "hooks"), filepath.Join(dataDir, "hooks")); err != nil {
-			t.Skipf("Windows symlink privilege unavailable: %v", err)
-		}
+		createTestDirectoryRedirect(t, filepath.Join(dataDir, "hooks"), filepath.Join(targetDataDir, "hooks"))
 		return dataDir
 	})
 }

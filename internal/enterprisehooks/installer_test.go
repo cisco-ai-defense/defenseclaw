@@ -23,7 +23,7 @@ func requireEnterpriseHookInstaller(t *testing.T) {
 	}
 }
 
-func TestInstallRejectsNativeWindowsBeforeSideEffects(t *testing.T) {
+func TestInstallRejectsInvalidNativeWindowsRequestBeforeSideEffects(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows rejection contract")
 	}
@@ -33,8 +33,8 @@ func TestInstallRejectsNativeWindowsBeforeSideEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Install(context.Background(), InstallOptions{UserHome: filepath.Join(scope, "home")})
-	if err == nil || !strings.Contains(err.Error(), "unsupported on Windows") {
-		t.Fatalf("Install error = %v, want unsupported-on-Windows rejection", err)
+	if err == nil {
+		t.Fatal("Install error = nil, want preflight/validation rejection")
 	}
 	if got, readErr := os.ReadFile(sentinel); readErr != nil || string(got) != "unchanged" {
 		t.Fatalf("sentinel changed: data=%q err=%v", got, readErr)
@@ -87,8 +87,13 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
-	if !strings.Contains(string(data), "/otlp/codex/"+otlpToken+"/v1/") {
-		t.Fatalf("codex config does not reference supplied service OTLP token:\n%s", string(data))
+	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
+		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
+	}
+	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
+	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
+	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
+		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
 	}
 	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
 	if err != nil {

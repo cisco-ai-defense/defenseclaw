@@ -41,6 +41,14 @@ if (-not $IsWindows) {
     throw 'The setup wizard probe requires native Windows.'
 }
 
+$setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
+if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
+    if (-not (Test-Path -LiteralPath $setupStandardUserLauncherSource -PathType Leaf)) {
+        throw "Windows Setup standard-user launcher source is missing: $setupStandardUserLauncherSource"
+    }
+    Add-Type -TypeDefinition (Get-Content -LiteralPath $setupStandardUserLauncherSource -Raw -Encoding UTF8)
+}
+
 $setup = [IO.Path]::GetFullPath($SetupPath)
 if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Setup executable not found: $setup"
@@ -211,6 +219,33 @@ function Assert-UnicodeWindowTextInterop {
     }
 }
 
+function Start-SetupWizardProcess([string]$Application, [string]$WorkingDirectory) {
+    if (-not [DefenseClaw.SetupStandardUserLauncher]::IsCurrentProcessElevated()) {
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $Application
+        $startInfo.WorkingDirectory = $WorkingDirectory
+        $startInfo.UseShellExecute = $false
+        return [Diagnostics.Process]::Start($startInfo)
+    }
+
+    # GitHub-hosted Windows runners execute this job with an elevated token,
+    # while user-scope Setup deliberately refuses elevation. Launch the exact
+    # Setup image on the interactive desktop with the UAC-linked limited token.
+    # Certification never accepts the weaker restricted-LUA compatibility
+    # fallback; hosted UAC-disabled runners use a real disposable user instead.
+    $environment = @(
+        [Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
+            ForEach-Object { '{0}={1}' -f [string]$_.Key, [string]$_.Value }
+    )
+    return [DefenseClaw.SetupStandardUserLauncher]::StartRestricted(
+        $Application,
+        [string[]]@(),
+        $WorkingDirectory,
+        [string[]]$environment,
+        $false
+    )
+}
+
 function Get-WizardControl([IntPtr]$Window, [int]$ControlId, [string]$Label) {
     $control = [DefenseClaw.SetupWizardSmokeNativeMethods]::GetDlgItem($Window, $ControlId)
     if ($control -eq [IntPtr]::Zero) {
@@ -252,7 +287,6 @@ function Send-WizardCommand([IntPtr]$Window, [int]$ControlId, [string]$Label) {
 }
 
 function Write-WizardTrace([string]$Event, [System.Collections.IDictionary]$Fields = $null) {
-    if (-not $ActivateInstall) { return }
     $record = [ordered]@{
         timestamp_utc = [DateTime]::UtcNow.ToString('o')
         elapsed_ms    = [Math]::Round($total.Elapsed.TotalMilliseconds, 1)
@@ -354,15 +388,13 @@ $observedConfigPath = Join-Path $observedDataRoot 'config.yaml'
 $observedGatewayPID = Join-Path $observedDataRoot 'gateway.pid'
 $observedWatchdogPID = Join-Path $observedDataRoot 'watchdog.pid'
 $observedARPKey = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
-if ($ActivateInstall) {
-    [IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
-    Write-WizardTrace 'driver-start' ([ordered]@{
-        connector      = $Connector
-        mode           = $Mode
-        start_gateway  = $StartGateway.IsPresent
-        timeout_seconds = $InstallTimeoutSeconds
-    })
-}
+[IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
+Write-WizardTrace 'driver-start' ([ordered]@{
+    connector      = $Connector
+    mode           = $Mode
+    start_gateway  = $StartGateway.IsPresent
+    timeout_seconds = $(if ($ActivateInstall) { $InstallTimeoutSeconds } else { $TimeoutSeconds })
+})
 $unicodeInterop = [Diagnostics.Stopwatch]::StartNew()
 Assert-UnicodeWindowTextInterop
 $unicodeInterop.Stop()
@@ -377,11 +409,7 @@ if ($InteropSelfTestOnly) {
     return
 }
 try {
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $setup
-    $startInfo.WorkingDirectory = $state
-    $startInfo.UseShellExecute = $false
-    $process = [Diagnostics.Process]::Start($startInfo)
+    $process = Start-SetupWizardProcess $setup $state
     if ($null -eq $process) {
         throw 'Starting the setup wizard returned no process.'
     }
@@ -416,7 +444,10 @@ try {
     $connectorControl = Get-WizardControl $window 1001 'connector'
     $modeControl = Get-WizardControl $window 1002 'mode'
     $startControl = Get-WizardControl $window 1003 'start-gateway'
-    $primaryControl = Get-WizardControl $window 1005 'primary action'
+    # The wizard intentionally uses the standard Win32 IDOK/IDCANCEL IDs so
+    # Enter, Escape, WM_CLOSE, accessibility tools, and automation agree on
+    # the primary and cancel semantics.
+    $primaryControl = Get-WizardControl $window 1 'primary action'
     $descriptionControl = Get-WizardControl $window 1009 'description'
     $headingControl = Get-WizardControl $window 1011 'heading'
 
@@ -442,7 +473,7 @@ try {
     $completion = $null
     if ($ActivateInstall) {
         $install = [Diagnostics.Stopwatch]::StartNew()
-        Send-WizardCommand $window 1005 'Install'
+        Send-WizardCommand $window 1 'Install'
         Write-WizardTrace 'install-posted'
         $nextTraceSeconds = 0
         $lastObservation = $null
@@ -483,7 +514,7 @@ try {
         if ($heading -ne 'DefenseClaw is installed') {
             throw "Setup wizard completion heading was '$heading': $description"
         }
-        Send-WizardCommand $window 1005 'Finish'
+        Send-WizardCommand $window 1 'Finish'
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             throw "Setup wizard did not exit after Finish within $TimeoutSeconds seconds."
         }
@@ -498,7 +529,7 @@ try {
         }
     } else {
         # WM_COMMAND/Cancel closes the initial page without entering startAction.
-        Send-WizardCommand $window 1006 'Cancel'
+        Send-WizardCommand $window 2 'Cancel'
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             throw "Setup wizard did not exit after Cancel within $TimeoutSeconds seconds."
         }

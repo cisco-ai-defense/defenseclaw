@@ -118,8 +118,16 @@ func preserveExistingProtection(source, destination string) error {
 		return err
 	}
 	safe, err := privateDACLIsSafe(source)
-	if err != nil || !safe {
+	if err != nil {
 		return err
+	}
+	if !safe {
+		// ReplaceFileW deliberately preserves the replaced file's DACL. Tighten
+		// an unsafe DefenseClaw-owned destination before publication so the
+		// metadata-preserving replace cannot retain a foreign read/write ACE.
+		if err := setPrivateDACL(source, false); err != nil {
+			return err
+		}
 	}
 	extendedSource, err := winpath.Extended(source)
 	if err != nil {
@@ -374,8 +382,7 @@ func privateDACLIsSafe(path string) (bool, error) {
 		// Object, callback, conditional, and other extended ACE layouts do not
 		// share ACCESS_ALLOWED_ACE's SID offset. Treat them as unsafe instead of
 		// mis-parsing or silently skipping a potentially writable principal.
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE &&
-			ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE {
+		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
 			return false, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
@@ -401,4 +408,14 @@ func privateDACLIsSafe(path string) (bool, error) {
 		return false, nil
 	}
 	return foundOwner && foundSystem, nil
+}
+
+// isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts
+// whose SID offset privateDACLIsSafe parses. Object, callback, conditional, and
+// callback-object ACEs carry additional fields or application data; accepting
+// one as a basic ACCESS_ALLOWED_ACE can validate the wrong SID. Unknown future
+// ACE types are therefore unsafe by default.
+func isSimpleDiscretionaryACE(aceType byte) bool {
+	return aceType == windows.ACCESS_ALLOWED_ACE_TYPE ||
+		aceType == windows.ACCESS_DENIED_ACE_TYPE
 }

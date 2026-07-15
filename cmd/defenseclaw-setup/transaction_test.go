@@ -318,14 +318,46 @@ func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
+	readNoReconciliation := func() (*connectorReconciliationState, error) { return nil, nil }
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readNoReconciliation); err != nil {
 		t.Fatalf("cleanupCommittedSetupTransaction: %v", err)
 	}
 	assertPathAbsent(t, transaction.TrashPath)
 	assertPathAbsent(t, filepath.Dir(maintenancePath))
 	assertPathAbsent(t, dataRoot)
-	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readNoReconciliation); err != nil {
 		t.Fatalf("idempotent cleanupCommittedSetupTransaction: %v", err)
+	}
+}
+
+func TestCommittedUninstallCleanupPreservesDataForPendingConnectorReconciliation(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, nil)
+	transaction.DeleteUserData = true
+	if err := os.MkdirAll(dataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataRoot, "state")
+	if err := os.WriteFile(statePath, []byte("preserve"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector:     "claudecode",
+			Operation:     "verify",
+			ConfigHome:    filepath.Join(filepath.Dir(dataRoot), ".claude"),
+			Message:       "managed connector cleanup is pending",
+			TransactionID: testCurrentTransactionID,
+		}},
+	}
+	readPendingReconciliation := func() (*connectorReconciliationState, error) { return pending, nil }
+
+	if err := cleanupCommittedSetupTransactionWithReconciliationReader(transaction, readPendingReconciliation); err != nil {
+		t.Fatalf("cleanupCommittedSetupTransaction: %v", err)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("pending connector reconciliation data was not preserved: %v", err)
 	}
 }
 
@@ -1325,6 +1357,96 @@ func TestRollbackRestoreIncludesOwnedRuntimeStartedAfterIntent(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if restored != liveDuringRecovery {
+		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)
+	}
+}
+
+func TestRollbackRestoresOwnedRuntimeWhenFileRollbackFails(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"1.0.0",
+	)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		&previous,
+	)
+	current := previous
+	current.Version = "9.9.9"
+	writeInstallTree(t, installRoot, current)
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("fixture"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	liveDuringRecovery := serviceState{Gateway: true, Watchdog: true}
+	var restored serviceState
+	err := rollbackSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(_ string, _ string, wanted serviceState) (serviceState, error) {
+			restored = wanted
+			return wanted, nil
+		},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "previous installation is missing") {
+		t.Fatalf("rollback error = %v, want recorded-state mismatch", err)
+	}
+	if restored != liveDuringRecovery {
+		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)
+	}
+}
+
+func TestRollbackRestoresStoppedFreshRuntimeWhenFileRollbackFails(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		nil,
+	)
+	unrelated := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"9.9.9",
+	)
+	writeInstallTree(t, installRoot, unrelated)
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("fixture"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	liveDuringRecovery := serviceState{Gateway: true, Watchdog: true}
+	var restored serviceState
+	err := rollbackSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(_ string, _ string, wanted serviceState) (serviceState, error) {
+			restored = wanted
+			return wanted, nil
+		},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "refusing to remove an install tree") {
+		t.Fatalf("rollback error = %v, want unrelated-tree refusal", err)
 	}
 	if restored != liveDuringRecovery {
 		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)

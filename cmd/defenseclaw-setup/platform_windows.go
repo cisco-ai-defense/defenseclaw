@@ -20,13 +20,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
-func publishStableHookRuntime(source, dataRoot, transactionID string) error {
-	return hookruntime.Publish(source, dataRoot, transactionID)
+func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
+	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
+		return err
+	}
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return err
+	}
+	return verifyPublishedStableHookRuntime(source, paths.Launcher)
 }
 
 func disableStableHookRuntime(transactionID string) error {
@@ -97,15 +105,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 	if state.PID <= 0 || strings.TrimSpace(state.Executable) == "" {
 		return false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
 	}
-	expected, err := filepath.Abs(gatewayPath)
-	if err != nil {
-		return false, err
-	}
-	recorded, err := filepath.Abs(state.Executable)
-	if err != nil {
-		return false, err
-	}
-	if !strings.EqualFold(recorded, expected) {
+	if !pathidentity.Same(state.Executable, gatewayPath) {
 		return false, nil
 	}
 	livePath, identity, err := processIdentity(uint32(state.PID))
@@ -115,11 +115,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	live, err := filepath.Abs(livePath)
-	if err != nil {
-		return false, err
-	}
-	if !strings.EqualFold(live, expected) {
+	if !pathidentity.Same(livePath, gatewayPath) {
 		return false, nil
 	}
 	if state.StartIdentity != "" && state.StartIdentity != identity {
@@ -129,11 +125,11 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 }
 
 func defaultInstallRoot() (string, error) {
-	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	programs, err := winfolders.UserProgramFiles()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(local, "Programs", "DefenseClaw"), nil
+	return filepath.Join(programs, "DefenseClaw"), nil
 }
 
 func defaultDataRoot() (string, error) {
@@ -416,6 +412,10 @@ try {
 }
 `
 	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	// The cached maintenance executable can be launched with its own directory
+	// as CWD. Run the detached helper from the trusted system PowerShell
+	// directory so Windows permits it to remove the cache after Setup exits.
+	cmd.Dir = filepath.Dir(powerShell)
 	// PowerShell treats tokens following -Command as more command text rather
 	// than reliably exposing them through $args. Environment variables keep the
 	// cleanup path byte-for-byte intact without shell interpolation.
@@ -431,14 +431,27 @@ try {
 
 func processIdentity(pid uint32) (string, string, error) {
 	handle, err := windows.OpenProcess(
-		windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
 		false,
 		pid,
 	)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return "", "", os.ErrProcessDone
+		}
 		return "", "", err
 	}
 	defer windows.CloseHandle(handle)
+	waitResult, err := windows.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return "", "", err
+	}
+	if waitResult == uint32(windows.WAIT_OBJECT_0) {
+		return "", "", os.ErrProcessDone
+	}
+	if waitResult != uint32(windows.WAIT_TIMEOUT) {
+		return "", "", fmt.Errorf("unexpected process wait result %#x", waitResult)
+	}
 
 	// QueryFullProcessImageNameW accepts the full NT path limit. A fixed
 	// MAX_PATH buffer breaks service ownership checks when the per-user install
@@ -456,6 +469,63 @@ func processIdentity(pid uint32) (string, string, error) {
 		return "", "", err
 	}
 	return windows.UTF16ToString(buffer[:size]), strconv.FormatInt(creation.Nanoseconds(), 10), nil
+}
+
+func liveProcessWithinInstallRoot(installRoot string, ignoredImages ...string) (uint32, string, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return 0, "", fmt.Errorf("snapshot processes: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	if err := windows.Process32First(snapshot, &entry); err != nil {
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return 0, "", nil
+		}
+		return 0, "", fmt.Errorf("read process snapshot: %w", err)
+	}
+	for {
+		if entry.ProcessID != 0 {
+			imagePath, _, queryErr := processIdentity(entry.ProcessID)
+			// Processes may exit or deny inspection while the snapshot is being
+			// walked. A query failure does not prove that the process executes from
+			// this ACL-protected per-user install tree, so only an observed image
+			// path can block activation.
+			if queryErr == nil && pathWithinRoot(imagePath, installRoot) &&
+				!pathMatchesAny(imagePath, ignoredImages) {
+				return entry.ProcessID, imagePath, nil
+			}
+		}
+		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
+		if err := windows.Process32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				return 0, "", nil
+			}
+			return 0, "", fmt.Errorf("advance process snapshot: %w", err)
+		}
+	}
+}
+
+func pathMatchesAny(path string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if pathidentity.Same(path, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithinRoot(path, root string) bool {
+	for directory := filepath.Dir(filepath.Clean(path)); ; directory = filepath.Dir(directory) {
+		if pathidentity.Same(directory, root) {
+			return true
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return false
+		}
+	}
 }
 
 func rejectReparseAncestors(path string) error {
@@ -516,45 +586,67 @@ func isReparsePoint(path string) (bool, error) {
 	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, nil
 }
 
+const (
+	userPathMutationMaxAttempts      = 8
+	userPathTransactionTimeoutMillis = 5000
+)
+
+var (
+	userPathKTM                    = windows.NewLazySystemDLL("KtmW32.dll")
+	userPathRegistry               = windows.NewLazySystemDLL("advapi32.dll")
+	procCreateUserPathTransaction  = userPathKTM.NewProc("CreateTransaction")
+	procCommitUserPathTransaction  = userPathKTM.NewProc("CommitTransaction")
+	procOpenUserPathKeyTransactedW = userPathRegistry.NewProc("RegOpenKeyTransactedW")
+)
+
+type userPathMutation struct {
+	Next            userPathSnapshot
+	Changed         bool
+	ReusedSeparator bool
+	ValueCreated    bool
+}
+
+type userPathCompareAndSwap func(
+	func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error)
+
 func addUserPath(commandDir string) (bool, bool, bool, error) {
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
+	mutation, err := mutateRegistryUserPath(
+		registry.CURRENT_USER,
+		`Environment`,
+		addUserPathMutation(commandDir),
+	)
 	if err != nil {
-		return false, false, false, err
-	}
-	defer key.Close()
-	current, valueType, err := key.GetStringValue("Path")
-	if err != nil && err != registry.ErrNotExist {
-		return false, false, false, err
-	}
-	valueCreated := err == registry.ErrNotExist
-	entries := strings.Split(current, ";")
-	if pathContains(entries, commandDir) {
-		// A previous attempt may have observed its SetValue before RegFlushKey
-		// completed. Flush even on the idempotent retry path before convergence
-		// is allowed to advance.
-		if err := flushRegistryKey(key); err != nil {
-			return false, false, false, err
-		}
-		updateCurrentProcessPath(commandDir, true)
-		if err := broadcastEnvironmentChange(); err != nil {
-			return false, false, false, err
-		}
-		return false, false, false, nil
-	}
-	next, reusedSeparator := prependUserPathEntry(current, commandDir)
-	if err := setRegistryPath(key, next, valueType); err != nil {
-		return false, false, false, err
-	}
-	if err := flushRegistryKey(key); err != nil {
-		return false, false, false, err
+		return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, err
 	}
 	updateCurrentProcessPath(commandDir, true)
 	if err := broadcastEnvironmentChange(); err != nil {
-		// The registry mutation is already flushed and therefore owned even if
-		// another desktop process did not acknowledge the change broadcast.
-		return true, reusedSeparator, valueCreated, err
+		// A committed registry transaction is already owned even when another
+		// desktop process does not acknowledge the environment broadcast.
+		return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, err
 	}
-	return true, reusedSeparator, valueCreated, nil
+	return mutation.Changed, mutation.ReusedSeparator, mutation.ValueCreated, nil
+}
+
+func addUserPathMutation(commandDir string) func(userPathSnapshot) (userPathMutation, error) {
+	return func(current userPathSnapshot) (userPathMutation, error) {
+		if pathContains(strings.Split(current.Value, ";"), commandDir) {
+			return userPathMutation{Next: current}, nil
+		}
+		next, reusedSeparator := prependUserPathEntry(current.Value, commandDir)
+		valueCreated := !current.Existed
+		current.Existed = true
+		current.Value = next
+		if current.ValueType == 0 {
+			current.ValueType = registry.SZ
+		}
+		return userPathMutation{
+			Next:            current,
+			Changed:         true,
+			ReusedSeparator: reusedSeparator,
+			ValueCreated:    valueCreated,
+		}, nil
+	}
 }
 
 func captureUserPath() (userPathSnapshot, error) {
@@ -567,20 +659,7 @@ func captureUserPath() (userPathSnapshot, error) {
 		return userPathSnapshot{}, err
 	}
 	defer key.Close()
-	value, valueType, err := key.GetStringValue("Path")
-	if err == registry.ErrNotExist {
-		return snapshot, nil
-	}
-	if err != nil {
-		return userPathSnapshot{}, err
-	}
-	if valueType != registry.SZ && valueType != registry.EXPAND_SZ {
-		return userPathSnapshot{}, fmt.Errorf("unsupported user PATH registry type %d", valueType)
-	}
-	snapshot.Existed = true
-	snapshot.Value = value
-	snapshot.ValueType = valueType
-	return snapshot, nil
+	return readUserPathSnapshot(key)
 }
 
 func prependUserPathEntry(current, commandDir string) (string, bool) {
@@ -596,43 +675,247 @@ func prependUserPathEntry(current, commandDir string) (string, bool) {
 }
 
 func removeUserPath(commandDir string, reusedSeparator, valueCreated bool) error {
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
+	_, err := mutateRegistryUserPath(
+		registry.CURRENT_USER,
+		`Environment`,
+		removeUserPathMutation(commandDir, reusedSeparator, valueCreated),
+	)
 	if err != nil {
-		return err
-	}
-	defer key.Close()
-	if err := removeOwnedUserPathValue(key, commandDir, reusedSeparator, valueCreated); err != nil {
-		return err
-	}
-	if err := flushRegistryKey(key); err != nil {
 		return err
 	}
 	updateCurrentProcessPath(commandDir, false)
 	return broadcastEnvironmentChange()
 }
 
-func removeOwnedUserPathValue(key registry.Key, commandDir string, reusedSeparator, valueCreated bool) error {
-	current, valueType, err := key.GetStringValue("Path")
-	if err == registry.ErrNotExist {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	next, deleteValue, err := planOwnedUserPathRemoval(current, commandDir, reusedSeparator, valueCreated)
-	if err != nil {
-		return err
-	}
-	// Missing values are created as REG_SZ. A different current type is a user
-	// mutation; preserve that value (empty) even when its content is otherwise
-	// identical to the original managed entry.
-	if deleteValue && valueType == registry.SZ {
-		if err := key.DeleteValue("Path"); err != nil && err != registry.ErrNotExist {
-			return err
+func removeUserPathMutation(
+	commandDir string,
+	reusedSeparator, valueCreated bool,
+) func(userPathSnapshot) (userPathMutation, error) {
+	return func(current userPathSnapshot) (userPathMutation, error) {
+		if !current.Existed {
+			return userPathMutation{Next: current}, nil
 		}
+		next, deleteValue, err := planOwnedUserPathRemoval(
+			current.Value,
+			commandDir,
+			reusedSeparator,
+			valueCreated,
+		)
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		// A missing value was created as REG_SZ. If the user changed its type,
+		// preserve the now-empty value rather than claiming ownership of it.
+		if deleteValue && current.ValueType == registry.SZ {
+			return userPathMutation{Changed: true}, nil
+		}
+		if next == current.Value {
+			return userPathMutation{Next: current}, nil
+		}
+		current.Value = next
+		return userPathMutation{Next: current, Changed: true}, nil
+	}
+}
+
+func mutateRegistryUserPath(
+	root registry.Key,
+	keyPath string,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	if err := validateUserPathTransactionSupport(); err != nil {
+		return userPathMutation{}, err
+	}
+	key, _, err := registry.CreateKey(root, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	if err := key.Close(); err != nil {
+		return userPathMutation{}, err
+	}
+
+	mutation, err := mutateUserPath(
+		func(transform func(userPathSnapshot) (userPathMutation, error)) (userPathMutation, error) {
+			return compareAndSwapRegistryUserPath(root, keyPath, transform)
+		},
+		transform,
+	)
+	if err != nil {
+		return mutation, err
+	}
+	key, err = registry.OpenKey(root, keyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return mutation, err
+	}
+	defer key.Close()
+	if err := flushRegistryKey(key); err != nil {
+		return mutation, err
+	}
+	return mutation, nil
+}
+
+func validateUserPathTransactionSupport() error {
+	for _, required := range []struct {
+		name string
+		proc *windows.LazyProc
+	}{
+		{"KtmW32.dll!CreateTransaction", procCreateUserPathTransaction},
+		{"KtmW32.dll!CommitTransaction", procCommitUserPathTransaction},
+		{"advapi32.dll!RegOpenKeyTransactedW", procOpenUserPathKeyTransactedW},
+	} {
+		if err := required.proc.Find(); err != nil {
+			return fmt.Errorf("resolve required user PATH transaction procedure %s: %w", required.name, err)
+		}
+	}
+	return nil
+}
+
+func mutateUserPath(
+	compareAndSwap userPathCompareAndSwap,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	var conflictErr error
+	for attempt := 0; attempt < userPathMutationMaxAttempts; attempt++ {
+		mutation, err := compareAndSwap(transform)
+		if err == nil {
+			return mutation, nil
+		}
+		if !isUserPathTransactionConflict(err) {
+			return mutation, err
+		}
+		conflictErr = err
+	}
+	return userPathMutation{}, fmt.Errorf(
+		"user PATH changed concurrently during %d mutation attempts: %w",
+		userPathMutationMaxAttempts,
+		conflictErr,
+	)
+}
+
+func compareAndSwapRegistryUserPath(
+	root registry.Key,
+	keyPath string,
+	transform func(userPathSnapshot) (userPathMutation, error),
+) (userPathMutation, error) {
+	transaction, err := createUserPathTransaction()
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	defer windows.CloseHandle(transaction)
+
+	keyPathPtr, err := windows.UTF16PtrFromString(keyPath)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	var key registry.Key
+	result, _, _ := procOpenUserPathKeyTransactedW.Call(
+		uintptr(root),
+		uintptr(unsafe.Pointer(keyPathPtr)),
+		0,
+		registry.QUERY_VALUE|registry.SET_VALUE,
+		uintptr(unsafe.Pointer(&key)),
+		uintptr(transaction),
+		0,
+	)
+	if result != 0 {
+		return userPathMutation{}, syscall.Errno(result)
+	}
+	defer key.Close()
+
+	current, err := readUserPathSnapshot(key)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	mutation, err := transform(current)
+	if err != nil {
+		return userPathMutation{}, err
+	}
+	if mutation.Changed {
+		if mutation.Next.Existed {
+			err = setRegistryPath(key, mutation.Next.Value, mutation.Next.ValueType)
+		} else {
+			err = key.DeleteValue("Path")
+		}
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		// TxR detects a normal write after this transaction has staged its own
+		// write. Validate the original snapshot after staging as well, covering
+		// the complementary race where another process wrote between our read
+		// and staged write. A later external write conflicts with the staged
+		// transaction, so the validation and commit form a compare-and-swap.
+		observed, err := readRegistryUserPathSnapshot(root, keyPath)
+		if err != nil {
+			return userPathMutation{}, err
+		}
+		if observed != current {
+			return userPathMutation{}, windows.ERROR_TRANSACTIONAL_CONFLICT
+		}
+	}
+	if err := commitUserPathTransaction(transaction); err != nil {
+		return userPathMutation{}, err
+	}
+	return mutation, nil
+}
+
+func createUserPathTransaction() (windows.Handle, error) {
+	result, _, callErr := procCreateUserPathTransaction.Call(
+		0,
+		0,
+		0,
+		0,
+		0,
+		userPathTransactionTimeoutMillis,
+		0,
+	)
+	transaction := windows.Handle(result)
+	if transaction != windows.InvalidHandle {
+		return transaction, nil
+	}
+	if callErr != nil && callErr != windows.ERROR_SUCCESS {
+		return 0, callErr
+	}
+	return 0, errors.New("create user PATH registry transaction failed")
+}
+
+func commitUserPathTransaction(transaction windows.Handle) error {
+	result, _, callErr := procCommitUserPathTransaction.Call(uintptr(transaction))
+	if result != 0 {
 		return nil
 	}
-	return setRegistryPath(key, next, valueType)
+	if callErr != nil && callErr != windows.ERROR_SUCCESS {
+		return callErr
+	}
+	return errors.New("commit user PATH registry transaction failed")
+}
+
+func isUserPathTransactionConflict(err error) bool {
+	return errors.Is(err, windows.ERROR_TRANSACTIONAL_CONFLICT) ||
+		errors.Is(err, windows.ERROR_TRANSACTION_NOT_ACTIVE) ||
+		errors.Is(err, windows.ERROR_TRANSACTION_ALREADY_ABORTED) ||
+		errors.Is(err, windows.ERROR_OPERATION_ABORTED)
+}
+
+func readUserPathSnapshot(key registry.Key) (userPathSnapshot, error) {
+	value, valueType, err := key.GetStringValue("Path")
+	if err == registry.ErrNotExist {
+		return userPathSnapshot{}, nil
+	}
+	if err != nil {
+		return userPathSnapshot{}, err
+	}
+	if valueType != registry.SZ && valueType != registry.EXPAND_SZ {
+		return userPathSnapshot{}, fmt.Errorf("unsupported user PATH registry type %d", valueType)
+	}
+	return userPathSnapshot{Existed: true, Value: value, ValueType: valueType}, nil
+}
+
+func readRegistryUserPathSnapshot(root registry.Key, keyPath string) (userPathSnapshot, error) {
+	key, err := registry.OpenKey(root, keyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return userPathSnapshot{}, err
+	}
+	defer key.Close()
+	return readUserPathSnapshot(key)
 }
 
 func planOwnedUserPathRemoval(current, commandDir string, reusedSeparator, valueCreated bool) (string, bool, error) {
@@ -1485,6 +1768,75 @@ func unregisterInstalledAppOwned(installRoot string, previousState *installState
 
 const gatewayAutoStartValueName = "DefenseClawGateway"
 
+func gatewayAutoStartRegistryCommand(gatewayPath string) (string, error) {
+	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		return "", fmt.Errorf("resolve LocalAppData for gateway auto-start: %w", err)
+	}
+	profile, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
+	if err != nil {
+		return "", fmt.Errorf("resolve user profile for gateway auto-start: %w", err)
+	}
+	return gatewayAutoStartRegistryCommandForRoots(gatewayPath, localAppData, profile)
+}
+
+func gatewayAutoStartRegistryCommandForRoots(gatewayPath, localAppData, profile string) (string, error) {
+	startupPath := filepath.Join(filepath.Dir(gatewayPath), "defenseclaw-startup.exe")
+	command := quote(startupPath)
+	for _, root := range []struct {
+		path     string
+		variable string
+	}{
+		{path: localAppData, variable: `%LOCALAPPDATA%`},
+		{path: profile, variable: `%USERPROFILE%`},
+	} {
+		compact, ok := compactRunPath(startupPath, root.path, root.variable)
+		if !ok {
+			continue
+		}
+		candidate := quote(compact)
+		if runCommandUTF16Units(candidate) < runCommandUTF16Units(command) {
+			command = candidate
+		}
+	}
+	if err := validateRunCommand(command); err != nil {
+		return "", fmt.Errorf("configure %s startup registration: %w", gatewayAutoStartValueName, err)
+	}
+	return command, nil
+}
+
+func compactRunPath(target, root, variable string) (string, bool) {
+	if strings.TrimSpace(root) == "" {
+		return "", false
+	}
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, `..\`) {
+		return "", false
+	}
+	if relative == "." {
+		return variable, true
+	}
+	return filepath.Join(variable, relative), true
+}
+
+func gatewayAutoStartValueOwned(gatewayPath, value string) (bool, error) {
+	if value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath) {
+		return true, nil
+	}
+	want, err := gatewayAutoStartRegistryCommand(gatewayPath)
+	if err != nil {
+		return false, err
+	}
+	return value == want, nil
+}
+
+func setGatewayAutoStartValue(key registry.Key, command string) error {
+	if err := validateRunCommand(command); err != nil {
+		return err
+	}
+	return key.SetExpandStringValue(gatewayAutoStartValueName, command)
+}
+
 func captureGatewayAutoStart() (gatewayAutoStartSnapshot, error) {
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
@@ -1521,14 +1873,21 @@ func gatewayAutoStartConfigured(gatewayPath string) (bool, error) {
 		return false, err
 	}
 	defer key.Close()
-	value, _, err := key.GetStringValue(gatewayAutoStartValueName)
+	value, valueType, err := key.GetStringValue(gatewayAutoStartValueName)
 	if err == registry.ErrNotExist {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath), nil
+	if value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath) {
+		return true, nil
+	}
+	want, err := gatewayAutoStartRegistryCommand(gatewayPath)
+	if err != nil {
+		return false, err
+	}
+	return value == want && valueType == registry.EXPAND_SZ, nil
 }
 
 func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
@@ -1542,16 +1901,26 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 	}
 	defer key.Close()
 
-	previous, _, readErr := key.GetStringValue(gatewayAutoStartValueName)
+	previous, previousType, readErr := key.GetStringValue(gatewayAutoStartValueName)
 	snapshot := gatewayAutoStartSnapshot{Existed: readErr == nil, Value: previous}
 	if readErr != nil && readErr != registry.ErrNotExist {
 		return gatewayAutoStartSnapshot{}, false, readErr
 	}
 	want := ""
 	if enabled {
-		want = gatewayAutoStartCommand(gatewayPath)
+		want, err = gatewayAutoStartRegistryCommand(gatewayPath)
+		if err != nil {
+			return snapshot, false, err
+		}
 	}
-	owned := previous == gatewayAutoStartCommand(gatewayPath) || previous == legacyGatewayAutoStartCommand(gatewayPath)
+	owned := false
+	if snapshot.Existed {
+		var ownedErr error
+		owned, ownedErr = gatewayAutoStartValueOwned(gatewayPath, previous)
+		if ownedErr != nil {
+			return snapshot, false, ownedErr
+		}
+	}
 	if snapshot.Existed && !owned {
 		if enabled {
 			return snapshot, false, fmt.Errorf("refusing to replace unrelated %s startup registration", gatewayAutoStartValueName)
@@ -1559,7 +1928,7 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 		// Uninstall only removes the exact value this installation owns.
 		return snapshot, false, nil
 	}
-	if snapshot.Existed && previous == want {
+	if snapshot.Existed && previous == want && previousType == registry.EXPAND_SZ {
 		if err := flushRegistryKey(key); err != nil {
 			return snapshot, false, err
 		}
@@ -1580,7 +1949,7 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 		}
 		return snapshot, true, nil
 	}
-	if err := key.SetStringValue(gatewayAutoStartValueName, want); err != nil {
+	if err := setGatewayAutoStartValue(key, want); err != nil {
 		return snapshot, false, err
 	}
 	if err := flushRegistryKey(key); err != nil {

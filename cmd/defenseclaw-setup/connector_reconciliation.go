@@ -71,6 +71,83 @@ func (recorder *connectorReconciliationRecorder) persist() error {
 	return updateConnectorReconciliation(recorder.attempts, recorder.failures)
 }
 
+// retryPendingConnectorReconciliation revisits durable residue that the
+// current install transaction did not already touch. Verification comes first:
+// a clean stale marker can be retired without mutating third-party settings.
+// Teardown is only safe when this connector has not been attempted at another
+// home, because connector backup metadata is shared beneath DataRoot.
+func retryPendingConnectorReconciliation(
+	transaction setupTransaction,
+	gatewayPath string,
+	recorder *connectorReconciliationRecorder,
+	read func() (*connectorReconciliationState, error),
+	run connectorLifecycleRunner,
+) error {
+	state, err := read()
+	if err != nil || state == nil {
+		return err
+	}
+	attemptedIdentities := make(map[string]bool, len(recorder.attempts))
+	attemptedConnectors := make(map[string]bool, len(recorder.attempts))
+	for _, attempt := range recorder.attempts {
+		attemptedIdentities[connectorReconciliationKey(attempt.Connector, attempt.ConfigHome)] = true
+		attemptedConnectors[strings.ToLower(attempt.Connector)] = true
+	}
+	seen := make(map[string]bool, len(state.Failures))
+	for _, failure := range state.Failures {
+		identity := connectorReconciliationKey(failure.Connector, failure.ConfigHome)
+		if seen[identity] || attemptedIdentities[identity] {
+			continue
+		}
+		seen[identity] = true
+		connectorName := strings.ToLower(failure.Connector)
+		codexHome, claudeHome := "", ""
+		if connectorName == "codex" {
+			codexHome = failure.ConfigHome
+		} else {
+			claudeHome = failure.ConfigHome
+		}
+		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome)
+		verify := func() error {
+			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
+		}
+		verifyErr := verify()
+		if verifyErr == nil {
+			recorder.run(transaction.ID, connectorName, failure.ConfigHome, "verify", func() error { return nil })
+			attemptedIdentities[identity] = true
+			continue
+		}
+		if attemptedConnectors[connectorName] {
+			recorder.run(transaction.ID, connectorName, failure.ConfigHome, "verify", func() error { return verifyErr })
+			attemptedIdentities[identity] = true
+			continue
+		}
+
+		// Claim the connector before teardown so at most one stale home can
+		// consume its shared backup metadata in this recovery pass.
+		attemptedConnectors[connectorName] = true
+		teardownErr := run(gatewayPath, transaction.DataRoot, connectorName, "teardown", env)
+		finalVerifyErr := verify()
+		operation := "verify"
+		terminalErr := finalVerifyErr
+		if teardownErr != nil {
+			operation = "teardown"
+			terminalErr = fmt.Errorf("teardown retry: %w", teardownErr)
+			if finalVerifyErr != nil {
+				terminalErr = errors.Join(
+					terminalErr,
+					fmt.Errorf("verification after teardown: %w", finalVerifyErr),
+				)
+			}
+		}
+		recorder.run(transaction.ID, connectorName, failure.ConfigHome, operation, func() error {
+			return terminalErr
+		})
+		attemptedIdentities[identity] = true
+	}
+	return nil
+}
+
 func reconcileRemovedConnectors(
 	transaction setupTransaction,
 	gatewayPath string,
@@ -80,12 +157,6 @@ func reconcileRemovedConnectors(
 	reconciliation := connectorReconciliationRecorder{}
 	for _, connectorName := range transaction.PreviousConnectors {
 		configHome := connectorConfigHome(transaction, connectorName, true)
-		if !pathExists(gatewayPath) {
-			reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-				return errors.New("installed gateway payload is missing; connector cleanup was not attempted")
-			})
-			continue
-		}
 		if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "teardown", childEnv)
 		}) {

@@ -431,9 +431,11 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 //     table; and
 //   - operator-visible doctor reports.
 //
-// Endpoint is the gateway's connector-scoped loopback OTLP receiver. The
-// credential lives only in /otlp/codex/<token>/... and cannot authenticate
-// general API or Claude traffic. Headers retain source attribution only.
+// Endpoint is the gateway's standard loopback OTLP receiver. Codex supports
+// arbitrary exporter headers, so its connector-scoped credential is carried
+// as an Authorization bearer instead of appearing in the URL. The gateway
+// binds that bearer to x-defenseclaw-source=codex; it cannot authenticate the
+// management API or Claude traffic.
 //
 // ServiceName / ResourceAttributes are intentionally omitted —
 // codex's documented [otel] schema doesn't accept those keys, and
@@ -453,6 +455,9 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	headers := map[string]string{
 		"x-defenseclaw-source": "codex",
 		"x-defenseclaw-client": "codex-otel/1.0",
+	}
+	if otlpToken != "" {
+		headers["authorization"] = "Bearer " + otlpToken
 	}
 	// Intentionally NOT setting ServiceName / ResourceAttributes
 	// on codex's NativeOTLPSpec — see F1 rationale below.
@@ -491,8 +496,6 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:       "http://" + opts.APIAddr,
 			Protocol:       "json",
 			Headers:        headers,
-			PathToken:      otlpToken,
-			PathScope:      OTLPScopeCodex,
 			LogUserPrompts: redaction.DisableAll(),
 		},
 		// Profile-driven callbacks are the canonical shape for
@@ -537,6 +540,49 @@ func codexConfigPath() string {
 		return CodexConfigPathOverride
 	}
 	return filepath.Join(codexHomeDir(), "config.toml")
+}
+
+// ownedHookContractPresent performs the Codex-specific runtime guardian check.
+// A command substring is insufficient: Codex only executes a handler when its
+// complete event shape is valid and its position-aware trusted_hash entry is
+// still enabled. Reuse the same authoritative verifier Setup applies to the
+// bytes it persists so guardian repair cannot mistake a partial, moved,
+// disabled, asynchronous, or untrusted matrix for active protection.
+func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	configPath := codexConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
+	}
+	if rawFeatures, exists := cfg["features"]; exists {
+		features, ok := rawFeatures.(map[string]interface{})
+		if !ok {
+			return false, nil
+		}
+		for _, key := range []string{"hooks", "codex_hooks"} {
+			if rawEnabled, exists := features[key]; exists {
+				enabled, ok := rawEnabled.(bool)
+				if !ok || !enabled {
+					return false, nil
+				}
+			}
+		}
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks")); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -1272,15 +1318,15 @@ func codexCanonicalJSON(v interface{}) []byte {
 //	[otel.exporter.otlp-http]
 //	endpoint = "http://127.0.0.1:18970/v1/logs"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { authorization = "Bearer <connector-scoped-token>", x-defenseclaw-source = "codex" }
 //	[otel.trace_exporter.otlp-http]
 //	endpoint = "http://127.0.0.1:18970/v1/traces"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { authorization = "Bearer <connector-scoped-token>", x-defenseclaw-source = "codex" }
 //	[otel.metrics_exporter.otlp-http]
 //	endpoint = "http://127.0.0.1:18970/v1/metrics"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { authorization = "Bearer <connector-scoped-token>", x-defenseclaw-source = "codex" }
 //
 // The `protocol` field is REQUIRED by codex's serde-deserialized
 // schema - omitting it produces `invalid configuration: missing
@@ -1298,11 +1344,10 @@ func codexCanonicalJSON(v interface{}) []byte {
 // Teardown restores the operator's pristine [otel] block or deletes
 // ours if there was none.
 //
-// Headers carry the gateway token so the OTLP-HTTP receiver can
-// authenticate the codex CLI process the same way the hook script
-// does. The header name is intentionally NOT "Authorization" so the
-// receiver can distinguish OTel traffic from hook/REST traffic in
-// audit logs.
+// Headers carry only the connector-scoped OTLP token, never the master gateway
+// token. Authorization is preferred over URL credentials because standard
+// diagnostics and proxies redact it; x-defenseclaw-source binds the narrow
+// bearer to the Codex namespace at the receiver.
 func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 	// Spec-driven OTLP wiring. The connector's HookProfile carries
 	// the declarative NativeOTLPSpec; this helper just asks it for

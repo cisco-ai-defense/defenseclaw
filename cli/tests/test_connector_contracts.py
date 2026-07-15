@@ -279,7 +279,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
             return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
-        ):
+        ), patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"):
             ok = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",

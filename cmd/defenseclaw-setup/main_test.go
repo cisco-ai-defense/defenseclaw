@@ -134,6 +134,16 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 	}
 }
 
+func TestParseArgsVerifyAction(t *testing.T) {
+	opts, err := parseArgs([]string{"/verify"})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.Action != "verify" {
+		t.Fatalf("action = %q, want verify", opts.Action)
+	}
+}
+
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	for _, connector := range []string{"none", "codex", "claudecode"} {
 		for _, mode := range []string{"observe", "action"} {
@@ -450,6 +460,90 @@ func TestRunCapturedSetupCommandTimesOut(t *testing.T) {
 	}
 }
 
+func TestRunCapturedSetupCommandHonorsParentCancellation(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	started := time.Now()
+	_, err := runCapturedSetupCommandContext(
+		ctx,
+		10*time.Second,
+		false,
+		append(os.Environ(), helperEnv+"=1"),
+		os.Args[0],
+		"-test.run=^TestRunCapturedSetupCommandHonorsParentCancellation$",
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled setup command error = %v, want context canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("cancelled setup command returned after %s, want a bounded wait", elapsed)
+	}
+}
+
+func TestRunInstallContextRejectsPreCancelledOperationWithoutMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	code, err := runInstallContext(ctx, options{Action: "install", Quiet: true}, "not-used", "not-used")
+	if code != userExitCode || !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("pre-cancelled install = code %d error %v, want %d/setup-cancelled", code, err, userExitCode)
+	}
+}
+
+func TestCancelledSetupRollsBackAndCompletesIntentBeforeReturning(t *testing.T) {
+	transaction := setupTransaction{ID: "cancelled-transaction"}
+	calls := []string{}
+	code, err := rollbackSetupIntentWith(
+		transaction,
+		errors.Join(errSetupCancelled, context.Canceled),
+		func(got setupTransaction) error {
+			if got.ID != transaction.ID {
+				t.Fatalf("rollback transaction ID = %q", got.ID)
+			}
+			calls = append(calls, "rollback")
+			return nil
+		},
+		func(got setupTransaction, phase string) error {
+			if got.ID != transaction.ID || phase != setupPhaseIntent {
+				t.Fatalf("complete transaction = %q/%q", got.ID, phase)
+			}
+			calls = append(calls, "journal-complete")
+			return nil
+		},
+	)
+	if code != userExitCode || !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("cancelled rollback = code %d error %v", code, err)
+	}
+	if got := strings.Join(calls, ","); got != "rollback,journal-complete" {
+		t.Fatalf("cancelled rollback calls = %q", got)
+	}
+}
+
+func TestCancelledSetupKeepsJournalPendingWhenRollbackFails(t *testing.T) {
+	rollbackFailure := errors.New("injected rollback failure")
+	completeCalled := false
+	code, err := rollbackSetupIntentWith(
+		setupTransaction{ID: "pending-transaction"},
+		errors.Join(errSetupCancelled, context.Canceled),
+		func(setupTransaction) error { return rollbackFailure },
+		func(setupTransaction, string) error {
+			completeCalled = true
+			return nil
+		},
+	)
+	if code != retryRequiredCode || !errors.Is(err, rollbackFailure) {
+		t.Fatalf("failed cancellation rollback = code %d error %v", code, err)
+	}
+	if completeCalled {
+		t.Fatal("failed rollback marked the intent journal complete")
+	}
+}
+
 func TestValidPayloadVersion(t *testing.T) {
 	for _, value := range []string{"0.8.0", "1.2.3-rc.1", "1.2.3+windows.x64", "1.2.3-rc.1+build.7"} {
 		if !validPayloadVersion(value) {
@@ -476,21 +570,30 @@ func TestValidPayloadVersion(t *testing.T) {
 }
 
 func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
-	valid := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"abc","built":"now"}`)
-	if err := validateMachineVersion(valid, "defenseclaw-gateway", "1.2.3-rc.1"); err != nil {
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	valid := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now"}`)
+	if err := validateMachineVersion(valid, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
 		t.Fatalf("validateMachineVersion valid report: %v", err)
 	}
 	for name, body := range map[string][]byte{
-		"substring": []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"11.2.30"}`),
-		"identity":  []byte(`{"schema_version":1,"name":"foreign-gateway","version":"1.2.3-rc.1"}`),
-		"trailing":  append(append([]byte(nil), valid...), []byte(` {}`)...),
-		"unknown":   []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
+		"substring":        []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"11.2.30"}`),
+		"identity":         []byte(`{"schema_version":1,"name":"foreign-gateway","version":"1.2.3-rc.1"}`),
+		"commit missing":   []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1"}`),
+		"commit short":     []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456"}`),
+		"commit uppercase": []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789ABCDEF0123456789ABCDEF01234567"}`),
+		"commit mismatch":  []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"1123456789abcdef0123456789abcdef01234567"}`),
+		"trailing":         append(append([]byte(nil), valid...), []byte(` {}`)...),
+		"unknown":          []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1"); err == nil {
+			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1", commit); err == nil {
 				t.Fatal("validateMachineVersion accepted invalid report")
 			}
 		})
+	}
+	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
+	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {
+		t.Fatalf("version-only CLI identity: %v", err)
 	}
 }
 
@@ -610,6 +713,20 @@ func (reader *readerThatFailsAfterData) Read(buffer []byte) (int, error) {
 	return 0, errors.New("injected source failure")
 }
 
+func TestReadPayloadManifestAcceptsYaraCompatibilityWheel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"yara_compat_wheel":"yara_python.whl"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var manifest payloadManifest
+	if err := readJSON(path, &manifest); err != nil {
+		t.Fatalf("readJSON rejected the generated YARA compatibility field: %v", err)
+	}
+	if manifest.YaraCompatWheel != "yara_python.whl" {
+		t.Fatalf("YaraCompatWheel = %q, want yara_python.whl", manifest.YaraCompatWheel)
+	}
+}
+
 func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 	manifest := payloadManifest{
 		SchemaVersion:      1,
@@ -619,6 +736,7 @@ func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 		GatewayArchive:     "gateway.zip",
 		Wheel:              "defenseclaw.whl",
 		PythonEmbed:        "python.zip",
+		YaraCompatWheel:    "yara-python.whl",
 		SitePackages:       "site-packages.zip",
 		Launcher:           "launcher.exe",
 		StartupLauncher:    "startup.exe",

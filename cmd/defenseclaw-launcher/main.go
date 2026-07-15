@@ -11,9 +11,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
-const consoleEntryPointScript = `import importlib.metadata as m, sys; name=sys.argv[1]; sys.argv=[name, *sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+const (
+	moduleEntryPointScript  = `import os,runpy,sys; cwd=sys.argv[1]; sys.argv=["defenseclaw",*sys.argv[2:]]; os.chdir(cwd) if cwd else None; runpy.run_module("defenseclaw.main",run_name="__main__")`
+	consoleEntryPointScript = `import importlib.metadata as m,os,sys; name=sys.argv[1]; cwd=sys.argv[2]; sys.argv=[name,*sys.argv[3:]]; os.chdir(cwd) if cwd else None; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+)
 
 func main() {
 	if runtime.GOOS != "windows" {
@@ -28,13 +33,23 @@ func main() {
 	}
 	binDir := filepath.Dir(self)
 	installRoot := filepath.Dir(binDir)
+	installState, packaged, stateErr := nativeinstallstate.LoadForExecutable(self)
+	if stateErr != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: validate native install state: %v\n", stateErr)
+		os.Exit(1)
+	}
 	python := filepath.Join(installRoot, "runtime", "python", "python.exe")
 	if _, err := os.Stat(python); err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: embedded Python runtime is missing: %s\n", python)
 		os.Exit(1)
 	}
 
-	argv, err := launcherArgs(filepath.Base(self), os.Args[1:])
+	logicalCWD, processCWD, err := launcherWorkingDirectories(installRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: resolve working directory: %v\n", err)
+		os.Exit(1)
+	}
+	argv, err := launcherArgs(filepath.Base(self), logicalCWD, os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", err)
 		os.Exit(1)
@@ -43,10 +58,8 @@ func main() {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = launcherEnv(binDir, filepath.Dir(python), installRoot)
-	if cwd, err := os.Getwd(); err == nil {
-		cmd.Dir = cwd
-	}
+	cmd.Env = launcherEnv(binDir, filepath.Dir(python), installRoot, installState, packaged)
+	cmd.Dir = processCWD
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -57,10 +70,10 @@ func main() {
 	}
 }
 
-func launcherArgs(executable string, userArgs []string) ([]string, error) {
+func launcherArgs(executable, workingDirectory string, userArgs []string) ([]string, error) {
 	name := strings.ToLower(strings.TrimSuffix(executable, filepath.Ext(executable)))
 	if name == "defenseclaw" {
-		return append([]string{"-I", "-m", "defenseclaw.main"}, userArgs...), nil
+		return append([]string{"-I", "-c", moduleEntryPointScript, workingDirectory}, userArgs...), nil
 	}
 	entryPoints := map[string]string{
 		"skill-scanner":             "skill-scanner",
@@ -71,15 +84,23 @@ func launcherArgs(executable string, userArgs []string) ([]string, error) {
 	if !ok {
 		return nil, errors.New("unrecognized managed launcher name")
 	}
-	return append([]string{"-I", "-c", consoleEntryPointScript, entryPoint}, userArgs...), nil
+	return append([]string{"-I", "-c", consoleEntryPointScript, entryPoint, workingDirectory}, userArgs...), nil
 }
 
-func launcherEnv(binDir, pythonDir, installRoot string) []string {
+func launcherEnv(binDir, pythonDir, installRoot string, state nativeinstallstate.State, packaged bool) []string {
+	base := os.Environ()
+	if packaged {
+		base = state.Environment(base)
+	}
+	return launcherEnvFromBase(binDir, pythonDir, installRoot, base, packaged)
+}
+
+func launcherEnvFromBase(binDir, pythonDir, installRoot string, base []string, packaged bool) []string {
 	pathValue := binDir + string(os.PathListSeparator) + pythonDir
-	env := make([]string, 0, len(os.Environ())+3)
+	env := make([]string, 0, len(base)+3)
 	sawPath := false
-	for _, entry := range os.Environ() {
-		name, _, ok := strings.Cut(entry, "=")
+	for _, entry := range base {
+		name, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
@@ -88,7 +109,10 @@ func launcherEnv(binDir, pythonDir, installRoot string) []string {
 			continue
 		case "PATH":
 			sawPath = true
-			env = append(env, "PATH="+pathValue+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if value != "" {
+				value = string(os.PathListSeparator) + value
+			}
+			env = append(env, "PATH="+pathValue+value)
 		default:
 			env = append(env, entry)
 		}
@@ -96,6 +120,8 @@ func launcherEnv(binDir, pythonDir, installRoot string) []string {
 	if !sawPath {
 		env = append(env, "PATH="+pathValue)
 	}
-	env = append(env, "DEFENSECLAW_INSTALL_ROOT="+installRoot)
+	if !packaged {
+		env = append(env, "DEFENSECLAW_INSTALL_ROOT="+installRoot)
+	}
 	return env
 }

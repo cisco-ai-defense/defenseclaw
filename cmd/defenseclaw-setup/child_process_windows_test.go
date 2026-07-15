@@ -51,6 +51,9 @@ func TestDirectoryCleanupCommandDeletesLiteralTarget(t *testing.T) {
 		transactionID,
 		5*time.Second,
 	)
+	if samePath(cmd.Dir, root) || !samePath(cmd.Dir, filepath.Dir(powerShell)) {
+		t.Fatalf("cleanup helper working directory = %q, want PowerShell directory %q", cmd.Dir, filepath.Dir(powerShell))
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cleanup helper failed: %v: %s", err, output)
 	}

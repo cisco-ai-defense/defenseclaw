@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -60,7 +61,14 @@ var (
 const (
 	childPIDRegistrationTimeout = 5 * time.Second
 	childPIDRegistrationPoll    = 5 * time.Millisecond
+	forcedStopWait              = 2 * time.Second
 )
+
+// GracefulStopRequest asks the authenticated gateway control plane to stop the
+// exact managed PID. Returning nil means the request was accepted; Daemon then
+// waits on that original process before using OS-level termination as a bounded
+// compatibility fallback.
+type GracefulStopRequest func(pid int) error
 
 type Daemon struct {
 	dataDir string
@@ -222,7 +230,7 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 		if err != nil {
 			return false
 		}
-		if info.Executable != "" && !strings.EqualFold(filepath.Clean(exePath), filepath.Clean(info.Executable)) {
+		if info.Executable != "" && !pathidentity.Same(exePath, info.Executable) {
 			return false
 		}
 		return true
@@ -572,6 +580,20 @@ func readGatewayTokenDotenv(path string) map[string]string {
 }
 
 func (d *Daemon) Stop(timeout time.Duration) error {
+	return d.stop(timeout, nil)
+}
+
+// StopGracefully first asks the running gateway to drain itself through its
+// authenticated control plane. If the control plane is unavailable (for
+// example, while replacing an older binary) or the process misses the bounded
+// deadline, stop falls back to the platform termination signal and finally a
+// force kill. PID state is cleared only after the original process handle has
+// confirmed exit.
+func (d *Daemon) StopGracefully(timeout time.Duration, request GracefulStopRequest) error {
+	return d.stop(timeout, request)
+}
+
+func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error {
 	running, pid := d.IsRunning()
 	if !running {
 		return ErrNotRunning
@@ -589,8 +611,21 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon: find process %d: %w", pid, err)
 	}
+	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
-	// Send termination signal for graceful shutdown
+	if request != nil {
+		if requestErr := request(pid); requestErr == nil {
+			if waitForProcessExit(proc, pid, timeout) {
+				d.removePIDFileIfStarted(started)
+				return nil
+			}
+		}
+	}
+
+	// Compatibility fallback for old/unhealthy gateways. On Unix this is
+	// SIGTERM; on Windows a detached process has no signal channel, so this is
+	// TerminateProcess. The authenticated request above is the normal Windows
+	// graceful path.
 	if err := sendTermSignal(proc); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
 			d.removePIDFileIfStarted(started)
@@ -608,8 +643,10 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	}
 
 	// Force kill if still running
-	_ = sendKillSignal(proc)
-	if !waitForProcessExit(proc, pid, 100*time.Millisecond) {
+	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("daemon: force kill process %d: %w", pid, err)
+	}
+	if !waitForProcessExit(proc, pid, forcedStopWait) {
 		return ErrStopTimeout
 	}
 
@@ -629,6 +666,7 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon: find started process %d: %w", pid, err)
 	}
+	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("daemon: stop started process: %w", err)
 	}
@@ -640,8 +678,10 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	_ = sendKillSignal(proc)
-	if !waitForProcessExit(proc, pid, 100*time.Millisecond) && d.verifyProcess(info) {
+	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) && d.verifyProcess(info) {
+		return fmt.Errorf("daemon: force kill started process %d: %w", pid, err)
+	}
+	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcess(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)

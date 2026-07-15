@@ -368,6 +368,8 @@ jobs:
           go-version-file: go.mod
 
       - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: v2.6.2
 
       - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
@@ -523,10 +525,11 @@ jobs:
         run: |
           set -euo pipefail
           make dist-upgrade-manifest
-          rm -f dist/checksums.txt.sig dist/checksums.txt.pem
+          rm -f dist/checksums.txt.sig dist/checksums.txt.pem dist/checksums.txt.bundle
           make dist-checksums
           cosign sign-blob \
             --yes \
+            --bundle=dist/checksums.txt.bundle \
             --output-certificate=dist/checksums.txt.pem \
             --output-signature=dist/checksums.txt.sig \
             dist/checksums.txt
@@ -549,6 +552,9 @@ jobs:
     environment: release
     permissions:
       contents: read
+    outputs:
+      artifact-id: ${{ steps.windows-installer-artifact.outputs.artifact-id }}
+      artifact-digest: ${{ steps.windows-installer-artifact.outputs.artifact-digest }}
     defaults:
       run:
         shell: pwsh
@@ -561,8 +567,8 @@ jobs:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
         with:
+          version: "0.11.28"
           python-version: "3.13"
-      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist-base
@@ -582,18 +588,21 @@ jobs:
           }
       - name: Build and Authenticode-sign native setup executable
         env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
         run: ./scripts/build-windows-installer.ps1 -DistRoot dist -OutRoot dist -Version $env:RELEASE_TAG -DistributionFlavor oss
       - name: Validate the exact signed installer lifecycle
         run: >-
-          ./scripts/windows-native-ci.ps1
-          -Operation setup-acceptance
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
           -ArtifactRoot dist
           -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-acceptance')
-          -AllowCurrentUserSetupAcceptance
+          -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-diagnostics')
+          -TimeoutSeconds 4500
       - name: Upload native Windows installer artifacts
+        id: windows-installer-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-dist-windows-installer
@@ -605,9 +614,83 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  windows-real-client-certification:
+    name: Certify signed installer with real Windows clients
+    needs: [release, windows-installer]
+    runs-on: windows-latest
+    # Bounded child operations fit below this budget, preserving time for the
+    # harness finally cleanup and failure-diagnostics upload.
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        with:
+          version: "0.11.28"
+          python-version: "3.13"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-installer.outputs.artifact-id }}
+          path: dist
+          merge-multiple: true
+      - name: Require both real-client provider credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
+            throw 'OPENAI_API_KEY and ANTHROPIC_API_KEY are required. Refusing to publish without both real Windows client certifications.'
+          }
+      - name: Certify exact signed installer with pinned real Codex and Claude Code
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact-digest }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.release.outputs.tag }}
+        run: >-
+          ./scripts/windows-native-ci.ps1
+          -Operation release-certification
+          -ArtifactRoot dist
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-real-client-certification')
+      - name: Upload real-client certification diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-real-client-diagnostics
+          path: |
+            ${{ runner.temp }}/defenseclaw-signed-real-client-certification/diagnostics/**
+            ${{ runner.temp }}/defenseclaw-signed-real-client-certification/logs/**
+            ${{ runner.temp }}/defenseclaw-signed-real-client-certification/real-client-results.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+      - name: Upload certified native Windows installer artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-dist-windows-certified
+          path: |
+            dist/DefenseClawSetup-x64.exe
+            dist/DefenseClawSetup-x64.exe.sha256
+            dist/DefenseClawSetup-x64.exe.provenance.json
+            dist/DefenseClawSetup-x64.exe.sbom.json
+            dist/DefenseClawSetup-x64.exe.certification.json
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish immutable GitHub release
-    needs: [release, windows-installer]
+    needs: [release, windows-real-client-certification]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -618,23 +701,26 @@ jobs:
         with:
           fetch-depth: 0
       - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: v2.6.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist-base
           path: dist
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-dist-windows-installer
+          name: release-dist-windows-certified
           path: dist
       - name: Recompute final checksums after Windows setup artifact is present
         run: |
           set -euo pipefail
-          rm -f dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem
+          rm -f dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem dist/checksums.txt.bundle
           cd dist
-          find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
+          find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem ! -name checksums.txt.bundle | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
           cd ..
           cosign sign-blob \
             --yes \
+            --bundle=dist/checksums.txt.bundle \
             --output-certificate=dist/checksums.txt.pem \
             --output-signature=dist/checksums.txt.sig \
             dist/checksums.txt
@@ -660,10 +746,12 @@ jobs:
             dist/*.exe
             dist/*.sbom.json
             dist/*.provenance.json
+            dist/*.certification.json
             dist/*.sha256
             dist/checksums.txt
             dist/checksums.txt.sig
             dist/checksums.txt.pem
+            dist/checksums.txt.bundle
             dist/*.whl
             dist/upgrade-manifest.json
           )
