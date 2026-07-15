@@ -89,11 +89,11 @@ def _doctor_subsection(title: str) -> None:
     The legacy uncolored layout so cron logs and log shippers see
     the same byte stream they always have.
     """
-    click.echo()
+    ux.echo()
     if ux._color_enabled():
-        click.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
+        ux.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
     else:
-        click.echo(f"  ── {title} ──")
+        ux.echo(f"  ── {title} ──")
 
 
 def _doctor_marker(tag: str) -> str:
@@ -199,7 +199,7 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         os.replace(tmp_path, path)
         tmp_path = ""
     except OSError as exc:
-        click.echo(
+        ux.echo(
             f"warning: could not write doctor cache at {path}: {exc}",
             err=True,
         )
@@ -275,7 +275,7 @@ def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = N
             # the bold label and the detail value without losing the
             # connection between the two halves.
             line += "  " + ux.dim("—") + f"  {detail}"
-        click.echo(line)
+        ux.echo(line)
     if r is not None:
         r.record(tag, label, detail)
 
@@ -292,7 +292,7 @@ def _emit_hint(text: str, *, indent: str = "      ") -> None:
     """
     if _json_mode:
         return
-    click.echo(f"{indent}{ux.dim('↪ ' + text)}")
+    ux.echo(f"{indent}{ux.dim('↪ ' + text)}")
 
 
 def _emit_aid_hint(text: str) -> None:
@@ -3127,8 +3127,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     _check_observability_v8_status(status, r, live_health=live_health)
     _check_connector_export_custody(
         inspect_connector_custody(
-            status.local_path
-            or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
+            status.local_path or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
             cfg.data_dir,
         ),
         r,
@@ -3176,13 +3175,9 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             ]
             if item.credential_state == "invalid":
                 tag = "fail"
-                conditions.append(
-                    f"invalid credentials observed ({item.authentication_failures} recent failures)"
-                )
+                conditions.append(f"invalid credentials observed ({item.authentication_failures} recent failures)")
             elif item.credential_state == "recovered":
-                conditions.append(
-                    f"credentials recovered after {item.authentication_failures} recent failures"
-                )
+                conditions.append(f"credentials recovered after {item.authentication_failures} recent failures")
             if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
                 tag = "fail"
                 conditions.append(
@@ -3223,23 +3218,17 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
 
         if item.credential_state == "invalid":
             tag = "fail"
-            conditions.append(
-                f"invalid credentials observed ({item.authentication_failures} recent failures)"
-            )
+            conditions.append(f"invalid credentials observed ({item.authentication_failures} recent failures)")
         elif item.credential_state == "recovered":
             if tag == "pass":
                 tag = "warn"
-            conditions.append(
-                f"credentials recovered after {item.authentication_failures} recent failures"
-            )
+            conditions.append(f"credentials recovered after {item.authentication_failures} recent failures")
         else:
             conditions.append("credentials=no recent failure")
 
         if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
             tag = "fail"
-            conditions.append(
-                f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
-            )
+            conditions.append(f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)")
         elif item.drop_only_batches:
             if tag == "pass":
                 tag = "warn"
@@ -3560,10 +3549,7 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         return
 
     if private_entries:
-        detail = (
-            f"active entries: {', '.join(private_entries)} | impact=high | "
-            f"sources={', '.join(sources)}"
-        )
+        detail = f"active entries: {', '.join(private_entries)} | impact=high | sources={', '.join(sources)}"
         _emit("warn", "Private upstream allowlist", detail, r=r)
 
     for entry in active:
@@ -3659,10 +3645,10 @@ def doctor(
     _json_mode = json_out
 
     if not json_out:
-        click.echo()
-        click.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
-        click.echo(ux._style("══════════════════", fg="cyan"))
-        click.echo()
+        ux.echo()
+        ux.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
+        ux.echo(ux._style("══════════════════", fg="cyan"))
+        ux.echo()
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
@@ -3834,8 +3820,8 @@ def doctor(
             parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
-        click.echo("  " + ", ".join(parts))
-        click.echo()
+        ux.echo("  " + ", ".join(parts))
+        ux.echo()
 
     if r.failed:
         if not json_out:
@@ -3844,7 +3830,7 @@ def doctor(
             # ``ux.warn`` rather than ``ux.err`` because the line
             # itself isn't a failure; the failures above are.
             ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
-            click.echo()
+            ux.echo()
         raise SystemExit(1)
 
     if app.logger:
