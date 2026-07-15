@@ -27,7 +27,14 @@ import (
 )
 
 func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
-	return hookruntime.Publish(source, gatewayPath, dataRoot, transactionID)
+	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
+		return err
+	}
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return err
+	}
+	return verifyPublishedStableHookRuntime(source, paths.Launcher)
 }
 
 func disableStableHookRuntime(transactionID string) error {

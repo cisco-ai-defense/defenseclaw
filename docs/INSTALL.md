@@ -48,6 +48,14 @@ Follow the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw
 for prerequisites, PowerShell installation, connector setup, verification,
 upgrades, and troubleshooting.
 
+The supported install transaction is `DefenseClawSetup-x64.exe`. The retained
+`scripts/install.ps1` command is only a compatibility bootstrap: it verifies
+the signed release checksum manifest and offline Sigstore bundle, the schema-1
+provenance binding for the exact Setup SHA-256, release policy, and Cisco
+Authenticode publisher before delegating to Setup. It no longer installs
+Python, `uv`, wheels, or separate gateway files, and its `-Local` mode performs
+no downloads.
+
 - **Certified:** Codex CLI and Claude Code.
 - **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
   OpenCode, and Hermes. These require separate certification before use on

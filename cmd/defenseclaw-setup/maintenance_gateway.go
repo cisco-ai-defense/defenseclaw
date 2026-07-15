@@ -96,7 +96,12 @@ func prepareConnectorMaintenanceGatewayAt(
 			strings.TrimSpace(string(output)),
 		))
 	}
-	if err := validateMachineVersion(output, "defenseclaw-gateway", payload.Manifest.Version); err != nil {
+	if err := validateMachineVersion(
+		output,
+		"defenseclaw-gateway",
+		payload.Manifest.Version,
+		payload.Manifest.SourceCommit,
+	); err != nil {
 		return fail(fmt.Errorf("validate connector maintenance gateway identity: %w", err))
 	}
 	return connectorMaintenanceGateway{path: gatewayPath, cleanup: cleanup}, nil

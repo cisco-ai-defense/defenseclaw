@@ -1476,6 +1476,9 @@ func validateCommittedInstallForUninstallHandoff(transaction setupTransaction) e
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
 	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
+	}
 	return nil
 }
 
@@ -1628,6 +1631,9 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	}
 	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
 		return errors.New("maintenance executable does not match the committed installer transaction")
+	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
 	}
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
