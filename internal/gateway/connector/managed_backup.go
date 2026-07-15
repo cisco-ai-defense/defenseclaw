@@ -113,9 +113,33 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if err != nil {
 		return err
 	}
-	nextHash := managedBackupMissingHash
+	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
-		nextHash = sha256Hex(data)
+		nextHash = managedFileSnapshotHash(data, true)
+	}
+	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
+}
+
+// updateManagedFileBackupPostHashValue records the exact bytes the connector
+// committed, rather than re-reading a path that an external editor can change
+// between replacement and backup publication. If the path later drifts, its
+// hash no longer matches and teardown automatically uses surgical cleanup.
+func updateManagedFileBackupPostHashValue(
+	dataDir, connectorName, logicalName, targetPath, nextHash string,
+) error {
+	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
+	b, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+		return err
+	}
+	if nextHash == "" {
+		return fmt.Errorf("managed backup post hash is empty")
 	}
 	if b.PostSHA256 == nextHash {
 		return nil
@@ -123,6 +147,27 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	b.PostSHA256 = nextHash
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
+}
+
+func managedFileSnapshotHash(data []byte, exists bool) string {
+	if !exists {
+		return managedBackupMissingHash
+	}
+	return sha256Hex(data)
+}
+
+func managedFileBackupExpectedHash(b *managedFileBackup) string {
+	if b == nil {
+		return ""
+	}
+	if b.PostSHA256 != "" {
+		return b.PostSHA256
+	}
+	return b.PristineSHA256
+}
+
+func managedFileBackupMatchesSnapshot(b *managedFileBackup, data []byte, exists bool) bool {
+	return b != nil && managedFileBackupExpectedHash(b) == managedFileSnapshotHash(data, exists)
 }
 
 func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, targetPath string) (bool, error) {

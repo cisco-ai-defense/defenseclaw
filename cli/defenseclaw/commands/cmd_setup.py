@@ -3218,6 +3218,43 @@ def _check_connector_version_supported_for_setup(
     return True
 
 
+def _record_windows_setup_agent_selections(
+    data_dir: str | os.PathLike[str] | None,
+    connectors: list[str] | tuple[str, ...],
+) -> None:
+    """Refresh protected executable authority required by native Codex setup."""
+
+    if platform_support.host_os() != "windows":
+        return
+    selected = tuple(
+        dict.fromkeys(
+            connector
+            for raw in connectors
+            if (connector := normalize_connector(raw)) == "codex"
+        )
+    )
+    if not selected:
+        return
+
+    from defenseclaw.agent_selection import record_setup_agent_selections
+
+    target_dir = data_dir or os.path.expanduser("~/.defenseclaw")
+    try:
+        selections, selection_errors = record_setup_agent_selections(target_dir, selected)
+    except OSError as exc:
+        raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
+
+    for connector in selected:
+        if connector not in selections and connector not in selection_errors:
+            selection_errors[connector] = "selection was not recorded"
+    if selection_errors:
+        details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
+        raise click.ClickException(
+            "cannot configure native hooks without a freshly verified selected agent executable "
+            f"({details})"
+        )
+
+
 def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str | None) -> list[str]:
     """Connectors whose binaries should be verified before guardrail setup."""
     targets: list[str] = []
@@ -3275,6 +3312,7 @@ def _check_guardrail_setup_connector_versions(
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             return False
+    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), tuple(targets))
     # Version validation can refuse a requested action mode and persist an
     # observe fallback. Reconcile the hook-lane judge gate after every target
     # has reached its final mode so a refused connector cannot remain judged
@@ -4836,6 +4874,7 @@ def _apply_hook_connector_setup(
     # (--rule-pack + --rule-pack-dir are mutually exclusive) fails fast via a
     # UsageError BEFORE _write_connector_identity mutates any in-memory state.
     pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
+    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), (connector,))
 
     workspace = _configure_connector_workspace(cfg, workspace_dir)
     # WU7: honor the resolved write mode — "replace" pins this as the sole
@@ -8455,6 +8494,9 @@ def _restart_services(
     connector_state_before = (
         _active_connector_state_marker(data_dir) if wait_for_connector_ready and hook_targets else None
     )
+    hook_contract_lock_before = (
+        _hook_contract_lock_marker(data_dir) if wait_for_connector_ready and hook_targets else None
+    )
 
     gateway_restarted = _restart_defense_gateway(data_dir)
     if not gateway_restarted:
@@ -8462,7 +8504,12 @@ def _restart_services(
 
     if wait_for_connector_ready and hook_targets and gateway_restarted:
         click.echo("  connector runtime: waiting for verified setup...", nl=False)
-        if _wait_for_connector_runtime(data_dir, hook_targets, connector_state_before):
+        if _wait_for_connector_runtime(
+            data_dir,
+            hook_targets,
+            connector_state_before,
+            hook_contract_lock_before,
+        ):
             click.echo(" ✓")
         else:
             click.echo(" ✗")
@@ -8531,9 +8578,16 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
 
 
 def _active_connector_state_marker(data_dir: str) -> int | None:
-    state_path = os.path.join(data_dir, "active_connector.json")
+    return _regular_file_marker(os.path.join(data_dir, "active_connector.json"))
+
+
+def _hook_contract_lock_marker(data_dir: str) -> int | None:
+    return _regular_file_marker(os.path.join(data_dir, "hook_contract_lock.json"))
+
+
+def _regular_file_marker(path: str) -> int | None:
     try:
-        info = os.lstat(state_path)
+        info = os.lstat(path)
     except OSError:
         return None
     if not stat.S_ISREG(info.st_mode):
@@ -8541,42 +8595,67 @@ def _active_connector_state_marker(data_dir: str) -> int | None:
     return info.st_mtime_ns
 
 
+def _read_stable_regular_json(path: str) -> tuple[Any, int]:
+    fd: int | None = None
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        opened_info = os.fstat(fd)
+        if not stat.S_ISREG(opened_info.st_mode):
+            raise OSError(f"opened {path} is not a regular file")
+        if not os.path.samestat(info, opened_info):
+            raise OSError(f"{path} changed while opening")
+        opened_file = os.fdopen(fd, encoding="utf-8")
+        fd = None
+        with opened_file:
+            payload = _json.load(opened_file)
+        return payload, opened_info.st_mtime_ns
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _hook_contract_lock_covers(lock: Any, expected: set[str]) -> bool:
+    if not isinstance(lock, dict):
+        return False
+    version = lock.get("version")
+    entries = lock.get("connectors")
+    if type(version) is not int or version < 1 or version > 2 or not isinstance(entries, dict):
+        return False
+    for name in expected:
+        entry = entries.get(name)
+        if not isinstance(entry, dict):
+            return False
+        connector_name = entry.get("connector")
+        if not isinstance(connector_name, str) or normalize_connector(connector_name) != name:
+            return False
+    return True
+
+
 def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
-    previous_marker: int | None,
+    previous_state_marker: int | None,
+    previous_lock_marker: int | None,
     timeout: float = _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS,
 ) -> bool:
     expected = {normalize_connector(name) for name in connectors if name}
     if not expected:
         return True
     state_path = os.path.join(data_dir, "active_connector.json")
+    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        fd: int | None = None
         try:
-            info = os.lstat(state_path)
-            if not stat.S_ISREG(info.st_mode):
-                raise OSError("connector state is not a regular file")
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            fd = os.open(state_path, flags)
-            opened_info = os.fstat(fd)
-            if not stat.S_ISREG(opened_info.st_mode):
-                raise OSError("opened connector state is not a regular file")
-            if not os.path.samestat(info, opened_info):
-                raise OSError("connector state changed while opening")
-            state_file = os.fdopen(fd, encoding="utf-8")
-            fd = None
-            with state_file:
-                state = _json.load(state_file)
+            state, state_marker = _read_stable_regular_json(state_path)
+            lock, lock_marker = _read_stable_regular_json(lock_path)
         except (OSError, ValueError):
             time.sleep(0.2)
             continue
-        finally:
-            if fd is not None:
-                os.close(fd)
-        marker = opened_info.st_mtime_ns
         raw_names = state.get("names") if isinstance(state, dict) else None
         if isinstance(raw_names, list):
             active = {
@@ -8587,7 +8666,14 @@ def _wait_for_connector_runtime(
         else:
             name = state.get("name") if isinstance(state, dict) else None
             active = {normalize_connector(name)} if isinstance(name, str) and name.strip() else set()
-        if expected.issubset(active) and (previous_marker is None or marker != previous_marker):
+        state_fresh = previous_state_marker is None or state_marker != previous_state_marker
+        lock_fresh = previous_lock_marker is None or lock_marker != previous_lock_marker
+        if (
+            expected.issubset(active)
+            and state_fresh
+            and lock_fresh
+            and _hook_contract_lock_covers(lock, expected)
+        ):
             return True
         time.sleep(0.2)
     return False
@@ -8645,6 +8731,33 @@ def _gateway_pid_file_identifies_gateway(pid_file: str) -> bool:
     return process_is_gateway(pid)
 
 
+def _gateway_lifecycle_executable(*, native: bool = False) -> str | None:
+    """Resolve one stable executable for a complete gateway lifecycle call.
+
+    A packaged Windows CLI must use the gateway beside its verified embedded
+    runtime.  Passing a bare executable name lets Windows search the current
+    directory before ``PATH`` and allowed a stale checkout binary to shadow the
+    installed service.  Developer and non-Windows flows retain their existing
+    behavior; native Job Object callers still require a concrete executable.
+    """
+
+    from defenseclaw.gateway import (
+        packaged_windows_gateway_path,
+        packaged_windows_install_root,
+    )
+
+    if packaged_windows_install_root():
+        # A corroborated package with a missing sibling is broken; fail closed
+        # instead of allowing PATH/current-directory executable shadowing.
+        return packaged_windows_gateway_path()
+    if native:
+        executable = shutil.which("defenseclaw-gateway")
+        if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+            return None
+        return str(Path(executable).resolve())
+    return "defenseclaw-gateway"
+
+
 def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
@@ -8682,7 +8795,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    cmd = ["defenseclaw-gateway", "restart"] if was_running else ["defenseclaw-gateway", "start"]
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        click.echo(" ✗ (binary not found)")
+        click.echo("    Build with: make gateway")
+        return False
+    cmd = [executable, "restart"] if was_running else [executable, "start"]
     try:
         result = subprocess.run(
             cmd,
@@ -8714,12 +8832,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         # child cannot outlive the failed setup command.  On restart, preserve
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
-        status = _gateway_lifecycle_status()
+        status = _gateway_lifecycle_status(executable)
         if status:
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
-            _cleanup_timed_out_gateway_start()
+            _cleanup_timed_out_gateway_start(executable)
         click.echo(" ✗ (timed out; final status is not healthy)")
         return False
 
@@ -8743,8 +8861,8 @@ def _restart_defense_gateway_native(data_dir: str, *, start_if_stopped: bool = T
     if ctx is not None:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
-    executable = shutil.which("defenseclaw-gateway")
-    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    executable = _gateway_lifecycle_executable(native=True)
+    if not executable:
         click.echo("  defenseclaw-gateway: native executable not found.")
         return False
 
@@ -8762,7 +8880,7 @@ def _restart_defense_gateway_native(data_dir: str, *, start_if_stopped: bool = T
     click.echo(f"  defenseclaw-gateway: {'restarting' if was_running else 'starting'}...", nl=False)
     try:
         result = runner.run(
-            [str(Path(executable).resolve()), action],
+            [executable, action],
             timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
         )
     except LocalStackError:
@@ -8809,18 +8927,18 @@ def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
 def _stop_defense_gateway_native(data_dir: str) -> bool:
     from defenseclaw.observability.local_stack import CommandRunner
 
-    executable = shutil.which("defenseclaw-gateway")
-    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    executable = _gateway_lifecycle_executable(native=True)
+    if not executable:
         return False
     if not _native_gateway_lifecycle_stop(CommandRunner(), executable):
         return False
     return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
 
 
-def _gateway_lifecycle_status() -> bool:
+def _gateway_lifecycle_status(executable: str) -> bool:
     try:
         result = subprocess.run(
-            ["defenseclaw-gateway", "status"],
+            [executable, "status"],
             capture_output=True,
             text=True,
             timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
@@ -8830,10 +8948,10 @@ def _gateway_lifecycle_status() -> bool:
     return result.returncode == 0
 
 
-def _cleanup_timed_out_gateway_start() -> None:
+def _cleanup_timed_out_gateway_start(executable: str) -> None:
     try:
         subprocess.run(
-            ["defenseclaw-gateway", "stop"],
+            [executable, "stop"],
             capture_output=True,
             text=True,
             timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,

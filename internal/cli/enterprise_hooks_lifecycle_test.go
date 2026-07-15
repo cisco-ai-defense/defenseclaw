@@ -29,10 +29,13 @@ type enterpriseHooksTreeEntry struct {
 	Digest     [sha256.Size]byte
 }
 
-func TestEnterpriseHooksWindowsGatePrecedesRootAndCommandLifecycle(t *testing.T) {
-	for _, command := range []string{"install", "reconcile", "watch"} {
+func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(t *testing.T) {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
+			enterpriseHooksPlatformPreflight = func() error {
+				return fmt.Errorf("enterprise hooks require an elevated administrator or LocalSystem token on native Windows")
+			}
 
 			scope := t.TempDir()
 			sentinel := filepath.Join(scope, "sentinel.txt")
@@ -61,12 +64,13 @@ func TestEnterpriseHooksWindowsGatePrecedesRootAndCommandLifecycle(t *testing.T)
 				return fmt.Errorf("command lifecycle must not run")
 			}
 			enterpriseHooksInstallRunE = blockedRun
+			enterpriseHooksUninstallRunE = blockedRun
 			enterpriseHooksReconcileRunE = blockedRun
 			enterpriseHooksWatchRunE = blockedRun
 
 			args := []string{"enterprise", "hooks", command}
 			switch command {
-			case "install":
+			case "install", "uninstall":
 				args = append(args, "--connector", "codex", "--user", "alice", "--user-home", userHome)
 			case "reconcile", "watch":
 				args = append(args, "--manifest", manifest)
@@ -83,8 +87,8 @@ func TestEnterpriseHooksWindowsGatePrecedesRootAndCommandLifecycle(t *testing.T)
 				t.Fatal("ExecuteC error = nil, want unsupported-platform failure")
 			}
 			diagnostic := stdout.String() + stderr.String() + err.Error()
-			if !strings.Contains(diagnostic, "enterprise hooks are unsupported on native Windows") {
-				t.Fatalf("diagnostic = %q, want native Windows unsupported message", diagnostic)
+			if !strings.Contains(diagnostic, "require an elevated administrator or LocalSystem") {
+				t.Fatalf("diagnostic = %q, want native Windows administrator requirement", diagnostic)
 			}
 			if elapsed >= time.Second {
 				t.Fatalf("command returned in %s, want less than 1s", elapsed)
@@ -122,7 +126,7 @@ func TestEnterpriseHooksWindowsGatePrecedesRootAndCommandLifecycle(t *testing.T)
 }
 
 func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T) {
-	for _, command := range []string{"install", "reconcile", "watch"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksRuntimeGOOS = func() string { return "linux" }
@@ -138,6 +142,8 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 			switch command {
 			case "install":
 				enterpriseHooksInstallRunE = commandRun
+			case "uninstall":
+				enterpriseHooksUninstallRunE = commandRun
 			case "reconcile":
 				enterpriseHooksReconcileRunE = commandRun
 			case "watch":
@@ -156,21 +162,24 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 	}
 }
 
-func TestEnterpriseHooksNativeWindowsSmoke(t *testing.T) {
+func TestEnterpriseHooksNativeWindowsAdministratorPreflightSmoke(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows smoke test")
 	}
 	restoreEnterpriseHooksLifecycleTestState(t)
 	scope := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(scope, "data"))
+	enterpriseHooksPlatformPreflight = func() error {
+		return fmt.Errorf("enterprise hooks require an elevated administrator or LocalSystem token on native Windows")
+	}
 	enterpriseHooksInstallRunE = func(*cobra.Command, []string) error {
 		t.Fatal("install handler ran on native Windows")
 		return nil
 	}
 	rootCmd.SetArgs([]string{"enterprise", "hooks", "install"})
 	_, err := rootCmd.ExecuteC()
-	if err == nil || !strings.Contains(err.Error(), "enterprise hooks are unsupported on native Windows") {
-		t.Fatalf("ExecuteC error = %v, want native Windows unsupported failure", err)
+	if err == nil || !strings.Contains(err.Error(), "require an elevated administrator") {
+		t.Fatalf("ExecuteC error = %v, want native Windows administrator failure", err)
 	}
 	if entries := snapshotEnterpriseHooksTree(t, scope); len(entries) != 1 {
 		t.Fatalf("native Windows smoke tree changed: %#v", entries)
@@ -180,16 +189,20 @@ func TestEnterpriseHooksNativeWindowsSmoke(t *testing.T) {
 func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	t.Helper()
 	originalGOOS := enterpriseHooksRuntimeGOOS
+	originalPlatformPreflight := enterpriseHooksPlatformPreflight
 	originalRootPreRun := enterpriseHooksRootPersistentPreRun
 	originalInstall := enterpriseHooksInstallRunE
+	originalUninstall := enterpriseHooksUninstallRunE
 	originalReconcile := enterpriseHooksReconcileRunE
 	originalWatch := enterpriseHooksWatchRunE
 	originalCfg, originalAuditStore, originalAuditLog, originalOTel := cfg, auditStore, auditLog, otelProvider
 	originalOut, originalErr := rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
 	t.Cleanup(func() {
 		enterpriseHooksRuntimeGOOS = originalGOOS
+		enterpriseHooksPlatformPreflight = originalPlatformPreflight
 		enterpriseHooksRootPersistentPreRun = originalRootPreRun
 		enterpriseHooksInstallRunE = originalInstall
+		enterpriseHooksUninstallRunE = originalUninstall
 		enterpriseHooksReconcileRunE = originalReconcile
 		enterpriseHooksWatchRunE = originalWatch
 		cfg, auditStore, auditLog, otelProvider = originalCfg, originalAuditStore, originalAuditLog, originalOTel

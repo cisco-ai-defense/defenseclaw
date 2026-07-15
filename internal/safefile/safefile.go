@@ -59,9 +59,12 @@ func Write(path string, data []byte) error {
 }
 
 // ReplaceFile performs a replacement-style rename from source to destination.
-// On Windows it retries transient access, sharing, and lock violations commonly caused
-// by antivirus scanners briefly opening a newly written file. Callers remain
-// responsible for validating both paths and cleaning up source on failure.
+// On Windows an existing destination is published with ReplaceFileW so its
+// DACL, EFS/compression state, creation metadata, and non-conflicting named
+// streams survive. It retries transient access, sharing, and lock violations
+// commonly caused by antivirus scanners briefly opening a newly written file.
+// Callers remain responsible for validating both paths and cleaning up source
+// on failure.
 func ReplaceFile(source, destination string) error {
 	return replaceFile(source, destination)
 }
@@ -249,6 +252,23 @@ func ProtectFile(path string) error {
 		return fmt.Errorf("safefile: file changed while validating: %s", path)
 	}
 	return protectFile(path, f)
+}
+
+// ValidatePrivateDirectory verifies that path is an existing, non-link
+// directory protected for the current user and the platform's trusted system
+// principal. Unlike ProtectDirectory it never changes the path. It is intended
+// for security-sensitive readers that must fail closed when private state has
+// been replaced or its permissions have drifted.
+func ValidatePrivateDirectory(path string) error {
+	return validatePrivateProtection(path, true)
+}
+
+// ValidatePrivateFile verifies that path is an existing, non-link regular file
+// protected for the current user and the platform's trusted system principal.
+// It performs no repair so a reader cannot silently bless attacker-controlled
+// state before consuming it.
+func ValidatePrivateFile(path string) error {
+	return validatePrivateProtection(path, false)
 }
 
 func validateRegularFilePath(path string) (os.FileInfo, error) {

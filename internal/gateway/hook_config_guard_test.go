@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,71 @@ func TestHookConfigGuard_RecreatesDeletedFile(t *testing.T) {
 	waitForPresence(t, conn, opts, true, 3*time.Second)
 	if _, err := os.Stat(cfgPath); err != nil {
 		t.Fatalf("config file not recreated: %v", err)
+	}
+}
+
+func TestHookConfigGuard_ContinuesAfterWatcherReplacement(t *testing.T) {
+	conn, opts, cfgPath := installedCursorConnector(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+
+	// Prove the run loop consumed an event from the original watcher before
+	// replacing it. The long debounce keeps the event pending and the loop
+	// blocked on that watcher's channels.
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("trigger original watcher: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		guard.mu.Lock()
+		pending := len(guard.pending)
+		guard.mu.Unlock()
+		if pending > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("original watcher event was not consumed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(2 * guardTestDebounce)
+
+	guard.mu.Lock()
+	original := guard.fsw
+	guard.resyncTargetsLocked(conn, opts)
+	replacement := guard.fsw
+	guard.pending = map[string]time.Time{}
+	guard.mu.Unlock()
+	if replacement == original {
+		t.Fatal("resync did not replace the filesystem watcher")
+	}
+
+	select {
+	case <-guard.done:
+		t.Fatal("guard stopped when the superseded watcher channels closed")
+	case <-time.After(4 * guardTestDebounce):
+	}
+
+	// The replacement watcher must remain live and consume a fresh event.
+	if err := os.WriteFile(cfgPath, []byte("{\"replacement\":true}\n"), 0o600); err != nil {
+		t.Fatalf("trigger replacement watcher: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		guard.mu.Lock()
+		pending := len(guard.pending)
+		guard.mu.Unlock()
+		if pending > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replacement watcher event was not consumed")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -306,6 +372,175 @@ func TestHookConfigGuard_NotifierFiresOnHeal(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("heal notifier did not fire after a successful re-install")
 	}
+}
+
+func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t *testing.T) {
+	settingsDir := filepath.Join(t.TempDir(), "claude")
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	previous := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+	opts := connector.SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	conn := connector.NewClaudeCodeConnector()
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("create Claude settings directory: %v", err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["disableAllHooks"] = true
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	notified := make(chan struct{}, 1)
+	guard.SetHealNotifier(func(string, []string) { notified <- struct{}{} })
+	guard.Start(ctx, conn, opts)
+	t.Cleanup(guard.Stop)
+
+	// Queue a target-file removal and then replace its watched directory
+	// before the debounce fires. The effective-policy resolver must diagnose
+	// the explicit disabling source without trying to fight administrator/user
+	// policy by rewriting hooks underneath it.
+	if err := os.Remove(settingsPath); err != nil {
+		t.Fatalf("remove Claude settings: %v", err)
+	}
+	if err := os.RemoveAll(settingsDir); err != nil {
+		t.Fatalf("remove watched Claude directory: %v", err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("recreate Claude directory: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{\"disableAllHooks\":true}\n"), 0o600); err != nil {
+		t.Fatalf("restore disabled Claude settings: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		guard.mu.Lock()
+		failure := guard.lastPolicyFailure
+		guard.mu.Unlock()
+		if strings.Contains(failure, "disableAllHooks=true") && strings.Contains(failure, settingsPath) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("guard did not report the exact policy-blocked source (last failure=%q)", failure)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked map[string]interface{}
+	if err := json.Unmarshal(data, &blocked); err != nil {
+		t.Fatal(err)
+	}
+	if _, hooksRestored := blocked["hooks"]; hooksRestored {
+		t.Fatal("guard rewrote hooks even though the effective source explicitly disabled them")
+	}
+
+	select {
+	case <-notified:
+		t.Fatal("guard reported a repair even though Claude Code still disables all hooks")
+	default:
+	}
+
+	// The blocked evaluation must not strand the watcher on the deleted
+	// directory object. Let the normal self-write suppression expire, then
+	// remove the policy and strip the hooks; the running guard must observe and
+	// heal this edit.
+	guard.mu.Lock()
+	suppressedUntil := guard.suppressUntil
+	guard.mu.Unlock()
+	if remaining := time.Until(suppressedUntil) + 2*guardTestDebounce; remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("remove Claude policy and hooks: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		present, presenceErr := connector.OwnedHooksPresent(conn, opts)
+		if presenceErr == nil && present {
+			break
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(settingsPath)
+			guard.mu.Lock()
+			pending := len(guard.pending)
+			suppressedUntil := guard.suppressUntil
+			watchList := guard.fsw.WatchList()
+			started := guard.started
+			guard.mu.Unlock()
+			t.Fatalf(
+				"guard did not heal subsequent edit (err=%v started=%v pending=%d suppressedUntil=%s watches=%v settings=%s)",
+				presenceErr,
+				started,
+				pending,
+				suppressedUntil.Format(time.RFC3339Nano),
+				watchList,
+				data,
+			)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard did not report the subsequent successful repair")
+	}
+
+	guard.Stop()
+}
+
+func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *testing.T) {
+	settingsDir := filepath.Join(t.TempDir(), "claude")
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	managedRoot := filepath.Join(t.TempDir(), "managed")
+	previousSettings := connector.ClaudeCodeSettingsPathOverride
+	previousManaged := connector.ClaudeCodeManagedSettingsRootOverride
+	connector.ClaudeCodeSettingsPathOverride = settingsPath
+	connector.ClaudeCodeManagedSettingsRootOverride = managedRoot
+	t.Cleanup(func() {
+		connector.ClaudeCodeSettingsPathOverride = previousSettings
+		connector.ClaudeCodeManagedSettingsRootOverride = previousManaged
+	})
+
+	opts := connector.SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	conn := connector.NewClaudeCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// A one-hour filesystem debounce proves the repair comes from the policy
+	// audit ticker rather than the ordinary fsnotify processing path.
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	guard.policyAudit = 20 * time.Millisecond
+	guard.Start(ctx, conn, opts)
+	t.Cleanup(guard.Stop)
+
+	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip Claude hooks: %v", err)
+	}
+	waitForPresence(t, conn, opts, true, 3*time.Second)
 }
 
 func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {

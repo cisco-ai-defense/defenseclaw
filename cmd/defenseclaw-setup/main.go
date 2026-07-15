@@ -6,6 +6,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -23,6 +24,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"golang.org/x/mod/semver"
 )
 
 //go:embed payload/*
@@ -33,15 +39,116 @@ const (
 	setupArtifactName            = "DefenseClawSetup-x64.exe"
 	defaultPublisher             = "Cisco Systems, Inc."
 	userExitCode                 = 1602
+	installAlreadyRunningCode    = 1618
 	installTreeRenameMaxAttempts = 40
 	installTreeRenameRetryDelay  = 100 * time.Millisecond
-	restartRequiredCode          = 3010
-	maxZipFiles                  = 100000
-	maxZipExpandedBytes          = int64(2 << 30)
+	// 1603 is the standard fatal-install result. Never use 3010 here: Windows
+	// deployment systems interpret it as a successful install requiring reboot,
+	// while these paths leave the requested operation incomplete and need retry.
+	retryRequiredCode          = 1603
+	maxZipFiles                = 100000
+	maxZipExpandedBytes        = int64(2 << 30)
+	setupControlCommandTimeout = 2 * time.Minute
+	setupValidationTimeout     = 30 * time.Second
+	setupConfigurationTimeout  = 5 * time.Minute
+	setupMigrationTimeout      = 15 * time.Minute
+	maxRunCommandUTF16Units    = 260
 )
 
+var (
+	errInstalledProcessRunning = errors.New("an installed DefenseClaw process is still running")
+	errSetupCancelled          = errors.New("setup cancelled by user")
+)
+
+func checkSetupContext(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(errSetupCancelled, err)
+	}
+	return nil
+}
+
+func setupOperationError(ctx context.Context, err error) error {
+	if err == nil {
+		return checkSetupContext(ctx)
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return errors.Join(errSetupCancelled, err)
+	}
+	return err
+}
+
+func newCapturedSetupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return processutil.CommandContext(ctx, name, args...)
+}
+
+func runCapturedSetupCommand(timeout time.Duration, env []string, name string, args ...string) ([]byte, error) {
+	return runCapturedSetupCommandContext(context.Background(), timeout, false, env, name, args...)
+}
+
+func runCapturedSetupCommandContext(
+	parent context.Context,
+	timeout time.Duration,
+	allowManagedBreakaway bool,
+	env []string,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	cmd := newCapturedSetupCommand(ctx, name, args...)
+	cmd.Env = env
+	output, err := processutil.CombinedOutputTree(cmd, allowManagedBreakaway)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) && parent.Err() == nil {
+			return output, errors.Join(fmt.Errorf("command timed out after %s: %w", timeout, ctxErr), err)
+		}
+		return output, errors.Join(fmt.Errorf("command cancelled: %w", ctxErr), err)
+	}
+	return output, err
+}
+
+func runCapturedManagedServiceCommand(
+	timeout time.Duration,
+	env []string,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	return runCapturedSetupCommandContext(context.Background(), timeout, true, env, name, args...)
+}
+
 func gatewayAutoStartCommand(gatewayPath string) string {
+	startupPath := filepath.Join(filepath.Dir(gatewayPath), "defenseclaw-startup.exe")
+	return `"` + startupPath + `"`
+}
+
+func legacyGatewayAutoStartCommand(gatewayPath string) string {
 	return `"` + gatewayPath + `" start`
+}
+
+func runCommandUTF16Units(command string) int {
+	return len(utf16.Encode([]rune(command)))
+}
+
+func validateRunCommand(command string) error {
+	if strings.ContainsRune(command, '\x00') {
+		return errors.New("windows Run command contains an embedded NUL")
+	}
+	units := runCommandUTF16Units(command)
+	if units > maxRunCommandUTF16Units {
+		return fmt.Errorf(
+			"windows Run command is %d UTF-16 code units; the supported maximum is %d",
+			units,
+			maxRunCommandUTF16Units,
+		)
+	}
+	return nil
 }
 
 type options struct {
@@ -58,24 +165,60 @@ type options struct {
 	StartGatewaySet bool
 	WaitPID         uint32
 	FromVersion     string
+	CodexHome       string
+	ClaudeConfigDir string
+	// PreserveConnectorConfiguration is internal transaction intent, never a
+	// command-line property. Servicing an existing install without an explicit
+	// connector or mode selection must refresh its owned registrations in place
+	// instead of collapsing connector changes made later through the CLI.
+	PreserveConnectorConfiguration bool
 }
 
 type payloadManifest struct {
-	SchemaVersion      int               `json:"schema_version"`
-	Version            string            `json:"version"`
-	SourceCommit       string            `json:"source_commit"`
-	DistributionFlavor string            `json:"distribution_flavor"`
-	PythonVersion      string            `json:"python_version"`
-	GatewayArchive     string            `json:"gateway_archive"`
-	Wheel              string            `json:"wheel"`
-	PythonEmbed        string            `json:"python_embed"`
-	UpgradeManifest    string            `json:"upgrade_manifest"`
-	SitePackages       string            `json:"site_packages"`
-	Launcher           string            `json:"launcher"`
-	CosignVerifier     string            `json:"cosign_verifier"`
-	Unsigned           bool              `json:"unsigned"`
-	Toolchain          map[string]string `json:"toolchain"`
-	Files              map[string]string `json:"files"`
+	SchemaVersion      int                   `json:"schema_version"`
+	Version            string                `json:"version"`
+	SourceCommit       string                `json:"source_commit"`
+	DistributionFlavor string                `json:"distribution_flavor"`
+	PythonVersion      string                `json:"python_version"`
+	GatewayArchive     string                `json:"gateway_archive"`
+	Wheel              string                `json:"wheel"`
+	PythonEmbed        string                `json:"python_embed"`
+	YaraCompatWheel    string                `json:"yara_compat_wheel"`
+	UpgradeManifest    string                `json:"upgrade_manifest"`
+	SitePackages       string                `json:"site_packages"`
+	Launcher           string                `json:"launcher"`
+	StartupLauncher    string                `json:"startup_launcher"`
+	CosignVerifier     string                `json:"cosign_verifier"`
+	Unsigned           bool                  `json:"unsigned"`
+	Authenticode       authenticodeInventory `json:"authenticode"`
+	Toolchain          map[string]string     `json:"toolchain"`
+	Files              map[string]string     `json:"files"`
+}
+
+type authenticodeInventory struct {
+	SchemaVersion int                                 `json:"schema_version"`
+	Files         map[string]authenticodeFileEvidence `json:"files"`
+}
+
+type authenticodeFileEvidence struct {
+	SchemaVersion int                    `json:"schema_version"`
+	InstalledPath string                 `json:"installed_path"`
+	SBOMFileName  string                 `json:"sbom_file_name"`
+	SHA256        string                 `json:"sha256"`
+	Expected      authenticodeFilePolicy `json:"expected"`
+	Observed      json.RawMessage        `json:"observed"`
+}
+
+type authenticodeFilePolicy struct {
+	Policy                          string `json:"policy"`
+	Status                          string `json:"status"`
+	Publisher                       string `json:"publisher"`
+	SignatureType                   string `json:"signature_type"`
+	PlatformIdentityRequired        bool   `json:"platform_identity_required"`
+	TimestampRequired               bool   `json:"timestamp_required"`
+	SignerThumbprintSHA256          string `json:"signer_thumbprint_sha256"`
+	TimestampSignerThumbprintSHA256 string `json:"timestamp_signer_thumbprint_sha256"`
+	TimestampTokenSHA256            string `json:"timestamp_token_sha256"`
 }
 
 type installState struct {
@@ -92,12 +235,16 @@ type installState struct {
 	MaintenancePath        string            `json:"maintenance_path"`
 	PathEntryOwned         bool              `json:"path_entry_owned"`
 	PathSeparatorReused    bool              `json:"path_separator_reused,omitempty"`
+	PathValueCreated       bool              `json:"path_value_created,omitempty"`
 	Connector              string            `json:"connector"`
 	Mode                   string            `json:"mode"`
+	CodexHome              string            `json:"codex_home,omitempty"`
+	ClaudeConfigDir        string            `json:"claude_config_dir,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
 	Toolchain              map[string]string `json:"toolchain"`
 	InstalledAtUTC         string            `json:"installed_at_utc"`
+	TransactionID          string            `json:"transaction_id,omitempty"`
 }
 
 func main() {
@@ -109,10 +256,6 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
-	}
-	if opts.Action == "help" {
-		printUsage()
-		return
 	}
 	if runtime.GOARCH != "amd64" {
 		fmt.Fprintln(os.Stderr, "DefenseClawSetup-x64.exe supports only Windows x64 (amd64)")
@@ -126,6 +269,7 @@ func main() {
 		// stderr stream; a windowsgui process still receives redirected standard
 		// handles when its parent explicitly provides them.
 		fmt.Fprintf(os.Stderr, "DefenseClaw setup failed: %v\n", err)
+		showSetupLaunchContextFailure(err, opts.Quiet)
 		if code != 0 {
 			os.Exit(code)
 		}
@@ -134,7 +278,46 @@ func main() {
 	os.Exit(code)
 }
 
+var acquireSetupOperationLock = acquireSetupLock
+
 func run(opts options) (int, error) {
+	// Help is intentionally available in every context: it is read-only and lets
+	// an administrator or deployment service discover the supported per-user
+	// invocation without starting an installation transaction.
+	if opts.Action == "help" {
+		printUsage()
+		return 0, nil
+	}
+	if opts.Action == "verify" {
+		self, err := os.Executable()
+		if err != nil {
+			return 1, err
+		}
+		if err := verifySetupExecutablePolicyAt(self, false); err != nil {
+			return 1, fmt.Errorf("verify setup Authenticode policy: %w", err)
+		}
+		fmt.Println("DefenseClaw Setup Authenticode verification succeeded")
+		return 0, nil
+	}
+	// INS-32: this read-only token/session/desktop gate must remain the first
+	// operation for every state-changing action. The setup mutex, known-folder
+	// resolution, registry, and filesystem transaction code below are all
+	// intentionally unreachable from an elevated, service, session-zero, or
+	// otherwise non-interactive launch.
+	if err := requireCurrentUserInteractiveSetup(); err != nil {
+		return retryRequiredCode, err
+	}
+	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
+		return retryRequiredCode, err
+	}
+	releaseSetupLock, err := acquireSetupOperationLock()
+	if err != nil {
+		return installAlreadyRunningCode, err
+	}
+	defer func() {
+		_ = releaseSetupLock()
+	}()
+
 	installRoot, err := defaultInstallRoot()
 	if err != nil {
 		return 1, err
@@ -144,6 +327,12 @@ func run(opts options) (int, error) {
 		return 1, err
 	}
 	if err := validateManagedRoot(installRoot); err != nil {
+		return 1, err
+	}
+	if err := preflightInstalledClients(installRoot); err != nil {
+		if errors.Is(err, errInstalledProcessRunning) {
+			return retryRequiredCode, err
+		}
 		return 1, err
 	}
 	if opts.Action == "uninstall" {
@@ -159,8 +348,12 @@ func run(opts options) (int, error) {
 }
 
 func runInstall(opts options, installRoot, dataRoot string) (int, error) {
-	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return restartRequiredCode, err
+	return runInstallContext(context.Background(), opts, installRoot, dataRoot)
+}
+
+func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot string) (int, error) {
+	if err := checkSetupContext(ctx); err != nil {
+		return userExitCode, err
 	}
 	maintenancePath, err := defaultMaintenancePath()
 	if err != nil {
@@ -169,17 +362,36 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := validateManagedRoot(filepath.Dir(maintenancePath)); err != nil {
 		return 1, err
 	}
+	hadInstall := pathExists(installRoot)
+	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
+		return retryRequiredCode, err
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return userExitCode, err
+	}
+	payloadTempRoot, err := defaultPayloadTempRoot()
+	if err != nil {
+		return 1, err
+	}
+	if err := cleanupStalePayloadTemps(payloadTempRoot); err != nil {
+		return retryRequiredCode, fmt.Errorf("clean stale installer payloads: %w", err)
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return userExitCode, err
+	}
 	oldState, err := loadExistingInstallState(installRoot)
 	if err != nil {
 		return 1, err
 	}
-	hadInstall := pathExists(installRoot)
+	// Recovery may publish, restore, or remove a transaction-owned tree.
+	hadInstall = pathExists(installRoot)
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
 	if oldState != nil {
 		if !opts.ConnectorSet && validConnector(oldState.Connector) {
 			opts.Connector = oldState.Connector
+			opts.PreserveConnectorConfiguration = !opts.ModeSet
 		}
 		if !opts.ModeSet && validMode(oldState.Mode) {
 			opts.Mode = oldState.Mode
@@ -188,26 +400,32 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			opts.FromVersion = oldState.Version
 		}
 	}
-	// Every install/repair/upgrade refreshes the selected connector. Existing
-	// data is not evidence that hooks are configured: it also covers legacy
-	// installs and data-preserving uninstalls.
-	configureConnector := opts.Connector != "none"
+	// Every install/repair/upgrade refreshes either the explicit selection or the
+	// existing owned connector roster. Existing data alone is not evidence that
+	// hooks are configured: it also covers legacy and data-preserving installs.
 	upgradeFrom := opts.FromVersion
 	pathEntryOwned := oldState != nil && oldState.PathEntryOwned
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
+	pathValueCreated := oldState != nil && oldState.PathValueCreated
 
-	staging := installRoot + ".staging." + strconv.Itoa(os.Getpid())
-	backup := installRoot + ".backup." + strconv.Itoa(os.Getpid())
-	_ = removeAllSafe(staging, filepath.Dir(installRoot))
-	_ = removeAllSafe(backup, filepath.Dir(installRoot))
-
-	payload, err := loadPayload(filepath.Dir(installRoot))
+	payload, err := loadPayload(payloadTempRoot)
 	if err != nil {
 		return 1, err
 	}
 	defer func() {
-		_ = removeAllSafe(payload.TempRoot, filepath.Dir(installRoot))
+		_ = removeAllSafe(payload.TempRoot, payloadTempRoot)
+		_ = os.Remove(payloadTempRoot)
 	}()
+	if err := checkSetupContext(ctx); err != nil {
+		return userExitCode, err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return 1, err
+	}
+	if err := verifySetupExecutablePolicyAt(self, payload.Manifest.Unsigned); err != nil {
+		return 1, fmt.Errorf("verify running setup Authenticode policy: %w", err)
+	}
 
 	if !opts.Quiet {
 		status := "Installing"
@@ -229,138 +447,120 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		)
 	}
 	upgradeFrom = migrationSource(oldState, payload.Manifest.Version, upgradeFrom)
-
-	if err := stageInstallTree(payload, staging, installRoot, dataRoot, maintenancePath, pathEntryOwned, pathSeparatorReused, opts); err != nil {
+	if err := validateInstalledAppMutation(installRoot, oldState); err != nil {
 		return 1, err
+	}
+	transaction, err := newSetupTransaction(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		upgradeFrom,
+		payload.Manifest.Version,
+		oldState,
+		opts,
+	)
+	if err != nil {
+		return 1, err
+	}
+	// Persist the effective connector homes chosen at intent time. Recovery
+	// must never depend on a later process inheriting the same environment.
+	opts.CodexHome = transaction.CodexHome
+	opts.ClaudeConfigDir = transaction.ClaudeConfigDir
+	if err := beginSetupTransaction(transaction); err != nil {
+		return retryRequiredCode, err
+	}
+	tryRestore := func(cause error) (int, error) {
+		return rollbackSetupIntent(transaction, cause)
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
+	}
+
+	if err := stageInstallTree(
+		payload,
+		transaction.StagingPath,
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		transaction.ID,
+		pathEntryOwned,
+		pathSeparatorReused,
+		pathValueCreated,
+		opts,
+	); err != nil {
+		return tryRestore(err)
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	restartOld, err := stopOwnedServices(gatewayPath, dataRoot)
+	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
 	if err != nil {
-		_ = removeAllSafe(staging, filepath.Dir(installRoot))
-		return 1, err
+		return tryRestore(setupOperationError(ctx, err))
 	}
-	if hadInstall {
-		if err := ensureTreeReplaceable(installRoot); err != nil {
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-			_ = removeAllSafe(staging, filepath.Dir(installRoot))
-			return restartRequiredCode, fmt.Errorf("installed files are in use; close running DefenseClaw terminals and retry: %w", err)
-		}
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
 	}
-
-	published := false
-	pathAdded := false
-	pathAddedReusedSeparator := false
-	registrationChanged := false
-	maintenance := maintenancePublication{}
-	startedNew := serviceState{}
-	autoStartSnapshot := gatewayAutoStartSnapshot{}
-	autoStartChanged := false
-	previousConnectors := connectorsForNativeUninstall(oldState, dataRoot)
-	connectorConfigurationAttempted := false
-	tryRestore := func(cause error) (int, error) {
-		if startedNew.any() {
-			_, _ = stopOwnedServices(gatewayPath, dataRoot)
+	if transaction.HadInstall {
+		currentState, err := loadExistingInstallState(installRoot)
+		if err != nil {
+			return tryRestore(err)
 		}
-		if autoStartChanged {
-			_ = restoreGatewayAutoStart(autoStartSnapshot)
+		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
+			return tryRestore(errors.New("installed state changed after the setup transaction began"))
 		}
-		if connectorConfigurationAttempted {
-			_ = runConnectorLifecycle(gatewayPath, dataRoot, opts.Connector, "teardown")
+		pid, imagePath, err := liveProcessWithinInstallRoot(installRoot)
+		if err != nil {
+			return tryRestore(fmt.Errorf("inspect running DefenseClaw processes: %w", err))
 		}
-		if registrationChanged {
-			if oldState != nil {
-				oldMaintenance := oldState.MaintenancePath
-				if oldMaintenance == "" {
-					oldMaintenance = maintenancePath
-				}
-				_ = registerInstalledApp(oldMaintenance, installRoot, oldState.Version, oldState.UnsignedLocalArtifact)
-			} else {
-				_ = unregisterInstalledApp()
-			}
+		if pid != 0 {
+			return tryRestore(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
 		}
-		if pathAdded {
-			_ = removeUserPath(filepath.Join(installRoot, "bin"), pathAddedReusedSeparator)
-		}
-		_ = maintenance.rollback()
-		if published {
-			_ = removeAllSafe(installRoot, filepath.Dir(installRoot))
-		}
-		if _, err := os.Stat(backup); err == nil {
-			_ = renameInstallTree(backup, installRoot)
-		}
-		for _, connectorName := range previousConnectors {
-			_ = runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "reconcile")
-		}
-		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-		if isSharingViolation(cause) {
-			return restartRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
-		}
-		return 1, cause
-	}
-
-	if _, err := os.Stat(installRoot); err == nil {
-		if err := renameInstallTree(installRoot, backup); err != nil {
-			_ = removeAllSafe(staging, filepath.Dir(installRoot))
+		if err := renameInstallTree(installRoot, transaction.BackupPath); err != nil {
 			if isTransientInstallTreeRenameError(err) {
-				return restartRequiredCode, fmt.Errorf("existing install files are locked; close running DefenseClaw terminals and retry")
+				return tryRestore(fmt.Errorf("existing install files are locked; close running DefenseClaw terminals and retry"))
 			}
-			return 1, fmt.Errorf("move existing install aside: %w", err)
+			return tryRestore(fmt.Errorf("move existing install aside: %w", err))
 		}
+	} else if _, err := os.Lstat(installRoot); err == nil {
+		return tryRestore(errors.New("install path appeared after the setup transaction began"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return tryRestore(err)
 	}
-	if err := renameInstallTree(staging, installRoot); err != nil {
+	if err := renameInstallTree(transaction.StagingPath, installRoot); err != nil {
 		return tryRestore(fmt.Errorf("publish staged install: %w", err))
 	}
-	published = true
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
+	}
 
-	if err := validateInstall(installRoot, payload.Manifest.Version); err != nil {
+	if err := validateInstallContext(ctx, installRoot, payload.Manifest.Version); err != nil {
+		return tryRestore(setupOperationError(ctx, err))
+	}
+	if err := checkSetupContext(ctx); err != nil {
 		return tryRestore(err)
 	}
-	if upgradeFrom != "" && compareVersions(upgradeFrom, payload.Manifest.Version) < 0 {
-		if err := runPackagedMigrations(installRoot, dataRoot, upgradeFrom, payload.Manifest.Version); err != nil {
-			return tryRestore(err)
+	if err := publishMaintenanceCopyForTransaction(transaction, payload.Manifest.Unsigned); err != nil {
+		return tryRestore(err)
+	}
+	// Cancellation is honored through the last rollback-safe boundary. After
+	// the committed phase is durable, setup must converge or leave recovery in
+	// the journal instead of partially undoing externally visible registration.
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
+	}
+	if err := markSetupTransactionCommitted(transaction); err != nil {
+		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
+			return retryRequiredCode, fmt.Errorf("commit setup transaction; recovery is required before retrying: %w", err)
 		}
+		return tryRestore(fmt.Errorf("commit setup transaction: %w", err))
 	}
-	if configureConnector {
-		connectorConfigurationAttempted = true
-		if err := runInitialConfiguration(installRoot, dataRoot, opts); err != nil {
-			return tryRestore(err)
-		}
+	if _, err := finishCommittedSetupTransaction(transaction); err != nil {
+		return retryRequiredCode, fmt.Errorf("installation committed but convergence is pending: %w", err)
 	}
-	maintenance, err = publishMaintenanceCopy(maintenancePath)
-	if err != nil {
-		return tryRestore(err)
-	}
-	pathAdded, pathAddedReusedSeparator, err = addUserPath(filepath.Join(installRoot, "bin"))
-	if err != nil {
-		return tryRestore(err)
-	}
-	if pathAdded {
-		pathSeparatorReused = pathAddedReusedSeparator
-	}
-	if err := updateInstalledPathOwnership(installRoot, pathEntryOwned || pathAdded, pathSeparatorReused); err != nil {
-		return tryRestore(err)
-	}
-	registrationChanged = true
-	if err := registerInstalledApp(maintenancePath, installRoot, payload.Manifest.Version, payload.Manifest.Unsigned); err != nil {
-		return tryRestore(err)
-	}
-	wanted := requestedServices(opts, restartOld)
-	autoStartSnapshot, autoStartChanged, err = configureGatewayAutoStart(gatewayPath, wanted.Gateway)
-	if err != nil {
-		return tryRestore(err)
-	}
-	startedNew, err = startSelectedServices(gatewayPath, dataRoot, wanted)
-	if err != nil {
-		return tryRestore(err)
-	}
-	if err := verifySelectedServices(gatewayPath, dataRoot, wanted); err != nil {
-		return tryRestore(err)
-	}
-	if err := removeAllSafe(backup, filepath.Dir(installRoot)); err != nil && !errors.Is(err, os.ErrNotExist) && !opts.Quiet {
-		fmt.Fprintf(os.Stderr, "DefenseClaw setup warning: old-version cleanup is pending: %v\n", err)
-	}
-	if err := maintenance.commit(); err != nil && !opts.Quiet {
-		fmt.Fprintf(os.Stderr, "DefenseClaw setup warning: installer-cache cleanup is pending: %v\n", err)
+	if err := connectorReconciliationPendingError("installation"); err != nil {
+		return retryRequiredCode, err
 	}
 	if !opts.Quiet {
 		fmt.Println("DefenseClaw installed successfully.")
@@ -369,110 +569,156 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	return 0, nil
 }
 
-func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
-	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return restartRequiredCode, err
+type rollbackSetupTransactionFunc func(setupTransaction) error
+type completeSetupTransactionFunc func(setupTransaction, string) error
+
+func rollbackSetupIntent(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupIntentWith(
+		transaction,
+		cause,
+		rollbackSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func rollbackSetupIntentWith(
+	transaction setupTransaction,
+	cause error,
+	rollback rollbackSetupTransactionFunc,
+	complete completeSetupTransactionFunc,
+) (int, error) {
+	rollbackErr := rollback(transaction)
+	if rollbackErr == nil {
+		rollbackErr = complete(transaction, setupPhaseIntent)
 	}
-	if !opts.Quiet {
-		fmt.Printf("Uninstalling DefenseClaw from %s\n", installRoot)
+	if rollbackErr != nil {
+		return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
 	}
-	oldState, err := loadExistingInstallState(installRoot)
-	if err != nil {
-		return 1, err
+	if errors.Is(cause, errSetupCancelled) {
+		return userExitCode, cause
 	}
-	if pathExists(installRoot) && oldState == nil {
-		return 1, fmt.Errorf("refusing to remove an existing directory without valid DefenseClaw installer state: %s", installRoot)
+	if errors.Is(cause, errInstalledProcessRunning) || isSharingViolation(cause) {
+		return retryRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
+	}
+	return 1, cause
+}
+
+func preflightInstalledClients(installRoot string) error {
+	if !pathExists(installRoot) {
+		return nil
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	restartOld, err := stopOwnedServices(gatewayPath, dataRoot)
+	pid, imagePath, err := liveProcessWithinInstallRoot(installRoot, gatewayPath)
 	if err != nil {
-		return 1, err
+		return fmt.Errorf("inspect running DefenseClaw processes: %w", err)
 	}
-	connectors := connectorsForNativeUninstall(oldState, dataRoot)
-	tornDown := make([]string, 0, len(connectors))
-	reconcileTornDown := func() {
-		for _, connectorName := range tornDown {
-			_ = runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "reconcile")
-		}
+	if pid == 0 {
+		return nil
 	}
-	for _, connectorName := range connectors {
-		if err := runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "teardown"); err != nil {
-			reconcileTornDown()
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-			return 1, err
-		}
-		tornDown = append(tornDown, connectorName)
-		if err := runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "verify"); err != nil {
-			reconcileTornDown()
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-			return 1, err
-		}
-	}
-	autoStartSnapshot, autoStartChanged, err := configureGatewayAutoStart(gatewayPath, false)
-	if err != nil {
-		reconcileTornDown()
-		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-		return 1, err
-	}
-	rollbackUninstall := func() {
-		if autoStartChanged {
-			_ = restoreGatewayAutoStart(autoStartSnapshot)
-		}
-		reconcileTornDown()
-		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-	}
-	if pathExists(installRoot) {
-		if err := ensureTreeReplaceable(installRoot); err != nil {
-			rollbackUninstall()
-			return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry: %w", err)
-		}
-		trash := installRoot + ".uninstall." + strconv.Itoa(os.Getpid())
-		_ = removeAllSafe(trash, filepath.Dir(installRoot))
-		if err := renameInstallTree(installRoot, trash); err != nil {
-			rollbackUninstall()
-			if isTransientInstallTreeRenameError(err) {
-				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
-			}
-			return 1, err
-		}
-		if err := removeAllSafe(trash, filepath.Dir(installRoot)); err != nil {
-			_ = renameInstallTree(trash, installRoot)
-			rollbackUninstall()
-			if isSharingViolation(err) {
-				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
-			}
-			return 1, err
-		}
-	}
-	if oldState == nil || oldState.PathEntryOwned {
-		reusedSeparator := oldState != nil && oldState.PathSeparatorReused
-		if err := removeUserPath(filepath.Join(installRoot, "bin"), reusedSeparator); err != nil {
-			return 1, err
-		}
-	}
-	if err := unregisterInstalledApp(); err != nil {
-		return 1, err
+	return fmt.Errorf(
+		"%w (PID %d, %s); close running DefenseClaw terminals and retry",
+		errInstalledProcessRunning,
+		pid,
+		imagePath,
+	)
+}
+
+func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
+	return runUninstallContext(context.Background(), opts, installRoot, dataRoot)
+}
+
+func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoot string) (int, error) {
+	if err := checkSetupContext(ctx); err != nil {
+		return userExitCode, err
 	}
 	maintenancePath, err := defaultMaintenancePath()
 	if err != nil {
 		return 1, err
 	}
-	maintenanceRoot := filepath.Dir(maintenancePath)
-	self, selfErr := os.Executable()
-	if selfErr != nil {
-		return 1, selfErr
+	transaction, err := preparePendingSetupTransactionForUninstall(opts, installRoot, dataRoot)
+	if err != nil {
+		return retryRequiredCode, err
 	}
-	if samePath(self, maintenancePath) {
-		if err := removeDirectoryAfterExit(maintenanceRoot, os.Getpid()); err != nil {
-			return 1, fmt.Errorf("schedule installer-cache cleanup: %w", err)
+	if err := checkSetupContext(ctx); err != nil {
+		if transaction != nil {
+			return rollbackSetupIntent(*transaction, err)
 		}
-	} else if err := removeAllSafe(maintenanceRoot, filepath.Dir(maintenanceRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return 1, err
+		return userExitCode, err
 	}
-	if opts.DeleteUserData {
-		if err := removeAllSafe(dataRoot, filepath.Dir(dataRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return 1, err
+	if !opts.Quiet {
+		fmt.Printf("Uninstalling DefenseClaw from %s\n", installRoot)
+	}
+	if transaction == nil {
+		oldState, loadErr := loadExistingInstallState(installRoot)
+		if loadErr != nil {
+			return 1, loadErr
 		}
+		if pathExists(installRoot) && oldState == nil {
+			return 1, fmt.Errorf("refusing to remove an existing directory without valid DefenseClaw installer state: %s", installRoot)
+		}
+		prepared, transactionErr := newSetupTransaction("uninstall", installRoot, dataRoot, maintenancePath, "", "", oldState, opts)
+		if transactionErr != nil {
+			return 1, transactionErr
+		}
+		if err := beginSetupTransaction(prepared); err != nil {
+			return retryRequiredCode, err
+		}
+		transaction = &prepared
+	}
+	rollbackUninstall := func(cause error) (int, error) {
+		return rollbackSetupIntent(*transaction, cause)
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return rollbackUninstall(err)
+	}
+	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
+	if err != nil {
+		return rollbackUninstall(setupOperationError(ctx, err))
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return rollbackUninstall(err)
+	}
+	if pathExists(installRoot) {
+		currentState, stateErr := loadExistingInstallState(installRoot)
+		if stateErr != nil {
+			return rollbackUninstall(stateErr)
+		}
+		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
+			return rollbackUninstall(errors.New("installed state changed after the uninstall transaction began"))
+		}
+		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
+		if processErr != nil {
+			return rollbackUninstall(fmt.Errorf("inspect running DefenseClaw processes: %w", processErr))
+		}
+		if pid != 0 {
+			return rollbackUninstall(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
+		}
+		if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
+			if isTransientInstallTreeRenameError(err) {
+				return rollbackUninstall(fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry"))
+			}
+			return rollbackUninstall(err)
+		}
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return rollbackUninstall(err)
+	}
+	if err := markSetupTransactionCommitted(*transaction); err != nil {
+		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
+			return retryRequiredCode, fmt.Errorf("commit uninstall transaction; recovery is required before retrying: %w", err)
+		}
+		return rollbackUninstall(fmt.Errorf("commit uninstall transaction: %w", err))
+	}
+	deferred, err := finishCommittedSetupTransaction(*transaction)
+	if err != nil {
+		return retryRequiredCode, fmt.Errorf("uninstall committed but convergence is pending: %w", err)
+	}
+	if err := connectorReconciliationPendingError("uninstall"); err != nil {
+		return retryRequiredCode, err
+	}
+	if deferred && !opts.Quiet {
+		fmt.Println("DefenseClaw cleanup will finish after this installer exits.")
 	}
 	if !opts.Quiet {
 		if opts.DeleteUserData {
@@ -485,8 +731,8 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 }
 
 type serviceState struct {
-	Gateway  bool
-	Watchdog bool
+	Gateway  bool `json:"gateway"`
+	Watchdog bool `json:"watchdog"`
 }
 
 func (state serviceState) any() bool {
@@ -524,8 +770,12 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) []string
 }
 
 func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
+	return runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action, managedChildEnv(dataRoot))
+}
+
+func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action string, env []string) error {
 	if !pathExists(gatewayPath) {
-		return fmt.Errorf("connector %s %s requires the installed gateway binary", connectorName, action)
+		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
 	}
 	args := []string{
 		"connector", action,
@@ -533,9 +783,7 @@ func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) 
 		"--data-dir", dataRoot,
 		"--json",
 	}
-	cmd := exec.Command(gatewayPath, args...)
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupControlCommandTimeout, env, gatewayPath, args...)
 	if err != nil {
 		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
 	}
@@ -543,8 +791,8 @@ func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) 
 }
 
 type gatewayAutoStartSnapshot struct {
-	Existed bool
-	Value   string
+	Existed bool   `json:"existed"`
+	Value   string `json:"value,omitempty"`
 }
 
 func pathExists(path string) bool {
@@ -553,9 +801,7 @@ func pathExists(path string) bool {
 }
 
 func samePath(a, b string) bool {
-	aFull, aErr := filepath.Abs(a)
-	bFull, bErr := filepath.Abs(b)
-	return aErr == nil && bErr == nil && strings.EqualFold(aFull, bFull)
+	return pathidentity.Same(a, b)
 }
 
 func validConnector(value string) bool {
@@ -567,42 +813,45 @@ func validMode(value string) bool {
 }
 
 func compareVersions(a, b string) int {
-	parse := func(value string) [3]int {
-		var result [3]int
-		core := strings.SplitN(value, "-", 2)[0]
-		for index, part := range strings.Split(core, ".") {
-			if index >= len(result) {
-				break
-			}
-			result[index], _ = strconv.Atoi(part)
-		}
-		return result
-	}
-	aVersion := parse(a)
-	bVersion := parse(b)
-	for index := range aVersion {
-		if aVersion[index] < bVersion[index] {
-			return -1
-		}
-		if aVersion[index] > bVersion[index] {
-			return 1
-		}
-	}
-	return 0
+	// All production callers receive versions from a validated payload,
+	// installer state, or FROMVERSION property. x/mod implements complete
+	// SemVer precedence, including prerelease identifiers and the rule that
+	// build metadata does not affect ordering.
+	return semver.Compare("v"+a, "v"+b)
 }
 
 func migrationSource(state *installState, packagedVersion, explicit string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if state != nil && compareVersions(state.Version, packagedVersion) < 0 {
+	if state != nil && compareVersions(state.Version, packagedVersion) <= 0 {
 		return state.Version
 	}
 	return ""
 }
 
+func shouldRunPackagedMigrations(fromVersion, toVersion string) bool {
+	return fromVersion != "" && compareVersions(fromVersion, toVersion) <= 0
+}
+
 func loadExistingInstallState(installRoot string) (*installState, error) {
-	path := filepath.Join(installRoot, "installer", "install-state.json")
+	return loadInstallStateFromTree(installRoot, installRoot)
+}
+
+func loadInstallStateFromTree(treeRoot, installRoot string) (*installState, error) {
+	dataRoot, err := defaultDataRoot()
+	if err != nil {
+		return nil, err
+	}
+	maintenancePath, err := defaultMaintenancePath()
+	if err != nil {
+		return nil, err
+	}
+	return loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenancePath)
+}
+
+func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenancePath string) (*installState, error) {
+	path := filepath.Join(treeRoot, "installer", "install-state.json")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	} else if err != nil {
@@ -612,35 +861,13 @@ func loadExistingInstallState(installRoot string) (*installState, error) {
 	if err := readJSON(path, &state); err != nil {
 		return nil, fmt.Errorf("read existing installer state: %w", err)
 	}
-	if state.SchemaVersion != 1 || state.InstallKind != "native-windows-exe" ||
-		state.InstallScope != "user" || !validPayloadVersion(state.Version) ||
-		!validConnector(state.Connector) || !validMode(state.Mode) {
-		return nil, errors.New("existing installer state is not a supported native Windows install")
-	}
-	dataRoot, err := defaultDataRoot()
-	if err != nil {
-		return nil, err
-	}
-	maintenancePath, err := defaultMaintenancePath()
-	if err != nil {
-		return nil, err
-	}
-	expected := map[string][2]string{
-		"install root":      {state.InstallRoot, installRoot},
-		"command directory": {state.CommandDir, filepath.Join(installRoot, "bin")},
-		"data root":         {state.DataRoot, dataRoot},
-		"runtime":           {state.Runtime, filepath.Join(installRoot, "runtime", "python")},
-		"maintenance path":  {state.MaintenancePath, maintenancePath},
-	}
-	for label, paths := range expected {
-		if !samePath(paths[0], paths[1]) {
-			return nil, fmt.Errorf("existing installer state has an unexpected %s", label)
-		}
+	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err != nil {
+		return nil, fmt.Errorf("existing installer state: %w", err)
 	}
 	return &state, nil
 }
 
-func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator bool) error {
+func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, valueCreated bool) error {
 	path := filepath.Join(installRoot, "installer", "install-state.json")
 	var state installState
 	if err := readJSON(path, &state); err != nil {
@@ -648,100 +875,95 @@ func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator boo
 	}
 	state.PathEntryOwned = owned
 	state.PathSeparatorReused = reusedSeparator
+	state.PathValueCreated = valueCreated
 	return writeJSON(path, state)
 }
 
-type maintenancePublication struct {
-	path    string
-	backup  string
-	changed bool
-	hadOld  bool
-}
-
-func publishMaintenanceCopy(target string) (maintenancePublication, error) {
+func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsignedLocal bool) error {
+	target := transaction.MaintenancePath
 	self, err := os.Executable()
 	if err != nil {
-		return maintenancePublication{}, err
+		return err
 	}
 	if samePath(self, target) {
-		return maintenancePublication{path: target}, nil
+		if err := validateMaintenanceSnapshot(
+			target,
+			transaction.MaintenanceExisted,
+			transaction.PreviousMaintenanceSHA256,
+		); err != nil {
+			return fmt.Errorf("maintenance executable changed after transaction intent: %w", err)
+		}
+		digest, err := fileSHA256(target)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(digest, transaction.MaintenanceSHA256) {
+			return errors.New("running maintenance executable does not match the transaction digest")
+		}
+		return verifySetupExecutablePolicyAt(target, unsignedLocal)
 	}
 	root := filepath.Dir(target)
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return maintenancePublication{}, err
+		return err
 	}
 	if err := rejectReparseAncestors(root); err != nil {
-		return maintenancePublication{}, err
+		return err
 	}
-	publication := maintenancePublication{
-		path:    target,
-		backup:  target + ".backup." + strconv.Itoa(os.Getpid()),
-		changed: true,
-		hadOld:  pathExists(target),
+	backup := transaction.MaintenanceBackup
+	staged := transaction.MaintenanceNew
+	for _, artifact := range []string{staged, backup} {
+		if _, err := os.Lstat(artifact); err == nil {
+			return fmt.Errorf("refusing pre-existing maintenance transaction artifact: %s", artifact)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
-	staged := target + ".new." + strconv.Itoa(os.Getpid())
-	_ = removeAllSafe(staged, root)
-	_ = removeAllSafe(publication.backup, root)
 	if err := copyFile(self, staged); err != nil {
-		return maintenancePublication{}, err
+		return err
 	}
-	if publication.hadOld {
-		if err := os.Rename(target, publication.backup); err != nil {
+	if err := verifySetupExecutablePolicyAt(staged, unsignedLocal); err != nil {
+		_ = removeAllSafe(staged, root)
+		return fmt.Errorf("verify staged maintenance Authenticode policy: %w", err)
+	}
+	if err := validateMaintenanceSnapshot(
+		target,
+		transaction.MaintenanceExisted,
+		transaction.PreviousMaintenanceSHA256,
+	); err != nil {
+		_ = removeAllSafe(staged, root)
+		return fmt.Errorf("maintenance executable changed after transaction intent: %w", err)
+	}
+	if transaction.MaintenanceExisted {
+		if err := renameInstallTree(target, backup); err != nil {
 			_ = removeAllSafe(staged, root)
-			return maintenancePublication{}, err
+			return err
+		}
+		backupDigest, digestErr := fileSHA256(backup)
+		if digestErr != nil || !strings.EqualFold(backupDigest, transaction.PreviousMaintenanceSHA256) {
+			restoreErr := renameInstallTree(backup, target)
+			_ = removeAllSafe(staged, root)
+			if digestErr != nil {
+				return errors.Join(fmt.Errorf("validate maintenance backup: %w", digestErr), restoreErr)
+			}
+			return errors.Join(errors.New("maintenance executable changed while it was being published"), restoreErr)
 		}
 	}
-	if err := os.Rename(staged, target); err != nil {
-		if publication.hadOld {
-			_ = os.Rename(publication.backup, target)
+	if err := renameInstallTree(staged, target); err != nil {
+		if transaction.MaintenanceExisted {
+			_ = renameInstallTree(backup, target)
 		}
-		return maintenancePublication{}, err
+		return err
 	}
-	return publication, nil
-}
-
-func (publication maintenancePublication) rollback() error {
-	if !publication.changed {
-		return nil
-	}
-	root := filepath.Dir(publication.path)
-	_ = removeAllSafe(publication.path, root)
-	if publication.hadOld && pathExists(publication.backup) {
-		return os.Rename(publication.backup, publication.path)
+	if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
+		return fmt.Errorf("verify published maintenance Authenticode policy: %w", err)
 	}
 	return nil
 }
 
-func (publication maintenancePublication) commit() error {
-	if !publication.changed || !publication.hadOld {
-		return nil
+func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath, transactionID string, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
+	if err := createExclusiveStagingRoot(staging); err != nil {
+		return err
 	}
-	return removeAllSafe(publication.backup, filepath.Dir(publication.path))
-}
-
-func ensureTreeReplaceable(root string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if reparse, err := isReparsePoint(path); err != nil {
-			return err
-		} else if reparse {
-			return fmt.Errorf("installed tree contains a reparse point: %s", path)
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		switch strings.ToLower(filepath.Ext(path)) {
-		case ".exe", ".dll", ".pyd":
-			return renameProbe(path)
-		default:
-			return nil
-		}
-	})
-}
-
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, pathEntryOwned, pathSeparatorReused bool, opts options) error {
 	if err := os.MkdirAll(filepath.Join(staging, "bin"), 0o755); err != nil {
 		return err
 	}
@@ -771,6 +993,12 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		return fmt.Errorf("install CLI launcher: %w", err)
 	}
 	if err := copyFile(
+		filepath.Join(payload.Root, payload.Manifest.StartupLauncher),
+		filepath.Join(staging, "bin", "defenseclaw-startup.exe"),
+	); err != nil {
+		return fmt.Errorf("install startup launcher: %w", err)
+	}
+	if err := copyFile(
 		filepath.Join(payload.Root, payload.Manifest.CosignVerifier),
 		filepath.Join(staging, "runtime", "tools", "cosign.exe"),
 	); err != nil {
@@ -784,6 +1012,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		filepath.Join(staging, "installer", "upgrade-manifest.json"),
 	); err != nil {
 		return fmt.Errorf("install upgrade manifest: %w", err)
+	}
+	if err := verifyInstalledPEInventory(staging, payload.Manifest); err != nil {
+		return fmt.Errorf("verify staged portable-executable inventory: %w", err)
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "payload-manifest.json"), payload.Manifest); err != nil {
 		return err
@@ -802,15 +1033,33 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		MaintenancePath:        maintenancePath,
 		PathEntryOwned:         pathEntryOwned,
 		PathSeparatorReused:    pathSeparatorReused,
+		PathValueCreated:       pathValueCreated,
 		Connector:              opts.Connector,
 		Mode:                   opts.Mode,
+		CodexHome:              opts.CodexHome,
+		ClaudeConfigDir:        opts.ClaudeConfigDir,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
 		ReleaseSigningRequired: true,
 		Toolchain:              payload.Manifest.Toolchain,
 		InstalledAtUTC:         time.Now().UTC().Format(time.RFC3339),
+		TransactionID:          transactionID,
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
+	}
+	return nil
+}
+
+func createExclusiveStagingRoot(staging string) error {
+	parent := filepath.Dir(staging)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create installer staging parent: %w", err)
+	}
+	if err := rejectReparseAncestors(parent); err != nil {
+		return fmt.Errorf("validate installer staging parent: %w", err)
+	}
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		return fmt.Errorf("create exclusive installer staging root: %w", err)
 	}
 	return nil
 }
@@ -849,33 +1098,89 @@ func publishNativeLaunchers(staging string) error {
 }
 
 func validateInstall(root, version string) error {
+	return validateInstallContext(context.Background(), root, version)
+}
+
+func validateInstallContext(ctx context.Context, root, version string) error {
+	var manifest payloadManifest
+	if err := readJSON(filepath.Join(root, "installer", "payload-manifest.json"), &manifest); err != nil {
+		return fmt.Errorf("read installed payload manifest: %w", err)
+	}
+	if manifest.Version != version {
+		return fmt.Errorf("installed payload manifest version %q does not match %q", manifest.Version, version)
+	}
+	if err := verifyInstalledPEInventory(root, manifest); err != nil {
+		return fmt.Errorf("verify installed portable-executable inventory: %w", err)
+	}
 	cosign := filepath.Join(root, "runtime", "tools", "cosign.exe")
 	if info, err := os.Stat(cosign); err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("managed Sigstore verifier is missing or invalid: %s", cosign)
 	}
 	launcher := filepath.Join(root, "bin", "defenseclaw.exe")
-	cmd := exec.Command(launcher, "--version")
-	cmd.Env = sanitizePythonEnv(os.Environ())
-	output, err := cmd.CombinedOutput()
+	childEnv := sanitizePythonEnv(os.Environ())
+	output, err := runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, launcher, "--version-json")
 	if err != nil {
 		return fmt.Errorf("managed CLI version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if !strings.Contains(string(output), version) {
-		return fmt.Errorf("managed CLI version %q does not report packaged version %s", strings.TrimSpace(string(output)), version)
+	if err := validateMachineVersion(output, "defenseclaw-cli", version, ""); err != nil {
+		return fmt.Errorf("managed CLI version check: %w", err)
 	}
 	gateway := filepath.Join(root, "bin", "defenseclaw-gateway.exe")
-	cmd = exec.Command(gateway, "--version")
-	output, err = cmd.CombinedOutput()
+	output, err = runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, gateway, "--version-json")
 	if err != nil {
 		return fmt.Errorf("gateway version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if !strings.Contains(string(output), version) {
-		return fmt.Errorf("gateway version %q does not report packaged version %s", strings.TrimSpace(string(output)), version)
+	if err := validateMachineVersion(output, "defenseclaw-gateway", version, manifest.SourceCommit); err != nil {
+		return fmt.Errorf("gateway version check: %w", err)
+	}
+	hook := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	output, err = runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, hook, "--version-json")
+	if err != nil {
+		return fmt.Errorf("hook version check failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if err := validateMachineVersion(output, "defenseclaw-hook", version, manifest.SourceCommit); err != nil {
+		return fmt.Errorf("hook version check: %w", err)
 	}
 	return nil
 }
 
-func runInitialConfiguration(root, dataRoot string, opts options) error {
+type machineVersionReport struct {
+	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit,omitempty"`
+	Built         string `json:"built,omitempty"`
+}
+
+func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var report machineVersionReport
+	if err := decoder.Decode(&report); err != nil {
+		return fmt.Errorf("decode machine-readable version %q: %w", strings.TrimSpace(string(output)), err)
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("machine-readable version contains trailing content")
+	}
+	if report.SchemaVersion != 1 || report.Name != expectedName {
+		return fmt.Errorf("unexpected version identity schema=%d name=%q", report.SchemaVersion, report.Name)
+	}
+	if !validPayloadVersion(report.Version) || report.Version != expectedVersion {
+		return fmt.Errorf("reported version %q does not exactly match packaged version %q", report.Version, expectedVersion)
+	}
+	if expectedCommit != "" {
+		if !validSourceCommit(report.Commit) {
+			return fmt.Errorf("reported source commit %q is invalid", report.Commit)
+		}
+		if report.Commit != expectedCommit {
+			return fmt.Errorf("reported source commit %q does not exactly match packaged source commit %q", report.Commit, expectedCommit)
+		}
+	}
+	return nil
+}
+
+func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []string) error {
 	if opts.Connector == "none" {
 		return nil
 	}
@@ -885,9 +1190,7 @@ func runInitialConfiguration(root, dataRoot string, opts options) error {
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
-	cmd := exec.Command(filepath.Join(root, "bin", "defenseclaw.exe"), args...)
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupConfigurationTimeout, env, filepath.Join(root, "bin", "defenseclaw.exe"), args...)
 	if err != nil {
 		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -911,22 +1214,33 @@ if missing:
 print(count)`
 
 func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
+	return runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion, managedChildEnv(dataRoot))
+}
+
+func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string, env []string) error {
 	openClawRoot, err := defaultOpenClawRoot()
 	if err != nil {
 		return err
 	}
-	cmd := newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion)
-	output, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newPackagedMigrationCommand(ctx, root, dataRoot, openClawRoot, fromVersion, toVersion)
+	cmd.Env = env
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("run packaged migrations timed out after %s: %w: %s", setupMigrationTimeout, ctxErr, strings.TrimSpace(string(output)))
+	}
 	if err != nil {
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
-func newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion string) *exec.Cmd {
+func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRoot, fromVersion, toVersion string) *exec.Cmd {
 	python := filepath.Join(root, "runtime", "python", "python.exe")
 	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
-	cmd := exec.Command(
+	cmd := newCapturedSetupCommand(
+		ctx,
 		python,
 		"-I",
 		// Isolated mode implies -E, so Python intentionally ignores the
@@ -947,9 +1261,7 @@ func newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVe
 }
 
 func startGateway(gatewayPath, dataRoot string) error {
-	cmd := exec.Command(gatewayPath, "start")
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "start")
 	if err != nil {
 		return fmt.Errorf("start gateway: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -957,9 +1269,7 @@ func startGateway(gatewayPath, dataRoot string) error {
 }
 
 func startWatchdog(gatewayPath, dataRoot string) error {
-	cmd := exec.Command(gatewayPath, "watchdog", "start")
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "watchdog", "start")
 	if err != nil {
 		return fmt.Errorf("start watchdog: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -967,6 +1277,10 @@ func startWatchdog(gatewayPath, dataRoot string) error {
 }
 
 func stopOwnedServices(gatewayPath, dataRoot string) (serviceState, error) {
+	return stopOwnedServicesContext(context.Background(), gatewayPath, dataRoot)
+}
+
+func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string) (serviceState, error) {
 	if !pathExists(gatewayPath) {
 		return serviceState{}, nil
 	}
@@ -980,18 +1294,14 @@ func stopOwnedServices(gatewayPath, dataRoot string) (serviceState, error) {
 	}
 	stopped := serviceState{}
 	if watchdogOwned {
-		cmd := exec.Command(gatewayPath, "watchdog", "stop")
-		cmd.Env = managedChildEnv(dataRoot)
-		output, stopErr := cmd.CombinedOutput()
+		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "watchdog", "stop")
 		if stopErr != nil {
 			return serviceState{}, fmt.Errorf("stop managed watchdog: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Watchdog = true
 	}
 	if gatewayOwned {
-		cmd := exec.Command(gatewayPath, "stop")
-		cmd.Env = managedChildEnv(dataRoot)
-		output, stopErr := cmd.CombinedOutput()
+		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "stop")
 		if stopErr != nil {
 			if stopped.Watchdog {
 				_ = startWatchdog(gatewayPath, dataRoot)
@@ -999,12 +1309,6 @@ func stopOwnedServices(gatewayPath, dataRoot string) (serviceState, error) {
 			return serviceState{}, fmt.Errorf("stop managed gateway: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Gateway = true
-	}
-	if stopped.any() {
-		if err := waitFileReplaceable(gatewayPath, 40, 250*time.Millisecond); err != nil {
-			_, _ = startSelectedServices(gatewayPath, dataRoot, stopped)
-			return serviceState{}, err
-		}
 	}
 	return stopped, nil
 }
@@ -1038,35 +1342,26 @@ func verifySelectedServices(gatewayPath, dataRoot string, wanted serviceState) e
 		commands = append(commands, []string{"watchdog", "status"})
 	}
 	for _, args := range commands {
-		cmd := exec.Command(gatewayPath, args...)
-		cmd.Env = managedChildEnv(dataRoot)
-		output, err := cmd.CombinedOutput()
+		output, err := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, args...)
 		if err != nil {
 			return fmt.Errorf("verify %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
 	}
+	// The status commands intentionally return success for a stopped service so
+	// they remain useful to operators. Setup needs the stronger postcondition:
+	// every requested process must own its exact PID/start/image identity before
+	// a committed repair or upgrade is reported complete.
+	actual, err := inspectOwnedServices(gatewayPath, dataRoot)
+	if err != nil {
+		return fmt.Errorf("inspect selected services after startup: %w", err)
+	}
+	if wanted.Gateway && !actual.Gateway {
+		return errors.New("managed gateway did not remain running after startup")
+	}
+	if wanted.Watchdog && !actual.Watchdog {
+		return errors.New("managed watchdog did not remain running after startup")
+	}
 	return nil
-}
-
-func waitFileReplaceable(path string, attempts int, delay time.Duration) error {
-	for i := 0; i < attempts; i++ {
-		if err := renameProbe(path); err == nil {
-			return nil
-		}
-		time.Sleep(delay)
-	}
-	return fmt.Errorf("managed gateway did not release %s", path)
-}
-
-func renameProbe(path string) error {
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	probe := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"."+strconv.Itoa(os.Getpid())+".probe")
-	if err := os.Rename(path, probe); err != nil {
-		return err
-	}
-	return os.Rename(probe, path)
 }
 
 type loadedPayload struct {
@@ -1076,12 +1371,17 @@ type loadedPayload struct {
 }
 
 func loadPayload(tempParent string) (loadedPayload, error) {
-	data, err := embeddedPayload.ReadFile("payload/installer-payload.zip")
+	archive, err := embeddedPayload.Open("payload/installer-payload.zip")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return loadedPayload{}, errors.New("installer payload missing; build with scripts/build-windows-installer.ps1")
 		}
 		return loadedPayload{}, err
+	}
+	defer archive.Close()
+	reader, err := zipReaderAtFile(archive)
+	if err != nil {
+		return loadedPayload{}, fmt.Errorf("open embedded payload: %w", err)
 	}
 	if err := os.MkdirAll(tempParent, 0o755); err != nil {
 		return loadedPayload{}, err
@@ -1092,11 +1392,6 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 	tempRoot, err := os.MkdirTemp(tempParent, ".DefenseClawSetup.")
 	if err != nil {
 		return loadedPayload{}, err
-	}
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		_ = os.RemoveAll(tempRoot)
-		return loadedPayload{}, fmt.Errorf("open embedded payload: %w", err)
 	}
 	if err := extractZipReader(reader, tempRoot); err != nil {
 		_ = os.RemoveAll(tempRoot)
@@ -1114,8 +1409,20 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 	return loadedPayload{Root: filepath.Join(tempRoot, "payload"), TempRoot: tempRoot, Manifest: manifest}, nil
 }
 
+func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	readerAt, ok := file.(io.ReaderAt)
+	if !ok {
+		return nil, errors.New("embedded payload does not support random access")
+	}
+	return zip.NewReader(readerAt, info.Size())
+}
+
 func verifyPayloadManifest(root string, manifest payloadManifest) error {
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported payload schema version %d", manifest.SchemaVersion)
 	}
 	if !validPayloadVersion(manifest.Version) {
@@ -1134,8 +1441,10 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		manifest.GatewayArchive,
 		manifest.Wheel,
 		manifest.PythonEmbed,
+		manifest.YaraCompatWheel,
 		manifest.SitePackages,
 		manifest.Launcher,
+		manifest.StartupLauncher,
 		manifest.CosignVerifier,
 		manifest.UpgradeManifest,
 	}
@@ -1166,7 +1475,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 			return fmt.Errorf("payload hash mismatch for %s", rel)
 		}
 	}
-	return nil
+	return validateAuthenticodeManifest(manifest)
 }
 
 func validSourceCommit(value string) bool {
@@ -1223,7 +1532,7 @@ func extractZipReader(reader *zip.Reader, dest string) error {
 		if err != nil {
 			return err
 		}
-		err = writeNewFile(target, src, file.Mode())
+		err = writeExtractedFile(target, src, file.Mode())
 		closeErr := src.Close()
 		if err != nil {
 			return err
@@ -1236,56 +1545,94 @@ func extractZipReader(reader *zip.Reader, dest string) error {
 }
 
 func validPayloadVersion(value string) bool {
-	parts := strings.SplitN(value, "-", 2)
-	core := strings.Split(parts[0], ".")
-	if len(core) != 3 {
+	if value == "" || len(value) > 192 || strings.HasPrefix(value, "v") {
 		return false
 	}
-	for _, part := range core {
-		if part == "" || len(part) > 10 {
-			return false
-		}
-		for _, char := range part {
-			if char < '0' || char > '9' {
-				return false
-			}
-		}
-		if _, err := strconv.ParseUint(part, 10, 31); err != nil {
-			return false
-		}
+	core := value
+	if index := strings.IndexAny(core, "-+"); index >= 0 {
+		core = core[:index]
 	}
-	if len(parts) == 1 {
-		return true
-	}
-	if parts[1] == "" || len(parts[1]) > 128 {
+	coreParts := strings.Split(core, ".")
+	if len(coreParts) != 3 {
 		return false
 	}
-	for _, char := range parts[1] {
-		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
-			(char < '0' || char > '9') && char != '.' && char != '_' && char != '-' {
+	for _, part := range coreParts {
+		if len(part) == 0 || len(part) > 10 {
 			return false
 		}
 	}
-	return true
+	return semver.IsValid("v" + value)
 }
 
-func writeNewFile(path string, src io.Reader, mode fs.FileMode) error {
-	tmp := path + "." + strconv.Itoa(os.Getpid()) + ".tmp"
-	dst, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
+// writeExtractedFile writes one entry directly into a random, unpublished
+// extraction tree. The outer payload is hash-verified before staging and ZIP
+// readers verify each entry's CRC before returning EOF. A partial extraction
+// is therefore disposable and setup recovery removes it before any retry.
+//
+// Do not use the durable write-and-rename path here. The managed runtime has
+// thousands of small files; flushing each file and then issuing a
+// MOVEFILE_WRITE_THROUGH rename serializes thousands of storage barriers and
+// can leave a healthy Windows installer on its Working page for many minutes.
+// CREATE_NEW retains the important security property that a concurrently
+// planted target is rejected rather than followed or overwritten. On Windows
+// the new handle also denies sharing until the entry is complete.
+func writeExtractedFile(path string, src io.Reader, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	dst, err := createExclusiveUnpublishedFile(path)
 	if err != nil {
 		return err
 	}
+	cleanup := func() {
+		_ = dst.Close()
+		_ = os.Remove(path)
+	}
+	if err := dst.Chmod(mode.Perm()); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		cleanup()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+func writeNewFile(path string, src io.Reader, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	dst, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := dst.Name()
+	if err := dst.Chmod(mode.Perm()); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
 	_, copyErr := io.Copy(dst, src)
+	syncErr := dst.Sync()
 	closeErr := dst.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
 		return copyErr
 	}
+	if syncErr != nil {
+		_ = os.Remove(tmp)
+		return syncErr
+	}
 	if closeErr != nil {
 		_ = os.Remove(tmp)
 		return closeErr
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameDurableFile(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -1302,7 +1649,7 @@ func configurePythonPTH(pythonDir string) error {
 	}
 	name := filepath.Base(strings.TrimSuffix(matches[0], "._pth")) + ".zip"
 	body := name + "\r\n.\r\nLib\\site-packages\r\nimport site\r\n"
-	return os.WriteFile(matches[0], []byte(body), 0o644)
+	return writeFileDurable(matches[0], []byte(body), 0o644)
 }
 
 func parseArgs(args []string) (options, error) {
@@ -1321,6 +1668,8 @@ func parseArgs(args []string) (options, error) {
 		switch lower {
 		case "/?", "-?", "/help", "--help":
 			opts.Action = "help"
+		case "/verify", "-verify", "--verify":
+			opts.Action = "verify"
 		case "/quiet", "-quiet", "--quiet", "/qn":
 			opts.Quiet = true
 		case "/norestart":
@@ -1413,7 +1762,7 @@ func normalizeConnector(value string) string {
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1]")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 
@@ -1517,7 +1866,43 @@ func writeJSON(path string, value any) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	return writeFileDurable(path, data, 0o644)
+}
+
+func writeFileDurable(path string, data []byte, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(mode.Perm()); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		if err := rejectReparseExisting(path); err != nil {
+			return err
+		}
+		return replaceDurableFile(temporaryPath, path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return renameDurableFile(temporaryPath, path)
 }
 
 func readJSON(path string, value any) error {
@@ -1586,7 +1971,7 @@ func isSharingViolation(err error) bool {
 }
 
 func renameInstallTree(source, destination string) error {
-	return renameInstallTreeWith(source, destination, os.Rename, time.Sleep)
+	return renameInstallTreeWith(source, destination, renameDurableFile, time.Sleep)
 }
 
 func renameInstallTreeWith(source, destination string, rename func(string, string) error, sleep func(time.Duration)) error {

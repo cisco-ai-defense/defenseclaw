@@ -395,6 +395,12 @@ class AlertsPanelModel:
     def set_severity_filter_exact(self, severity: SeverityFilter) -> None:
         self.severity_filter = severity
         self.show_all_severities = True
+        if self.store is not None and severity in {"", "MEDIUM", "LOW"}:
+            # The default alert load is intentionally limited to actionable
+            # severities. Toolbar buttons must hydrate the complete store just
+            # like their keyboard equivalents before showing All/Medium/Low.
+            self.refresh()
+            return
         self.apply_filter()
 
     def set_severity_filter(self, severity: SeverityFilter) -> None:
