@@ -829,6 +829,14 @@ try {
         $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
         $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
         'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($nativeHarnessText -match 'DefenseClawWindowsResourceVerifier-x64\.exe' -and
+        $nativeHarnessText -match "'build', '-trimpath', '-buildvcs=false'" -and
+        $nativeHarnessText -match '\./internal/tools/windowsresources' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
+        $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
+        $standardUserCIText -match '\$resourceVerifierInputs = @\(' -and
+        $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
+        'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
         $standardUserCIText -match 'Read-BoundedDisposableResult \$SourcePath \$SourceRoot 1048576' -and
         $standardUserCIText -match '\[string\]\$record\.os -cne ''windows''' -and

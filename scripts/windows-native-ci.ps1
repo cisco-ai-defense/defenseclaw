@@ -27,6 +27,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
 
+$windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
+$windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
+$windowsResourceVersionName = 'DefenseClawWindowsResourceVersion.txt'
+
 $setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
 if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
     if (-not (Test-Path -LiteralPath $setupStandardUserLauncherSource -PathType Leaf)) {
@@ -74,11 +78,20 @@ function Get-StableHookRuntimeExecutable {
 }
 
 function Get-WorkspacePackageVersion {
-    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
-    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-        throw 'Could not resolve project version from pyproject.toml'
+    $projectPath = Join-Path $WorkspaceRoot 'pyproject.toml'
+    if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
+        $projectText = Get-Content -LiteralPath $projectPath -Raw -Encoding UTF8
+        if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw 'Could not resolve project version from pyproject.toml'
+        }
+        $packageVersion = $Matches[1]
+    } else {
+        $versionPath = Join-Path $PSScriptRoot $windowsResourceVersionName
+        if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+            throw 'Could not resolve project version from the workspace or packaged resource verifier'
+        }
+        $packageVersion = ([IO.File]::ReadAllText($versionPath)).Trim()
     }
-    $packageVersion = $Matches[1]
     if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
         throw "Invalid package version for Windows resources: $packageVersion"
     }
@@ -91,17 +104,26 @@ function Assert-WindowsExecutableResources(
     [string]$Version,
     [switch]$Apply
 ) {
-    $go = Get-RequiredCommand 'go.exe'
     $arguments = @(
-        'run', './internal/tools/windowsresources',
         '-target', 'windows_amd64',
         '-executable', $Path,
         '-component', $Component,
-        '-version', $Version,
-        '-icon', (Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png')
+        '-version', $Version
     )
+    $verifier = Join-Path $PSScriptRoot $windowsResourceVerifierName
+    $packagedIcon = Join-Path $PSScriptRoot $windowsResourceIconName
+    if ((Test-Path -LiteralPath $verifier -PathType Leaf) -and
+        (Test-Path -LiteralPath $packagedIcon -PathType Leaf)) {
+        $command = $verifier
+        $arguments += @('-icon', $packagedIcon)
+    } else {
+        $command = Get-RequiredCommand 'go.exe'
+        $arguments = @('run', './internal/tools/windowsresources') + $arguments + @(
+            '-icon', (Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png')
+        )
+    }
     if (-not $Apply) { $arguments += '-verify-only' }
-    Invoke-WindowsNativeProcess $go $arguments -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
+    Invoke-WindowsNativeProcess $command $arguments -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
 }
 
 function Get-CiscoAuthenticodeState([string]$Path) {
@@ -1014,6 +1036,19 @@ function Invoke-BuildArtifacts {
         Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', $hook, './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
         Assert-WindowsExecutableResources $gateway 'gateway' $packageVersion -Apply
         Assert-WindowsExecutableResources $hook 'hook' $packageVersion -Apply
+        Invoke-WindowsNativeProcess $go @(
+            'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w',
+            '-o', (Join-Path $dist $windowsResourceVerifierName),
+            './internal/tools/windowsresources'
+        ) -TimeoutSeconds 300 -WorkingDirectory $WorkspaceRoot | Out-Null
+        Copy-Item -LiteralPath (
+            Join-Path $WorkspaceRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
+        ) -Destination (Join-Path $dist $windowsResourceIconName)
+        [IO.File]::WriteAllText(
+            (Join-Path $dist $windowsResourceVersionName),
+            $packageVersion + "`n",
+            [Text.UTF8Encoding]::new($false)
+        )
     } finally {
         if ($null -eq $previousCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
         else { $env:CGO_ENABLED = $previousCgo }
