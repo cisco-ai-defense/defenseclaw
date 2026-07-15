@@ -32,6 +32,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf16"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func setHookBinaryOverride(t *testing.T, path string) {
@@ -62,6 +64,15 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 	}
 	t.Fatalf("command has no -EncodedCommand token: %q", command)
 	return ""
+}
+
+func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
+	want := windowsSystemPowerShellExe()
+	t.Setenv("SystemRoot", filepath.Join(t.TempDir(), "poisoned-system-root"))
+	t.Setenv("WINDIR", filepath.Join(t.TempDir(), "poisoned-windir"))
+	if got := windowsSystemPowerShellExe(); got != want {
+		t.Fatalf("system PowerShell path changed with mutable environment: got %q, want %q", got, want)
+	}
 }
 
 func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
@@ -268,6 +279,9 @@ func TestPackagedWindowsHookBinaryUsesVerifiedNativeInstallState(t *testing.T) {
 	if got := packagedWindowsHookBinaryAtRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
 		t.Fatalf("packagedWindowsHookBinaryAtRoot() = %q, want %q", got, hook)
 	}
+	if got := packagedWindowsHookBinaryForRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
+		t.Fatalf("packagedWindowsHookBinaryForRoot() = %q, want exact installed sibling %q", got, hook)
+	}
 	if got := packagedWindowsHookBinary(gateway); got != "" {
 		t.Fatalf("arbitrary self-consistent install root selected production hook binary %q", got)
 	}
@@ -373,10 +387,11 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 		t.Fatalf("native launcher path missing: %v", entry.Locations.HookScriptPaths)
 	}
 }
+
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; ordinary Windows connectors invoke the native Go `hook` subcommand
-// instead of any Bash/.cmd wrapper. Cursor and Antigravity have separately
-// tested Windows adapters because their client launch contracts are distinct.
+// path; Windows Cursor uses the PowerShell object-pipeline adapter while other
+// connectors invoke the native Go `hook` subcommand directly. PowerShell
+// shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
@@ -406,15 +421,17 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
 	}
 
-	// Codex passes this string to cmd.exe /C as one argument. Do not use the
-	// quoted absolute-path form that Windows re-escapes into a literal argv[0].
+	// Codex passes this string to cmd.exe /C as one argument. The outer command
+	// uses an unquoted system PowerShell path and an encoded script; the decoded
+	// script invokes the stable absolute launcher with PowerShell's call operator.
 	codex := hookInvocationCommandFor("windows", "codex", unix)
-	wantCodex := windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
+	wantCodex := windowsNativePowerShellHookCommand("codex")
 	if codex != wantCodex {
 		t.Errorf("codex command = %q, want %q", codex, wantCodex)
 	}
-	if strings.ContainsAny(codex, `"'`) {
-		t.Errorf("codex cmd.exe command contains quote characters: %q", codex)
+	decodedCodex := decodePowerShellEncodedCommandForTest(t, codex)
+	if want := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "codex"; !strings.Contains(decodedCodex, want) {
+		t.Errorf("decoded codex command = %q, want invocation %q", decodedCodex, want)
 	}
 	if !isNativeHookCommand(codex) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
@@ -424,7 +441,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	// absolute, quoted, installer-managed launcher. It must never regress to a
 	// bare or PATH-resolved form that an untrusted current directory can shadow.
 	claude := hookInvocationCommandFor("windows", "claudecode", unix)
-	wantClaude := windowsQuoteExe(windowsExe) + " " + nativeHookFlag + "claudecode"
+	wantClaude := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "claudecode"
 	if claude != wantClaude {
 		t.Errorf("claudecode command = %q, want %q", claude, wantClaude)
 	}
@@ -457,6 +474,176 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 }
 
+func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T) {
+	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, windowsExe)
+
+	for connector, wrapper := range map[string]func() string{
+		"antigravity": windowsAntigravityHookCommand,
+		"codex":       windowsCodexHookCommand,
+	} {
+		t.Run(connector, func(t *testing.T) {
+			got := wrapper()
+			if want := windowsNativeHookCommand(connector); got != want {
+				t.Fatalf("wrapper command = %q, want shared builder output %q", got, want)
+			}
+			wantScript := strings.Join([]string{
+				"$ErrorActionPreference='Stop'",
+				"$env:NoDefaultCurrentDirectoryInExePath='1'",
+				"& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + connector,
+				"exit $LASTEXITCODE",
+			}, "; ")
+			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
+				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
+			}
+		})
+	}
+}
+
+// TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
+// shell boundary that treats a quoted path as a string unless it is preceded
+// by PowerShell's call operator.
+func TestClaudeCodeWindowsHookCommandRunsInPowerShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell launch semantics are Windows-specific")
+	}
+
+	root := filepath.Join(t.TempDir(), "Install Root With Spaces")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(root, windowsHookBinaryName)
+	source := filepath.Join(root, "hook-probe.go")
+	probeOutput := filepath.Join(root, "hook-args.txt")
+	body := `package main
+import (
+	"os"
+	"strings"
+)
+func main() {
+	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "claudecode" {
+		os.Exit(9)
+	}
+	if err := os.WriteFile(os.Getenv("DC_TEST_HOOK_PROBE"), []byte(strings.Join(os.Args[1:], "|")), 0600); err != nil {
+		os.Exit(10)
+	}
+}
+`
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("go", "build", "-o", helper, source).CombinedOutput(); err != nil {
+		t.Fatalf("build hook probe: %v\n%s", err, out)
+	}
+	setHookBinaryOverride(t, helper)
+	command := hookInvocationCommandFor("windows", "claudecode", "")
+
+	ps := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
+	ps.Env = append(os.Environ(), "DC_TEST_HOOK_PROBE="+probeOutput)
+	if out, err := ps.CombinedOutput(); err != nil {
+		t.Fatalf("Claude Code-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	got, err := os.ReadFile(probeOutput)
+	if err != nil {
+		t.Fatalf("read hook probe output: %v", err)
+	}
+	if string(got) != "hook|--connector|claudecode" {
+		t.Fatalf("hook args = %q", got)
+	}
+}
+
+// TestCursorWindowsAdapterPreservesObjectPipelineJSON reproduces Cursor 3.9's
+// actual Windows launch boundary: Get-Content reads a vendor temp file and
+// passes the payload through PowerShell's object pipeline into the configured
+// hook command. A native executable receives only encoding preambles on this
+// boundary; the generated adapter must recover the JSON exactly, invoke the
+// launcher through --input-file, forward stdout, and remove its payload file.
+func TestCursorWindowsAdapterPreservesObjectPipelineJSON(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Cursor PowerShell transport is Windows-specific")
+	}
+
+	root := t.TempDir()
+	hookDir := filepath.Join(root, "hooks")
+	helper := filepath.Join(root, "fake-defenseclaw-hook.exe")
+	helperSource := filepath.Join(root, "fake-defenseclaw-hook.go")
+	helperBody := `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for i, arg := range os.Args {
+		if arg != "--input-file" || i+1 >= len(os.Args) {
+			continue
+		}
+		payload, err := os.ReadFile(os.Args[i+1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
+		_, _ = os.Stdout.Write(payload)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "missing input file argument")
+	os.Exit(9)
+}
+`
+	if err := os.WriteFile(helperSource, []byte(helperBody), 0o600); err != nil {
+		t.Fatalf("write launcher probe source: %v", err)
+	}
+	build := exec.Command("go", "build", "-o", helper, helperSource)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build launcher probe: %v\n%s", err, output)
+	}
+	setHookBinaryOverride(t, helper)
+
+	if err := WriteHookScriptsForConnectorObject(
+		hookDir,
+		"127.0.0.1:18970",
+		"tok-test",
+		NewCursorConnector(),
+	); err != nil {
+		t.Fatalf("render Cursor adapter: %v", err)
+	}
+
+	payload := `{"hook_event_name":"beforeSubmitPrompt","prompt":"DefenseClaw Cursor adapter test"}`
+	vendorInput := filepath.Join(root, "cursor-vendor-input.json")
+	if err := os.WriteFile(vendorInput, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write Cursor vendor input: %v", err)
+	}
+	configuredCommand := hookInvocationCommand(
+		"cursor",
+		filepath.Join(hookDir, "cursor-hook.sh"),
+	)
+	command := "$OutputEncoding = [System.Text.Encoding]::UTF8; " +
+		"Get-Content -LiteralPath " + powershellQuoteLiteral(vendorInput) +
+		" -Raw | & { $input | " + configuredCommand + " }"
+
+	out, err := exec.Command(
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		command,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Cursor-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	if !strings.Contains(strings.TrimSpace(string(out)), payload) {
+		t.Fatalf("adapter output did not preserve JSON\nwant: %s\ngot: %q", payload, out)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(hookDir, ".cursor-input-*.json"))
+	if err != nil {
+		t.Fatalf("find adapter payload leftovers: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("adapter left temporary payload files behind: %v", leftovers)
+	}
+}
+
 // TestCodexWindowsHookCommandRunsAsSingleCmdArgument reproduces Codex's native
 // Windows launch shape. The probe substitutes a system executable for the
 // gateway while preserving the generated command prefix and single-argument
@@ -468,11 +655,13 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	}
 
 	command := hookInvocationCommandFor("windows", "codex", "")
-	wantTail := windowsHookBinaryName + " " + nativeHookFlag + "codex"
-	probe := strings.Replace(command, wantTail, "where.exe cmd.exe", 1)
-	if probe == command {
-		t.Fatalf("generated Codex command %q did not contain %q", command, wantTail)
+	decoded := decodePowerShellEncodedCommandForTest(t, command)
+	wantInvocation := "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "codex"
+	probeScript := strings.Replace(decoded, wantInvocation, "& 'where.exe' 'cmd.exe'", 1)
+	if probeScript == decoded {
+		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)
 	}
+	probe := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(probeScript)
 	comspec := os.Getenv("COMSPEC")
 	if comspec == "" {
 		comspec = "cmd.exe"
@@ -583,14 +772,19 @@ func TestShellWordPassesNativeCommandThrough(t *testing.T) {
 	}
 }
 
-// TestBuildCodexHooksTableHashesTheCommand verifies the Codex hooks table writes
-// the trust hash over the exact command it executes (so Codex recognizes it),
-// and that teardown reproduces the same fingerprint to remove the state.
-func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
+// TestBuildCodexHooksTableUsesSupportedTrustFlow verifies the event-table
+// builder supplies Codex's absolute native Windows override. Position-aware
+// trust state is added only after this table is merged with existing hooks.
+func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	const cmd = windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	const configPath = "/home/u/.codex/config.toml"
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
 	table := buildCodexHooksTable(configPath, cmd)
+	wantCommand := cmd
+	if runtime.GOOS == "windows" {
+		wantCommand = hookInvocationCommandFor("windows", "codex", cmd)
+	}
 
 	for _, group := range codexHookGroups {
 		raw, ok := table[group.eventType].([]interface{})
@@ -600,30 +794,29 @@ func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
 		mg := raw[0].(map[string]interface{})
 		hooks := mg["hooks"].([]interface{})
 		h0 := hooks[0].(map[string]interface{})
-		if got := h0["command"].(string); got != cmd {
-			t.Errorf("event %s command = %q, want %q", group.eventType, got, cmd)
+		if got := h0["command"].(string); got != wantCommand {
+			t.Errorf("event %s command = %q, want %q", group.eventType, got, wantCommand)
+		}
+		if runtime.GOOS == "windows" {
+			generic := h0["command"].(string)
+			windowsCommand := h0["command_windows"].(string)
+			if windowsCommand != windowsCodexHookCommand() {
+				got := windowsCommand
+				t.Errorf("event %s command_windows = %q, want %q", group.eventType, got, windowsCodexHookCommand())
+			}
+			if generic != windowsCommand {
+				t.Errorf(
+					"event %s generic command and command_windows differ; Codex 0.129.x and newer would derive different trust hashes: %q != %q",
+					group.eventType,
+					generic,
+					windowsCommand,
+				)
+			}
 		}
 	}
 
-	state, ok := table["state"].(map[string]interface{})
-	if !ok || len(state) == 0 {
-		t.Fatal("expected non-empty state table")
-	}
-
-	// Teardown with the same command recognizes and removes every entry.
-	hooks := map[string]interface{}{"state": state}
-	if !removeOwnedCodexHookState(hooks, configPath, cmd) {
-		t.Fatal("removeOwnedCodexHookState did not recognize its own hash")
-	}
-	if _, present := hooks["state"]; present {
-		t.Error("state should be deleted once every owned entry is removed")
-	}
-
-	// A different command must NOT match (ownership specificity).
-	fresh := buildCodexHooksTable(configPath, cmd)
-	freshHooks := map[string]interface{}{"state": fresh["state"]}
-	if removeOwnedCodexHookState(freshHooks, configPath, `"other.exe" hook --connector codex`) {
-		t.Error("teardown removed state for a command it never wrote")
+	if _, ok := table["state"]; ok {
+		t.Fatal("buildCodexHooksTable added state before final merge positions were known")
 	}
 }
 
@@ -638,7 +831,7 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector claudecode`,
+				"command": `& 'C:\Program Files\DefenseClaw\defenseclaw-hook.exe' hook --connector claudecode`,
 			},
 		},
 	}
@@ -677,6 +870,61 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	}
 	if isOwnedHook(foreignSameBasename, hooksDir) {
 		t.Error("different absolute gateway path was incorrectly recognized as owned")
+	}
+}
+
+func TestWindowsDriveAbsoluteHookPath(t *testing.T) {
+	if !isWindowsDriveAbsolutePath(`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`) {
+		t.Fatal("drive-rooted Windows hook path was not recognized as absolute")
+	}
+	setHookBinaryOverride(t, `C:defenseclaw-hook.exe`)
+	if isDefenseClawManagedHookExecutable(defenseclawHookBinaryOverride) {
+		t.Fatal("drive-relative Windows hook path was recognized as managed")
+	}
+}
+
+func TestRemoveOwnedHooksPreservesForeignHandlersInSharedMatcherGroup(t *testing.T) {
+	const hooksDir = "/home/u/.defenseclaw/hooks"
+	const foreignCommand = "/usr/bin/user-shared-hook"
+	mixed := map[string]interface{}{
+		"matcher":       "*",
+		"user_metadata": "preserve-me",
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": hooksDir + "/codex-hook.sh"},
+			map[string]interface{}{"type": "command", "command": foreignCommand, "user_option": true},
+		},
+	}
+	empty := map[string]interface{}{"matcher": "Empty", "hooks": []interface{}{}}
+	result := removeOwnedHooks([]interface{}{
+		mixed,
+		"preserve-malformed-entry",
+		empty,
+		map[string]interface{}{"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": hooksDir + "/inspect-hook.sh"},
+		}},
+	}, hooksDir)
+
+	if len(result) != 3 {
+		t.Fatalf("matcher-group count=%d, want 3: %#v", len(result), result)
+	}
+	group := result[0].(map[string]interface{})
+	if group["matcher"] != "*" || group["user_metadata"] != "preserve-me" {
+		t.Fatalf("shared matcher-group metadata was not preserved: %#v", group)
+	}
+	handlers := group["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		t.Fatalf("handler count=%d, want 1: %#v", len(handlers), handlers)
+	}
+	handler := handlers[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != true {
+		t.Fatalf("foreign handler was not preserved intact: %#v", handler)
+	}
+	if result[1] != "preserve-malformed-entry" {
+		t.Fatalf("malformed outer entry was not preserved: %#v", result[1])
+	}
+	preservedEmpty := result[2].(map[string]interface{})
+	if preservedEmpty["matcher"] != "Empty" || len(preservedEmpty["hooks"].([]interface{})) != 0 {
+		t.Fatalf("originally empty matcher group was not preserved: %#v", result[2])
 	}
 }
 
@@ -802,6 +1050,28 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
+			} else if connectorName == "claudecode" {
+				var cfg map[string]interface{}
+				if err := json.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse Claude Code config: %v", err)
+				}
+				if !structuredHookCommandReferences(cfg, []string{nativeHookFlag + connectorName}) {
+					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
+				}
+			} else if connectorName == "codex" {
+				var cfg map[string]interface{}
+				if err := toml.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse Codex config: %v", err)
+				}
+				hooks := cfg["hooks"].(map[string]interface{})
+				groups := hooks["PreToolUse"].([]interface{})
+				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
+				command := handlers[0].(map[string]interface{})["command_windows"].(string)
+				decoded := decodePowerShellEncodedCommandForTest(t, command)
+				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
+					!strings.Contains(decoded, nativeHookFlag+connectorName) {
+					t.Errorf("config missing native command_windows connector command for %s:\n%s", connectorName, text)
+				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
@@ -811,7 +1081,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 			}
 			lower := strings.ToLower(text)
-			for _, forbidden := range []string{".sh", `"bash"`, "curl", "jq"} {
+			forbiddenDependencies := []string{".sh", `"bash"`, "curl", "jq"}
+			for _, forbidden := range forbiddenDependencies {
 				if strings.Contains(lower, forbidden) {
 					t.Errorf("config contains forbidden Windows hook dependency %q:\n%s", forbidden, text)
 				}

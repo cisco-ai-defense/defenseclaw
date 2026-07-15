@@ -50,7 +50,7 @@ def build_notifications_model(currently_enabled: bool, system: str | None = None
             summary=f"Configured state: {configured}\nNative desktop delivery: INACTIVE",
             details=(
                 capability.unsupported_reason,
-                "Windows toast delivery cannot be enabled in this release.",
+                "Desktop notification delivery cannot be enabled on this platform.",
                 "Audit DB, Splunk, OTel, webhooks, files, and terminal output are unchanged.",
                 "Any delivery fallback is labelled as terminal fallback, never desktop success.",
             ),

@@ -35,6 +35,7 @@ they run cleanly in CI without Docker / a built sidecar binary.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -195,6 +196,54 @@ class TestSetupCodexAlias(unittest.TestCase):
         ):
             result = _invoke(["codex", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart_mock.assert_not_called()
+
+    def test_windows_setup_refreshes_expired_agent_selection_before_save(self):
+        selection_path = os.path.join(self.app.cfg.data_dir, "agent_selection.json")
+        os.makedirs(self.app.cfg.data_dir, exist_ok=True)
+        with open(selection_path, "w", encoding="utf-8") as handle:
+            json.dump({"selections": {"codex": {"expires_at": "2000-01-01T00:00:00Z"}}}, handle)
+
+        def _refresh(data_dir, connectors):
+            self.assertEqual(os.fspath(data_dir), self.app.cfg.data_dir)
+            self.assertEqual(tuple(connectors), ("codex",))
+            with open(selection_path, "w", encoding="utf-8") as handle:
+                json.dump({"selections": {"codex": {"expires_at": "fresh"}}}, handle)
+            return {"codex": object()}, {}
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.agent_selection.record_setup_agent_selections", side_effect=_refresh) as selection_mock,
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(["codex", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        selection_mock.assert_called_once()
+        with open(selection_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["selections"]["codex"]["expires_at"], "fresh")
+        self.assertTrue(os.path.isfile(self.cfg_path))
+
+    def test_windows_selection_failure_precedes_config_save_and_restart(self):
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                return_value=({}, {"codex": "selection receipt is invalid or expired"}),
+            ),
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None) as restart_mock,
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(["codex", "--yes"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("freshly verified selected agent executable", result.output)
+        self.assertFalse(os.path.exists(self.cfg_path))
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
         restart_mock.assert_not_called()
 
 
@@ -832,17 +881,21 @@ class TestConnectorRulePackFlag(unittest.TestCase):
     def test_rule_pack_and_rule_pack_dir_are_mutually_exclusive(self):
         # Naming a pack two ways in one invocation is the one-input-two-
         # meanings ambiguity R3 removes — reject it loudly, write nothing.
-        result = self._run(
-            "codex",
-            "--yes",
-            "--no-restart",
-            "--rule-pack",
-            "strict",
-            "--rule-pack-dir",
-            os.path.join(self.tmp_dir, "x"),
-        )
+        with patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
+        ) as selection_mock:
+            result = self._run(
+                "codex",
+                "--yes",
+                "--no-restart",
+                "--rule-pack",
+                "strict",
+                "--rule-pack-dir",
+                os.path.join(self.tmp_dir, "x"),
+            )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("mutually exclusive", result.output)
+        selection_mock.assert_not_called()
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(gc.connectors, {})

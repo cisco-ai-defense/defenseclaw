@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -110,8 +111,36 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+def _emit_version_json(
+    ctx: click.Context, _param: click.Parameter | None, value: bool
+) -> None:
+    """Emit a stable installer-facing version record before config loading."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "defenseclaw-cli",
+                "version": __version__,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    ctx.exit()
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="defenseclaw")
+@click.option(
+    "--version-json",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_emit_version_json,
+    help="Emit the exact build version as JSON and exit.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Enterprise governance layer for AI coding agents.
@@ -282,7 +311,7 @@ def _try_launch_tui() -> bool:
     argv = sys.argv[1:]
     if argv and not all(a.startswith("-") for a in argv):
         return False
-    if any(a in {"-h", "--help", "--version"} for a in argv):
+    if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
         return False
 
     from defenseclaw.tui import run_textual_tui

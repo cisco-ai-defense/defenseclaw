@@ -17,10 +17,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,7 +42,9 @@ const (
 	defaultStartReadinessTimeout = 60 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
-	restartPortReleaseTimeout    = 2 * time.Second
+	gracefulShutdownHTTPTimeout  = 3 * time.Second
+	gracefulShutdownResponseMax  = 4 << 10
+	restartPortReleaseTimeout    = defaultStopTimeout
 	restartPortReleaseInterval   = 25 * time.Millisecond
 )
 
@@ -165,6 +169,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
+	printSplunkLocalHint()
 
 	// Auto-start watchdog if enabled in config.
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
@@ -180,11 +185,12 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func runStop(_ *cobra.Command, _ []string) error {
+func runStop(cmd *cobra.Command, _ []string) error {
 	// Stop watchdog first since it monitors the gateway.
 	_ = runWatchdogStop(nil, nil)
 
 	d := daemon.New(config.DefaultDataPath())
+	cfg, _ := loadDaemonConfig(cmd)
 
 	running, pid := d.IsRunning()
 	if !running {
@@ -194,7 +200,7 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
-	if err := d.Stop(defaultStopTimeout); err != nil {
+	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("stop daemon: %w", err)
 	}
@@ -219,7 +225,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		// this managed instance; a foreign collision must have no side effects.
 		_ = runWatchdogStop(nil, nil)
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
-		if err := d.Stop(defaultStopTimeout); err != nil {
+		if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 			fmt.Println(Style("FAILED", "fg=red", "bold"))
 			return fmt.Errorf("stop for restart: %w", err)
 		}
@@ -261,6 +267,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
+	printSplunkLocalHint()
 
 	// Re-start watchdog if enabled in config.
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
@@ -270,6 +277,109 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+type gracefulGatewayStopper interface {
+	StopGracefully(time.Duration, daemon.GracefulStopRequest) error
+}
+
+func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {
+	client := &http.Client{Timeout: gracefulShutdownHTTPTimeout}
+	return d.StopGracefully(timeout, func(pid int) error {
+		return requestGatewayShutdown(client, cfg, daemonGatewayToken(cfg), pid)
+	})
+}
+
+func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
+	if client == nil {
+		client = &http.Client{Timeout: gracefulShutdownHTTPTimeout}
+	}
+	if cfg == nil {
+		return errors.New("gateway shutdown configuration is unavailable")
+	}
+	if strings.TrimSpace(token) == "" {
+		return errors.New("gateway shutdown token is unavailable")
+	}
+	clientHost := strings.Trim(strings.TrimSpace(gatewayClientHost(cfg)), "[]")
+	clientIP := net.ParseIP(clientHost)
+	if !strings.EqualFold(clientHost, "localhost") && (clientIP == nil || !clientIP.IsLoopback()) {
+		return fmt.Errorf("refusing to send gateway token to non-loopback shutdown host %q", clientHost)
+	}
+	if requireStartupListenerOwnership {
+		ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+		if err != nil {
+			return fmt.Errorf("verify gateway shutdown listener owner: %w", err)
+		}
+		if ownerPID != pid {
+			return fmt.Errorf("refusing to send gateway token to listener owned by PID %d; managed PID is %d", ownerPID, pid)
+		}
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"pid":      pid,
+		"data_dir": cfg.DataDir,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal gateway shutdown request: %w", err)
+	}
+	shutdownURL := strings.TrimSuffix(sidecarStatusURL(cfg), "/status") + "/api/v1/admin/shutdown"
+	req, err := http.NewRequest(http.MethodPost, shutdownURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create gateway shutdown request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-DefenseClaw-Token", token)
+	req.Header.Set("X-DefenseClaw-Client", "daemon-stop")
+	req.Header.Set("Content-Type", "application/json")
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request gateway shutdown: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, gracefulShutdownResponseMax+1))
+	if readErr != nil {
+		return fmt.Errorf("read gateway shutdown response: %w", readErr)
+	}
+	if len(responseBody) > gracefulShutdownResponseMax {
+		return fmt.Errorf("gateway shutdown response exceeds %d bytes", gracefulShutdownResponseMax)
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway shutdown returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
+}
+
+// printSplunkLocalHint prints Splunk Web credentials when the local bridge
+// is configured, so the user knows how to access the dashboards.
+func printSplunkLocalHint() {
+	dataDir := config.DefaultDataPath()
+
+	// Check bridge env first (written by Python setup splunk --logs)
+	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
+	bridgeEnv := readDotEnv(bridgeEnvPath)
+	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
+		Section("Splunk Local Mode")
+		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
+		return
+	}
+
+	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
+	dotenvPath := filepath.Join(dataDir, ".env")
+	env := readDotEnv(dotenvPath)
+	user := env["DEFENSECLAW_LOCAL_USERNAME"]
+	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
+	if user == "" || pass == "" {
+		return
+	}
+	Section("Splunk Local Mode")
+	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
+	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
 }
 
 type daemonReadinessRequirements struct {

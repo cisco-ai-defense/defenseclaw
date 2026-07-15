@@ -44,6 +44,7 @@ var (
 	enterpriseHookUserHome      string
 	enterpriseHookUID           int
 	enterpriseHookGID           int
+	enterpriseHookSID           string
 	enterpriseHookDataDir       string
 	enterpriseHookAPIAddr       string
 	enterpriseHookProxyAddr     string
@@ -53,11 +54,15 @@ var (
 	enterpriseHookWatchInterval time.Duration
 	enterpriseHookWatchDebounce time.Duration
 
-	enterpriseHooksRuntimeGOOS          = func() string { return runtime.GOOS }
-	enterpriseHooksRootPersistentPreRun = rootPersistentPreRunE
-	enterpriseHooksInstallRunE          = runEnterpriseHooksInstall
-	enterpriseHooksReconcileRunE        = runEnterpriseHooksReconcile
-	enterpriseHooksWatchRunE            = runEnterpriseHooksWatch
+	enterpriseHooksRuntimeGOOS                 = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight           = enterpriseHooksNativePlatformPreflight
+	enterpriseHooksRootPersistentPreRun        = rootPersistentPreRunE
+	enterpriseHooksInstallRunE                 = runEnterpriseHooksInstall
+	enterpriseHooksUninstallRunE               = runEnterpriseHooksUninstall
+	enterpriseHooksReconcileRunE               = runEnterpriseHooksReconcile
+	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
+	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
+	enterpriseHooksRemoveManagedPolicy         = enterprisehooks.RemoveManagedPolicy
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -77,8 +82,8 @@ var enterpriseHooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Install and repair per-user hook connectors",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if enterpriseHooksRuntimeGOOS() == "windows" {
-			return fmt.Errorf("enterprise hooks are unsupported on native Windows")
+		if err := enterpriseHooksPlatformPreflight(); err != nil {
+			return err
 		}
 		// Cobra runs only the nearest persistent pre-run hook. Chain the root
 		// initializer explicitly so supported hosts retain config, audit, and
@@ -100,6 +105,18 @@ hook config file to already exist, so broad process discovery cannot create a
 new app profile from scratch.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return enterpriseHooksInstallRunE(cmd, args)
+	},
+}
+
+var enterpriseHooksUninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove an owned administrator-managed hook registration",
+	Long: `Remove one interactive user's DefenseClaw registration from the
+administrator-managed hook policy. The command validates the protected policy
+and ownership sidecar before mutation and refuses foreign or edited policy.
+Per-user runtime files are retained for repair or forensic recovery.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksUninstallRunE(cmd, args)
 	},
 }
 
@@ -142,8 +159,10 @@ func init() {
 		"Target user uid (defaults to --user lookup or user-home owner)")
 	enterpriseHooksInstallCmd.Flags().IntVar(&enterpriseHookGID, "gid", -1,
 		"Target user gid (defaults to --user lookup or user-home owner)")
+	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookSID, "sid", "",
+		"Target Windows user SID (defaults to --user lookup or user-home owner)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookDataDir, "data-dir", "",
-		"Per-user DefenseClaw data dir for hook scripts and token (default: <user-home>/.defenseclaw)")
+		"Per-user DefenseClaw data dir for hook scripts and token (default: <user-home>/.defenseclaw; native Windows managed Claude requires this exact path)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
 		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
@@ -151,6 +170,22 @@ func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAgentVersion, "agent-version", "",
 		"Raw local agent version used for hook-contract validation")
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
+		"Administrator-managed connector to remove (currently claudecode on native Windows)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
+		"Target local user name (resolves home and SID)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
+		"Target user's home directory (required when --user is omitted)")
+	enterpriseHooksUninstallCmd.Flags().IntVar(&enterpriseHookUID, "uid", -1,
+		"Target user uid (Unix compatibility; defaults to user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().IntVar(&enterpriseHookGID, "gid", -1,
+		"Target user gid (Unix compatibility; defaults to user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookSID, "sid", "",
+		"Target Windows user SID (defaults to --user lookup or user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookDataDir, "data-dir", "",
+		"Per-user DefenseClaw data dir associated with the registration (native Windows managed Claude accepts only <user-home>/.defenseclaw)")
+	enterpriseHooksUninstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 
 	enterpriseHooksReconcileCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
@@ -174,10 +209,48 @@ func init() {
 		"Filesystem-event debounce before reconcile")
 
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
+}
+
+func runEnterpriseHooksUninstall(cmd *cobra.Command, _ []string) error {
+	target := enterpriseHookTarget{uid: -1, gid: -1, sid: strings.TrimSpace(enterpriseHookSID)}
+	var err error
+	if target.sid == "" || strings.TrimSpace(enterpriseHookUser) != "" || strings.TrimSpace(enterpriseHookUserHome) != "" {
+		target, err = resolveEnterpriseHookTarget()
+		if err != nil {
+			return enterpriseHooksUninstallError(cmd, err)
+		}
+	}
+	err = enterpriseHooksRemoveManagedPolicy(cmd.Context(), enterprisehooks.InstallOptions{
+		ConnectorName: enterpriseHookConnector,
+		UserHome:      target.home,
+		OwnerUID:      target.uid,
+		OwnerGID:      target.gid,
+		OwnerSID:      target.sid,
+		DataDir:       enterpriseHookDataDir,
+	})
+	if err != nil {
+		return enterpriseHooksUninstallError(cmd, err)
+	}
+	if enterpriseHookJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+			"ok": true, "connector": strings.TrimSpace(enterpriseHookConnector), "user_home": target.home,
+		})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s managed hooks removed for %s\n", Style("✓", "fg=green", "bold"), strings.TrimSpace(enterpriseHookConnector), target.home)
+	return nil
+}
+
+func enterpriseHooksUninstallError(cmd *cobra.Command, err error) error {
+	if enterpriseHookJSON {
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return fmt.Errorf("enterprise hooks uninstall failed")
+	}
+	return err
 }
 
 func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
@@ -203,16 +276,22 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
+	otlpToken, err := enterpriseHookScopedOTLPToken(cfg.DataDir, enterpriseHookConnector)
+	if err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 
 	opts := enterprisehooks.InstallOptions{
 		ConnectorName:                enterpriseHookConnector,
 		UserHome:                     target.home,
 		OwnerUID:                     target.uid,
 		OwnerGID:                     target.gid,
+		OwnerSID:                     target.sid,
 		DataDir:                      enterpriseHookDataDir,
 		APIAddr:                      apiAddr,
 		ProxyAddr:                    proxyAddr,
 		APIToken:                     token,
+		OTLPPathToken:                otlpToken,
 		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
 		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
 		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
@@ -349,10 +428,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			Connector: strings.TrimSpace(target.Connector),
 		}
 		token := ""
-		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.DataDir)
+		otlpToken := ""
+		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			var tokenErr error
 			token, tokenErr = enterpriseHookScopedToken(cfg.DataDir, target.Connector)
+			if tokenErr != nil {
+				err = tokenErr
+			}
+		}
+		if err == nil {
+			var tokenErr error
+			otlpToken, tokenErr = enterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
 			}
@@ -363,10 +450,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				UserHome:                     resolved.home,
 				OwnerUID:                     resolved.uid,
 				OwnerGID:                     resolved.gid,
+				OwnerSID:                     resolved.sid,
 				DataDir:                      strings.TrimSpace(target.DataDir),
 				APIAddr:                      apiAddr,
 				ProxyAddr:                    proxyAddr,
 				APIToken:                     token,
+				OTLPPathToken:                otlpToken,
 				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
 				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
 				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
@@ -622,7 +711,7 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	if err := os.Chmod(authorizationDir, 0o750); err != nil {
 		return fmt.Errorf("harden hook guardian authorization directory: %w", err)
 	}
-	if err := setEnterpriseHookAuthorizationOwnership(authorizationDir); err != nil {
+	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationDir); err != nil {
 		return fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
@@ -632,7 +721,7 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	if err := os.Chmod(authorizationPath, 0o640); err != nil {
 		return fmt.Errorf("make hook guardian authorization readable: %w", err)
 	}
-	if err := setEnterpriseHookAuthorizationOwnership(authorizationPath); err != nil {
+	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationPath); err != nil {
 		return fmt.Errorf("set hook guardian authorization file ownership: %w", err)
 	}
 
@@ -764,46 +853,63 @@ type enterpriseHookTarget struct {
 	home string
 	uid  int
 	gid  int
+	sid  string
 }
 
 func resolveEnterpriseHookTarget() (enterpriseHookTarget, error) {
-	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookDataDir)
+	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookSID, enterpriseHookDataDir)
 }
 
-func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, dataDir string) (enterpriseHookTarget, error) {
+func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, sid, dataDir string) (enterpriseHookTarget, error) {
 	target := enterpriseHookTarget{
 		home: strings.TrimSpace(userHome),
 		uid:  uid,
 		gid:  gid,
+		sid:  strings.TrimSpace(sid),
 	}
 	if name := strings.TrimSpace(userName); name != "" {
 		u, err := user.Lookup(name)
 		if err != nil {
-			return target, fmt.Errorf("enterprise hooks install: lookup user %q: %w", name, err)
+			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}
 		if target.home == "" {
 			target.home = u.HomeDir
 		}
 		if target.uid < 0 {
-			uid, err := strconv.Atoi(u.Uid)
-			if err != nil {
-				return target, fmt.Errorf("enterprise hooks install: parse uid for %q: %w", name, err)
+			if runtime.GOOS == "windows" {
+				if target.sid == "" {
+					target.sid = strings.TrimSpace(u.Uid)
+				}
+			} else {
+				uid, err := strconv.Atoi(u.Uid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: parse uid for %q: %w", name, err)
+				}
+				target.uid = uid
 			}
-			target.uid = uid
 		}
 		if target.gid < 0 {
-			gid, err := strconv.Atoi(u.Gid)
-			if err != nil {
-				return target, fmt.Errorf("enterprise hooks install: parse gid for %q: %w", name, err)
+			if runtime.GOOS != "windows" {
+				gid, err := strconv.Atoi(u.Gid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: parse gid for %q: %w", name, err)
+				}
+				target.gid = gid
 			}
-			target.gid = gid
 		}
 	}
+	if target.home == "" && target.sid != "" {
+		home, err := enterpriseHookSIDProfilePath(target.sid)
+		if err != nil {
+			return target, fmt.Errorf("enterprise hooks: resolve profile for SID %s: %w", target.sid, err)
+		}
+		target.home = strings.TrimSpace(home)
+	}
 	if target.home == "" {
-		return target, fmt.Errorf("enterprise hooks install: --user or --user-home is required")
+		return target, fmt.Errorf("enterprise hooks: --user, --user-home, or --sid is required")
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
-		return target, fmt.Errorf("enterprise hooks install: --data-dir must be absolute")
+		return target, fmt.Errorf("enterprise hooks: --data-dir must be absolute")
 	}
 	return target, nil
 }
@@ -825,6 +931,28 @@ func enterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
 		return "", fmt.Errorf("enterprise hooks: ensure scoped hook API token: %w", err)
 	}
 	if err := alignEnterpriseHookScopedTokenOwner(dataDir, connectorName); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func enterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error) {
+	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return "", nil
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("enterprise hooks: config data_dir is required before minting OTLP path token")
+	}
+	if err := validateEnterpriseOTLPTokenLocation(dataDir, scope); err != nil {
+		return "", err
+	}
+	token, err := connector.EnsureOTLPPathToken(dataDir, scope)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: ensure scoped OTLP path token: %w", err)
+	}
+	if err := alignEnterpriseOTLPTokenOwner(dataDir, scope); err != nil {
 		return "", err
 	}
 	return token, nil

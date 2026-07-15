@@ -38,7 +38,6 @@ def test_windows_release_metadata_is_exact() -> None:
         "omnigent",
         "openclaw",
         "zeptoclaw",
-        "native-desktop-toasts",
     }
 
 
@@ -65,7 +64,6 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
         "OmniGent",
         "OpenClaw",
         "ZeptoClaw",
-        "native desktop toasts",
     ):
         assert label in text
 

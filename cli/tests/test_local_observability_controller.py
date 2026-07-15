@@ -724,7 +724,7 @@ func main() {
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=60,
+        timeout=180,
         check=False,
     )
     assert built.returncode == 0, built.stdout + built.stderr

@@ -3593,8 +3593,8 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 
-	// User-session OS notifications. Master switch defaults to true
-	// on darwin and false elsewhere — see DefaultNotificationsEnabled
+	// User-session OS notifications. Master switch defaults to true on macOS
+	// and native Windows and false elsewhere — see DefaultNotificationsEnabled
 	// in notifications.go for the rationale. block_enforced and
 	// hitl_approval default ON so the user sees real blocks and
 	// real chat-side asks; block_would_block defaults OFF so the

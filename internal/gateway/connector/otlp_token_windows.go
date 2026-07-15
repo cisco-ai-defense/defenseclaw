@@ -30,6 +30,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// otlpValidateDirectory enforces the native Windows owner, DACL, and
+// reparse-point contract for every directory controlling a token path.
+func otlpValidateDirectory(path string) error {
+	return hookAPIValidateDirectory(path)
+}
+
 // otlpOpenNoFollow returns 0 on Windows. O_NOFOLLOW is a Unix flag and is not
 // available here. (Windows DOES traverse reparse points/symlinks during
 // CreateFile unless FILE_FLAG_OPEN_REPARSE_POINT is set, but creating symlinks

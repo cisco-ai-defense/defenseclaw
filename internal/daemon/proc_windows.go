@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -132,6 +133,28 @@ func processExists(pid int) bool {
 		return true
 	}
 	return code == stillActive
+}
+
+func waitForProcessExit(proc *os.Process, _ int, timeout time.Duration) bool {
+	millis := timeout.Milliseconds()
+	if millis < 0 {
+		millis = 0
+	} else if timeout > 0 && millis == 0 {
+		millis = 1
+	}
+	const maxFiniteWaitMillis = int64(^uint32(0) - 1)
+	if millis > maxFiniteWaitMillis {
+		millis = maxFiniteWaitMillis
+	}
+
+	var result uint32
+	var waitErr error
+	if err := proc.WithHandle(func(handle uintptr) {
+		result, waitErr = windows.WaitForSingleObject(windows.Handle(handle), uint32(millis))
+	}); err != nil {
+		return false
+	}
+	return waitErr == nil && result == windows.WAIT_OBJECT_0
 }
 
 // processStartIdentity returns an opaque string that uniquely identifies a
