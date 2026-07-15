@@ -3218,6 +3218,43 @@ def _check_connector_version_supported_for_setup(
     return True
 
 
+def _record_windows_setup_agent_selections(
+    data_dir: str | os.PathLike[str] | None,
+    connectors: list[str] | tuple[str, ...],
+) -> None:
+    """Refresh protected executable authority required by native Codex setup."""
+
+    if platform_support.host_os() != "windows":
+        return
+    selected = tuple(
+        dict.fromkeys(
+            connector
+            for raw in connectors
+            if (connector := normalize_connector(raw)) == "codex"
+        )
+    )
+    if not selected:
+        return
+
+    from defenseclaw.agent_selection import record_setup_agent_selections
+
+    target_dir = data_dir or os.path.expanduser("~/.defenseclaw")
+    try:
+        selections, selection_errors = record_setup_agent_selections(target_dir, selected)
+    except OSError as exc:
+        raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
+
+    for connector in selected:
+        if connector not in selections and connector not in selection_errors:
+            selection_errors[connector] = "selection was not recorded"
+    if selection_errors:
+        details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
+        raise click.ClickException(
+            "cannot configure native hooks without a freshly verified selected agent executable "
+            f"({details})"
+        )
+
+
 def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str | None) -> list[str]:
     """Connectors whose binaries should be verified before guardrail setup."""
     targets: list[str] = []
@@ -3275,6 +3312,7 @@ def _check_guardrail_setup_connector_versions(
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             return False
+    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), tuple(targets))
     # Version validation can refuse a requested action mode and persist an
     # observe fallback. Reconcile the hook-lane judge gate after every target
     # has reached its final mode so a refused connector cannot remain judged
@@ -4828,6 +4866,7 @@ def _apply_hook_connector_setup(
         version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
     if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
         return False
+    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), (connector,))
 
     cfg = app.cfg
     gc = cfg.guardrail
