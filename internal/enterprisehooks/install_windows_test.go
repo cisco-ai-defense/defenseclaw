@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -51,6 +52,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	originalPath := windowsClaudeManagedPolicyPathResolver
 	originalHigher := windowsClaudeHigherPolicyCheck
 	originalOwner := windowsManagedPolicyOwnerSID
+	originalRuntimeOwner := windowsManagedRuntimeOwnerSID
 	originalDirTrust := windowsManagedPolicyDirTrustCheck
 	originalFileTrust := windowsManagedPolicyFileTrustCheck
 	originalWriter := windowsManagedPolicyWriter
@@ -60,6 +62,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 	windowsEnterpriseAdministratorCheck = func() error { return nil }
 	windowsClaudeHigherPolicyCheck = func() error { return nil }
 	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
+	windowsManagedRuntimeOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
 	windowsManagedPolicyDirTrustCheck = func(path string) error {
 		return validateWindowsUserPathElement(path, targetSID, true, true, true)
 	}
@@ -116,6 +119,7 @@ func newWindowsManagedInstallFixture(t *testing.T, basePolicy map[string]interfa
 		windowsClaudeManagedPolicyPathResolver = originalPath
 		windowsClaudeHigherPolicyCheck = originalHigher
 		windowsManagedPolicyOwnerSID = originalOwner
+		windowsManagedRuntimeOwnerSID = originalRuntimeOwner
 		windowsManagedPolicyDirTrustCheck = originalDirTrust
 		windowsManagedPolicyFileTrustCheck = originalFileTrust
 		windowsManagedPolicyWriter = originalWriter
@@ -201,10 +205,14 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	if token, err := os.ReadFile(tokenPath); err != nil || strings.TrimSpace(string(token)) != opts.APIToken {
 		t.Fatalf("per-user scoped token = %q, err=%v", token, err)
 	}
-	if owner, err := windowsPathOwner(tokenPath); err != nil || !owner.Equals(fixture.targetSID) {
-		t.Fatalf("runtime token owner = %v, err=%v, want %s", owner, err, fixture.targetSID)
+	runtimeOwner, err := windowsManagedRuntimeOwnerSID()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := validateWindowsUserPathElement(tokenPath, fixture.targetSID, false, false, true); err != nil {
+	if owner, err := windowsPathOwner(tokenPath); err != nil || !owner.Equals(runtimeOwner) {
+		t.Fatalf("runtime token owner = %v, err=%v, want administrator %s", owner, err, runtimeOwner)
+	}
+	if err := validateWindowsManagedRuntimePathElement(tokenPath, fixture.targetSID, false, false); err != nil {
 		t.Fatalf("runtime token DACL: %v", err)
 	}
 	if err := validateWindowsUserPathElement(fixture.policyPath, fixture.targetSID, false, false, true); err != nil {
@@ -238,6 +246,77 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatalf("no-op reconcile churned managed policy mtime: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestWindowsManagedRuntimeTargetHasReadOnlyEffectiveRights(t *testing.T) {
+	owner := currentWindowsTestSID(t)
+	target, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalOwner := windowsManagedRuntimeOwnerSID
+	windowsManagedRuntimeOwnerSID = func() (*windows.SID, error) { return owner, nil }
+	t.Cleanup(func() { windowsManagedRuntimeOwnerSID = originalOwner })
+
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(hookDir, ".hookcfg"),
+		filepath.Join(hookDir, ".hookcfg.claudecode"),
+		filepath.Join(hookDir, ".hook-claudecode.token"),
+	}
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("managed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := hardenWindowsManagedRuntime(dataDir, paths, target); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range append([]struct {
+		path string
+		dir  bool
+	}{{dataDir, true}, {hookDir, true}}, []struct {
+		path string
+		dir  bool
+	}{{paths[0], false}, {paths[1], false}, {paths[2], false}}...) {
+		rights := windowsTestEffectiveRights(t, item.path, target)
+		if rights&windows.FILE_GENERIC_READ != windows.FILE_GENERIC_READ {
+			t.Fatalf("target effective rights on %s = 0x%x, want FILE_GENERIC_READ", item.path, uint32(rights))
+		}
+		if item.dir && rights&windows.FILE_GENERIC_EXECUTE != windows.FILE_GENERIC_EXECUTE {
+			t.Fatalf("target effective rights on directory %s = 0x%x, want FILE_GENERIC_EXECUTE", item.path, uint32(rights))
+		}
+		if windowsEnterpriseWriteLikeAccess(rights, item.dir) {
+			t.Fatalf("target effective rights on %s remain write-capable: 0x%x", item.path, uint32(rights))
+		}
+		if err := validateWindowsManagedRuntimePathElement(item.path, target, item.dir, item.dir); err != nil {
+			t.Fatalf("managed runtime validation for %s: %v", item.path, err)
+		}
+	}
+
+	// A target-user write grant is the original bypass primitive. The runtime
+	// validator must refuse it before hook code reads the mutable sidecar.
+	setWindowsTestManagedRuntimeTargetWriteDACL(t, paths[0], owner, target)
+	if err := validateWindowsManagedRuntimePathElement(paths[0], target, false, false); err == nil || !strings.Contains(err.Error(), "target user SID") {
+		t.Fatalf("writable target sidecar validation error = %v, want fail-closed refusal", err)
+	}
+}
+
+func TestResolveWindowsClaudeManagedHookRuntimeFailsClosedOnWritableSidecar(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(fixture.home, ".defenseclaw", "hooks", ".hookcfg")
+	setWindowsTestUntrustedWriteDACL(t, sidecar, fixture.targetSID)
+	if _, registered, err := ResolveWindowsClaudeManagedHookRuntime(fixture.hookExe); err == nil || registered || !strings.Contains(err.Error(), "write-like access") {
+		t.Fatalf("writable managed sidecar resolution: registered=%v err=%v, want fail closed", registered, err)
 	}
 }
 
@@ -604,6 +683,73 @@ func setWindowsTestUntrustedWriteDACL(t *testing.T, path string, owner *windows.
 	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func setWindowsTestManagedRuntimeTargetWriteDACL(t *testing.T, path string, owner, target *windows.SID) {
+	t.Helper()
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []windows.EXPLICIT_ACCESS{}
+	for _, item := range []struct {
+		sid  *windows.SID
+		mask windows.ACCESS_MASK
+	}{
+		{owner, windows.GENERIC_ALL},
+		{system, windows.GENERIC_ALL},
+		{target, windows.GENERIC_READ | windows.GENERIC_WRITE},
+	} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: item.mask,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(item.sid)},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func windowsTestEffectiveRights(t *testing.T, path string, principal *windows.SID) windows.ACCESS_MASK {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read DACL for %s: %v", path, err)
+	}
+	trustee := windows.TRUSTEE{
+		TrusteeForm:  windows.TRUSTEE_IS_SID,
+		TrusteeType:  windows.TRUSTEE_IS_USER,
+		TrusteeValue: windows.TrusteeValueFromSID(principal),
+	}
+	var rights windows.ACCESS_MASK
+	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("GetEffectiveRightsFromAclW")
+	status, _, _ := proc.Call(
+		uintptr(unsafe.Pointer(dacl)),
+		uintptr(unsafe.Pointer(&trustee)),
+		uintptr(unsafe.Pointer(&rights)),
+	)
+	if status != 0 {
+		t.Fatalf("GetEffectiveRightsFromAclW(%s, %s): %v", path, principal, syscall.Errno(status))
+	}
+	return rights
 }
 
 func windowsTestDACLGrants(path string, principal *windows.SID, mask windows.ACCESS_MASK) bool {

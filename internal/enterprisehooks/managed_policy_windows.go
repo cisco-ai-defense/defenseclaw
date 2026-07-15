@@ -137,7 +137,7 @@ func ResolveWindowsClaudeManagedHookRuntime(hookExecutable string) (dataDir stri
 		{filepath.Join(hookDir, ".hookcfg.claudecode"), false},
 		{filepath.Join(hookDir, ".hook-claudecode.token"), false},
 	} {
-		if err := validateWindowsUserPathElement(item.path, currentSID, item.dir, item.dir, true); err != nil {
+		if err := validateWindowsManagedRuntimePathElement(item.path, currentSID, item.dir, item.dir); err != nil {
 			return dataDir, false, fmt.Errorf("enterprise hooks: current managed runtime trust check failed for %s: %w", item.path, err)
 		}
 	}
