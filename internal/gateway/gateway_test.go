@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -6471,6 +6472,59 @@ func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || !*called {
 		t.Fatalf("Codex scoped Authorization rejected: status=%d called=%v", rr.Code, *called)
+	}
+}
+
+func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
+	const scopedToken = "claude-scoped-token"
+	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: scopedToken,
+	})
+	if profile.NativeOTLP == nil {
+		t.Fatal("Claude profile has no native OTLP configuration")
+	}
+	env, err := profile.NativeOTLP.EnvBlock()
+	if err != nil {
+		t.Fatalf("render Claude OTLP environment: %v", err)
+	}
+
+	decodedHeaders := make(http.Header)
+	for _, pair := range strings.Split(env["OTEL_EXPORTER_OTLP_HEADERS"], ",") {
+		keyValue := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(keyValue) != 2 {
+			t.Fatalf("malformed rendered OTLP header pair %q", pair)
+		}
+		// OpenTelemetry JS uses decodeURIComponent for each key and value.
+		key, err := url.PathUnescape(keyValue[0])
+		if err != nil {
+			t.Fatalf("decode rendered OTLP header key %q: %v", keyValue[0], err)
+		}
+		value, err := url.PathUnescape(keyValue[1])
+		if err != nil {
+			t.Fatalf("decode rendered OTLP header value %q: %v", keyValue[1], err)
+		}
+		decodedHeaders.Set(key, value)
+	}
+	if got := decodedHeaders.Get("Authorization"); got != "Bearer "+scopedToken {
+		t.Fatalf("decoded Claude Authorization = %q, want scoped bearer", got)
+	}
+
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeClaude: scopedToken,
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header = decodedHeaders
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("gateway rejected Claude-rendered scoped Authorization: status=%d called=%v", rr.Code, *called)
 	}
 }
 

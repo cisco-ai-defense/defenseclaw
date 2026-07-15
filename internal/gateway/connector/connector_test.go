@@ -6682,7 +6682,7 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
 	}
-	if !strings.Contains(headers, "authorization=Bearer+"+scoped) {
+	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
 	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {

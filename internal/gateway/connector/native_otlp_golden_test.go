@@ -405,6 +405,27 @@ func TestNativeOTLPShape_GeminiCLI(t *testing.T) {
 	}
 }
 
+func TestSerializeOTLPHeadersRoundTripsThroughJavaScriptURIParser(t *testing.T) {
+	t.Parallel()
+
+	const value = "Bearer literal+plus,comma=equals%percent 雪"
+	encoded := serializeOTLPHeaders(map[string]string{
+		"Authorization": value,
+	})
+	if strings.Contains(encoded, "authorization=Bearer+") {
+		t.Fatalf("space used form/query encoding instead of URI encoding: %q", encoded)
+	}
+	if !strings.Contains(encoded, "authorization=Bearer%20") {
+		t.Fatalf("space was not percent-encoded for decodeURIComponent: %q", encoded)
+	}
+
+	got := splitOTelHeader(encoded)
+	want := []string{"authorization=" + value}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("JavaScript-style header round-trip mismatch:\n  got=%q\n want=%q\nencoded=%q", got, want, encoded)
+	}
+}
+
 // toStringMap canonicalizes header keys to lower-case so values
 // produced by either map[string]string or map[string]interface{}
 // renderers compare equal.
@@ -439,8 +460,11 @@ func splitOTelHeader(v string) []string {
 			out = append(out, p)
 			continue
 		}
-		key, _ := url.QueryUnescape(p[:eq])
-		value, _ := url.QueryUnescape(p[eq+1:])
+		// OpenTelemetry JS parses header components with decodeURIComponent,
+		// whose relevant Go equivalent is PathUnescape: unlike query/form
+		// decoding, a literal '+' remains a plus rather than becoming a space.
+		key, _ := url.PathUnescape(p[:eq])
+		value, _ := url.PathUnescape(p[eq+1:])
 		out = append(out, strings.ToLower(key)+"="+value)
 	}
 	sort.Strings(out)

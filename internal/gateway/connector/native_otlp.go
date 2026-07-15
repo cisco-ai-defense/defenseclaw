@@ -377,10 +377,12 @@ func (s NativeOTLPSpec) FileSinkPath() (string, error) {
 }
 
 // serializeOTLPHeaders renders Headers as the comma-separated key=value
-// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Sorted
-// by lowercase key so the output is deterministic across runs (env
-// blocks are written into agent config files that operators read and
-// diff).
+// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Header
+// components use URI percent-encoding because OpenTelemetry JS parses
+// them with decodeURIComponent; query/form encoding would turn a space
+// into '+', which that parser preserves as a literal plus. Sorted by
+// lowercase key so the output is deterministic across runs (env blocks
+// are written into agent config files that operators read and diff).
 func serializeOTLPHeaders(h map[string]string) string {
 	keys := make([]string, 0, len(h))
 	for k := range h {
@@ -396,7 +398,7 @@ func serializeOTLPHeaders(h map[string]string) string {
 		// for the value; only the key is canonicalized to lower-case.
 		for origKey, v := range h {
 			if strings.ToLower(origKey) == k {
-				parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+				parts = append(parts, url.PathEscape(k)+"="+url.PathEscape(v))
 				break
 			}
 		}
