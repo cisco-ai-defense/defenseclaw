@@ -467,13 +467,10 @@ namespace DefenseClaw
                     throw new InvalidOperationException(
                         "disposable standard-user harness token has an unexpected user SID");
                 }
-                WindowsPrincipal principal = new WindowsPrincipal(identity);
-                if (principal.IsInRole(WindowsBuiltInRole.Administrator))
-                {
-                    throw new InvalidOperationException(
-                        "disposable standard-user harness token is an administrator");
-                }
+                SecurityIdentifier administrators =
+                    new SecurityIdentifier("S-1-5-32-544");
                 SecurityIdentifier interactive = new SecurityIdentifier("S-1-5-4");
+                bool hasAdministratorSid = false;
                 bool hasInteractiveSid = false;
                 if (identity.Groups != null)
                 {
@@ -488,9 +485,17 @@ namespace DefenseClaw
                         if (groupSid.Equals(interactive))
                         {
                             hasInteractiveSid = true;
-                            break;
+                        }
+                        if (groupSid.Equals(administrators))
+                        {
+                            hasAdministratorSid = true;
                         }
                     }
+                }
+                if (hasAdministratorSid)
+                {
+                    throw new InvalidOperationException(
+                        "disposable standard-user harness token is an administrator");
                 }
                 if (!hasInteractiveSid)
                 {

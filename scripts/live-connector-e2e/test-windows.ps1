@@ -774,6 +774,8 @@ try {
         $standardUserLauncherText -match 'TerminateAndDrain' -and
         $standardUserLauncherText -match 'ActiveProcesses' -and
         $standardUserLauncherText -match 'InteractiveDesktopGrant' -and
+        $standardUserLauncherText -match 'S-1-5-32-544' -and
+        $standardUserLauncherText -notmatch 'WindowsPrincipal' -and
         $standardUserLauncherText -match 'TokenIsElevated != 0') `
         'disposable-user launcher validates identity/elevation and bounds the complete process tree'
     Assert-True ($standardUserCIText -match 'Disable-LocalUser' -and
