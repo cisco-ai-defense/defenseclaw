@@ -98,6 +98,15 @@ Project Markdown documentation is centralized under [docs/](docs/). Package-loca
 
 ### Build from source (developers only)
 
+Choose the command by intent:
+
+| Goal | Command | Changes installed state? |
+|------|---------|--------------------------|
+| Normal development from this checkout | `make all` | Yes; rebuilds and activates this exact checkout |
+| Compile/test artifacts only | `make build` | No |
+| See the supported developer paths | `make help` | No |
+| Upgrade a packaged release | `defenseclaw upgrade` | Yes; uses the signed release resolver |
+
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
@@ -113,6 +122,9 @@ source state and records a strict ownership marker after rebuilding. This can
 run the checkout's current migrations against developer state and must not be
 used as a release upgrade. Release-managed installations must use the
 release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver.
+`make install`, `make dev-install`, and `scripts/install-dev.sh` are lower-level
+strict plumbing for a fresh or isolated development home; they are not the
+normal repeated-development command.
 
 ### Install with the release script
 

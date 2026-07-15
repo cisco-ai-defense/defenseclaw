@@ -128,8 +128,10 @@ already picked).
 
 `scripts/install.sh` (release) and `scripts/install-dev.sh` (from
 source) both accept `--quickstart` / `--quickstart-mode`. The
-top-level `Makefile` adds five new targets:
+top-level `Makefile` exposes the following workflow targets:
 
+- `make help` (also the default `make` target) → explain the supported source
+  development, build-only, and release-upgrade paths without changing state.
 - `make all` → developer source publication + `path` + `quickstart`. The
   developer publication may reclaim markerless or older source state only
   when the installed CLI belongs to the exact checkout; `make install` and
@@ -138,6 +140,9 @@ top-level `Makefile` adds five new targets:
 - `make doctor`, `make uninstall`, `make quickstart` — thin
   wrappers over the CLI that fall through to the venv binary if
   the installed symlink is missing (e.g. after `make clean`)
+
+`make build` reports that it changed no installed state and directs developers
+to `make all`; it no longer recommends the strict `make install` plumbing target.
 
 `scripts/add-to-path.sh` is shell-aware (`bash`, `zsh`, `fish`),
 idempotent (checks for the exact export block it would append),

@@ -98,6 +98,13 @@ contract.
 
 <Tab value="From source">
 
+| Goal | Command |
+|------|---------|
+| Normal same-checkout development | `make all` |
+| Build artifacts without installing | `make build` |
+| Show developer workflow help | `make help` |
+| Upgrade a packaged release | `defenseclaw upgrade` |
+
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
@@ -119,6 +126,8 @@ and records the current strict marker after a successful rebuild. Direct
 `make install`, `scripts/install-dev.sh`, and release-managed hosts remain
 fail-closed. Release installations must use `defenseclaw upgrade`; do not aim a
 raw `pip`, `uv`, or editable install at a release-managed virtual environment.
+The lower-level install targets are for fresh or isolated development homes,
+not the normal repeated-development path.
 
 </Tab>
 

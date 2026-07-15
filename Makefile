@@ -1,6 +1,7 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 VERSION     := 0.8.5
+.DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -40,7 +41,7 @@ endif
 # platform. Dependency-bearing scripts continue to use $(VENV_BIN)/python.
 BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%s' "$(VENV_BIN)/python$(EXE)"; elif command -v python3 >/dev/null 2>&1; then command -v python3; elif command -v python >/dev/null 2>&1; then command -v python; else printf '%s' python; fi)
 
-.PHONY: all path doctor uninstall quickstart llm-setup \
+.PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
@@ -54,6 +55,27 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
+
+# ---------------------------------------------------------------------------
+# Developer workflow help
+# ---------------------------------------------------------------------------
+
+help:
+	@echo "DefenseClaw source-development workflow"
+	@echo ""
+	@echo "  make all      Build and activate this exact checkout using your existing"
+	@echo "                developer state. This is the normal local development path."
+	@echo "  make build    Build artifacts only. Does not install or change managed state."
+	@echo "  make check    Run the standard validation suite."
+	@echo "  make clean    Remove local build artifacts."
+	@echo ""
+	@echo "Common developer options:"
+	@echo "  make all NO_QUICKSTART=1   rebuild/install without first-run setup"
+	@echo "  make all CONNECTOR=none    rebuild/install without connector setup"
+	@echo ""
+	@echo "Release installation detected? Use: defenseclaw upgrade"
+	@echo "Direct 'make install' and scripts/install-dev.sh are strict plumbing targets;"
+	@echo "they intentionally do not reclaim an existing managed installation."
 
 # ---------------------------------------------------------------------------
 # Version stamping
@@ -145,7 +167,8 @@ quickstart: _source-install-preflight
 		elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
 			dc_bin="$(VENV)/bin/defenseclaw"; \
 		else \
-			echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+			echo "  Could not locate the defenseclaw binary."; \
+			echo "  Developers: run 'make all'. Release installs: run 'defenseclaw upgrade'."; \
 			exit 1; \
 		fi; \
 		if [ -n "$${CONNECTOR:-}" ]; then \
@@ -230,7 +253,9 @@ build: pycli gateway plugin
 	@echo "  • Go gateway   → ./$(GATEWAY)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
-	@echo "Run 'make install' to install all components."
+	@echo "Build only: no installed files or managed state were changed."
+	@echo "To activate this exact checkout for development, run 'make all'."
+	@echo "For a release-managed installation, run 'defenseclaw upgrade'."
 
 install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_INSTALL_TARGET)
 	@./scripts/source-install-preflight.sh claim \

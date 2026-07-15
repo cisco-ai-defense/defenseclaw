@@ -112,6 +112,20 @@ against developer state and must not be used on a release-managed host. The
 release-owned resolver is for release-managed layouts; it must not be presented
 as recovery for a source venv.
 
+### Choose the right command
+
+| What you want | Use | State behavior |
+|---------------|-----|----------------|
+| Rebuild and run this checkout during normal development | `make all` | Activates only the exact checkout that already owns the source install; may migrate developer state |
+| Compile artifacts without installing them | `make build` | Leaves installed files and `~/.defenseclaw` unchanged |
+| Review the developer workflow and common options | `make help` | Read-only |
+| Upgrade an installed release | `defenseclaw upgrade` | Uses the signed release resolver and required bridge |
+| Exercise a fresh source install in isolation | `HOME=$(mktemp -d) make all` | Uses a disposable home instead of existing state |
+
+Do not follow `make build` with `make install` on an existing developer or
+release installation. For normal same-checkout development, run `make all`
+directly; it performs the guarded developer publication itself.
+
 ### Prerequisites
 
 | Tool | Minimum | Check | Install |
@@ -215,13 +229,16 @@ ssh spark 'sudo mv /tmp/defenseclaw-gateway /usr/local/bin/defenseclaw-gateway &
 
 ### Dev Install
 
-For contributors and development workflows:
+For normal repeated development in a checkout, use:
 
 ```bash
-make dev-install
+make all
 ```
 
-This runs `scripts/install-dev.sh`, which:
+`make dev-install` and `scripts/install-dev.sh` are strict lower-level plumbing
+for a fresh or isolated developer home. They intentionally refuse to reclaim
+existing managed state; use them only when testing that fresh-install path.
+The script:
 
 1. Creates a `.venv` with editable install + dev dependencies (ruff,
    pytest, pytest-cov)

@@ -69,7 +69,9 @@ boundary.
   markerless or older source-owned state may advance with the checkout for
   local development. Foreign, newer, release-managed, and different-checkout
   installations still refuse before mutation, and direct install targets do
-  not inherit the developer reclaim path.
+  not inherit the developer reclaim path. Running `make` or `make help` now
+  explains the source-build, developer-activation, and release-upgrade paths;
+  `make build` no longer directs developers into the strict install target.
 - **AI Discovery inventories Lemonade and local model artifacts**: the built-in
   catalog now recognizes Lemonade Server, bounded loopback metadata reads show
   installed/loaded models, and independent filesystem discovery covers GGUF,
