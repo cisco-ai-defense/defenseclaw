@@ -1284,8 +1284,12 @@ func stubInsightClawInstall(t *testing.T, ocHome string) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
-		pkg := []byte(`{"name":"insightclaw","version":"0.0.0"}`)
+		pkg := []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`)
 		if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
+			return nil, err
+		}
+		manifest := []byte(`{"id":"insightclaw"}`)
+		if err := os.WriteFile(filepath.Join(dir, "openclaw.plugin.json"), manifest, 0o644); err != nil {
 			return nil, err
 		}
 		return []byte("installed insightclaw"), nil
@@ -1327,7 +1331,10 @@ func TestInstallInsightClawNPMPlugin_EnvUsesHomeParentWithoutOpenClawHome(t *tes
 		if err := os.MkdirAll(installDir, 0o755); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"insightclaw","version":"0.1.3"}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`), 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(installDir, "openclaw.plugin.json"), []byte(`{"id":"insightclaw"}`), 0o644); err != nil {
 			return nil, err
 		}
 		return []byte("ok"), nil
@@ -1356,6 +1363,70 @@ func TestInstallInsightClawNPMPlugin_EnvUsesHomeParentWithoutOpenClawHome(t *tes
 	}
 	if !hasHome {
 		t.Fatalf("install env missing %q", wantHome)
+	}
+}
+
+func TestInstallInsightClawNPMPlugin_ReplacesUntrustedPrecreatedDir(t *testing.T) {
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, ".openclaw")
+	if err := os.MkdirAll(filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
+	if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"evil-plugin","version":"9.9.9"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "openclaw.plugin.json"), []byte(`{"id":"evil-plugin"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "index.js"), []byte("malicious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origLookPath := execLookPath
+	execLookPath = func(file string) (string, error) {
+		if file == "openclaw" {
+			return "/usr/bin/openclaw", nil
+		}
+		return "", exec.ErrNotFound
+	}
+	defer func() { execLookPath = origLookPath }()
+
+	called := false
+	origInstall := execOpenClawPluginInstall
+	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
+		if pluginName != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+		}
+		called = true
+
+		if _, err := os.Stat(filepath.Join(installDir, "index.js")); !os.IsNotExist(err) {
+			return nil, fmt.Errorf("attacker precreated file still present before install: %v", err)
+		}
+
+		if err := os.MkdirAll(installDir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`), 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(installDir, "openclaw.plugin.json"), []byte(`{"id":"insightclaw"}`), 0o644); err != nil {
+			return nil, err
+		}
+		return []byte("ok"), nil
+	}
+	defer func() { execOpenClawPluginInstall = origInstall }()
+
+	if err := installInsightClawNPMPlugin(context.Background(), ocHome); err != nil {
+		t.Fatalf("installInsightClawNPMPlugin failed: %v", err)
+	}
+	if !called {
+		t.Fatal("expected installer to run for untrusted precreated insightclaw directory")
+	}
+
+	if _, err := os.Stat(filepath.Join(installDir, "index.js")); !os.IsNotExist(err) {
+		t.Fatalf("attacker precreated file survived install: %v", err)
 	}
 }
 

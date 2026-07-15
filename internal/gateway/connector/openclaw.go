@@ -59,6 +59,7 @@ const openClawPlaceholderName = ".placeholder"
 
 const defenseClawOpenClawPluginID = "defenseclaw"
 const insightClawOpenClawPluginID = "insightclaw"
+const insightClawNPMPackageName = "@outshift-open/insightclaw"
 
 // insightClawNPMVersion is the reviewed, pinned release of the
 // insightclaw OpenClaw plugin fetched from NPM during setup. Bump
@@ -311,8 +312,15 @@ var execLookPath = exec.LookPath
 
 func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
-	if openClawPluginDirLooksUsable(installDir) {
+	if err := validateInsightClawPluginDir(installDir); err == nil {
 		return nil
+	}
+
+	extensionsDir := filepath.Join(ocHome, "extensions")
+	if _, err := os.Stat(installDir); err == nil {
+		if err := safeRemoveAll(installDir, extensionsDir); err != nil {
+			return fmt.Errorf("remove stale insightclaw extension dir: %w", err)
+		}
 	}
 
 	// Give a clear error when the CLI is not on PATH rather than
@@ -345,7 +353,7 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	out, err := execOpenClawPluginInstall(installCtx, insightClawNPMSource, env)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		if openClawPluginDirLooksUsable(installDir) && isLikelyNonFatalOpenClawInstallError(msg) {
+		if validateInsightClawPluginDir(installDir) == nil && isLikelyNonFatalOpenClawInstallError(msg) {
 			return nil
 		}
 		if msg != "" {
@@ -353,8 +361,8 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 		}
 		return fmt.Errorf("openclaw plugins install %s: %w", insightClawNPMSource, err)
 	}
-	if !openClawPluginDirLooksUsable(installDir) {
-		return fmt.Errorf("openclaw plugins install %s completed but %s is missing a package.json or openclaw.plugin.json", insightClawNPMSource, installDir)
+	if err := validateInsightClawPluginDir(installDir); err != nil {
+		return fmt.Errorf("openclaw plugins install %s completed but %s failed validation: %w", insightClawNPMSource, installDir, err)
 	}
 	return nil
 }
@@ -368,14 +376,56 @@ func isLikelyNonFatalOpenClawInstallError(msg string) bool {
 		strings.Contains(msg, "not a valid hook pack")
 }
 
-func openClawPluginDirLooksUsable(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "openclaw.plugin.json")); err == nil {
-		return true
+func validateInsightClawPluginDir(dir string) error {
+	pkgPath := filepath.Join(dir, "package.json")
+	pkg := map[string]interface{}{}
+	if data, err := os.ReadFile(pkgPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing package.json")
+		}
+		return fmt.Errorf("read package.json: %w", err)
+	} else if err := json.Unmarshal(data, &pkg); err != nil {
+		return fmt.Errorf("parse package.json: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return true
+
+	pkgName, _ := pkg["name"].(string)
+	if pkgName != insightClawNPMPackageName && pkgName != insightClawOpenClawPluginID {
+		return fmt.Errorf("package.json name %q does not match expected %q", pkgName, insightClawNPMPackageName)
 	}
-	return false
+
+	pkgVersion, _ := pkg["version"].(string)
+	if pkgVersion != insightClawNPMVersion {
+		return fmt.Errorf("package.json version %q does not match expected %q", pkgVersion, insightClawNPMVersion)
+	}
+
+	manifestPath := filepath.Join(dir, "openclaw.plugin.json")
+	manifest := map[string]interface{}{}
+	if data, err := os.ReadFile(manifestPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing openclaw.plugin.json")
+		}
+		return fmt.Errorf("read openclaw.plugin.json: %w", err)
+	} else if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse openclaw.plugin.json: %w", err)
+	}
+
+	id := ""
+	if v, ok := manifest["id"].(string); ok {
+		id = v
+	} else if v, ok := manifest["name"].(string); ok {
+		id = v
+	} else if plugin, ok := manifest["plugin"].(map[string]interface{}); ok {
+		if v, ok := plugin["id"].(string); ok {
+			id = v
+		} else if v, ok := plugin["name"].(string); ok {
+			id = v
+		}
+	}
+	if id != insightClawOpenClawPluginID {
+		return fmt.Errorf("openclaw.plugin.json identity %q does not match expected %q", id, insightClawOpenClawPluginID)
+	}
+
+	return nil
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
