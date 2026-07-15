@@ -20,11 +20,14 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
@@ -46,7 +49,7 @@ func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 	start := func(environment []string) *exec.Cmd {
 		t.Helper()
 		command := exec.Command(resolvedSleep, "30")
-		command.Env = append(os.Environ(), environment...)
+		command.Env = environment
 		if err := command.Start(); err != nil {
 			t.Fatalf("start helper: %v", err)
 		}
@@ -57,9 +60,57 @@ func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 		return command
 	}
 
-	matching := start([]string{EnvDaemon + "=1", EnvDataDir + "=" + dataDir})
-	if identity, ok := d.proveStaleDaemonProcess(matching.Process.Pid, resolvedSleep); !ok || identity == "" {
-		t.Fatal("exact executable, daemon marker, and data directory were not proven")
+	withoutIdentityKey := func(environment []string, key string) []string {
+		cleaned := make([]string, 0, len(environment))
+		for _, entry := range environment {
+			name, _, _ := strings.Cut(entry, "=")
+			if name != key {
+				cleaned = append(cleaned, entry)
+			}
+		}
+		return cleaned
+	}
+	waitForVisibleEnvironment := func(command *exec.Cmd) {
+		t.Helper()
+		path := fmt.Sprintf("/proc/%d/environ", command.Process.Pid)
+		deadline := time.Now().Add(250 * time.Millisecond)
+		for attempts := 1; ; attempts++ {
+			environment, err := os.ReadFile(path)
+			if err == nil && len(environment) > 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf(
+					"helper environment was not visible after %d attempts: environ_bytes=%d environ_err=%v",
+					attempts,
+					len(environment),
+					err,
+				)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	matching := start(d.childEnv(os.Environ()))
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for attempts := 1; ; attempts++ {
+		identity, ok := d.proveStaleDaemonProcess(matching.Process.Pid, resolvedSleep)
+		if ok && identity != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			actualExecutable, executableErr := os.Readlink(fmt.Sprintf("/proc/%d/exe", matching.Process.Pid))
+			environment, environmentErr := os.ReadFile(fmt.Sprintf("/proc/%d/environ", matching.Process.Pid))
+			t.Fatalf(
+				"exact executable, daemon marker, and data directory were not proven after %d attempts: executable=%q executable_err=%v environ_bytes=%d environ_err=%v",
+				attempts,
+				actualExecutable,
+				executableErr,
+				len(environment),
+				environmentErr,
+			)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if _, ok := d.proveStaleDaemonProcess(matching.Process.Pid, "/nonexistent/gateway"); ok {
 		t.Fatal("mismatched executable was accepted")
@@ -71,12 +122,14 @@ func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 		t.Fatal("mismatched data directory was accepted")
 	}
 
-	withoutMarker := start([]string{EnvDataDir + "=" + dataDir})
+	withoutMarker := start(withoutIdentityKey(d.childEnv(os.Environ()), EnvDaemon))
+	waitForVisibleEnvironment(withoutMarker)
 	if _, ok := d.proveStaleDaemonProcess(withoutMarker.Process.Pid, resolvedSleep); ok {
 		t.Fatal("process without daemon marker was accepted")
 	}
 
-	withoutDataDir := start([]string{EnvDaemon + "=1"})
+	withoutDataDir := start(withoutIdentityKey(d.childEnv(os.Environ()), EnvDataDir))
+	waitForVisibleEnvironment(withoutDataDir)
 	if _, ok := d.proveStaleDaemonProcess(withoutDataDir.Process.Pid, resolvedSleep); ok {
 		t.Fatal("process without data-directory marker was accepted")
 	}

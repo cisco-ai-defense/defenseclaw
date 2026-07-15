@@ -82,10 +82,12 @@ SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade"
 
 # These commands are the only top-level boundaries permitted to operate on an
 # existing pre-v8 document. They either create/replace a configuration,
-# perform the explicit upgrade, or remove an installation. Every other group
-# preflights the raw schema discriminator before a Python compatibility
-# dataclass can be constructed.
+# perform the explicit upgrade, remove an installation, or (for ``config``)
+# delegate the read-only/mutation boundary to that group's subcommand guard.
+# Every other group preflights the raw schema discriminator before a Python
+# compatibility dataclass can be constructed.
 LEGACY_CONFIG_BOUNDARY_COMMANDS = {
+    "config",
     "init",
     "migrations",
     "reset",

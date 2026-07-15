@@ -79,6 +79,33 @@ def test_v8_validate_surfaces_safe_helper_error(tmp_path: Path) -> None:
     assert "$.observability: invalid" in result.output
 
 
+def test_top_level_validate_reaches_canonical_diagnostics_for_malformed_v8(tmp_path: Path) -> None:
+    from defenseclaw.main import cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\nobservability: [\n", encoding="utf-8")
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(
+            cmd_config.config_module,
+            "require_v8_config",
+            side_effect=AssertionError("root v8 preflight must not intercept config validation"),
+        ) as root_preflight,
+        patch.object(
+            cmd_config,
+            "inspect_v8_config",
+            side_effect=ConfigInspectError("$.observability: malformed YAML source"),
+        ) as inspect,
+    ):
+        result = CliRunner().invoke(cli, ["config", "validate"])
+
+    assert result.exit_code == 1
+    assert "$.observability: malformed YAML source" in result.output
+    assert "run 'defenseclaw upgrade' first" not in result.output
+    root_preflight.assert_not_called()
+    inspect.assert_called_once_with("validate", config_path=str(config_path))
+
+
 def test_v8_source_view_uses_masked_source_not_go_effective(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     hidden = "DO-NOT-ECHO-SECRET"
@@ -235,6 +262,8 @@ def test_config_path_projects_v8_paths_without_legacy_load(tmp_path: Path) -> No
 
 
 def test_future_config_mutation_refuses_v7_source(tmp_path: Path) -> None:
+    from defenseclaw.main import cli
+
     config_path = tmp_path / "config.yaml"
     config_path.write_text("guardrail:\n  mode: observe\n", encoding="utf-8")
 
@@ -244,10 +273,18 @@ def test_future_config_mutation_refuses_v7_source(tmp_path: Path) -> None:
 
     cmd_config.config_cmd.add_command(mutation_probe)
     try:
-        with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
-            result = CliRunner().invoke(cmd_config.config_cmd, ["mutation-probe"])
+        with (
+            patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+            patch.object(
+                cmd_config.config_module,
+                "require_v8_config",
+                side_effect=AssertionError("config mutations are guarded by the config group"),
+            ) as root_preflight,
+        ):
+            result = CliRunner().invoke(cli, ["config", "mutation-probe"])
     finally:
         cmd_config.config_cmd.commands.pop("mutation-probe", None)
 
     assert result.exit_code == 1
     assert "run 'defenseclaw upgrade' first" in result.output
+    root_preflight.assert_not_called()
