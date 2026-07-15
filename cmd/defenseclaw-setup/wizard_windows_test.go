@@ -538,6 +538,29 @@ func TestWizardReportsCancellationOnlyAfterSuccessfulRollback(t *testing.T) {
 	}
 }
 
+func TestWizardCancellationConfirmationRechecksCompletedOperation(t *testing.T) {
+	cancelCalls := 0
+	wizard := setupWizard{
+		running: true,
+		operationCancel: func() {
+			cancelCalls++
+		},
+	}
+	wizard.requestCancellationWithPrompt(func() bool {
+		// MessageBoxW pumps window messages; model wmDone clearing the operation
+		// before the user confirms cancellation.
+		wizard.running = false
+		wizard.operationCancel = nil
+		return true
+	})
+	if wizard.cancelRequested {
+		t.Fatal("completed operation was changed to cancelling after confirmation closed")
+	}
+	if cancelCalls != 0 {
+		t.Fatalf("completed operation cancel calls = %d, want 0", cancelCalls)
+	}
+}
+
 func TestWizardFailureDescriptionIncludesRecoveryAndPrivateLog(t *testing.T) {
 	detail := wizardFailureDescription(
 		retryRequiredCode,

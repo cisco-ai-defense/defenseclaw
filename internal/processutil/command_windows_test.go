@@ -69,10 +69,9 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 		if err := grandchild.Start(); err != nil {
 			os.Exit(21)
 		}
-		if err := os.WriteFile(
+		if err := publishProcessTreeFixture(
 			os.Getenv(processTreePIDFileEnv),
 			[]byte(strconv.Itoa(grandchild.Process.Pid)),
-			0o600,
 		); err != nil {
 			os.Exit(22)
 		}
@@ -104,7 +103,7 @@ func TestCombinedOutputTreeKillsGrandchildrenOnCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if !processTreeFixtureNotReady(err) {
 			t.Fatal(err)
 		}
 		if childPID == 0 {
@@ -156,7 +155,12 @@ func TestCapturedJobFlagsLimitBreakawayToManagedLaunches(t *testing.T) {
 func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 	if os.Getenv(managedBreakawayChildEnv) == "1" {
 		time.Sleep(300 * time.Millisecond)
-		_ = os.WriteFile(os.Getenv(processTreeMarkerEnv), []byte("managed"), 0o600)
+		if err := publishProcessTreeFixture(
+			os.Getenv(processTreeMarkerEnv),
+			[]byte("managed"),
+		); err != nil {
+			os.Exit(24)
+		}
 		return
 	}
 	if os.Getenv(managedBreakawayHelperEnv) == "1" {
@@ -187,7 +191,7 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 			}
 			break
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		if !processTreeFixtureNotReady(err) {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {
@@ -195,4 +199,27 @@ func TestCombinedOutputTreeAllowsExplicitManagedBreakaway(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func publishProcessTreeFixture(path string, data []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+func processTreeFixtureNotReady(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }

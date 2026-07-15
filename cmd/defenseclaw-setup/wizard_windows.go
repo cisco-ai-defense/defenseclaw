@@ -611,22 +611,30 @@ func (w *setupWizard) startAction() {
 }
 
 func (w *setupWizard) requestCancellation() {
-	if !w.running || w.cancelRequested {
-		return
-	}
 	const (
 		mbYesNo        = 0x00000004
 		mbIconQuestion = 0x00000020
 		mbDefButton2   = 0x00000100
 		idYes          = 6
 	)
-	answer := messageBoxResult(
-		w.hwnd,
-		"Cancel Setup at the next safe point?\r\n\r\nUncommitted changes will be rolled back before this window closes. If the transaction is already committed, Setup must finish its durable recovery steps.",
-		"Cancel DefenseClaw Setup",
-		mbYesNo|mbIconQuestion|mbDefButton2,
-	)
-	if answer != idYes {
+	w.requestCancellationWithPrompt(func() bool {
+		return messageBoxResult(
+			w.hwnd,
+			"Cancel Setup at the next safe point?\r\n\r\nUncommitted changes will be rolled back before this window closes. If the transaction is already committed, Setup must finish its durable recovery steps.",
+			"Cancel DefenseClaw Setup",
+			mbYesNo|mbIconQuestion|mbDefButton2,
+		) == idYes
+	})
+}
+
+func (w *setupWizard) requestCancellationWithPrompt(confirm func() bool) {
+	if !w.running || w.cancelRequested {
+		return
+	}
+	if !confirm() || !w.running || w.cancelRequested {
+		// MessageBoxW runs a nested message loop. wmDone may have completed the
+		// operation while the confirmation was open, so re-check UI-thread state
+		// before changing the completed wizard or calling its cleared cancel func.
 		return
 	}
 	w.cancelRequested = true
