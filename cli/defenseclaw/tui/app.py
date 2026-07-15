@@ -1743,6 +1743,19 @@ class DefenseClawTUI(App[None]):
             event.prevent_default()
             return
 
+        # Textual treats Tab/Shift+Tab as focus traversal before ordinary
+        # bindings can reliably route them.  Handle the advertised panel
+        # navigation here, after command-palette and panel-local handlers have
+        # had first refusal (Setup forms, for example, use Tab between fields).
+        if event.key in {"tab", "shift+tab"}:
+            if event.key == "tab":
+                self.action_next_panel()
+            else:
+                self.action_previous_panel()
+            event.stop()
+            event.prevent_default()
+            return
+
         panel = PANEL_SHORTCUTS.get(event.key.lower())
         if panel is None:
             return
@@ -4386,12 +4399,14 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            if not model.loaded and filter_input.value:
+            if not model.loaded and filter_input.has_focus:
                 # Initial catalog auto-loads can complete a repaint between
                 # Input.value changing and Textual delivering Input.Changed.
-                # Preserve that fresh operator text instead of copying the
-                # still-empty model value back over it; apply_loaded() will
-                # reapply the filter to the eventual rows.
+                # Preserve fresh text only while this exact widget owns input
+                # focus. A failed/slow loader can otherwise repaint after the
+                # operator clicked Clear and resurrect a stale value from an
+                # unfocused or replaced Input. Input.Changed remains the
+                # canonical model update once Textual delivers it.
                 model.set_filter(filter_input.value)
             else:
                 filter_input.value = model.filter_text
@@ -11893,6 +11908,11 @@ def _panel_key(event: events.Key) -> str:
     if event.key == "escape":
         return "escape"
     if event.key in {"up", "down"}:
+        return event.key
+    # Textual supplies Tab's control character (\t) in ``event.character``.
+    # Preserve the logical key before generic character handling so Setup
+    # forms and menus can consume Tab/Shift+Tab locally.
+    if event.key in {"tab", "shift+tab"}:
         return event.key
     # Normalize backspace/delete BEFORE the event.character branch. Textual
     # delivers the DEL control char (\x7f) as event.character, so without this

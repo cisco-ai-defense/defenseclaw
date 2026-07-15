@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import pytest
 from defenseclaw.tui.windows_clipboard import (
     CF_UNICODETEXT,
+    HWND_MESSAGE,
     MAX_CLIPBOARD_BYTES,
     ClipboardError,
     Win32ClipboardAPI,
@@ -23,41 +24,69 @@ class FakeClipboardAPI:
     empty_ok: bool = True
     set_ok: bool = True
     read_override: str | None = None
+    create_error: bool = False
+    destroy_error: bool = False
     close_error: bool = False
     free_error: bool = False
+    owner: int = 73
+    create_calls: int = 0
+    destroy_calls: list[int] = field(default_factory=list)
+    open_owners: list[int | None] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
     open_calls: int = 0
     close_calls: int = 0
     free_calls: list[int] = field(default_factory=list)
     allocated_payload: bytes = b""
     stored_text: str = ""
 
-    def open(self) -> bool:
+    def create_owner(self) -> int:
+        self.create_calls += 1
+        self.events.append("create-owner")
+        if self.create_error:
+            raise ClipboardError("clipboard owner creation failed")
+        return self.owner
+
+    def destroy_owner(self, owner: int) -> None:
+        self.destroy_calls.append(owner)
+        self.events.append("destroy-owner")
+        if self.destroy_error:
+            raise ClipboardError("clipboard owner cleanup failed")
+
+    def open(self, owner: int | None = None) -> bool:
         self.open_calls += 1
+        self.open_owners.append(owner)
+        self.events.append("open")
         return self.open_calls > self.opens_before_success
 
     def close(self) -> None:
         self.close_calls += 1
+        self.events.append("close")
         if self.close_error:
             raise ClipboardError("clipboard close failed")
 
     def empty(self) -> bool:
+        self.events.append("empty")
         return self.empty_ok
 
     def allocate_unicode(self, payload: bytes) -> int:
+        self.events.append("allocate")
         self.allocated_payload = payload
         self.stored_text = payload[:-2].decode("utf-16-le")
         return 41
 
     def free(self, handle: int) -> None:
         self.free_calls.append(handle)
+        self.events.append("free")
         if self.free_error:
             raise ClipboardError("clipboard free failed")
 
     def set_unicode(self, handle: int) -> bool:
+        self.events.append("set")
         assert handle == 41
         return self.set_ok
 
     def read_unicode(self) -> str:
+        self.events.append("read")
         return self.stored_text if self.read_override is None else self.read_override
 
 
@@ -80,6 +109,18 @@ def test_native_unicode_write_and_read_back(text: str) -> None:
     assert api.allocated_payload.endswith(b"\x00\x00")
     assert api.close_calls == 1
     assert api.free_calls == []  # successful SetClipboardData transfers ownership
+    assert api.open_owners == [api.owner]
+    assert api.destroy_calls == [api.owner]
+    assert api.events == [
+        "create-owner",
+        "open",
+        "empty",
+        "allocate",
+        "set",
+        "read",
+        "close",
+        "destroy-owner",
+    ]
 
 
 def test_busy_clipboard_retries_with_bounded_sleep() -> None:
@@ -97,8 +138,10 @@ def test_busy_clipboard_retries_with_bounded_sleep() -> None:
     )
 
     assert api.open_calls == 3
+    assert api.open_owners == [api.owner, api.owner, api.owner]
     assert sleeps == [0.1, 0.1]
     assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
 
 
 def test_busy_clipboard_timeout_has_no_allocation_or_close() -> None:
@@ -117,6 +160,7 @@ def test_busy_clipboard_timeout_has_no_allocation_or_close() -> None:
 
     assert api.allocated_payload == b""
     assert api.close_calls == 0
+    assert api.destroy_calls == [api.owner]
 
 
 def test_access_denied_closes_without_allocating() -> None:
@@ -127,6 +171,7 @@ def test_access_denied_closes_without_allocating() -> None:
 
     assert api.allocated_payload == b""
     assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
 
 
 def test_failed_set_frees_allocation_and_closes() -> None:
@@ -136,6 +181,7 @@ def test_failed_set_frees_allocation_and_closes() -> None:
         copy_windows_clipboard("secret", api=api)
 
     assert api.free_calls == [41]
+    assert api.events[-3:] == ["free", "close", "destroy-owner"]
 
 
 def test_free_failure_still_closes_clipboard() -> None:
@@ -146,7 +192,7 @@ def test_free_failure_still_closes_clipboard() -> None:
 
     assert api.free_calls == [41]
     assert api.close_calls == 1
-    assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
 
 
 def test_read_back_mismatch_closes_after_ownership_transfer() -> None:
@@ -157,6 +203,7 @@ def test_read_back_mismatch_closes_after_ownership_transfer() -> None:
 
     assert api.free_calls == []
     assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
 
 
 def test_close_failure_is_reported_after_successful_write() -> None:
@@ -166,6 +213,38 @@ def test_close_failure_is_reported_after_successful_write() -> None:
         copy_windows_clipboard("payload", api=api)
 
     assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
+
+
+def test_owner_creation_failure_has_no_clipboard_side_effect() -> None:
+    api = FakeClipboardAPI(create_error=True)
+
+    with pytest.raises(ClipboardError, match="owner creation failed"):
+        copy_windows_clipboard("payload", api=api)
+
+    assert api.open_calls == 0
+    assert api.close_calls == 0
+    assert api.destroy_calls == []
+
+
+def test_owner_cleanup_failure_is_reported_after_successful_write() -> None:
+    api = FakeClipboardAPI(destroy_error=True)
+
+    with pytest.raises(ClipboardError, match="owner cleanup failed"):
+        copy_windows_clipboard("payload", api=api)
+
+    assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
+
+
+def test_primary_error_wins_over_owner_cleanup_error() -> None:
+    api = FakeClipboardAPI(empty_ok=False, destroy_error=True)
+
+    with pytest.raises(ClipboardError, match="access denied"):
+        copy_windows_clipboard("payload", api=api)
+
+    assert api.close_calls == 1
+    assert api.destroy_calls == [api.owner]
 
 
 def test_oversize_content_has_no_native_side_effect() -> None:
@@ -178,6 +257,44 @@ def test_oversize_content_has_no_native_side_effect() -> None:
 
     assert api.open_calls == 0
     assert api.allocated_payload == b""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows message-only HWND")
+def test_native_owner_is_a_real_message_only_window() -> None:
+    api = Win32ClipboardAPI()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    is_window = user32.IsWindow
+    is_window.argtypes = [ctypes.c_void_p]
+    is_window.restype = ctypes.c_int
+    is_window_visible = user32.IsWindowVisible
+    is_window_visible.argtypes = [ctypes.c_void_p]
+    is_window_visible.restype = ctypes.c_int
+    find_window = user32.FindWindowExW
+    find_window.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+    ]
+    find_window.restype = ctypes.c_void_p
+
+    owner = api.create_owner()
+    try:
+        assert owner
+        assert is_window(owner)
+        assert not is_window_visible(owner)
+        assert (
+            find_window(
+                ctypes.c_void_p(HWND_MESSAGE),
+                None,
+                "STATIC",
+                "DefenseClawClipboardOwner",
+            )
+            == owner
+        )
+    finally:
+        api.destroy_owner(owner)
+    assert not is_window(owner)
 
 
 def _open_native_clipboard(api: Win32ClipboardAPI, timeout: float = 1.0) -> None:
