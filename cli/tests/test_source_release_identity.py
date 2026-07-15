@@ -362,6 +362,40 @@ def test_make_all_dev_reclaim_rejects_foreign_checkout_marker(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_rejects_newer_source_marker(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original_gateway = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    future_marker = _marker_payload(repo, installed_gateway)
+    future_marker.update(
+        {
+            "source_release": "0.8.6",
+            "source_install_compatibility_epoch": 3,
+            "runtime_config_version": 9,
+        }
+    )
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(future_marker, sort_keys=True) + "\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "newer than this checkout" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original_gateway
+    assert marker.read_bytes() == original_marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_direct_install_ignores_developer_reclaim_environment_switch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

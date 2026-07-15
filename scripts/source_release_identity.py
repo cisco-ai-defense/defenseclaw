@@ -378,7 +378,19 @@ def validate_marker(
         or marker_root != expected_root
     ):
         raise SourceIdentityError(f"source-install marker belongs to a different checkout ({marker_root!r})")
-    if not allow_source_transition:
+    if allow_source_transition:
+        future_fields: list[str] = []
+        if _version_tuple(marker_release) > _version_tuple(source_release):
+            future_fields.append(f"source_release={marker_release!r}")
+        if marker_epoch > compatibility_epoch:
+            future_fields.append(f"source_install_compatibility_epoch={marker_epoch!r}")
+        if marker_runtime > runtime_version:
+            future_fields.append(f"runtime_config_version={marker_runtime!r}")
+        if future_fields:
+            raise SourceIdentityError(
+                "source-install marker is newer than this checkout (" + ", ".join(future_fields) + ")"
+            )
+    else:
         expected_scalars = {
             "source_release": source_release,
             "source_install_compatibility_epoch": compatibility_epoch,
