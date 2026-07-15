@@ -121,9 +121,10 @@ def _windows_package_manager_bin_prefixes(
 ) -> tuple[str, ...]:
     """Return documented per-user JavaScript package-manager bin roots.
 
-    Custom roots are accepted only when absolute. Executables below every
-    returned root still pass the normal owner/DACL/reparse validation before
-    discovery launches them.
+    Only the package managers' documented locations below OS account roots are
+    admitted automatically. Ambient package-manager prefix variables are not
+    execution authority; operators can add a custom root through DefenseClaw's
+    protected trusted-prefix configuration instead.
     """
 
     candidates: list[str] = []
@@ -138,21 +139,6 @@ def _windows_package_manager_bin_prefixes(
                 os.path.join(home, ".volta", "bin"),
             )
         )
-
-    custom_roots = (
-        ("BUN_INSTALL", "bin"),
-        ("PNPM_HOME", ""),
-        ("NPM_CONFIG_PREFIX", ""),
-        ("VOLTA_HOME", "bin"),
-    )
-    for variable, suffix in custom_roots:
-        raw = os.environ.get(variable, "").strip().strip('"')
-        if not raw:
-            continue
-        root = os.path.expandvars(os.path.expanduser(raw))
-        if not os.path.isabs(root):
-            continue
-        candidates.append(os.path.join(root, suffix) if suffix else root)
 
     deduplicated: list[str] = []
     seen: set[str] = set()

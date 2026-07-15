@@ -491,7 +491,7 @@ notifications:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` on darwin, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
+| `enabled` | bool | `true` on macOS and Windows, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
 | `block_enforced` | bool | `true` | Surface a toast for action-mode blocks (`action == "block"`). |
 | `block_would_block` | bool | `false` | Surface a toast for observe-mode would-block events (verdict was a block but the runtime mode degraded it to alert) AND for "would-ask" events where a `confirm` verdict never reached the chat surface (observe mode, or the connector cannot natively ask — see `BlockEvent.WouldAsk`). Off by default so a fresh install only notifies for things that actually happened. |
 | `hitl_approval` | bool | `true` | Surface an **informational** toast at the start of the OpenClaw `HILTApprovalManager.Request` flow. The notification has no buttons; the operator replies in the OpenClaw chat-origin session. |

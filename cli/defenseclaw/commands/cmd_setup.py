@@ -4866,7 +4866,6 @@ def _apply_hook_connector_setup(
         version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
     if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
         return False
-    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), (connector,))
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -4875,6 +4874,7 @@ def _apply_hook_connector_setup(
     # (--rule-pack + --rule-pack-dir are mutually exclusive) fails fast via a
     # UsageError BEFORE _write_connector_identity mutates any in-memory state.
     pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
+    _record_windows_setup_agent_selections(getattr(app.cfg, "data_dir", None), (connector,))
 
     workspace = _configure_connector_workspace(cfg, workspace_dir)
     # WU7: honor the resolved write mode — "replace" pins this as the sole

@@ -9,6 +9,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from defenseclaw import config as config_module
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.notification_capabilities import desktop_notification_capability
 
@@ -33,6 +34,17 @@ def _invoke(app, *args: str):
     with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
         result = CliRunner().invoke(setup_group, list(args), obj=app)
     return result, restart
+
+
+def _reload_windows_config(config_path: str, data_dir: str):
+    with (
+        patch.dict(
+            os.environ,
+            {"DEFENSECLAW_CONFIG": config_path, "DEFENSECLAW_HOME": data_dir},
+        ),
+        patch("defenseclaw.config.platform.system", return_value="Windows"),
+    ):
+        return config_module.load()
 
 
 def test_windows_status_reports_enabled_as_active_and_preserves_file() -> None:
@@ -82,10 +94,14 @@ def test_windows_enable_succeeds_without_restart() -> None:
         app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
         app.cfg.notifications.enabled = False
         with patch("defenseclaw.notification_capabilities.platform.system", return_value="Windows"):
+            app.cfg.save()
+            before = open(app.cfg.config_path, "rb").read()
             result, restart = _invoke(app, "notifications", "on", "--no-restart")
 
         assert result.exit_code == 0, result.output
         assert app.cfg.notifications.enabled is True
+        assert open(app.cfg.config_path, "rb").read() != before
+        assert _reload_windows_config(app.cfg.config_path, tmp_dir).notifications.enabled is True
         restart.assert_not_called()
     finally:
         cleanup_app(app, db_path, tmp_dir)
@@ -97,10 +113,14 @@ def test_windows_onboarding_yes_enables_without_traceback() -> None:
         app.cfg.config_path = os.path.join(tmp_dir, "config.yaml")
         app.cfg.notifications.enabled = False
         with patch("defenseclaw.notification_capabilities.platform.system", return_value="Windows"):
+            app.cfg.save()
+            before = open(app.cfg.config_path, "rb").read()
             result, restart = _invoke(app, "notifications", "--yes", "--no-restart")
         assert result.exit_code == 0, result.output
         assert "Traceback" not in result.output
         assert app.cfg.notifications.enabled is True
+        assert open(app.cfg.config_path, "rb").read() != before
+        assert _reload_windows_config(app.cfg.config_path, tmp_dir).notifications.enabled is True
         restart.assert_not_called()
     finally:
         cleanup_app(app, db_path, tmp_dir)

@@ -35,6 +35,7 @@ from defenseclaw.doctor_hooks import (
     _codex_command_hook_hash,
     _codex_hook_state_key_source,
     _codex_policy_executable,
+    _codex_trusted_hash,
     _commands_from_hooks,
     _inspect_codex_effective_hook_policy,
     _InspectionError,
@@ -298,6 +299,28 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 },
             ),
             "sha256:00d233bf308896ec04f67e2fee61ac2962df3c0afbe80c9d8bc6975ec3697786",
+        )
+
+    def test_codex_native_hash_matches_go_encoder_for_line_separators(self) -> None:
+        handler = {
+            "type": "command",
+            "command": "generic-command",
+            "command_windows": "C:\\Tools\\line\u2028paragraph\u2029\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "async": False,
+            "statusMessage": "Checking\u2028DefenseClaw\u2029policy",
+        }
+        expected = "sha256:1534d4ba6c374c49c19398a340d64feee0a2d9639d7f2d42e03c6b1573623aac"
+
+        # Cross-language fixture from Go's codexCommandHookHashForPlatform,
+        # whose encoding/json serializer escapes U+2028 and U+2029.
+        self.assertEqual(
+            _codex_command_hook_hash("pre_tool_use", "PowerShell\u2028Command\u2029", handler),
+            expected,
+        )
+        self.assertEqual(
+            _codex_trusted_hash("pre_tool_use", "PowerShell\u2028Command\u2029", handler),
+            expected,
         )
 
     def test_codex_current_contract_requires_exact_native_trust_matrix(self) -> None:

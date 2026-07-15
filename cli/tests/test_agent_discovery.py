@@ -524,7 +524,7 @@ def test_codex_desktop_bin_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     assert ad._path_key(str(desktop_bin.parent)) not in prefixes
 
 
-def test_codex_windows_discovery_enumerates_bun_and_custom_manager_prefixes(
+def test_codex_windows_discovery_ignores_ambient_package_manager_prefixes(
     monkeypatch,
     tmp_path,
     windows_host_no_path,
@@ -552,27 +552,35 @@ def test_codex_windows_discovery_enumerates_bun_and_custom_manager_prefixes(
             home=str(home),
         )
     }
-    expected = {
+    documented = {
         home / ".bun" / "bin",
         home / ".volta" / "bin",
         local_app_data / "pnpm",
         roaming_app_data / "npm",
+    }
+    ambient = {
         bun_install / "bin",
         pnpm_home,
         npm_prefix,
         volta_home / "bin",
     }
-    assert {ad._path_key(str(path)) for path in expected} <= prefixes
+    documented_keys = {ad._path_key(str(path)) for path in documented}
+    ambient_keys = {ad._path_key(str(path)) for path in ambient}
+    assert documented_keys <= prefixes
+    assert ambient_keys.isdisjoint(prefixes)
 
     candidates = {
         ad._path_key(path)
         for path in ad._windows_binary_candidates("codex", "codex")
     }
-    for prefix in expected:
+    for prefix in documented:
         assert ad._path_key(str(prefix / "codex.exe")) in candidates
+    for prefix in ambient:
+        assert ad._path_key(str(prefix / "codex.exe")) not in candidates
 
     trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
-    assert {ad._path_key(str(path)) for path in expected} <= trusted
+    assert documented_keys <= trusted
+    assert ambient_keys.isdisjoint(trusted)
 
 
 def test_windows_package_manager_prefixes_ignore_relative_environment_roots(

@@ -881,17 +881,21 @@ class TestConnectorRulePackFlag(unittest.TestCase):
     def test_rule_pack_and_rule_pack_dir_are_mutually_exclusive(self):
         # Naming a pack two ways in one invocation is the one-input-two-
         # meanings ambiguity R3 removes — reject it loudly, write nothing.
-        result = self._run(
-            "codex",
-            "--yes",
-            "--no-restart",
-            "--rule-pack",
-            "strict",
-            "--rule-pack-dir",
-            os.path.join(self.tmp_dir, "x"),
-        )
+        with patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
+        ) as selection_mock:
+            result = self._run(
+                "codex",
+                "--yes",
+                "--no-restart",
+                "--rule-pack",
+                "strict",
+                "--rule-pack-dir",
+                os.path.join(self.tmp_dir, "x"),
+            )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("mutually exclusive", result.output)
+        selection_mock.assert_not_called()
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(gc.connectors, {})

@@ -2267,10 +2267,10 @@
     {
       "name": "DEFENSECLAW_TEST_WINDOWS_NOTIFICATION",
       "category": "test_fixture",
-      "purpose": "Selects and records the native Windows notification fixture.",
+      "purpose": "Enables the attended native Windows notification delivery test.",
       "default": "unset",
       "accepted_values": [
-        "test-defined value",
+        "1",
         "unset"
       ],
       "security_impact": "none",

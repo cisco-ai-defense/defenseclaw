@@ -1561,7 +1561,8 @@ def _codex_trusted_hash(event_key: str, matcher: Any, handler: dict[str, Any]) -
         if not isinstance(matcher, str):
             raise _InspectionError("malformed", "Codex DefenseClaw matcher is not a string")
         identity["matcher"] = matcher
-    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    canonical_text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical = canonical_text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
