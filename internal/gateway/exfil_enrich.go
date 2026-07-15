@@ -29,13 +29,24 @@ var (
 	curlUploadArtifactRe = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*(?:--upload-file|-T)\s+(\S+)`)
 	curlDataAtRe         = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*--data\s+@(\S+)`)
 	wgetPostArtifactRe   = regexp.MustCompile(`(?i)\bwget\b[^;&|]*--post-file=(\S+)`)
-	scpArtifactRe        = regexp.MustCompile(`(?i)\bscp\b(?:\s+-[a-zA-Z]+\s+)*\s+(\S+)`)
-	rsyncArtifactRe      = regexp.MustCompile(`(?i)\brsync\b(?:\s+-[^\s]+\s+)*(\S+)\s+\S+.*:`)
 
-	urlInTextRe = regexp.MustCompile(`(?i)https?://[^\s'"]+`)
-	scpHostRe   = regexp.MustCompile(`(?i)\bscp\b(?:\s+-[a-zA-Z]+\s+)*\s+\S+\s+([^@:\s]+@)?([^:\s/]+)`)
-	s3URIRe     = regexp.MustCompile(`(?i)\bs3://([^/\s]+)`)
+	curlSegmentRe         = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*`)
+	curlUploadIndicatorRe = regexp.MustCompile(`(?i)(?:--upload-file|-T)\s+\S+`)
+	wgetSegmentRe         = regexp.MustCompile(`(?i)\bwget\b[^;&|]*`)
+	wgetPostIndicatorRe   = regexp.MustCompile(`(?i)--post-file=\S+`)
+	urlInTextRe           = regexp.MustCompile(`(?i)https?://[^\s'"]+`)
+	nonDestCurlFlagURLRe  = regexp.MustCompile(`(?i)(?:--referer|-e|--proxy)\s+https?://\S+`)
+	scpDestRe             = regexp.MustCompile(`(?i)\bscp\b.*\s((?:[^\s:@/]+@)?[^\s:/]+):`)
+	s3URIRe               = regexp.MustCompile(`(?i)\bs3://([^/\s]+)`)
 )
+
+var scpFlagsWithArg = map[string]bool{
+	"-i": true, "-P": true, "-F": true, "-l": true, "-S": true, "-c": true, "-o": true,
+}
+
+var rsyncFlagsWithArg = map[string]bool{
+	"-e": true, "--rsh": true, "--password-file": true, "--exclude-from": true, "--include-from": true,
+}
 
 // allowedExfilEndpointHosts lists known artifact-store hosts. Matching
 // uses exact host or registrable suffix (host == allowed or
@@ -99,11 +110,17 @@ func extractArchiveArtifact(text string) string {
 
 func extractUploadArtifact(text string) string {
 	for _, re := range []*regexp.Regexp{
-		curlUploadArtifactRe, curlDataAtRe, wgetPostArtifactRe, scpArtifactRe, rsyncArtifactRe,
+		curlUploadArtifactRe, curlDataAtRe, wgetPostArtifactRe,
 	} {
 		if m := re.FindStringSubmatch(text); len(m) > 1 && m[1] != "" {
 			return normalizeArtifactName(m[1])
 		}
+	}
+	if art := extractSCPArtifact(text); art != "" {
+		return art
+	}
+	if art := extractRsyncArtifact(text); art != "" {
+		return art
 	}
 	return ""
 }
@@ -124,17 +141,45 @@ func extractExternalEndpoint(text string) string {
 	if host := extractHTTPHost(text); host != "" {
 		return host
 	}
-	if m := scpHostRe.FindStringSubmatch(text); len(m) > 2 && m[2] != "" {
-		return strings.ToLower(m[2])
+	if host := extractSCPHost(text); host != "" {
+		return host
 	}
 	return ""
 }
 
 func extractHTTPHost(text string) string {
-	raw := urlInTextRe.FindString(text)
-	if raw == "" {
+	if host := extractCurlUploadHost(text); host != "" {
+		return host
+	}
+	return extractWgetPostHost(text)
+}
+
+func extractCurlUploadHost(text string) string {
+	seg := curlSegmentRe.FindString(text)
+	if seg == "" || !curlUploadIndicatorRe.MatchString(seg) {
 		return ""
 	}
+	return hostFromLastURL(scrubNonDestinationFlagURLs(seg))
+}
+
+func extractWgetPostHost(text string) string {
+	seg := wgetSegmentRe.FindString(text)
+	if seg == "" || !wgetPostIndicatorRe.MatchString(seg) {
+		return ""
+	}
+	return hostFromLastURL(seg)
+}
+
+func scrubNonDestinationFlagURLs(seg string) string {
+	return nonDestCurlFlagURLRe.ReplaceAllString(seg, " ")
+}
+
+func hostFromLastURL(seg string) string {
+	urls := urlInTextRe.FindAllString(seg, -1)
+	if len(urls) == 0 {
+		return ""
+	}
+	raw := urls[len(urls)-1]
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
@@ -144,6 +189,113 @@ func extractHTTPHost(text string) string {
 		return ""
 	}
 	return strings.ToLower(host)
+}
+
+func extractSCPHost(text string) string {
+	m := scpDestRe.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return ""
+	}
+	target := m[1]
+	if at := strings.LastIndex(target, "@"); at >= 0 {
+		target = target[at+1:]
+	}
+	return strings.ToLower(target)
+}
+
+func extractSCPArtifact(text string) string {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, "scp")
+	if idx < 0 {
+		return ""
+	}
+	args := strings.Fields(text[idx+3:])
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if strings.HasPrefix(arg, "-o") {
+			if strings.Contains(arg, "=") {
+				i++
+				continue
+			}
+			if i+1 < len(args) {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		if scpFlagsWithArg[arg] {
+			if i+1 < len(args) {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
+			needsArg := false
+			for _, c := range arg[1:] {
+				if c == 'i' || c == 'P' || c == 'F' || c == 'l' {
+					needsArg = true
+					break
+				}
+			}
+			if needsArg && i+1 < len(args) {
+				i += 2
+				continue
+			}
+		}
+		i++
+	}
+	if i >= len(args) {
+		return ""
+	}
+	candidate := args[i]
+	if strings.Contains(candidate, ":") || strings.Contains(candidate, "@") {
+		return ""
+	}
+	return normalizeArtifactName(candidate)
+}
+
+func extractRsyncArtifact(text string) string {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, "rsync")
+	if idx < 0 {
+		return ""
+	}
+	args := strings.Fields(text[idx+5:])
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if rsyncFlagsWithArg[arg] {
+			if i+1 < len(args) {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
+			i++
+			continue
+		}
+		i++
+	}
+	if i >= len(args) {
+		return ""
+	}
+	candidate := args[i]
+	if strings.Contains(candidate, ":") || strings.Contains(candidate, "@") {
+		return ""
+	}
+	return normalizeArtifactName(candidate)
 }
 
 func isAllowlistedExfilEndpoint(endpoint string) bool {
