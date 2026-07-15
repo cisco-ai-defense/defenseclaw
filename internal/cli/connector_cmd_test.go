@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -299,6 +300,73 @@ func TestConnectorTeardown_UnknownConnector(t *testing.T) {
 	// exit with a non-zero code via the sentinel.
 	if exitCode != 0 {
 		t.Fatalf("expected sentinel untouched (RunE error path), got %d", exitCode)
+	}
+}
+
+func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	if err := connector.SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatalf("save active connectors: %v", err)
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "cursor")
+	if exitCode != 0 || !strings.Contains(stdout, "teardown complete") {
+		t.Fatalf("teardown failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	if !connector.ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("cursor was not marked explicitly inactive")
+	}
+	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("active connectors after teardown = %v, want [codex]", got)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("cursor residue after teardown: %v", err)
+	}
+}
+
+func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	if err := connector.SaveActiveConnector(dir, "cursor"); err != nil {
+		t.Fatalf("save active connector: %v", err)
+	}
+	backup := filepath.Join(dir, "connector_backups", "cursor", "config.json")
+	if err := os.WriteFile(backup, []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt managed backup: %v", err)
+	}
+
+	_, stderr, _ := runConnectorCmd(t, "teardown", "--connector", "cursor")
+	if !strings.Contains(stderr, "restore config backup") {
+		t.Fatalf("teardown did not surface backup failure: %q", stderr)
+	}
+	if connector.ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("failed teardown left cursor explicitly inactive")
+	}
+	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"cursor"}) {
+		t.Fatalf("active state after failed teardown = %v, want [cursor]", got)
 	}
 }
 

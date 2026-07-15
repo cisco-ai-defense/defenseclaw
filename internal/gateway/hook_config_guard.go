@@ -340,6 +340,13 @@ func (g *HookConfigGuard) processPending() {
 	if suppressed || len(ready) == 0 || conn == nil {
 		return
 	}
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
+		// A low-level connector teardown writes an explicit runtime-state
+		// exclusion before editing the agent config. Honor it so this
+		// still-running guard cannot race the intentional removal and
+		// reinstall hooks a moment later.
+		return
+	}
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil {
@@ -361,6 +368,9 @@ func (g *HookConfigGuard) processPending() {
 func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpts, changed []string) {
 	connName := conn.Name()
 	detail := strings.Join(changed, ", ")
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, connName) {
+		return
+	}
 
 	g.mu.Lock()
 	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)

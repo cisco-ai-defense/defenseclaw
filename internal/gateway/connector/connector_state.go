@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,17 +26,22 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const activeConnectorFile = "active_connector.json"
 const hookContractLockFile = "hook_contract_lock.json"
 
+var activeConnectorStateMu sync.Mutex
+
 // activeConnectorStateVersion is the schema version written by
 // SaveActiveConnectors. Version 2 introduced the multi-connector "names"
-// set; version-less / "name"-only files are the legacy pre-v2 layout that
-// LoadActiveConnectors migrates on read.
-const activeConnectorStateVersion = 2
+// set. Version 3 adds connector-scoped inactive tombstones so a running hook
+// guard can distinguish intentional teardown from missing/corrupt state
+// without suppressing unrelated connectors. Version-less / "name"-only files
+// are the legacy pre-v2 layout that LoadActiveConnectors migrates on read.
+const activeConnectorStateVersion = 3
 
 // connectorState is the on-disk shape of active_connector.json.
 //
@@ -47,10 +53,11 @@ const activeConnectorStateVersion = 2
 // read, Names wins; a legacy file with only "name" is surfaced as a
 // one-element set.
 type connectorState struct {
-	Version   int      `json:"version,omitempty"`
-	Names     []string `json:"names,omitempty"`
-	UpdatedAt string   `json:"updated_at,omitempty"`
-	Name      string   `json:"name,omitempty"`
+	Version       int      `json:"version,omitempty"`
+	Names         []string `json:"names,omitempty"`
+	InactiveNames []string `json:"inactive_names,omitempty"`
+	UpdatedAt     string   `json:"updated_at,omitempty"`
+	Name          string   `json:"name,omitempty"`
 }
 
 type hookContractLock struct {
@@ -93,23 +100,65 @@ func LoadActiveConnector(dataDir string) string {
 // <dataDir>/active_connector.json. Returns nil if the file is absent or
 // unreadable. A v2+ file is read from "names"; a legacy ("name"-only) file is
 // migrated on read into a one-element set so the next SaveActiveConnectors
-// rewrites it in v2 form.
+// rewrites it in the current form.
 func LoadActiveConnectors(dataDir string) []string {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	names, _, err := ReadActiveConnectorState(dataDir)
 	if err != nil {
 		return nil
 	}
+	return names
+}
+
+// ReadActiveConnectorState reads the active connector set without collapsing
+// an explicitly empty state file into the same result as a missing or corrupt
+// file. Callers that need teardown intent must use ConnectorExplicitlyInactive;
+// an empty active set alone never suppresses a connector guard.
+func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err error) {
+	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
 	var state connectorState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil
+		return nil, true, err
 	}
 	if len(state.Names) > 0 {
-		return normalizeConnectorSet(state.Names)
+		return normalizeConnectorSet(state.Names), true, nil
 	}
 	if trimmed := strings.TrimSpace(state.Name); trimmed != "" {
-		return []string{trimmed}
+		return []string{trimmed}, true, nil
 	}
-	return nil
+	return nil, true, nil
+}
+
+// ConnectorExplicitlyInactive reports whether name has a connector-scoped
+// inactive tombstone. Missing, corrupt, legacy, and merely empty state are not
+// treated as intentional teardown: the hook guard continues to heal in those
+// cases. An explicit active entry wins over a stale inactive entry.
+func ConnectorExplicitlyInactive(dataDir, name string) bool {
+	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	if err != nil {
+		return false
+	}
+	var state connectorState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return false
+	}
+	want := strings.TrimSpace(name)
+	for _, active := range activeNamesFromState(state) {
+		if strings.EqualFold(strings.TrimSpace(active), strings.TrimSpace(name)) {
+			return false
+		}
+	}
+	for _, inactive := range state.InactiveNames {
+		if strings.EqualFold(strings.TrimSpace(inactive), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // SaveActiveConnector persists a single active connector. It is a backward-
@@ -122,23 +171,170 @@ func SaveActiveConnector(dataDir, name string) error {
 // SaveActiveConnectors persists the active-connector set to
 // <dataDir>/active_connector.json so the next sidecar boot can detect added
 // or removed connectors and reconcile teardown. Names are trimmed, de-duped,
-// and sorted for a stable representation. The primary (Names[0]) is mirrored
-// into the legacy "name" field for cross-language/older readers.
+// and sorted for a stable representation. Existing inactive tombstones are
+// preserved unless names explicitly reactivates that connector. The primary
+// (Names[0]) is mirrored into the legacy "name" field for cross-language/older
+// readers.
 func SaveActiveConnectors(dataDir string, names []string) error {
-	set := normalizeConnectorSet(names)
-	state := connectorState{
-		Version:   activeConnectorStateVersion,
-		Names:     set,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	path := filepath.Join(dataDir, activeConnectorFile)
+	return withActiveConnectorStateLock(path, func() error {
+		set := normalizeConnectorSet(names)
+		inactive := loadInactiveConnectorNames(path)
+		inactive = withoutConnectorNames(inactive, set)
+		return writeConnectorState(path, set, inactive)
+	})
+}
+
+// MarkConnectorInactive atomically revokes one connector's runtime ownership
+// before its agent configuration is removed. The returned restore function
+// reinstates the exact previous bytes when no concurrent writer intervened;
+// otherwise it merges the rollback into the newer state. This lets teardown
+// proceed through recoverable state corruption while still rolling back only
+// its ownership change if connector cleanup fails.
+func MarkConnectorInactive(dataDir, name string) (restore func() error, err error) {
+	path := filepath.Join(dataDir, activeConnectorFile)
+	var original, marked []byte
+	var existed, originalValid, originallyActive, originallyInactive bool
+	want := strings.TrimSpace(name)
+	err = withActiveConnectorStateLock(path, func() error {
+		var readErr error
+		original, readErr = os.ReadFile(path)
+		existed = true
+		if readErr != nil {
+			if !os.IsNotExist(readErr) {
+				return readErr
+			}
+			existed = false
+			original = nil
+		}
+
+		var state connectorState
+		if existed {
+			if json.Unmarshal(original, &state) == nil {
+				originalValid = true
+				originallyActive = containsConnectorName(activeNamesFromState(state), want)
+				originallyInactive = containsConnectorName(state.InactiveNames, want)
+			} else {
+				state = connectorState{}
+			}
+		}
+		// Corrupt JSON is recoverable here: teardown writes a valid,
+		// connector-scoped tombstone and the restore closure retains the exact
+		// original bytes if subsequent agent cleanup fails before another
+		// runtime-state writer commits newer information.
+		active := withoutConnectorNames(activeNamesFromState(state), []string{want})
+		inactive := append(append([]string(nil), state.InactiveNames...), want)
+		var marshalErr error
+		marked, marshalErr = marshalConnectorState(active, inactive)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return atomicWriteFile(path, marked, 0o600)
+	})
+	if err != nil {
+		return nil, err
 	}
-	if len(set) > 0 {
-		state.Name = set[0]
+
+	return func() error {
+		return withActiveConnectorStateLock(path, func() error {
+			current, readErr := os.ReadFile(path)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				return readErr
+			}
+			// No writer touched the state after MarkConnectorInactive. Restore
+			// the exact previous representation, including corrupt legacy bytes.
+			if readErr == nil && bytes.Equal(current, marked) {
+				if !existed {
+					return removeActiveConnectorStateFile(path)
+				}
+				return atomicWriteFile(path, original, 0o600)
+			}
+
+			// A concurrent state writer committed newer information. Preserve it
+			// while undoing only this teardown's ownership change.
+			var state connectorState
+			if readErr == nil {
+				if err := json.Unmarshal(current, &state); err != nil {
+					return err
+				}
+			}
+			active := activeNamesFromState(state)
+			inactive := withoutConnectorNames(state.InactiveNames, []string{want})
+			if originalValid && originallyActive && !containsConnectorName(active, want) {
+				active = append(active, want)
+			}
+			if originalValid && originallyInactive && !containsConnectorName(inactive, want) {
+				inactive = append(inactive, want)
+			}
+			if !existed && len(active) == 0 && len(inactive) == 0 {
+				return removeActiveConnectorStateFile(path)
+			}
+			return writeConnectorState(path, active, inactive)
+		})
+	}, nil
+}
+
+func loadInactiveConnectorNames(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
 	}
-	data, err := json.Marshal(state)
+	var state connectorState
+	if json.Unmarshal(data, &state) != nil {
+		return nil
+	}
+	return normalizeConnectorSet(state.InactiveNames)
+}
+
+func writeConnectorState(path string, active, inactive []string) error {
+	data, err := marshalConnectorState(active, inactive)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(dataDir, activeConnectorFile), data, 0o600)
+	return atomicWriteFile(path, data, 0o600)
+}
+
+func marshalConnectorState(active, inactive []string) ([]byte, error) {
+	state := connectorState{
+		Version:       activeConnectorStateVersion,
+		Names:         normalizeConnectorSet(active),
+		InactiveNames: normalizeConnectorSet(inactive),
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(state.Names) > 0 {
+		state.Name = state.Names[0]
+	}
+	return json.Marshal(state)
+}
+
+func containsConnectorName(names []string, want string) bool {
+	want = strings.TrimSpace(want)
+	for _, candidate := range names {
+		if strings.EqualFold(strings.TrimSpace(candidate), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutConnectorNames(names, removed []string) []string {
+	out := make([]string, 0, len(names))
+	for _, candidate := range names {
+		if !containsConnectorName(removed, candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return normalizeConnectorSet(out)
+}
+
+func activeNamesFromState(state connectorState) []string {
+	if len(state.Names) > 0 {
+		return normalizeConnectorSet(state.Names)
+	}
+	if trimmed := strings.TrimSpace(state.Name); trimmed != "" {
+		return []string{trimmed}
+	}
+	return nil
 }
 
 // normalizeConnectorSet trims, drops empties, de-dupes, and sorts connector
@@ -165,7 +361,35 @@ func normalizeConnectorSet(names []string) []string {
 // ClearActiveConnector removes the state file (used on full teardown
 // when guardrails are disabled).
 func ClearActiveConnector(dataDir string) {
-	os.Remove(filepath.Join(dataDir, activeConnectorFile))
+	_ = RemoveActiveConnectorState(dataDir)
+}
+
+// RemoveActiveConnectorState removes the runtime ownership marker and reports
+// filesystem failures. ClearActiveConnector retains its historical best-effort
+// signature; teardown rollback uses this strict variant so it never silently
+// leaves an explicit inactive marker after connector removal failed.
+func RemoveActiveConnectorState(dataDir string) error {
+	path := filepath.Join(dataDir, activeConnectorFile)
+	return withActiveConnectorStateLock(path, func() error {
+		return removeActiveConnectorStateFile(path)
+	})
+}
+
+func withActiveConnectorStateLock(path string, fn func() error) error {
+	activeConnectorStateMu.Lock()
+	defer activeConnectorStateMu.Unlock()
+	// Use a persistent owned lock inode. Removing an advisory lock file on
+	// release can split waiters across different inodes and defeat mutual
+	// exclusion; withOwnedFileLock also validates ownership and link safety.
+	return withOwnedFileLock(path+".lock", fn)
+}
+
+func removeActiveConnectorStateFile(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func LoadHookContractLockEntry(dataDir, connectorName string) HookContractLockEntry {

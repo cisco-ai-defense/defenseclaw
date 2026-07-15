@@ -193,6 +193,32 @@ func TestHookConfigGuard_DisabledDoesNotHeal(t *testing.T) {
 	}
 }
 
+func TestHookConfigGuard_ExplicitTeardownStateDoesNotHeal(t *testing.T) {
+	conn, opts, cfgPath := installedCursorConnector(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+
+	if _, err := connector.MarkConnectorInactive(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("mark connector inactive: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip hook block: %v", err)
+	}
+	time.Sleep(20 * guardTestDebounce)
+
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if present {
+		t.Fatal("hook guard reinstalled an explicitly torn-down connector")
+	}
+}
+
 // TestHookConfigGuard_HealAuditRowsCarryConnectorAndSeverity locks in the
 // connector-attribution contract for the self-heal audit rows. Regression
 // guard for the gap where heal rows used the bare LogAction helper so the
