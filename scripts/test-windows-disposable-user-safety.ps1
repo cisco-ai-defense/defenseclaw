@@ -62,13 +62,15 @@ try {
     [IO.Directory]::CreateDirectory($leaseBase) | Out-Null
     $leasePaths = @($leaseBoundary, $leaseMiddle, $leaseBase)
     $leaseSnapshots = @{}
+    $leaseSections = [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
     foreach ($path in $leasePaths) {
         $security = [IO.FileSystemAclExtensions]::GetAccessControl(
-            [IO.DirectoryInfo]::new($path)
+            [IO.DirectoryInfo]::new($path),
+            $leaseSections
         )
-        $leaseSnapshots[$path] = [Convert]::ToBase64String(
-            $security.GetSecurityDescriptorBinaryForm()
-        )
+        $leaseSnapshots[$path] = $security.GetSecurityDescriptorSddlForm($leaseSections)
     }
     $ancestorLease = @()
     try {
@@ -94,9 +96,10 @@ try {
     }
     foreach ($path in $leasePaths) {
         $security = [IO.FileSystemAclExtensions]::GetAccessControl(
-            [IO.DirectoryInfo]::new($path)
+            [IO.DirectoryInfo]::new($path),
+            $leaseSections
         )
-        if ([Convert]::ToBase64String($security.GetSecurityDescriptorBinaryForm()) -cne
+        if ($security.GetSecurityDescriptorSddlForm($leaseSections) -cne
             [string]$leaseSnapshots[$path]) {
             throw "ancestor ACL lease did not restore the exact descriptor: $path"
         }

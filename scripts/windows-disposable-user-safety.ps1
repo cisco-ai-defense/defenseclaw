@@ -268,12 +268,11 @@ function Restore-DisposableAncestorReadLease {
                 $directory,
                 $sections
             )
-            $observedDescriptor = [Convert]::ToBase64String(
-                $observed.GetSecurityDescriptorBinaryForm()
-            )
-            if ($observedDescriptor -cne [string]$entry.Descriptor -or
-                $observed.GetSecurityDescriptorSddlForm($sections) -cne
-                    [string]$entry.Sddl) {
+            # SetAccessControl may canonicalize the binary form differently on
+            # different Windows builds. Owner, group, DACL, and DACL control
+            # flags are the security semantics we changed and must round-trip.
+            if ($observed.GetSecurityDescriptorSddlForm($sections) -cne
+                [string]$entry.Sddl) {
                 throw 'restored security descriptor does not match its snapshot'
             }
             $remaining = @($observed.GetAccessRules(
