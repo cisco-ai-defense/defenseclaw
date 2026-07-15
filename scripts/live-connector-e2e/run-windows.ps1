@@ -1369,9 +1369,27 @@ function Invoke-LiveRun {
     Write-Result teardown pass
 }
 
+function Get-NormalizedExecutablePath([AllowNull()][string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    try { return [IO.Path]::GetFullPath($Path) }
+    catch { return '' }
+}
+
+function Get-NativeProcessStartIdentity([Diagnostics.Process]$Process) {
+    try {
+        $unixTicks = [long]($Process.StartTime.ToUniversalTime().Ticks - [DateTime]::UnixEpoch.Ticks)
+        return ([long]($unixTicks * 100)).ToString([Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return ''
+    }
+}
+
 function Stop-IsolatedProcessTree {
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [string[]]$ProductExecutablePaths = @(),
+        [string]$ProductDataRoot = $env:DEFENSECLAW_HOME
+    )
 
     $root = [IO.Path]::GetFullPath($StateRoot)
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
@@ -1384,14 +1402,87 @@ function Stop-IsolatedProcessTree {
         if ($ancestor.Count -ne 1) { break }
         $ancestorId = [int]$ancestor[0].ParentProcessId
     }
+
+    $knownProductPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (@($ProductExecutablePaths).Count -eq 0) {
+        $gateway = @(Get-Command 'defenseclaw-gateway' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1)
+        if ($gateway.Count -eq 1) { $ProductExecutablePaths = @([string]$gateway[0].Source) }
+    }
+    foreach ($path in @($ProductExecutablePaths)) {
+        $normalized = Get-NormalizedExecutablePath $path
+        if (-not [string]::IsNullOrWhiteSpace($normalized)) { [void]$knownProductPaths.Add($normalized) }
+    }
+
+    # Gateway and watchdog children are detached and carry their managed home
+    # in the environment/working directory, not argv. If graceful stop fails,
+    # accept only current strong PID records whose recorded and live executable
+    # both equal the exact gateway path selected by this harness.
+    $managedProductProcesses = @{}
+    if ($knownProductPaths.Count -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($ProductDataRoot)) {
+        foreach ($name in @('gateway.pid', 'watchdog.pid')) {
+            $pidPath = Join-Path $ProductDataRoot $name
+            if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) { continue }
+            $native = $null
+            try {
+                $record = [IO.File]::ReadAllText($pidPath) | ConvertFrom-Json -ErrorAction Stop
+                $processId = [int]$record.pid
+                $recordedPath = Get-NormalizedExecutablePath ([string]$record.executable)
+                $recordedIdentity = [string]$record.start_identity
+                if ($processId -le 0 -or
+                    -not $knownProductPaths.Contains($recordedPath) -or
+                    [string]::IsNullOrWhiteSpace($recordedIdentity) -or
+                    $ancestorIds.Contains($processId)) {
+                    continue
+                }
+                $native = [Diagnostics.Process]::GetProcessById($processId)
+                $livePath = Get-NormalizedExecutablePath ([string]$native.MainModule.FileName)
+                $liveIdentity = Get-NativeProcessStartIdentity $native
+                if (-not [string]::Equals(
+                        $livePath, $recordedPath, [StringComparison]::OrdinalIgnoreCase
+                    ) -or
+                    $liveIdentity -cne $recordedIdentity) {
+                    $native.Dispose()
+                    $native = $null
+                    continue
+                }
+                if ($managedProductProcesses.ContainsKey($processId)) {
+                    $native.Dispose()
+                    $native = $null
+                    continue
+                }
+                $managedProductProcesses[$processId] = $native
+                $native = $null
+            } catch {
+                if ($null -ne $native) { $native.Dispose() }
+            }
+        }
+    }
+
     foreach ($process in $processes) {
         $processId = [int]$process.ProcessId
         $matchesRoot = $process.CommandLine -and
             $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
         if (-not $ancestorIds.Contains($processId) -and
+            -not $managedProductProcesses.ContainsKey($processId) -and
             $matchesRoot -and
             $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($entry in @($managedProductProcesses.GetEnumerator())) {
+        try {
+            if ($PSCmdlet.ShouldProcess("PID $($entry.Key)", 'Stop managed product process')) {
+                $entry.Value.Kill()
+                if (-not $entry.Value.WaitForExit(5000)) {
+                    Write-Warning "managed product PID $($entry.Key) did not exit within 5 seconds"
+                }
+            }
+        } catch {
+            Write-Warning (Protect-LogText "could not stop managed product PID $($entry.Key): $($_.Exception.Message)")
+        } finally {
+            $entry.Value.Dispose()
         }
     }
 }

@@ -511,21 +511,38 @@ try {
     ) -PassThru -WindowStyle Hidden
     $ownedRoot = Join-Path $StateRoot 'cleanup-owned-process'
     [IO.Directory]::CreateDirectory($ownedRoot) | Out-Null
-    $ownedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
+    $argvOwnedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $ownedRoot
     ) -PassThru -WindowStyle Hidden
+    $productExecutable = (Get-Command ping.exe -CommandType Application -ErrorAction Stop).Source
+    $productDescendant = Start-Process -FilePath $productExecutable -ArgumentList @(
+        '-t', '127.0.0.1'
+    ) -WorkingDirectory $ownedRoot -Environment @{
+        DEFENSECLAW_HOME = $ownedRoot
+    } -PassThru -WindowStyle Hidden
     try {
         Start-Sleep -Milliseconds 250
-        Stop-IsolatedProcessTree -Confirm:$false
-        Assert-True ($ownedDescendant.WaitForExit(5000)) `
-            'isolated cleanup killed a process owned by StateRoot'
+        $productPID = @{
+            pid = $productDescendant.Id
+            executable = $productExecutable
+            start_identity = Get-NativeProcessStartIdentity $productDescendant
+        } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $ownedRoot 'gateway.pid'), $productPID)
+        Stop-IsolatedProcessTree -ProductExecutablePaths @($productExecutable) `
+            -ProductDataRoot $ownedRoot -Confirm:$false
+        Assert-True ($argvOwnedDescendant.WaitForExit(5000)) `
+            'isolated cleanup killed a process with StateRoot on argv'
+        Assert-True ($productDescendant.WaitForExit(5000)) `
+            'isolated cleanup killed the exact managed product process without StateRoot on argv'
         Assert-True (-not $unrelatedDescendant.HasExited) `
             'isolated cleanup preserved a descendant without StateRoot in its command line'
     } finally {
         Stop-Process -Id $unrelatedDescendant.Id -Force -ErrorAction SilentlyContinue
-        Stop-Process -Id $ownedDescendant.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $argvOwnedDescendant.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $productDescendant.Id -Force -ErrorAction SilentlyContinue
         $unrelatedDescendant.Dispose()
-        $ownedDescendant.Dispose()
+        $argvOwnedDescendant.Dispose()
+        $productDescendant.Dispose()
     }
 
     $jsonl = Join-Path $temp 'gateway.jsonl'
@@ -1063,6 +1080,10 @@ try {
     Assert-True ($isolatedCleanup -match '\$matchesRoot -and' -and
         $isolatedCleanup -notmatch 'descendantIds') `
         'isolated process cleanup only terminates state-root-owned processes'
+    Assert-True ($isolatedCleanup -match 'gateway\.pid' -and
+        $isolatedCleanup -match 'watchdog\.pid' -and
+        $isolatedCleanup -match '\$livePath, \$recordedPath, \[StringComparison\]::OrdinalIgnoreCase') `
+        'isolated process cleanup strongly identifies detached product processes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and
         $harnessText -match 'obsolete gateway launcher' -and
         $harnessText -match 'does not use the native hook runtime' -and
