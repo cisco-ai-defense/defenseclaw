@@ -1567,7 +1567,6 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 		publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		gatewayPath := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
-		reconciliation := connectorReconciliationRecorder{}
 		if pathExists(transaction.TrashPath) {
 			state, err := loadTransactionInstallState(transaction.TrashPath, transaction)
 			if err != nil {
@@ -1579,20 +1578,17 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			if _, err := stopOwnedServices(gatewayPath, transaction.DataRoot); err != nil {
 				return err
 			}
-			reconciliation = reconcileRemovedConnectors(
-				transaction,
-				gatewayPath,
-				transactionPreviousChildEnv(transaction),
-				runConnectorLifecycleWithEnv,
-			)
-		} else if transaction.PreviousState != nil || len(transaction.PreviousConnectors) != 0 {
-			for _, connectorName := range transaction.PreviousConnectors {
-				configHome := connectorConfigHome(transaction, connectorName, true)
-				reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-					return errors.New("committed uninstall no longer has its owned payload tree; connector cleanup was not attempted")
-				})
-			}
 		}
+		// Connector lifecycle is always run by the manifest-verified gateway
+		// embedded in the executing Setup binary. The installed/trash copy is
+		// retained above only as the process-ownership identity used to stop a
+		// previously running service; it is never trusted to edit agent config.
+		reconciliation := reconcileRemovedConnectorsWithMaintenance(
+			transaction,
+			transactionPreviousChildEnv(transaction),
+			prepareConnectorMaintenanceGateway,
+			runConnectorLifecycleWithEnv,
+		)
 		if err := reconciliation.persist(); err != nil {
 			return fmt.Errorf("persist connector reconciliation residue: %w", err)
 		}

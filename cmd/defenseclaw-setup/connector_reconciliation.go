@@ -80,12 +80,6 @@ func reconcileRemovedConnectors(
 	reconciliation := connectorReconciliationRecorder{}
 	for _, connectorName := range transaction.PreviousConnectors {
 		configHome := connectorConfigHome(transaction, connectorName, true)
-		if !pathExists(gatewayPath) {
-			reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
-				return errors.New("installed gateway payload is missing; connector cleanup was not attempted")
-			})
-			continue
-		}
 		if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "teardown", childEnv)
 		}) {

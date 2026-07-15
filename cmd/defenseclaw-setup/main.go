@@ -608,7 +608,7 @@ func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) 
 
 func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action string, env []string) error {
 	if !pathExists(gatewayPath) {
-		return fmt.Errorf("connector %s %s requires the installed gateway binary", connectorName, action)
+		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
 	}
 	args := []string{
 		"connector", action,

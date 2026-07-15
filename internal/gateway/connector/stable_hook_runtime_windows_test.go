@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/windows"
 )
 
@@ -192,5 +195,173 @@ func TestPackagedWindowsRunningGatewayUsesExactInstalledSiblingWhileImageIsLocke
 	}
 	if err := <-released; err != nil {
 		t.Fatalf("release packaged hook image: %v", err)
+	}
+}
+
+func TestMaintenanceTeardownRecognizesCanonicalHookWithoutInstalledLayout(t *testing.T) {
+	canonical := canonicalNativeWindowsHookBinary()
+	if strings.TrimSpace(canonical) == "" {
+		t.Fatal("canonical native installed hook path is empty")
+	}
+	defenseclawHookBinaryOverride = `C:\repository-build\defenseclaw-hook.exe`
+	t.Cleanup(func() { defenseclawHookBinaryOverride = "" })
+
+	owned := windowsNativePowerShellHookCommandForBinary("codex", canonical)
+	if !isNativeHookCommand(owned) {
+		t.Fatalf("maintenance teardown did not recognize canonical encoded hook command %q", owned)
+	}
+	if !isDefenseClawHookExecutable(canonical) {
+		t.Fatalf("maintenance teardown did not recognize canonical hook executable %q", canonical)
+	}
+	structured := map[string]interface{}{
+		"command": canonical,
+		"args":    []interface{}{"hook", "--connector", "claudecode"},
+	}
+	if !structuredNativeExecHookReferences(structured, []string{nativeHookFlag + "claudecode"}) {
+		t.Fatalf("maintenance teardown did not recognize canonical structured hook %#v", structured)
+	}
+	foreign := windowsNativePowerShellHookCommandForBinary("codex", `C:\foreign\defenseclaw-hook.exe`)
+	if isNativeHookCommand(foreign) {
+		t.Fatalf("maintenance teardown accepted foreign encoded hook command %q", foreign)
+	}
+	structured["command"] = `C:\foreign\defenseclaw-hook.exe`
+	if structuredNativeExecHookReferences(structured, []string{nativeHookFlag + "claudecode"}) {
+		t.Fatalf("maintenance teardown accepted foreign structured hook %#v", structured)
+	}
+	if got, want := windowsNativePowerShellHookCommand("codex"), windowsNativePowerShellHookCommandForBinary("codex", defenseclawHookBinaryOverride); got != want {
+		t.Fatalf("command generation unexpectedly switched to canonical maintenance ownership path: %q", got)
+	}
+}
+
+func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-user-choice\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	originalInspector := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: "maintenance teardown test"}, nil
+	}
+	t.Cleanup(func() { codexPolicyInspector = originalInspector })
+
+	canonical := canonicalNativeWindowsHookBinary()
+	defenseclawHookBinaryOverride = canonical
+	t.Cleanup(func() { defenseclawHookBinaryOverride = "" })
+	opts := SetupOpts{
+		DataDir:   filepath.Join(root, "data"),
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "maintenance-test-token",
+	}
+	conn := NewCodexConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("seed canonical Codex hook: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("setup hooks have unexpected type %T", cfg["hooks"])
+	}
+	hooks["SessionStart"] = []interface{}{map[string]interface{}{
+		"hooks": []interface{}{map[string]interface{}{
+			"type":    "command",
+			"command": "user-maintenance-policy.exe",
+			"timeout": int64(7),
+		}},
+	}}
+	drifted, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A maintenance gateway has no packaged install layout, and this override
+	// simulates its ordinary repository/legacy fallback. Teardown must still
+	// recognize the exact canonical installed command already stored in Codex
+	// config even when that installed executable is now missing.
+	defenseclawHookBinaryOverride = `C:\maintenance-temp\defenseclaw-hook.exe`
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("maintenance Codex teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("maintenance Codex verify clean: %v", err)
+	}
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), "user-maintenance-policy.exe") ||
+		!strings.Contains(string(restored), "gpt-user-choice") {
+		t.Fatalf("maintenance teardown discarded unrelated Codex drift:\n%s", restored)
+	}
+}
+
+func TestMaintenanceClaudeTeardownPreservesForeignHookWithoutInstalledLayout(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configHome := filepath.Join(root, "claude")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configHome, "settings.json")
+	original := `{"existingKey":"user-value","hooks":{"Notification":[{"hooks":[{"type":"command","command":"user-notification.exe"}]}]}}`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configHome)
+
+	canonical := canonicalNativeWindowsHookBinary()
+	if strings.TrimSpace(canonical) == "" {
+		t.Fatal("canonical native installed hook path is empty")
+	}
+	defenseclawHookBinaryOverride = canonical
+	t.Cleanup(func() { defenseclawHookBinaryOverride = "" })
+	opts := SetupOpts{
+		DataDir:   filepath.Join(root, "data"),
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "maintenance-test-token",
+	}
+	conn := NewClaudeCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("seed canonical Claude hooks: %v", err)
+	}
+
+	// Simulate the Setup-owned maintenance gateway after the installed payload
+	// disappeared. Its own fallback path must not determine hook ownership.
+	defenseclawHookBinaryOverride = `C:\maintenance-temp\defenseclaw-hook.exe`
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("maintenance Claude teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("maintenance Claude verify clean: %v", err)
+	}
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(restored))
+	if strings.Contains(lower, "defenseclaw") {
+		t.Fatalf("owned Claude state survived maintenance teardown:\n%s", restored)
+	}
+	for _, want := range []string{"user-value", "user-notification.exe"} {
+		if !strings.Contains(string(restored), want) {
+			t.Fatalf("unrelated Claude setting %q was not preserved:\n%s", want, restored)
+		}
 	}
 }

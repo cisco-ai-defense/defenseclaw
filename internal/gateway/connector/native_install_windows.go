@@ -39,6 +39,18 @@ func canonicalNativeWindowsInstallRoot() string {
 	return filepath.Join(programs, "DefenseClaw")
 }
 
+// canonicalNativeWindowsHookBinary is the exact logical launcher path native
+// Setup owns. Maintenance teardown uses this Known-Folder-derived path to
+// recognize registrations after the installed payload itself was removed or
+// quarantined; it never accepts an environment-selected or arbitrary path.
+func canonicalNativeWindowsHookBinary() string {
+	root := canonicalNativeWindowsInstallRoot()
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(root, "bin", windowsHookBinaryName)
+}
+
 func nativeWindowsPathHasNoReparsePoints(path string) bool {
 	current, err := filepath.Abs(path)
 	if err != nil {

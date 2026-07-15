@@ -445,10 +445,14 @@ func windowsNativeHookCommand(connector string) string {
 }
 
 func windowsNativePowerShellHookCommand(connector string) string {
+	return windowsNativePowerShellHookCommandForBinary(connector, defenseclawHookBinary())
+}
+
+func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector,
+		"& " + powershellQuoteLiteral(hookBinary) + " " + nativeHookFlag + connector,
 		"exit $LASTEXITCODE",
 	}, "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
@@ -480,9 +484,21 @@ func isNativeHookCommand(cmd string) bool {
 	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
 	// without shell interpolation. Compare against the exact commands we emit;
 	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
+	hookBinaries := []string{defenseclawHookBinary()}
+	if runtime.GOOS == "windows" {
+		// A Setup-owned maintenance gateway runs outside the installed layout,
+		// and the installed payload may itself have been quarantined. The
+		// canonical launcher path is still authoritative because it comes from
+		// the Windows Known Folder API, not environment or PATH. Accept the exact
+		// encoded command Setup writes without making repository builds generate
+		// it.
+		hookBinaries = append(hookBinaries, canonicalNativeWindowsHookBinary())
+	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
-		if cmd == windowsNativePowerShellHookCommand(connectorName) {
-			return true
+		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
+			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
+				return true
+			}
 		}
 	}
 	// Codex's Windows command uses PATH with current-directory lookup disabled;
@@ -526,8 +542,10 @@ func isNativeHookCommand(cmd string) bool {
 
 func isDefenseClawHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
+	if isDefenseClawManagedHookExecutable(exe) {
+		return true
+	}
 	for _, owned := range []string{
-		defenseclawHookBinary(),
 		defenseclawGatewayBinary(), // legacy pre-launcher config
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
@@ -548,6 +566,23 @@ func isDefenseClawHookExecutable(exe string) bool {
 		strings.EqualFold(normalized, "defenseclaw-hook") ||
 		strings.EqualFold(normalized, windowsGatewayBinaryName) ||
 		strings.EqualFold(normalized, "defenseclaw-gateway")
+}
+
+// isDefenseClawManagedHookExecutable recognizes only the exact current
+// launcher or native Setup's canonical installed launcher. Structured exec
+// hooks use this narrower predicate so a foreign absolute or PATH-resolved
+// command is never claimed merely because its basename resembles ours.
+func isDefenseClawManagedHookExecutable(exe string) bool {
+	exe = strings.TrimSpace(exe)
+	for _, owned := range uniqueNonEmptyStrings([]string{
+		defenseclawHookBinary(),
+		canonicalNativeWindowsHookBinary(),
+	}) {
+		if pathidentity.Same(exe, owned) {
+			return true
+		}
+	}
+	return false
 }
 
 func validNativeHookConnector(connector string) bool {
