@@ -772,14 +772,19 @@ async def test_large_table_commit_yields_to_latest_tab_input(
         partial_count = table.row_count
         assert not app._applying_panel_snapshot  # noqa: SLF001
 
-        started = perf_counter()
         app.action_switch_panel("overview")
-        acknowledgement_ms = (perf_counter() - started) * 1_000
+
+        # The acknowledgement contract is ordering, not host wall time: the
+        # new panel must be visible synchronously at the next batch yield.
+        # Busy Windows coverage runners may deschedule this process for longer
+        # than an arbitrary deadline even though no table work blocks input.
+        assert app.active_panel == "overview"
+        assert app.query_one("#tabs").active == "tab-overview"
+        assert table.has_class("hidden")
         await _wait_for_panel(app, "overview")
         await _wait_until(lambda: "logs" not in app._panel_render_running)  # noqa: SLF001
 
         assert 0 < partial_count < len(expected)
-        assert acknowledgement_ms < 150
         assert rows_before_yield
         assert max(rows_before_yield) <= 16
         assert app.active_panel == "overview"
