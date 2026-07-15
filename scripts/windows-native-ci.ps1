@@ -163,12 +163,24 @@ function Assert-SafeStateRoot([string]$Path) {
     return Assert-NoReparseAncestors $full
 }
 
+function Test-WindowsNativeProcessElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
 function Set-CurrentUserAsDefaultOwner {
     # GitHub's elevated Windows runner token can use BUILTIN\Administrators as
     # its default owner even though processes run as the runner user. That
     # makes ordinary child-created test paths look foreign to the production
     # ownership checks. Normalize only this disposable CI process token; child
     # processes inherit it and create objects owned by the actual runner user.
+    # A real standard-user disposable child already creates files with its own
+    # SID as owner and cannot adjust TokenOwner. Only the elevated hosted
+    # runner token needs this normalization.
+    if (-not (Test-WindowsNativeProcessElevated)) { return }
     if ($null -eq ('DefenseClaw.WindowsNative.TokenOwner' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -2531,7 +2543,8 @@ function Invoke-SetupAcceptance {
         [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
     )
     $root = Assert-SafeStateRoot $StateRoot
-    $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
+    # RUNNER_TEMP already contains the disposable child's state. Do not turn
+    # a parent-owned, out-of-profile sandbox into an explicit native base.
     $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "native setup executable not found: $setup"
@@ -2888,7 +2901,8 @@ function Invoke-Contract {
         throw 'contract installs native Setup for the current Windows user. Run only on a disposable CI user, or pass -AllowCurrentUserSetupAcceptance explicitly.'
     }
     $root = Assert-SafeStateRoot $StateRoot
-    $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
+    # RUNNER_TEMP already contains the disposable child's state. Do not turn
+    # a parent-owned, out-of-profile sandbox into an explicit native base.
     $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "native setup executable not found: $setup"

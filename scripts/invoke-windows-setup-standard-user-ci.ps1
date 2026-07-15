@@ -17,8 +17,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('setup-acceptance', 'wizard-smoke')]
+    [ValidateSet('setup-acceptance', 'wizard-smoke', 'contract')]
     [string]$Mode,
+    [ValidateSet('codex', 'claudecode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$DiagnosticsRoot = '',
@@ -305,6 +306,11 @@ function Invoke-ChildMode {
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
                 -AllowCurrentUserSetupAcceptance
+        } elseif ($Mode -eq 'contract') {
+            & $nativeHarness -Operation contract -Connector $Connector `
+                -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
+                -StateRoot $state -ArtifactRoot $artifacts `
+                -AllowCurrentUserSetupAcceptance
         } else {
             $setup = Join-Path $artifacts 'DefenseClawSetup-x64.exe'
             & (Join-Path $PSScriptRoot 'test-windows-setup-wizard.ps1') `
@@ -351,7 +357,8 @@ function Invoke-ChildMode {
                 }
             }
         } else {
-            # Cancel-only never enters Setup's mutation path. The parent owns
+            # Wizard cancel-only never enters Setup's mutation path, while the
+            # contract performs its own uninstall in finally. The parent owns
             # the stronger job-object drain, exact-SID sweep, profile removal,
             # and sandbox deletion, so a second CIM-based child cleanup adds no
             # coverage and can strand the disposable child in a sick provider.
@@ -626,6 +633,45 @@ function Remove-DisposableProfileAndAccount([string]$Name, [string]$Sid) {
     }
 }
 
+function Publish-BoundedDisposableContractResults {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [Parameter(Mandatory)][string]$DestinationRoot,
+        [Parameter(Mandatory)][ValidateSet('codex', 'claudecode')]
+        [string]$ExpectedConnector
+    )
+
+    $contents = Read-BoundedDisposableResult $SourcePath $SourceRoot 1048576
+    $lines = @($contents -split '\r?\n' | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    })
+    if ($lines.Count -eq 0) {
+        throw 'disposable connector contract produced an empty results.jsonl'
+    }
+    foreach ($line in $lines) {
+        try { $record = $line | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "disposable connector contract produced invalid JSONL: $($_.Exception.Message)" }
+        if ([string]$record.connector -cne $ExpectedConnector -or
+            [string]$record.os -cne 'windows') {
+            throw 'disposable connector contract result identity does not match the requested Windows connector'
+        }
+    }
+
+    $destination = Assert-DisposableNoReparseAncestors -Path $DestinationPath `
+        -AllowedRoot $DestinationRoot
+    if (Test-Path -LiteralPath $destination) {
+        throw "refusing to overwrite an existing connector contract result: $destination"
+    }
+    [IO.File]::WriteAllText(
+        $destination,
+        $contents,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 if (-not $IsWindows) { throw 'disposable Setup acceptance requires native Windows' }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'disposable Setup acceptance is restricted to GitHub-hosted Windows CI'
@@ -692,6 +738,9 @@ $result = ''
 $wmiFixtureRecord = ''
 $progressRecord = ''
 $wizardTraceRecord = ''
+$contractResultsRecord = ''
+$contractResultsDestination = ''
+$contractResultsPublished = $false
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $executionBoundaryComplete = $false
@@ -763,7 +812,7 @@ try {
     # Keep both the exact Setup input and the harness that evaluates it
     # immutable to the disposable child, while retaining parent/SYSTEM cleanup
     # authority.
-    foreach ($file in @(
+    $harnessFiles = @(
         'invoke-windows-setup-standard-user-ci.ps1',
         'windows-native-ci.ps1',
         'windows-native-paths.ps1',
@@ -771,11 +820,26 @@ try {
         'windows-disposable-user-safety.ps1',
         'windows-setup-standard-user-launcher.cs',
         'test-windows-setup-wizard.ps1'
-    )) {
+    )
+    if ($Mode -eq 'contract') {
+        $harnessFiles += @(
+            'assert-gateway-jsonl.py',
+            'live-connector-e2e\run-windows.ps1',
+            'live-connector-e2e\assert-windows-evidence.py',
+            'live-connector-e2e\testdata\windows-mock.ps1',
+            "live-connector-e2e\golden\$Connector\pre_tool_allow.json",
+            "live-connector-e2e\golden\$Connector\pre_tool_block.json",
+            "live-connector-e2e\golden\$Connector\session_start.json"
+        )
+    }
+    foreach ($file in $harnessFiles) {
         $source = Join-Path $PSScriptRoot $file
         $destination = Join-Path $scripts $file
         $null = Assert-DisposableNoReparseAncestors -Path $source `
             -AllowedRoot $PSScriptRoot -RequireExists
+        $null = Assert-DisposableNoReparseAncestors -Path $destination `
+            -AllowedRoot $scripts
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
         [IO.File]::Copy($source, $destination, $false)
     }
     $childSetup = Join-Path $childArtifacts 'DefenseClawSetup-x64.exe'
@@ -813,6 +877,8 @@ try {
     $wmiFixtureRecord = Join-Path $childResults 'wmi-escape-pid.txt'
     $progressRecord = Join-Path $childResults 'progress.log'
     $wizardTraceRecord = Join-Path $childState 'wizard-smoke\wizard-driver.log'
+    $contractResultsRecord = Join-Path $childState 'results.jsonl'
+    $contractResultsDestination = Join-Path $stateBase 'results.jsonl'
     $desktopGrant = [DefenseClaw.DisposableStandardUserLauncher]::GrantInteractiveDesktop($accountSid)
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
     $arguments = @(
@@ -825,6 +891,9 @@ try {
         '-ResultPath', $result,
         '-ExpectedChildSid', $accountSid
     )
+    if ($Mode -eq 'contract') {
+        $arguments += @('-Connector', $Connector)
+    }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
     }
@@ -865,6 +934,16 @@ try {
     $terminatedSidProcessIds = @(Complete-DisposableExecutionBoundary `
         $childProcess $accountName $accountSid $unverifiableProcessBaseline)
     $executionBoundaryComplete = $true
+    if ($Mode -eq 'contract' -and
+        (Test-Path -LiteralPath $contractResultsRecord -PathType Leaf)) {
+        Publish-BoundedDisposableContractResults `
+            -SourcePath $contractResultsRecord `
+            -SourceRoot $childState `
+            -DestinationPath $contractResultsDestination `
+            -DestinationRoot $stateBase `
+            -ExpectedConnector $Connector
+        $contractResultsPublished = $true
+    }
     if ($startupFailed) {
         $progressDetail = if (Test-Path -LiteralPath $progressRecord -PathType Leaf) {
             Read-BoundedDisposableResult $progressRecord $childResults 32768
@@ -917,6 +996,9 @@ try {
     }
     if ($exitCode -ne 0 -or -not [bool]$observed.succeeded) {
         throw "disposable standard-user $Mode failed (exit $exitCode): $($observed.detail)"
+    }
+    if ($Mode -eq 'contract' -and -not $contractResultsPublished) {
+        throw 'disposable connector contract passed without producing bounded results.jsonl'
     }
     Write-Host ($observed | ConvertTo-Json -Compress -Depth 4)
 } catch {

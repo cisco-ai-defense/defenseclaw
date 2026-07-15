@@ -739,6 +739,9 @@ try {
         $contractFunction -notmatch 'Install-PackagedArtifacts' -and
         $contractFunction -notmatch 'scripts\\install\.ps1') `
         'connector contract installs, validates, and removes the exact native Setup artifact'
+    Assert-True ($nativeWorkflowText -match '(?s)Required setup, allow/block, audit, telemetry, timeout, and teardown contract.*?invoke-windows-setup-standard-user-ci\.ps1.*?-Mode contract.*?-Connector \$env:CONNECTOR.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
+        $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
+        'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
         $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
         $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
@@ -773,11 +776,20 @@ try {
         $standardUserCIText -match 'GrantInteractiveDesktop' -and
         $standardUserCIText -match 'Get-LocalGroupMember -SID \$administratorsSid' -and
         $standardUserCIText -match '-Operation setup-acceptance' -and
+        $standardUserCIText -match '-Operation contract -Connector \$Connector' -and
+        $standardUserCIText -match '\$arguments \+= @\(''-Connector'', \$Connector\)' -and
+        $standardUserCIText -match 'live-connector-e2e\\run-windows\.ps1' -and
         $standardUserCIText -match '\$env:RUNNER_TEMP = Split-Path -Parent \$state' -and
         $standardUserCIText -match 'Remove-Item Env:DC_WINDOWS_NATIVE_BASE_ROOT' -and
         $standardUserCIText -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT = \$state' -and
         $standardUserCIText -notmatch '(?i)password\s*=\s*["''][^"'']+["'']') `
         'hosted Setup lifecycle uses a verified disposable standard user without weakening state containment or persisting a credential'
+    Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
+        $standardUserCIText -match 'Read-BoundedDisposableResult \$SourcePath \$SourceRoot 1048576' -and
+        $standardUserCIText -match '\[string\]\$record\.os -cne ''windows''' -and
+        $standardUserCIText -match '(?s)Complete-DisposableExecutionBoundary.*?\$executionBoundaryComplete = \$true.*?Publish-BoundedDisposableContractResults' -and
+        $standardUserCIText -match "contract passed without producing bounded results\.jsonl") `
+        'contract results are identity-checked, bounded, and handed to the parent only after job and SID drain'
     Assert-True ($standardUserCIText -match '(?s)child-entry.*?windows-native-paths\.ps1.*?file-guard-load-start.*?windows-disposable-user-safety\.ps1.*?file-guard-load-complete' -and
         $standardUserCIText -match "'-NoLogo', '-NoProfile', '-NonInteractive', '-File'" -and
         $standardUserCIText -match '''-ExpectedChildSid'', \$accountSid' -and
@@ -894,6 +906,21 @@ try {
         $nativeHarnessText,
         '(?s)function Invoke-SetupAcceptance\b.*?(?=\r?\nfunction Invoke-Contract)'
     ).Value
+    $defaultOwnerFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Set-CurrentUserAsDefaultOwner\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($nativeHarnessText -match 'function Test-WindowsNativeProcessElevated\b' -and
+        $nativeHarnessText -match 'WindowsBuiltInRole\]::Administrator' -and
+        $defaultOwnerFunction -match 'if \(-not \(Test-WindowsNativeProcessElevated\)\) \{ return \}' -and
+        $defaultOwnerFunction.IndexOf('Test-WindowsNativeProcessElevated') -lt
+            $defaultOwnerFunction.IndexOf('Add-Type')) `
+        'hosted owner normalization runs only in an actually elevated process'
+    Assert-True ($setupAcceptanceFunction -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT\s*=' -and
+        $contractFunction -notmatch '\$env:DC_WINDOWS_NATIVE_BASE_ROOT\s*=' -and
+        $standardUserCIText -match '\$env:RUNNER_TEMP = Split-Path -Parent \$state' -and
+        $standardUserCIText -match 'Remove-Item Env:DC_WINDOWS_NATIVE_BASE_ROOT') `
+        'non-elevated hosted children keep parent-owned state under RUNNER_TEMP without publishing an out-of-profile native base'
     $agentFixtureFunction = [regex]::Match(
         $nativeHarnessText,
         '(?s)function New-WizardAgentFixtures\b.*?(?=\r?\nfunction Remove-WizardAgentFixtures)'

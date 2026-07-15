@@ -345,7 +345,14 @@ jobs:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
       - name: Required setup, allow/block, audit, telemetry, timeout, and teardown contract
-        run: ./scripts/windows-native-ci.ps1 -Operation contract -Connector $env:CONNECTOR -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode contract
+          -Connector $env:CONNECTOR
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 1800
       - name: Upload deterministic contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
