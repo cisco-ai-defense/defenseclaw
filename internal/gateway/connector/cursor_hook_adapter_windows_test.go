@@ -20,6 +20,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,13 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	default:
+		// Pre-existing connector fixtures exercise config, trust, CAS, and
+		// teardown behavior without provisioning a real Codex installation.
+		// Dedicated production-path tests explicitly restore the native policy
+		// inspector; external CLI/gateway/installer tests use protected evidence.
+		codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+			return codexEffectivePolicy{Source: "connector unit-test policy fixture"}, nil
+		}
 		os.Exit(m.Run())
 	}
 }

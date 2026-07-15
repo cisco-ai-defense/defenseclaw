@@ -584,6 +584,73 @@ func TestEvaluateClaudeCodeHook_AssetPolicyPostToolUseWouldBlock(t *testing.T) {
 	}
 }
 
+func TestEvaluateClaudeCodeHook_PostToolUseRuleFindingIsNotReportedAsEnforced(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolResponse:  map[string]interface{}{"stdout": "jailbreak ai"},
+	})
+
+	if resp.Action != "allow" || resp.RawAction != "block" || !resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want allow/block/true", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if decision, ok := resp.ClaudeCodeOutput["decision"]; ok && decision == "block" {
+		t.Fatalf("claude output = %+v, PostToolUse cannot undo an already-executed tool", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_PostToolBatchFindingStopsNextModelCall(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolBatch",
+		ToolCalls:     "jailbreak ai",
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want block/block/false", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if decision, ok := resp.ClaudeCodeOutput["decision"]; !ok || decision != "block" {
+		t.Fatalf("claude output = %+v, PostToolBatch must stop before the next model call", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_ConfigChangeEnforcementDependsOnSource(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
+	tests := []struct {
+		name           string
+		source         string
+		wantAction     string
+		wantWouldBlock bool
+	}{
+		{name: "policy settings cannot be blocked", source: "policy_settings", wantAction: "allow", wantWouldBlock: true},
+		{name: "user settings remain blockable", source: "user_settings", wantAction: "block", wantWouldBlock: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+				HookEventName: "ConfigChange",
+				Source:        tc.source,
+				Message:       "jailbreak ai",
+			})
+			if resp.Action != tc.wantAction || resp.RawAction != "block" || resp.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("action=%q raw=%q would_block=%v, want %s/block/%v", resp.Action, resp.RawAction, resp.WouldBlock, tc.wantAction, tc.wantWouldBlock)
+			}
+		})
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {

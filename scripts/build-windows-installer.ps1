@@ -30,10 +30,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.12.10"
+$PythonVersion = "3.14.6"
+$PythonTargetVersion = "3.14"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3"
+$PythonEmbedSha256 = "DF901E84A896FF1EE720AD03377E0C8D8C2244FDA79808AEEAFF6316DF1CB75C"
+# Force the runtime owner to review the pinned binary at least quarterly. A
+# release after this deadline must deliberately move the deadline (and normally
+# the version/hash) after checking Python's current security release line.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-09-10T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'
@@ -41,6 +46,9 @@ $CosignVersion = '2.6.2'
 $CosignName = 'cosign-windows-amd64.exe'
 $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignName"
 $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
+$WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
+$WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
+$WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -123,6 +131,35 @@ function Get-GitSourceCommit([string]$RepositoryRoot) {
     return $commit
 }
 
+function Get-GitSourceEpoch([string]$RepositoryRoot, [string]$Commit) {
+    $git = (Get-Command 'git.exe' -ErrorAction Stop).Source
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $git
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @('-C', $RepositoryRoot, 'show', '-s', '--format=%ct', $Commit)) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Could not resolve the installer source timestamp: $($stderr.Trim())"
+        }
+    } finally {
+        $process.Dispose()
+    }
+    $epoch = $stdout.Trim()
+    if ($epoch -notmatch '^\d{9,}$') {
+        throw "Git returned an invalid installer source timestamp: $epoch"
+    }
+    return $epoch
+}
+
 function Copy-RequiredFile([string]$Source, [string]$Destination) {
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
         throw "Missing required file: $Source"
@@ -137,24 +174,131 @@ function Copy-RequiredFile([string]$Source, [string]$Destination) {
 function Write-ZipFromDirectory(
     [string]$Source,
     [string]$Destination,
+    [string]$PythonExecutable,
+    [string]$Epoch,
+    [string]$VerificationRoot,
     [switch]$IncludeSourceDirectory
 ) {
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Force
+    foreach ($required in @($WindowsArtifactHelper, $PythonExecutable)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Deterministic ZIP dependency is missing: $required"
+        }
     }
-    $items = @(Get-ChildItem -LiteralPath $Source -Force)
-    if (-not $items) {
-        throw "Cannot zip empty directory: $Source"
+    if ($Epoch -notmatch '^\d{9,}$') {
+        throw "Invalid deterministic ZIP epoch: $Epoch"
     }
+    [IO.Directory]::CreateDirectory($VerificationRoot) | Out-Null
+    $verification = Join-Path $VerificationRoot "$(Split-Path -Leaf $Destination).verify.zip"
+    $arguments = @(
+        $WindowsArtifactHelper, 'zip', '--source', $Source,
+        '--output', $Destination, '--epoch', $Epoch
+    )
     if ($IncludeSourceDirectory) {
-        Compress-Archive -LiteralPath $Source -DestinationPath $Destination -Force
-    } else {
-        Compress-Archive -LiteralPath ($items | ForEach-Object { $_.FullName }) -DestinationPath $Destination -Force
+        $arguments += '--include-root'
+    }
+    Invoke-CheckedProcess $PythonExecutable $arguments
+    $verificationArguments = @($arguments)
+    $outputIndex = [Array]::IndexOf($verificationArguments, '--output') + 1
+    $verificationArguments[$outputIndex] = $verification
+    try {
+        Invoke-CheckedProcess $PythonExecutable $verificationArguments
+        $primaryHash = Get-FileHashHex $Destination
+        $verificationHash = Get-FileHashHex $verification
+        if ($primaryHash -ne $verificationHash) {
+            throw "Deterministic ZIP self-check failed for $(Split-Path -Leaf $Destination): $primaryHash != $verificationHash"
+        }
+    } finally {
+        Remove-Item -LiteralPath $verification -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Build-VerifiedGoBinary(
+    [string]$Output,
+    [string]$Package,
+    [string]$LdFlags,
+    [string]$VerificationRoot,
+    [string]$ResourceComponent = ''
+) {
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Output)) | Out-Null
+    [IO.Directory]::CreateDirectory($VerificationRoot) | Out-Null
+    $verification = Join-Path $VerificationRoot "$(Split-Path -Leaf $Output).verify.exe"
+    $go = (Get-Command 'go.exe' -ErrorAction Stop).Source
+    $savedCgo = [Environment]::GetEnvironmentVariable('CGO_ENABLED')
+    try {
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', '0')
+        $hashes = @()
+        # Build the disposable comparison first and the artifact second. Hash
+        # each immediately so endpoint scanners cannot turn a successful,
+        # byte-identical build into a misleading comparison race.
+        foreach ($target in @($verification, $Output)) {
+            Invoke-CheckedProcess $go @(
+                'build', '-trimpath', '-buildvcs=false', '-ldflags', $LdFlags,
+                '-o', $target, $Package
+            )
+            if (-not [string]::IsNullOrWhiteSpace($ResourceComponent)) {
+                Set-WindowsExecutableResource $target $ResourceComponent
+            }
+            $hashes += Get-FileHashHex $target
+        }
+        $verificationHash = $hashes[0]
+        $primaryHash = $hashes[1]
+        if ($primaryHash -ne $verificationHash) {
+            throw "Reproducible Go build self-check failed for $(Split-Path -Leaf $Output): $primaryHash != $verificationHash"
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', $savedCgo)
+        Remove-Item -LiteralPath $verification -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Get-FileHashHex([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Set-WindowsExecutableResource(
+    [string]$Executable,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [switch]$VerifyOnly
+) {
+    $arguments = @(
+        'run', './internal/tools/windowsresources',
+        '-target', 'windows_amd64',
+        '-executable', $Executable,
+        '-component', $Component,
+        '-version', $Version,
+        '-icon', $resourceIcon
+    )
+    if ($VerifyOnly) { $arguments += '-verify-only' }
+    Invoke-CheckedProcess 'go' $arguments $repoRoot
+
+    # Exercise the same Win32 version API used by Explorer in addition to the
+    # tool's exact PE-resource parser.
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo([IO.Path]::GetFullPath($Executable))
+    if ($versionInfo.CompanyName -ne 'Cisco Systems, Inc.' -or
+        $versionInfo.ProductName -ne 'Cisco DefenseClaw' -or
+        $versionInfo.FileVersion -ne $Version -or
+        $versionInfo.ProductVersion -ne $Version) {
+        throw "Windows VERSIONINFO API returned unexpected metadata for ${Executable}: company='$($versionInfo.CompanyName)' product='$($versionInfo.ProductName)' file='$($versionInfo.FileVersion)' version='$($versionInfo.ProductVersion)'"
+    }
+}
+
+function Publish-SetupAcceptanceResourceInputs(
+    [string]$DestinationRoot,
+    [string]$VerificationRoot,
+    [string]$IconPath,
+    [string]$PackageVersion,
+    [string]$SourceCommit
+) {
+    $verifier = Join-Path $DestinationRoot 'DefenseClawWindowsResourceVerifier-x64.exe'
+    Build-VerifiedGoBinary $verifier './internal/tools/windowsresources' `
+        "-s -w -buildid=defenseclaw-windows-resource-verifier-$SourceCommit" $VerificationRoot
+    Copy-Item -LiteralPath $IconPath `
+        -Destination (Join-Path $DestinationRoot 'DefenseClawWindowsResourceIcon.png') -Force
+    [IO.File]::WriteAllText(
+        (Join-Path $DestinationRoot 'DefenseClawWindowsResourceVersion.txt'),
+        $PackageVersion + "`n",
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function Protect-SensitiveDirectory([string]$Path) {
@@ -190,9 +334,17 @@ function Get-TrustedTimestampUrl {
     return $uri.AbsoluteUri
 }
 
-function Sign-SetupIfConfigured([string]$SetupPath, [string]$BuildRoot) {
+function Set-FileSignaturesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
+    if (-not $Paths -or $Paths.Count -eq 0) {
+        throw 'Authenticode signing requires at least one file.'
+    }
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Authenticode signing input is missing: $path"
+        }
+    }
     if ($SkipSigning) {
-        Write-Warning "Skipping Authenticode signing by request; artifact is unsigned."
+        Write-Warning "Skipping Authenticode signing by request; product executables are unsigned."
         return $false
     }
     $cert64 = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")
@@ -225,18 +377,21 @@ function Sign-SetupIfConfigured([string]$SetupPath, [string]$BuildRoot) {
         if ($signer.Count -ne 1 -or -not $signer[0].HasPrivateKey) {
             throw 'The imported Authenticode certificate did not expose exactly one signing private key.'
         }
-        Invoke-CheckedProcess $signtool @(
-            'sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', (Get-TrustedTimestampUrl),
-            '/s', 'My', '/sha1', $thumbprint, $SetupPath
-        )
-        $signature = Get-AuthenticodeSignature -LiteralPath $SetupPath
-        $publisher = if ($signature.SignerCertificate) {
-            $signature.SignerCertificate.GetNameInfo(
-                [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
+        $timestampUrl = Get-TrustedTimestampUrl
+        foreach ($path in $Paths) {
+            Invoke-CheckedProcess $signtool @(
+                'sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', $timestampUrl,
+                '/s', 'My', '/sha1', $thumbprint, $path
             )
-        } else { '' }
-        if ($signature.Status -ne 'Valid' -or $publisher -ne 'Cisco Systems, Inc.') {
-            throw "Authenticode signature validation failed: status=$($signature.Status), publisher=$publisher"
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            $publisher = if ($signature.SignerCertificate) {
+                $signature.SignerCertificate.GetNameInfo(
+                    [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
+                )
+            } else { '' }
+            if ($signature.Status -ne 'Valid' -or $publisher -ne 'Cisco Systems, Inc.') {
+                throw "Authenticode signature validation failed for ${path}: status=$($signature.Status), publisher=$publisher"
+            }
         }
         return $true
     } finally {
@@ -253,9 +408,22 @@ if (-not $IsWindows) {
 if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
     throw "The native Windows installer build supports only Windows x64."
 }
+if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
+    throw "Pinned CPython $PythonVersion security review expired at $($PythonRuntimeReviewDeadlineUTC.ToString('o')); review the current Python 3.14 Windows release and update the pin."
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
+$resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
+foreach ($requiredSetupInput in @(
+    $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper,
+    $WindowsBinaryIdentityHelper
+)) {
+    if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
+        throw "Required Windows installer input is missing: $requiredSetupInput"
+    }
+}
+. $WindowsAuthenticodeHelper
 
 if ($DistributionFlavor -eq 'managed-enterprise') {
     throw @'
@@ -263,6 +431,7 @@ The public Windows installer builder cannot produce a managed-enterprise artifac
 '@
 }
 $sourceCommit = Get-GitSourceCommit $repoRoot
+$sourceDateEpoch = Get-GitSourceEpoch $repoRoot $sourceCommit
 
 $dist = Resolve-FullPath $DistRoot
 $out = Resolve-FullPath $OutRoot
@@ -275,10 +444,6 @@ if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
     throw "Invalid version for installer payload: $Version"
 }
-$willSign = -not $SkipSigning -and
-    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")) -and
-    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_PASSWORD"))
-
 $gatewayZip = Join-Path $dist "defenseclaw_${Version}_windows_amd64.zip"
 $wheel = Join-Path $dist "defenseclaw-$Version-py3-none-any.whl"
 $upgradeManifest = Join-Path $dist 'upgrade-manifest.json'
@@ -318,8 +483,46 @@ if ([string]$upgradePolicy.release_version -ne $Version -or
 $build = Join-Path $state "build"
 Remove-SafeTree $build $state
 [IO.Directory]::CreateDirectory($build) | Out-Null
+$reproducibilityRoot = Join-Path $build 'reproducibility-checks'
+[IO.Directory]::CreateDirectory($reproducibilityRoot) | Out-Null
 $payload = Join-Path $build "payload"
 [IO.Directory]::CreateDirectory($payload) | Out-Null
+
+# yara-python's last published Windows wheel targets CPython 3.13. Build the
+# repository-owned, pure-Python MCP Scanner compatibility adapter twice from
+# clean copies. SOURCE_DATE_EPOCH plus byte-for-byte equality makes a
+# non-reproducible adapter wheel a hard release failure. Runtime dependencies
+# still enter site-packages exclusively as hash-verified binary wheels.
+$yaraCompatSource = Join-Path $repoRoot 'packages\yara-python-compat'
+if (-not (Test-Path -LiteralPath (Join-Path $yaraCompatSource 'src\yara\__init__.py') -PathType Leaf)) {
+    throw 'Windows Python 3.14 YARA compatibility source is missing.'
+}
+$yaraCompatHashes = @()
+$yaraCompatWheels = @()
+$savedSourceDateEpoch = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH')
+try {
+    [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $sourceDateEpoch)
+    foreach ($attempt in @('a', 'b')) {
+        $sourceCopy = Join-Path $build "yara-python-compat-source-$attempt"
+        $wheelRoot = Join-Path $build "yara-python-compat-wheel-$attempt"
+        Copy-Item -LiteralPath $yaraCompatSource -Destination $sourceCopy -Recurse -Force
+        [IO.Directory]::CreateDirectory($wheelRoot) | Out-Null
+        Invoke-CheckedProcess 'uv' @('build', '--wheel', $sourceCopy, '--out-dir', $wheelRoot)
+        $builtWheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter 'yara_python-4.5.4.post1-py3-none-any.whl' -File)
+        if ($builtWheels.Count -ne 1) {
+            throw "YARA compatibility build $attempt did not produce exactly one expected wheel."
+        }
+        $yaraCompatWheels += $builtWheels[0].FullName
+        $yaraCompatHashes += Get-FileHashHex $builtWheels[0].FullName
+    }
+} finally {
+    [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $savedSourceDateEpoch)
+}
+if ($yaraCompatHashes[0] -ne $yaraCompatHashes[1]) {
+    throw 'Windows Python 3.14 YARA compatibility wheel is not reproducible.'
+}
+$yaraCompatWheel = $yaraCompatWheels[0]
+$yaraCompatSha256 = $yaraCompatHashes[0]
 
 $downloadDir = Join-Path $state "downloads"
 [IO.Directory]::CreateDirectory($downloadDir) | Out-Null
@@ -349,15 +552,27 @@ $requirements = Join-Path $build "requirements-release.txt"
 Invoke-CheckedProcess "uv" @(
     "export", "--frozen", "--no-dev", "--no-emit-project", "--no-header",
     "--no-emit-package", "win-unicode-console",
+    "--no-emit-package", "yara-python",
     "--format", "requirements.txt", "--output-file", $requirements
 )
+
+$yaraCompatRequirements = Join-Path $build 'requirements-yara-compat.txt'
+$yaraCompatUri = ([Uri]$yaraCompatWheel).AbsoluteUri
+"yara-python @ $yaraCompatUri --hash=sha256:$yaraCompatSha256`r`n" |
+    Set-Content -LiteralPath $yaraCompatRequirements -Encoding ascii -NoNewline
 
 $sitePackages = Join-Path $build "site-packages"
 [IO.Directory]::CreateDirectory($sitePackages) | Out-Null
 Invoke-CheckedProcess "uv" @(
     "pip", "sync", "--target", $sitePackages,
-    "--python-version", "3.12", "--python-platform", "windows",
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
     "--only-binary", ":all:", "--require-hashes", $requirements
+)
+Invoke-CheckedProcess "uv" @(
+    "pip", "install", "--target", $sitePackages,
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
+    "--only-binary", ":all:", "--require-hashes", "--no-deps",
+    "--requirements", $yaraCompatRequirements
 )
 $winUnicodeExtract = Join-Path $build 'win-unicode-console-source'
 $sourceArchive = [IO.Compression.ZipFile]::OpenRead($winUnicodeSource)
@@ -382,7 +597,7 @@ foreach ($name in @('win_unicode_console', 'win_unicode_console.egg-info')) {
 }
 Invoke-CheckedProcess "uv" @(
     "pip", "install", "--target", $sitePackages,
-    "--python-version", "3.12", "--python-platform", "windows",
+    "--python-version", $PythonTargetVersion, "--python-platform", "windows",
     "--only-binary", ":all:", "--no-deps", "--strict", $wheel
 )
 
@@ -393,6 +608,14 @@ if ($pth.Count -ne 1) { throw 'Pinned CPython runtime did not contain exactly on
 $stdlibZip = [IO.Path]::GetFileNameWithoutExtension($pth[0].Name) + '.zip'
 "$stdlibZip`r`n.`r`nLib\site-packages`r`nimport site`r`n" |
     Set-Content -LiteralPath $pth[0].FullName -Encoding ascii -NoNewline
+$validationPython = Join-Path $validationRuntime 'python.exe'
+# uv targets can inherit bytecode from a shared cache and PEP 610 file://
+# origins for locally supplied wheels. Both encode host-specific absolute
+# paths. Remove those optional artifacts and repair RECORD before validating
+# or archiving the runtime; exact input hashes remain in manifest/provenance.
+Invoke-CheckedProcess $validationPython @(
+    '-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages
+)
 $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 [IO.Directory]::CreateDirectory($validationSite) | Out-Null
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
@@ -418,25 +641,124 @@ for dist in metadata.distributions():
             problems.append(f'{dist.metadata.get("Name")}: {requirement.name} {version} violates {requirement.specifier}')
 if problems:
     raise SystemExit('\n'.join(problems))
-for module in ('defenseclaw', 'skill_scanner', 'mcpscanner'):
+for module in ('defenseclaw', 'skill_scanner', 'mcpscanner', 'yara'):
     __import__(module)
+import asyncio
+import yara
+from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
+if not getattr(yara, '__defenseclaw_yarax_compat__', False):
+    raise SystemExit('Windows CPython 3.14 payload did not select the YARA-X compatibility adapter')
+findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
+if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
+    raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
 print(f'validated {len(installed)} embedded distributions')
 '@
-Invoke-CheckedProcess (Join-Path $validationRuntime 'python.exe') @('-I', '-c', $dependencyCheck)
+Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck)
 
 $siteZip = Join-Path $payload "site-packages.zip"
-Write-ZipFromDirectory $sitePackages $siteZip
+Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot
 
 $launcher = Join-Path $payload "defenseclaw-launcher.exe"
-Invoke-CheckedProcess "go" @(
-    "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
-)
+Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot 'launcher'
+$startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
+Build-VerifiedGoBinary $startupLauncher './cmd/defenseclaw-startup' "-s -w -buildid=defenseclaw-startup-$sourceCommit -H=windowsgui" $reproducibilityRoot 'startup'
 
-Copy-RequiredFile $gatewayZip (Join-Path $payload (Split-Path -Leaf $gatewayZip))
+$gatewayPayloadDir = Join-Path $build 'gateway-payload'
+Remove-SafeTree $gatewayPayloadDir $build
+[IO.Directory]::CreateDirectory($gatewayPayloadDir) | Out-Null
+Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
+$gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
+$hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
+Set-WindowsExecutableResource $gatewayBinary 'gateway' -VerifyOnly
+Set-WindowsExecutableResource $hookBinary 'hook' -VerifyOnly
+. $WindowsBinaryIdentityHelper
+Assert-DefenseClawBinaryIdentity `
+    -Path $gatewayBinary -ExpectedName 'defenseclaw-gateway' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
+Assert-DefenseClawBinaryIdentity `
+    -Path $hookBinary -ExpectedName 'defenseclaw-hook' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
+$payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
+foreach ($resourceContract in @(
+    [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
+    [pscustomobject]@{ Path = $startupLauncher; Component = 'startup' },
+    [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
+    [pscustomobject]@{ Path = $hookBinary; Component = 'hook' }
+)) {
+    Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
+}
+
+$payloadAuthenticodeFiles = [ordered]@{}
+function Add-PayloadAuthenticodeEvidence(
+    [string]$InstalledPath,
+    [string]$SourcePath,
+    [string]$SbomFileName,
+    [switch]$DefenseClawProduct,
+    [switch]$DigestOnlyUpstream
+) {
+    $normalizedInstalledPath = $InstalledPath.Replace('\', '/')
+    if ($payloadAuthenticodeFiles.Contains($normalizedInstalledPath)) {
+        throw "Duplicate installed Authenticode identity: $normalizedInstalledPath"
+    }
+    $arguments = @{
+        Path = $SourcePath
+        InstalledPath = $normalizedInstalledPath
+        SbomFileName = $SbomFileName.Replace('\', '/')
+    }
+    if ($DefenseClawProduct) {
+        $arguments.Policy = 'defenseclaw-product-publisher'
+        $arguments.ExpectedStatus = if ($payloadSigned) { 'Valid' } else { 'NotSigned' }
+        $arguments.ExpectedPublisher = if ($payloadSigned) { 'Cisco Systems, Inc.' } else { '' }
+        $arguments.TimestampRequired = [bool]$payloadSigned
+    } elseif ($DigestOnlyUpstream) {
+        $arguments.Policy = 'digest-only-upstream'
+        $arguments.ExpectedStatus = 'NotSigned'
+        $arguments.ExpectedPublisher = ''
+        $arguments.TimestampRequired = $false
+    }
+    $payloadAuthenticodeFiles[$normalizedInstalledPath] = Get-DefenseClawAuthenticodeEvidence @arguments
+}
+
+foreach ($mapping in @(
+    [pscustomobject]@{ Installed = 'bin/defenseclaw.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/skill-scanner.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/mcp-scanner.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-observability.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-startup.exe'; Source = $startupLauncher; Sbom = './payload/defenseclaw-startup.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-gateway.exe'; Source = $gatewayBinary; Sbom = './expanded/gateway/defenseclaw.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' }
+)) {
+    Add-PayloadAuthenticodeEvidence $mapping.Installed $mapping.Source $mapping.Sbom -DefenseClawProduct
+}
+
+# Inventory every third-party PE that Setup installs. Pinned archive digests
+# remain the supply-chain root; this evidence also binds the observed Windows
+# publisher/certificate/timestamp state to the manifest and final SBOM.
+foreach ($file in Get-ChildItem -LiteralPath $validationRuntime -File -Recurse | Sort-Object FullName) {
+    if (Test-PathWithin $file.FullName $validationSite) { continue }
+    if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
+    $relative = [IO.Path]::GetRelativePath($validationRuntime, $file.FullName).Replace('\', '/')
+    Add-PayloadAuthenticodeEvidence "runtime/python/$relative" $file.FullName "./expanded/python/$relative"
+}
+foreach ($file in Get-ChildItem -LiteralPath $sitePackages -File -Recurse | Sort-Object FullName) {
+    if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
+    $relative = [IO.Path]::GetRelativePath($sitePackages, $file.FullName).Replace('\', '/')
+    Add-PayloadAuthenticodeEvidence `
+        "runtime/python/Lib/site-packages/$relative" `
+        $file.FullName `
+        "./expanded/site-packages/$relative"
+}
+# The exact pinned Cosign 2.6.2 Windows release is not Authenticode-signed.
+Add-PayloadAuthenticodeEvidence `
+    'runtime/tools/cosign.exe' $cosignVerifier './payload/cosign.exe' -DigestOnlyUpstream
+$embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
+Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip $validationPython $sourceDateEpoch $reproducibilityRoot
+
 Copy-RequiredFile $wheel (Join-Path $payload (Split-Path -Leaf $wheel))
 Copy-RequiredFile $pythonZip (Join-Path $payload $PythonEmbedName)
 Copy-RequiredFile $cosignVerifier (Join-Path $payload 'cosign.exe')
 Copy-RequiredFile $requirements (Join-Path $payload "requirements-release.txt")
+Copy-RequiredFile $yaraCompatWheel (Join-Path $payload (Split-Path -Leaf $yaraCompatWheel))
 Copy-RequiredFile $upgradeManifest (Join-Path $payload 'upgrade-manifest.json')
 
 $files = [ordered]@{}
@@ -446,7 +768,7 @@ foreach ($file in Get-ChildItem -LiteralPath $payload -File | Sort-Object Name) 
 }
 
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     version = $Version
     source_commit = $sourceCommit
     distribution_flavor = $DistributionFlavor
@@ -454,16 +776,24 @@ $manifest = [ordered]@{
     gateway_archive = (Split-Path -Leaf $gatewayZip)
     wheel = (Split-Path -Leaf $wheel)
     python_embed = $PythonEmbedName
+    yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
     upgrade_manifest = 'upgrade-manifest.json'
     site_packages = "site-packages.zip"
     launcher = "defenseclaw-launcher.exe"
+    startup_launcher = "defenseclaw-startup.exe"
     cosign_verifier = 'cosign.exe'
-    unsigned = -not $willSign
+    unsigned = -not $payloadSigned
+    authenticode = [ordered]@{
+        schema_version = 1
+        files = $payloadAuthenticodeFiles
+    }
     toolchain = [ordered]@{
         go = (& go version)
         uv = (& uv --version)
         python_embed_url = $PythonEmbedUrl
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+        python_runtime_review_deadline_utc = $PythonRuntimeReviewDeadlineUTC.ToString('o')
+        yara_compat_sha256 = $yaraCompatSha256
         win_unicode_console_source_url = $WinUnicodeSourceUrl
         win_unicode_console_source_sha256 = $WinUnicodeSourceSha256.ToLowerInvariant()
         cosign_version = $CosignVersion
@@ -472,13 +802,13 @@ $manifest = [ordered]@{
     }
     files = $files
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $payload "manifest.json") -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $payload "manifest.json") -Encoding UTF8
 
 $embeddedPayload = Join-Path $repoRoot "cmd\defenseclaw-setup\payload\installer-payload.zip"
 # loadPayload deliberately extracts into a private parent and resolves the
 # manifest below a single payload/ directory. Preserve that root in the ZIP;
 # the other archives built above intentionally contain only their children.
-Write-ZipFromDirectory $payload $embeddedPayload -IncludeSourceDirectory
+Write-ZipFromDirectory $payload $embeddedPayload $validationPython $sourceDateEpoch $reproducibilityRoot -IncludeSourceDirectory
 $embeddedArchive = [IO.Compression.ZipFile]::OpenRead($embeddedPayload)
 try {
     $embeddedEntryNames = @($embeddedArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
@@ -490,48 +820,146 @@ try {
 }
 
 $setupPath = Join-Path $out "DefenseClawSetup-x64.exe"
-try {
-    Invoke-CheckedProcess "go" @(
-        "build", "-ldflags", "-s -w -H=windowsgui", "-o", $setupPath, "./cmd/defenseclaw-setup"
-    )
-} finally {
-    Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
-}
-
-$signed = Sign-SetupIfConfigured $setupPath $build
-
 $shaPath = "$setupPath.sha256"
-"$(Get-FileHashHex $setupPath)  $(Split-Path -Leaf $setupPath)" |
-    Set-Content -LiteralPath $shaPath -Encoding ascii
-
-$provenance = [ordered]@{
-    schema_version = 1
-    artifact = (Split-Path -Leaf $setupPath)
-    version = $Version
-    source_commit = $sourceCommit
-    distribution_flavor = $DistributionFlavor
-    built_at_utc = [DateTime]::UtcNow.ToString("o")
-    unsigned = -not $signed
-    inputs = [ordered]@{
-        gateway_archive = (Split-Path -Leaf $gatewayZip)
-        gateway_archive_sha256 = Get-FileHashHex $gatewayZip
-        wheel = (Split-Path -Leaf $wheel)
-        wheel_sha256 = Get-FileHashHex $wheel
-        python_embed = $PythonEmbedName
-        python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
-    }
-    toolchain = $manifest.toolchain
-}
 $provenancePath = Join-Path $out "DefenseClawSetup-x64.exe.provenance.json"
-$provenance | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
+$sbomPath = "$setupPath.sbom.json"
+$setupVerification = Join-Path $reproducibilityRoot 'DefenseClawSetup-x64.exe.manifest.verify.exe'
+try {
+    Build-VerifiedGoBinary $setupPath './cmd/defenseclaw-setup' "-s -w -buildid=defenseclaw-setup-$sourceCommit -H=windowsgui" $reproducibilityRoot
+    Copy-RequiredFile $setupPath $setupVerification
+    # Resource mutation is the last PE-writing step before Authenticode. Apply
+    # the deterministic manifest, icon, and VERSIONINFO contract to both
+    # byte-identical builds and compare the complete unsigned executables.
+    Set-WindowsExecutableResource $setupPath 'setup'
+    Set-WindowsExecutableResource $setupVerification 'setup'
+    $setupPreSignHash = Get-FileHashHex $setupPath
+    $setupVerificationHash = Get-FileHashHex $setupVerification
+    if ($setupPreSignHash -ne $setupVerificationHash) {
+        throw "Deterministic setup resource self-check failed: $setupPreSignHash != $setupVerificationHash"
+    }
+    Remove-Item -LiteralPath $setupVerification -Force
 
-$syft = Get-Command "syft" -ErrorAction SilentlyContinue
-if ($syft) {
-    Invoke-CheckedProcess $syft.Source @(
-        "scan", $setupPath, "-o", "spdx-json=$setupPath.sbom.json"
+    # Signing order is security-sensitive: all inner executable bytes and the
+    # deterministic embedded payload are finalized before the outer Setup EXE
+    # is signed. The merged SBOM is generated only after this signature, so
+    # its top-level checksum names the exact artifact accepted by lifecycle CI.
+    $setupSigned = Set-FileSignaturesIfConfigured @($setupPath) $build
+    Set-WindowsExecutableResource $setupPath 'setup' -VerifyOnly
+    $signed = $setupSigned -and $payloadSigned
+
+    $setupSha256 = Get-FileHashHex $setupPath
+    "$setupSha256  $(Split-Path -Leaf $setupPath)" |
+        Set-Content -LiteralPath $shaPath -Encoding ascii
+
+    $goInventoryPath = Join-Path $build 'go-component-inventory.json'
+    $goExecutable = (Get-Command 'go.exe' -ErrorAction Stop).Source
+    Invoke-CheckedProcess $validationPython @(
+        '-I', $WindowsArtifactHelper, 'go-inventory',
+        '--go', $goExecutable,
+        '--output', $goInventoryPath,
+        '--component', "setup=$setupPath",
+        '--component', "gateway=$gatewayBinary",
+        '--component', "hook=$hookBinary",
+        '--component', "launcher=$launcher",
+        '--component', "startup-launcher=$startupLauncher",
+        '--component', "cosign=$(Join-Path $payload 'cosign.exe')"
     )
-} else {
-    Write-Warning "syft not found; setup SBOM generation skipped for local build."
+
+    $reproducibleBuiltAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$sourceDateEpoch).UtcDateTime.ToString('o')
+    $releaseAuthenticodeFiles = [ordered]@{
+        'DefenseClawSetup-x64.exe' = Get-DefenseClawAuthenticodeEvidence `
+            -Path $setupPath `
+            -InstalledPath 'DefenseClawSetup-x64.exe' `
+            -SbomFileName './DefenseClawSetup-x64.exe' `
+            -Policy 'defenseclaw-product-publisher' `
+            -ExpectedStatus $(if ($setupSigned) { 'Valid' } else { 'NotSigned' }) `
+            -ExpectedPublisher $(if ($setupSigned) { 'Cisco Systems, Inc.' } else { '' }) `
+            -TimestampRequired ([bool]$setupSigned)
+    }
+    foreach ($entry in $payloadAuthenticodeFiles.GetEnumerator()) {
+        $releaseAuthenticodeFiles[$entry.Key] = $entry.Value
+    }
+    $releaseAuthenticode = [ordered]@{
+        schema_version = 1
+        files = $releaseAuthenticodeFiles
+    }
+    $authenticodeInventoryPath = Join-Path $build 'authenticode-inventory.json'
+    $releaseAuthenticode | ConvertTo-Json -Depth 16 |
+        Set-Content -LiteralPath $authenticodeInventoryPath -Encoding UTF8
+
+    $provenance = [ordered]@{
+        schema_version = 1
+        artifact = (Split-Path -Leaf $setupPath)
+        artifact_sha256 = $setupSha256
+        version = $Version
+        source_commit = $sourceCommit
+        distribution_flavor = $DistributionFlavor
+        built_at_utc = if ($signed) { [DateTime]::UtcNow.ToString('o') } else { $reproducibleBuiltAt }
+        unsigned = -not $signed
+        authenticode = $releaseAuthenticode
+        inputs = [ordered]@{
+            gateway_archive = (Split-Path -Leaf $gatewayZip)
+            gateway_archive_sha256 = Get-FileHashHex $gatewayZip
+            embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
+            embedded_payload_sha256 = Get-FileHashHex $embeddedPayload
+            product_executables_authenticode_signed = $payloadSigned
+            wheel = (Split-Path -Leaf $wheel)
+            wheel_sha256 = Get-FileHashHex $wheel
+            python_embed = $PythonEmbedName
+            python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+            site_packages_sha256 = Get-FileHashHex $siteZip
+            yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
+            yara_compat_wheel_sha256 = $yaraCompatSha256
+            cosign_sha256 = Get-FileHashHex (Join-Path $payload 'cosign.exe')
+            payload_manifest_sha256 = Get-FileHashHex (Join-Path $payload 'manifest.json')
+            go_component_inventory_sha256 = Get-FileHashHex $goInventoryPath
+            payload_files = $files
+            windows_resource_policy = 'internal/windowsresources'
+            windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
+            windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
+        }
+        toolchain = $manifest.toolchain
+    }
+    $provenance | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
+
+    Invoke-CheckedProcess $validationPython @(
+        $WindowsArtifactHelper, 'sbom',
+        '--setup', $setupPath,
+        '--payload-root', $payload,
+        '--embedded-payload', $embeddedPayload,
+        '--output', $sbomPath,
+        '--version', $Version,
+        '--source-commit', $sourceCommit,
+        '--source-epoch', $sourceDateEpoch,
+        '--python-version', $PythonVersion,
+        '--cosign-version', $CosignVersion,
+        '--go-inventory', $goInventoryPath,
+        '--authenticode-inventory', $authenticodeInventoryPath
+    )
+    $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sbom.spdxVersion -ne 'SPDX-2.3' -or
+        [string]$sbom.dataLicense -ne 'CC0-1.0' -or
+        @($sbom.documentDescribes).Count -ne 1) {
+        throw 'Merged Windows installer SBOM failed the release validity gate.'
+    }
+    Publish-SetupAcceptanceResourceInputs $out `
+        (Join-Path $reproducibilityRoot 'resource-verifier') `
+        $resourceIcon $Version $sourceCommit
+} catch {
+    # Never leave a setup-named executable or incomplete sidecars in an
+    # otherwise valid-looking output directory.
+    foreach ($incomplete in @(
+        $setupPath, $shaPath, $provenancePath, $sbomPath,
+        (Join-Path $out 'DefenseClawWindowsResourceVerifier-x64.exe'),
+        (Join-Path $out 'DefenseClawWindowsResourceIcon.png'),
+        (Join-Path $out 'DefenseClawWindowsResourceVersion.txt')
+    )) {
+        Remove-Item -LiteralPath $incomplete -Force -ErrorAction SilentlyContinue
+    }
+    throw
+} finally {
+    Remove-Item -LiteralPath $setupVerification -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
 }
 
 $artifact = Get-Item -LiteralPath $setupPath

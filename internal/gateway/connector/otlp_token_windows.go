@@ -18,7 +18,15 @@
 
 package connector
 
-import "os"
+import (
+	"os"
+)
+
+// otlpValidateDirectory enforces the native Windows owner, DACL, and
+// reparse-point contract for every directory controlling a token path.
+func otlpValidateDirectory(path string) error {
+	return hookAPIValidateDirectory(path)
+}
 
 // otlpOpenNoFollow returns 0 on Windows. O_NOFOLLOW is a Unix flag and is not
 // available here. (Windows DOES traverse reparse points/symlinks during

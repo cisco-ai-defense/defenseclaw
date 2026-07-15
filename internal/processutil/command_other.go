@@ -21,3 +21,7 @@ package processutil
 import "os/exec"
 
 func configureCapturedCommand(_ *exec.Cmd) {}
+
+func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
+	return cmd.CombinedOutput()
+}

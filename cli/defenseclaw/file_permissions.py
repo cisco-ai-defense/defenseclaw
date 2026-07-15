@@ -22,6 +22,7 @@ import contextlib
 import os
 import stat
 import tempfile
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -30,6 +31,94 @@ from typing import TextIO
 
 class UnsafePathError(OSError):
     """Raised when a sensitive write would traverse a reparse point."""
+
+
+def _windows_extended_path(path: str | os.PathLike[str]) -> str:
+    """Return an absolute Win32 path that is not limited by ``MAX_PATH``."""
+
+    value = os.path.abspath(os.fspath(path))
+    if value.startswith(("\\\\?\\", "\\\\.\\")):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def _sync_directory(path: str | os.PathLike[str]) -> None:
+    """Persist a directory-entry mutation where the platform supports it."""
+
+    if os.name == "nt":
+        # Windows replacements use MOVEFILE_WRITE_THROUGH below. Opening a
+        # directory for FlushFileBuffers is filesystem/privilege dependent and
+        # adds no stronger guarantee than that documented primitive.
+        return
+    fd = os.open(os.fspath(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    """Atomically replace *target* and durably commit the directory entry.
+
+    ``os.replace`` provides name atomicity but does not request write-through
+    on Windows. Installer migrations use the resulting file as a recovery
+    boundary, so native Windows uses ``MoveFileExW`` with both
+    ``MOVEFILE_REPLACE_EXISTING`` and ``MOVEFILE_WRITE_THROUGH``. POSIX uses a
+    sibling rename followed by an fsync of the containing directory.
+    """
+
+    source_path = os.path.abspath(os.fspath(source))
+    target_path = os.path.abspath(os.fspath(target))
+    if os.path.normcase(os.path.dirname(source_path)) != os.path.normcase(os.path.dirname(target_path)):
+        raise OSError("durable atomic replacement requires sibling paths")
+    if os.name != "nt":
+        os.replace(source_path, target_path)
+        _sync_directory(os.path.dirname(target_path) or os.curdir)
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    movefile_replace_existing = 0x00000001
+    movefile_write_through = 0x00000008
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    move_file_ex = kernel32.MoveFileExW
+    move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    move_file_ex.restype = wintypes.BOOL
+    if not move_file_ex(
+        _windows_extended_path(source_path),
+        _windows_extended_path(target_path),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def delete_file_durable(path: str | os.PathLike[str]) -> None:
+    """Durably remove one file without exposing a partially deleted name.
+
+    On Windows, first write-through rename the file to a unique sibling. A
+    crash can therefore leave only an inert tombstone, never the live legacy
+    filename that a downgraded process would consume again. The tombstone is
+    then unlinked immediately. We deliberately do not glob-delete tombstones
+    on a later run: without a durable ownership record, a matching filename is
+    not sufficient proof that DefenseClaw owns an artifact. POSIX unlinks and
+    fsyncs the parent directory.
+    """
+
+    target = os.path.abspath(os.fspath(path))
+    parent = os.path.dirname(target) or os.curdir
+    if os.name != "nt":
+        os.unlink(target)
+        _sync_directory(parent)
+        return
+    tombstone = os.path.join(parent, f".{os.path.basename(target)}.deleted.{uuid.uuid4().hex}")
+    replace_file_durable(target, tombstone)
+    try:
+        os.unlink(tombstone)
+    except OSError as exc:
+        raise OSError(f"removed live path but could not delete durable tombstone {tombstone}: {exc}") from exc
 
 
 def reject_reparse_path(path: str | os.PathLike[str]) -> None:
@@ -146,7 +235,7 @@ def atomic_write_text_secure(
             write(stream)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(tmp, path)
+        replace_file_durable(tmp, path)
         tmp = ""
     finally:
         if fd != -1:
@@ -416,7 +505,7 @@ def atomic_write_private(
                 # copied onto the new protected staging file.
                 if windows_acl_write_error(target) is None and _windows_acl_has_required_access(target):
                     copy_windows_dacl(target, tmp)
-            os.replace(tmp, target)
+            replace_file_durable(tmp, target)
             tmp = ""
             if os.name == "nt":
                 _verify_or_repair_windows_private_target(target)
