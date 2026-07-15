@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+type expiredDeadlineContext struct{ context.Context }
+
+func (expiredDeadlineContext) Deadline() (time.Time, bool) {
+	return time.Now().Add(-time.Second), true
+}
+
 func TestGatewayStartLockSerializesConcurrentHookProcesses(t *testing.T) {
 	const callers = 8
 	var active atomic.Int32
@@ -78,5 +84,19 @@ func TestGatewayStartLockHonorsWaitingHookDeadline(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGatewayStartLockReturnsDeadlineWhenTimerPublicationLags(t *testing.T) {
+	called := false
+	err := WithGatewayStartLock(expiredDeadlineContext{Context: context.Background()}, func() error {
+		called = true
+		return nil
+	})
+	if called {
+		t.Fatal("expired deadline entered gateway start critical section")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired deadline error = %v, want deadline exceeded", err)
 	}
 }

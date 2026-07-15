@@ -1045,12 +1045,25 @@ try {
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and
         $harnessText -match 'HomeRoot must be contained by StateRoot') `
         'connector contract keeps the installed runtime and agent homes in one disposable ownership root'
+    $contractInstall = $contractFunction.IndexOf(
+        'Invoke-WindowsSetupStandardUserProcess $setup',
+        [StringComparison]::Ordinal
+    )
+    $codexHomeCapture = $contractFunction.IndexOf(
+        '$env:CODEX_HOME = $codexHome',
+        [StringComparison]::Ordinal
+    )
+    $claudeHomeCapture = $contractFunction.IndexOf(
+        '$env:CLAUDE_CONFIG_DIR = $claudeHome',
+        [StringComparison]::Ordinal
+    )
     Assert-True ($nativeHarnessText -match 'Join-Path \$contractRoot ''codex-home''' -and
         $nativeHarnessText -match 'Join-Path \$contractRoot ''claude-home''' -and
         $nativeHarnessText -match 'Assert-WindowsNativePathsDisjoint @\(\$contractHome, \$codexHome, \$claudeHome\)' -and
-        $nativeHarnessText -match '\$env:CODEX_HOME = \$codexHome' -and
-        $nativeHarnessText -match '\$env:CLAUDE_CONFIG_DIR = \$claudeHome') `
-        'connector contract uses pairwise disjoint OS, Codex, and Claude homes'
+        $contractInstall -ge 0 -and
+        $codexHomeCapture -ge 0 -and $codexHomeCapture -lt $contractInstall -and
+        $claudeHomeCapture -ge 0 -and $claudeHomeCapture -lt $contractInstall) `
+        'connector contract captures pairwise disjoint Codex and Claude homes during native Setup'
     Assert-True ($nativeHarnessText -match '\$originalEnvironment = @\{\}' -and
         $nativeHarnessText -match 'GetEnvironmentVariables\(''Process''\)' -and
         $nativeHarnessText -match 'SetEnvironmentVariable\(\s*\[string\]\$name,\s*\[string\]\$originalEnvironment\[\$name\],\s*''Process''') `

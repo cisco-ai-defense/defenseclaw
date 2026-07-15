@@ -78,3 +78,30 @@ func TestLauncherEnvRehydratesManagedConnectorHomes(t *testing.T) {
 		t.Fatal("launcher environment construction mutated the parent process")
 	}
 }
+
+func TestLauncherEnvPreservesAuthoritativeBasePath(t *testing.T) {
+	t.Setenv("PATH", "ambient-path")
+	separator := string(os.PathListSeparator)
+	binDir := "managed-bin"
+	pythonDir := "managed-python"
+	env := launcherEnvFromBase(
+		binDir,
+		pythonDir,
+		"install-root",
+		[]string{"PATH=authoritative-path"},
+		true,
+	)
+	want := "PATH=" + binDir + separator + pythonDir + separator + "authoritative-path"
+	if len(env) != 1 || env[0] != want {
+		t.Fatalf("launcher PATH = %v, want %q", env, want)
+	}
+	if strings.Contains(env[0], "ambient-path") {
+		t.Fatalf("launcher PATH retained ambient value: %q", env[0])
+	}
+
+	env = launcherEnvFromBase(binDir, pythonDir, "install-root", nil, true)
+	want = "PATH=" + binDir + separator + pythonDir
+	if len(env) != 1 || env[0] != want {
+		t.Fatalf("launcher PATH fallback = %v, want %q", env, want)
+	}
+}

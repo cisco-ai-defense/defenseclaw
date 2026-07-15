@@ -232,3 +232,26 @@ func TestWindowsWatchdogWaitConfirmsOriginalProcessExit(t *testing.T) {
 		t.Fatal("terminated process with a retained handle was reported alive")
 	}
 }
+
+func TestWindowsWatchdogExitCodeStillActiveIsNotAlive(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT"
+	if os.Getenv(helperEnv) == "1" {
+		os.Exit(259)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsWatchdogExitCodeStillActiveIsNotAlive$")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	if !watchdogWaitForExit(cmd.Process, watchdogPIDInfo{}, 5*time.Second) {
+		t.Fatal("exit-code helper did not stop")
+	}
+	if watchdogProcessAlive(cmd.Process.Pid, cmd.Process) {
+		t.Fatal("process that exited with STILL_ACTIVE was reported alive")
+	}
+}

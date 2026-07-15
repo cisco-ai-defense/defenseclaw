@@ -88,15 +88,19 @@ func launcherArgs(executable, workingDirectory string, userArgs []string) ([]str
 }
 
 func launcherEnv(binDir, pythonDir, installRoot string, state nativeinstallstate.State, packaged bool) []string {
-	pathValue := binDir + string(os.PathListSeparator) + pythonDir
 	base := os.Environ()
 	if packaged {
 		base = state.Environment(base)
 	}
+	return launcherEnvFromBase(binDir, pythonDir, installRoot, base, packaged)
+}
+
+func launcherEnvFromBase(binDir, pythonDir, installRoot string, base []string, packaged bool) []string {
+	pathValue := binDir + string(os.PathListSeparator) + pythonDir
 	env := make([]string, 0, len(base)+3)
 	sawPath := false
 	for _, entry := range base {
-		name, _, ok := strings.Cut(entry, "=")
+		name, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
@@ -105,7 +109,10 @@ func launcherEnv(binDir, pythonDir, installRoot string, state nativeinstallstate
 			continue
 		case "PATH":
 			sawPath = true
-			env = append(env, "PATH="+pathValue+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if value != "" {
+				value = string(os.PathListSeparator) + value
+			}
+			env = append(env, "PATH="+pathValue+value)
 		default:
 			env = append(env, entry)
 		}

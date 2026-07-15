@@ -2933,7 +2933,29 @@ function Invoke-Contract {
     $fixtureSearchPath = ''
     $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
         $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
+    $contractRoot = [IO.Path]::GetFullPath($root).TrimEnd('\')
+    $contractHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'home')).TrimEnd('\')
+    $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
+    $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
+    $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
+    foreach ($path in @(
+        $contractHome,
+        (Join-Path $contractHome 'AppData\Roaming'),
+        (Join-Path $contractHome 'AppData\Local'),
+        (Join-Path $contractRoot 'temp'),
+        $codexHome,
+        $claudeHome
+    )) {
+        [IO.Directory]::CreateDirectory($path) | Out-Null
+        Protect-TestDirectory $path
+    }
+    $defaultCodexHome = Join-Path $contractHome '.codex'
+    $defaultClaudeHome = Join-Path $contractHome '.claude'
     try {
+        # Setup records the trusted connector homes in installed state. The
+        # launcher intentionally rejects later ambient overrides.
+        $env:CODEX_HOME = $codexHome
+        $env:CLAUDE_CONFIG_DIR = $claudeHome
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
             'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
@@ -2964,24 +2986,6 @@ function Invoke-Contract {
         }
         Assert-ManagedDistributionIntegrity (Join-Path $managedPython 'python.exe') $managedPython
 
-        $contractRoot = [IO.Path]::GetFullPath($root).TrimEnd('\')
-        $contractHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'home')).TrimEnd('\')
-        $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
-        $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
-        $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
-        foreach ($path in @(
-            $contractHome,
-            (Join-Path $contractHome 'AppData\Roaming'),
-            (Join-Path $contractHome 'AppData\Local'),
-            (Join-Path $contractRoot 'temp'),
-            $codexHome,
-            $claudeHome
-        )) {
-            [IO.Directory]::CreateDirectory($path) | Out-Null
-            Protect-TestDirectory $path
-        }
-        $defaultCodexHome = Join-Path $contractHome '.codex'
-        $defaultClaudeHome = Join-Path $contractHome '.claude'
         if ((Test-Path -LiteralPath $defaultCodexHome) -or
             (Test-Path -LiteralPath $defaultClaudeHome)) {
             throw 'contract installation touched a default connector home before connector setup'
@@ -2993,8 +2997,6 @@ function Invoke-Contract {
         $env:LOCALAPPDATA = Join-Path $contractHome 'AppData\Local'
         $env:TEMP = Join-Path $contractRoot 'temp'
         $env:TMP = $env:TEMP
-        $env:CODEX_HOME = $codexHome
-        $env:CLAUDE_CONFIG_DIR = $claudeHome
         $fixturePrefix = if ([string]::IsNullOrWhiteSpace($fixtureSearchPath)) {
             ''
         } else {

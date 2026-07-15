@@ -87,17 +87,20 @@ func watchdogCreationFlagsForJob(queryErr error, limitFlags uint32) uint32 {
 }
 
 func watchdogProcessAlive(pid int, _ *os.Process) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := windows.OpenProcess(
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
+		false,
+		uint32(pid),
+	)
 	if err != nil {
 		return false
 	}
 	defer windows.CloseHandle(h) //nolint:errcheck -- read-only liveness handle.
-	var exitCode uint32
-	if err := windows.GetExitCodeProcess(h, &exitCode); err != nil {
+	result, err := windows.WaitForSingleObject(h, 0)
+	if err != nil {
 		return false
 	}
-	const stillActive = 259
-	return exitCode == stillActive
+	return result == uint32(windows.WAIT_TIMEOUT)
 }
 
 func watchdogProcessStartIdentity(pid int) string {

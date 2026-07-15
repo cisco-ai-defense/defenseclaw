@@ -405,6 +405,10 @@ try {
 }
 `
 	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	// The cached maintenance executable can be launched with its own directory
+	// as CWD. Run the detached helper from the trusted system PowerShell
+	// directory so Windows permits it to remove the cache after Setup exits.
+	cmd.Dir = filepath.Dir(powerShell)
 	// PowerShell treats tokens following -Command as more command text rather
 	// than reliably exposing them through $args. Environment variables keep the
 	// cleanup path byte-for-byte intact without shell interpolation.

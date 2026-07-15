@@ -52,7 +52,10 @@ func WithGatewayStartLock(ctx context.Context, fn func() error) (resultErr error
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return ctx.Err()
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return context.DeadlineExceeded
 			}
 			if remaining < gatewayStartMutexPollInterval {
 				waitMillis = uint32((remaining + time.Millisecond - 1) / time.Millisecond)
