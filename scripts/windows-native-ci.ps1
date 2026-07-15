@@ -2934,9 +2934,19 @@ function Invoke-Contract {
     $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
         $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
     $contractRoot = [IO.Path]::GetFullPath($root).TrimEnd('\')
-    $contractHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'home')).TrimEnd('\')
-    $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
-    $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
+    # Hook-token ACL validation walks the complete ancestor chain. Keep the
+    # alternate homes inside the disposable account's real profile so every
+    # ancestor has a production-valid owner; StateRoot is intentionally owned
+    # by the elevated harness and is only for immutable inputs and results.
+    $contractProfileRoot = [IO.Path]::GetFullPath(
+        (Join-Path $realProfile '.defenseclaw-ci-contract')
+    ).TrimEnd('\')
+    if (Test-Path -LiteralPath $contractProfileRoot) {
+        throw "refusing to overwrite an existing contract profile root: $contractProfileRoot"
+    }
+    $contractHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'home')).TrimEnd('\')
+    $codexHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'codex-home')).TrimEnd('\')
+    $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'claude-home')).TrimEnd('\')
     $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
     foreach ($path in @(
         $contractHome,
@@ -3042,6 +3052,11 @@ function Invoke-Contract {
         }
         try {
             Remove-WizardAgentFixtures $agentFixtures
+        } catch {
+            $cleanupErrors.Add($_)
+        }
+        try {
+            Remove-SafeDisposableTree $contractProfileRoot
         } catch {
             $cleanupErrors.Add($_)
         }
