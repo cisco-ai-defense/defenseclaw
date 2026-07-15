@@ -8,6 +8,7 @@ package safefile
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ func TestReplaceFileRetriesTransientWindowsErrors(t *testing.T) {
 		windows.ERROR_ACCESS_DENIED,
 		windows.ERROR_SHARING_VIOLATION,
 		windows.ERROR_LOCK_VIOLATION,
+		errorUnableToRemoveReplaced,
 	} {
 		transient := transient
 		t.Run(transient.Error(), func(t *testing.T) {
@@ -109,5 +111,68 @@ func TestReplaceFileReturnsImmediatelyOnSuccess(t *testing.T) {
 	}
 	if calls != 1 || sleeps != 0 {
 		t.Fatalf("calls=%d, sleeps=%d; want 1, 0", calls, sleeps)
+	}
+}
+
+func TestReplaceFileUsesCreateMoveOnlyWhenDestinationIsMissing(t *testing.T) {
+	replaces := 0
+	moves := 0
+	err := replaceFileOnceWith(func() error {
+		replaces++
+		return windows.ERROR_FILE_NOT_FOUND
+	}, func() error {
+		moves++
+		return nil
+	})
+	if err != nil || replaces != 1 || moves != 1 {
+		t.Fatalf("error=%v replaces=%d moves=%d, want nil/1/1", err, replaces, moves)
+	}
+}
+
+func TestReplaceFileRetriesMetadataPreservingReplaceWhenCreateLosesRace(t *testing.T) {
+	replaces := 0
+	moves := 0
+	err := replaceFileOnceWith(func() error {
+		replaces++
+		if replaces == 1 {
+			return windows.ERROR_FILE_NOT_FOUND
+		}
+		return nil
+	}, func() error {
+		moves++
+		return windows.ERROR_ALREADY_EXISTS
+	})
+	if err != nil || replaces != 2 || moves != 1 {
+		t.Fatalf("error=%v replaces=%d moves=%d, want nil/2/1", err, replaces, moves)
+	}
+}
+
+func TestReplaceFilePreservesExistingNTFSAlternateDataStream(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "settings.json")
+	source := filepath.Join(dir, "staged.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stream := destination + ":defenseclaw-test"
+	if err := os.WriteFile(stream, []byte("owned metadata"), 0o600); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_NAME) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("test volume does not support NTFS alternate streams: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceFile(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil || string(content) != "new" {
+		t.Fatalf("destination=%q error=%v, want new", content, err)
+	}
+	metadata, err := os.ReadFile(stream)
+	if err != nil || string(metadata) != "owned metadata" {
+		t.Fatalf("alternate stream=%q error=%v, want preserved metadata", metadata, err)
 	}
 }
