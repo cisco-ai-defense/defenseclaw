@@ -45,13 +45,14 @@ try {
     Set-DisposableProtectedDirectoryAcl $sandbox $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
     Set-DisposableProtectedDirectoryAcl $state $childSid `
-        ([Security.AccessControl.FileSystemRights]::Modify) -InheritChildRights
+        ([Security.AccessControl.FileSystemRights]::FullControl) -InheritChildRights
     Set-DisposableProtectedDirectoryAcl $payload $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -InheritChildRights
     Assert-DisposableChildAcl $sandbox $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
     Assert-DisposableChildAcl $state $childSid `
-        ([Security.AccessControl.FileSystemRights]::Modify) -ExpectInheritance
+        ([Security.AccessControl.FileSystemRights]::FullControl) `
+        -ExpectInheritance -AllowOwnershipBootstrap
     Assert-DisposableChildAcl $payload $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -ExpectInheritance
 

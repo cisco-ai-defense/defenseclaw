@@ -251,17 +251,22 @@ try {
     Assert-True ($owner.Equals($identity.User)) 'private fixture owner is the current user'
     Assert-True $security.AreAccessRulesProtected 'private fixture does not inherit the workspace ACL'
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $rules = $security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
     $seenUser = $false
     $seenSystem = $false
+    $seenAdministrators = $false
     foreach ($rule in $rules) {
         Assert-True ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) "private fixture contains non-allow ACE for $($rule.IdentityReference)"
         $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier])
-        Assert-True ($sid.Equals($identity.User) -or $sid.Equals($system)) "private fixture trusts unexpected principal $sid"
+        Assert-True ($sid.Equals($identity.User) -or $sid.Equals($system) -or
+            $sid.Equals($administrators)) "private fixture trusts unexpected principal $sid"
         if ($sid.Equals($identity.User)) { $seenUser = $true }
         if ($sid.Equals($system)) { $seenSystem = $true }
+        if ($sid.Equals($administrators)) { $seenAdministrators = $true }
     }
-    Assert-True ($seenUser -and $seenSystem) 'private fixture must grant only the current user and SYSTEM'
+    Assert-True ($seenUser -and $seenSystem -and $seenAdministrators) `
+        'private fixture must grant only the current user, SYSTEM, and Administrators'
 
     $pwsh = (Get-Process -Id $PID).Path
     $profileTest = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
@@ -769,6 +774,9 @@ try {
         $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$sandbox' -and
         $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$workspace' -and
         $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$childArtifacts' -and
+        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$childState \$sidObject' -and
+        $standardUserCIText -match '\[Security\.AccessControl\.FileSystemRights\]::FullControl\) -InheritChildRights' -and
+        $standardUserCIText -match 'AllowOwnershipBootstrap' -and
         $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$directory \$sidObject' -and
         $standardUserCIText -match 'Assert-DisposableChildAcl \$sandbox' -and
         $standardUserCIText -match '\$childResults = Join-Path \$sandbox ''results''' -and

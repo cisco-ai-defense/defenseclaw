@@ -338,32 +338,12 @@ function Invoke-ChildMode {
         }
     } finally {
         Write-ChildProgress $progress 'child-cleanup-start'
-        if ($Mode -eq 'setup-acceptance') {
-            try {
-                & $nativeHarness -Operation cleanup -StateRoot $state
-            } catch {
-                if ($null -eq $failure) {
-                    $failure = $_
-                } else {
-                    $failure = [Management.Automation.ErrorRecord]::new(
-                        [InvalidOperationException]::new(
-                            "$($failure.Exception.Message); child cleanup failed: $($_.Exception.Message)",
-                            $failure.Exception
-                        ),
-                        'DisposableUserCleanupFailed',
-                        [Management.Automation.ErrorCategory]::OperationStopped,
-                        $state
-                    )
-                }
-            }
-        } else {
-            # Wizard cancel-only never enters Setup's mutation path, while the
-            # contract performs its own uninstall in finally. The parent owns
-            # the stronger job-object drain, exact-SID sweep, profile removal,
-            # and sandbox deletion, so a second CIM-based child cleanup adds no
-            # coverage and can strand the disposable child in a sick provider.
-            Write-ChildProgress $progress 'child-cleanup-delegated-to-parent'
-        }
+        # Setup acceptance and the connector contract perform their product
+        # teardown before returning. The elevated parent owns the stronger
+        # harness cleanup boundary: job-object drain, exact-SID sweep, profile
+        # removal, and sandbox deletion. A second child cleanup cannot add
+        # coverage and would have to inspect parent-owned sandbox ancestors.
+        Write-ChildProgress $progress 'child-cleanup-delegated-to-parent'
         Write-ChildProgress $progress 'child-cleanup-complete'
     }
 
@@ -858,7 +838,12 @@ try {
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -InheritChildRights
     Set-DisposableProtectedDirectoryAcl $childArtifacts $sidObject `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -InheritChildRights
-    foreach ($directory in @($childState, $childDiagnostics, $childResults)) {
+    # The native harness replaces its state-root DACL and owner immediately on
+    # entry. Give this one writable root the WRITE_DAC/WRITE_OWNER rights needed
+    # for that transition; immutable workspace and artifact roots stay read-only.
+    Set-DisposableProtectedDirectoryAcl $childState $sidObject `
+        ([Security.AccessControl.FileSystemRights]::FullControl) -InheritChildRights
+    foreach ($directory in @($childDiagnostics, $childResults)) {
         Set-DisposableProtectedDirectoryAcl $directory $sidObject `
             ([Security.AccessControl.FileSystemRights]::Modify) -InheritChildRights
     }
@@ -868,7 +853,10 @@ try {
         Assert-DisposableChildAcl $directory $sidObject `
             ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -ExpectInheritance
     }
-    foreach ($directory in @($childState, $childDiagnostics, $childResults)) {
+    Assert-DisposableChildAcl $childState $sidObject `
+        ([Security.AccessControl.FileSystemRights]::FullControl) `
+        -ExpectInheritance -AllowOwnershipBootstrap
+    foreach ($directory in @($childDiagnostics, $childResults)) {
         Assert-DisposableChildAcl $directory $sidObject `
             ([Security.AccessControl.FileSystemRights]::Modify) -ExpectInheritance
     }

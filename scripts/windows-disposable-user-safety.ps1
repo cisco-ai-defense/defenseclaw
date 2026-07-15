@@ -168,7 +168,8 @@ function Assert-DisposableChildAcl {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ChildSid,
         [Parameter(Mandatory)][Security.AccessControl.FileSystemRights]$ExpectedRights,
-        [switch]$ExpectInheritance
+        [switch]$ExpectInheritance,
+        [switch]$AllowOwnershipBootstrap
     )
 
     $security = [IO.FileSystemAclExtensions]::GetAccessControl(
@@ -204,7 +205,8 @@ function Assert-DisposableChildAcl {
     $privileged = [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
-    if (($rule.FileSystemRights -band $privileged) -ne 0) {
+    if (-not $AllowOwnershipBootstrap -and
+        ($rule.FileSystemRights -band $privileged) -ne 0) {
         throw "disposable child received privileged filesystem rights on $Path"
     }
 }

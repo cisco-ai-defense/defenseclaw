@@ -78,7 +78,8 @@ function Protect-TestDirectory([string]$Path) {
     $propagation = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    foreach ($sid in @($identity.User, $system)) {
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    foreach ($sid in @($identity.User, $system, $administrators)) {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $sid,
             [Security.AccessControl.FileSystemRights]::FullControl,
