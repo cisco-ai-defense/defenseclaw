@@ -60,7 +60,7 @@ builder then embeds:
 
 - the GoReleaser Windows archive;
 - the DefenseClaw wheel used for provenance;
-- CPython 3.12.10 embeddable x64, pinned by URL and SHA-256
+- CPython 3.14.6 embeddable x64, pinned by URL and SHA-256
   `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`;
 - cosign 2.6.2 for offline availability of release-manifest verification,
   pinned to the official Windows x64 release SHA-256
