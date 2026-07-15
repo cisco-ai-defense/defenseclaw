@@ -419,7 +419,17 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	if err := conn.Setup(hctx, opts); err != nil {
+	setupErr := conn.Setup(hctx, opts)
+
+	// Setup may have recreated a deleted parent directory even when a later
+	// verification step fails. Rebind before handling its result so the guard
+	// never remains attached to the deleted inode.
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
+
+	if setupErr != nil {
+		err := setupErr
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
@@ -429,13 +439,6 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 		}
 		return
 	}
-
-	// Setup may have recreated a deleted parent directory. Rebind the watch
-	// before verification can return so later policy/config changes are still
-	// observed even when enforcement remains inactive.
-	g.mu.Lock()
-	g.resyncTargetsLocked(conn, opts)
-	g.mu.Unlock()
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil || !present {

@@ -126,7 +126,11 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             connector,
             executable,
             spec.version_args,
-            require_trusted_binary_paths=True,
+            # The setup-specific admission immediately above already binds the
+            # candidate to token-resolved roots and validates its ACL chain.
+            # Generic discovery roots intentionally follow the discovery
+            # environment and must not override that stronger setup decision.
+            require_trusted_binary_paths=False,
             data_dir=data_dir,
         )
         if probe_error or not raw_version:
@@ -288,10 +292,10 @@ def _codex_wrapper_native_candidates(
     try:
         root = os.path.realpath(os.path.abspath(root))
         wrapper = os.path.realpath(os.path.abspath(wrapper))
-        if (
-            not agent_discovery._path_is_within(wrapper, root)
-            or os.path.splitext(wrapper)[1].casefold() not in {".cmd", ".bat"}
-        ):
+        if not agent_discovery._path_is_within(wrapper, root) or os.path.splitext(wrapper)[1].casefold() not in {
+            ".cmd",
+            ".bat",
+        }:
             return False, ()
         with open(wrapper, "rb") as stream:
             body = stream.read(65_537)
@@ -385,8 +389,7 @@ def _codex_pnpm_native_candidates(
     try:
         if generations:
             active_packages = [
-                Path(root) / "global" / generation / "node_modules" / "@openai" / "codex"
-                for generation in generations
+                Path(root) / "global" / generation / "node_modules" / "@openai" / "codex" for generation in generations
             ]
         else:
             # Generic root enumeration is allowed only when exactly one active
@@ -416,15 +419,7 @@ def _codex_pnpm_native_candidates(
         )
         for dependency_root in dependency_roots:
             for package_name, target in platform_variants:
-                linked_candidate = (
-                    dependency_root
-                    / "@openai"
-                    / package_name
-                    / "vendor"
-                    / target
-                    / "bin"
-                    / "codex.exe"
-                )
+                linked_candidate = dependency_root / "@openai" / package_name / "vendor" / target / "bin" / "codex.exe"
                 candidate = os.path.realpath(linked_candidate)
                 key = os.path.normcase(os.path.abspath(candidate))
                 if key in seen or not agent_discovery._path_is_within(candidate, root):
@@ -491,7 +486,20 @@ def _windows_known_folder(identifier: str) -> str:
     raw = value.bytes_le
     guid = GUID.from_buffer_copy(raw)
     path = ctypes.c_wchar_p()
+    token = wintypes.HANDLE()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
     shell32.SHGetKnownFolderPath.argtypes = [
         ctypes.POINTER(GUID),
         wintypes.DWORD,
@@ -499,16 +507,29 @@ def _windows_known_folder(identifier: str) -> str:
         ctypes.POINTER(ctypes.c_wchar_p),
     ]
     shell32.SHGetKnownFolderPath.restype = ctypes.c_long
-    result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path))
-    if result != 0:
+    # A null token lets Known Folder resolution consume process-level profile
+    # overrides inherited from an agent. Bind setup authority to the actual
+    # current-user token, matching internal/winpath on the native Go side.
+    token_query = 0x0008
+    token_impersonate = 0x0004
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        token_query | token_impersonate,
+        ctypes.byref(token),
+    ):
         return ""
     try:
+        result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, token, ctypes.byref(path))
+        if result != 0:
+            return ""
         return os.path.abspath(path.value or "") if path.value else ""
     finally:
-        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
-        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
-        ole32.CoTaskMemFree.restype = None
-        ole32.CoTaskMemFree(ctypes.cast(path, ctypes.c_void_p))
+        if path:
+            ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            ole32.CoTaskMemFree.restype = None
+            ole32.CoTaskMemFree(ctypes.cast(path, ctypes.c_void_p))
+        kernel32.CloseHandle(token)
 
 
 def _windows_system_directory() -> str:

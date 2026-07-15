@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -62,10 +64,16 @@ def test_explicit_selection_probes_candidates_instead_of_discovery_cache(
         lambda *_args: (str(executable),),
     )
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
+    probe_options: dict[str, object] = {}
+
+    def probe_version(*_args, **kwargs):
+        probe_options.update(kwargs)
+        return "codex-cli 0.144.3", ""
+
     monkeypatch.setattr(
         agent_selection.agent_discovery,
         "_version_for_agent_binary",
-        lambda *_args, **_kwargs: ("codex-cli 0.144.3", ""),
+        probe_version,
     )
     monkeypatch.setattr(
         agent_selection,
@@ -83,6 +91,7 @@ def test_explicit_selection_probes_candidates_instead_of_discovery_cache(
     assert selection.executable == str(executable.resolve())
     assert selection.normalized_version == "0.144.3"
     assert selection.sha256 == hashlib.sha256(b"trusted-codex").hexdigest()
+    assert probe_options["require_trusted_binary_paths"] is False
 
 
 def test_setup_trust_rejects_path_admitted_only_by_environment_extension(
@@ -166,6 +175,54 @@ def test_builtin_setup_roots_ignore_poisoned_profile_environment(
 
     assert any(str(trusted_local) in root for root in roots)
     assert all(str(poisoned_local) not in root for root in roots)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows token-bound Known Folder contract")
+def test_windows_known_folders_ignore_inherited_profile_environment(tmp_path: Path) -> None:
+    identifiers = (
+        "F1B32785-6FBA-4FCF-9D55-7B8E7F157091",  # LocalAppData
+        "3EB685DB-65F9-4CF6-A03A-E3EF65729F3D",  # RoamingAppData
+        "5E6C858F-0E22-4760-9AFE-EA3317B67173",  # Profile
+    )
+    expected = [agent_selection._windows_known_folder(identifier) for identifier in identifiers]
+    assert all(expected)
+
+    foreign_profile = tmp_path / "foreign-profile"
+    foreign_local = foreign_profile / "AppData" / "Local"
+    foreign_roaming = foreign_profile / "AppData" / "Roaming"
+    foreign_local.mkdir(parents=True)
+    foreign_roaming.mkdir(parents=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "USERPROFILE": str(foreign_profile),
+            "HOME": str(foreign_profile),
+            "LOCALAPPDATA": str(foreign_local),
+            "APPDATA": str(foreign_roaming),
+        }
+    )
+    cli_root = str(Path(__file__).resolve().parents[1])
+    environment["PYTHONPATH"] = os.pathsep.join(
+        entry for entry in (cli_root, environment.get("PYTHONPATH", "")) if entry
+    )
+    code = (
+        "import json; from defenseclaw import agent_selection; "
+        f"print(json.dumps([agent_selection._windows_known_folder(value) for value in {identifiers!r}]))"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    actual = json.loads(completed.stdout)
+
+    assert [os.path.normcase(os.path.abspath(value)) for value in actual] == [
+        os.path.normcase(os.path.abspath(value)) for value in expected
+    ]
 
 
 def test_setup_candidates_include_official_nested_npm_native_codex(
@@ -271,15 +328,7 @@ def test_setup_candidates_follow_active_pnpm_package_not_stale_store_entry(
     monkeypatch,
 ) -> None:
     pnpm_root = tmp_path / "pnpm"
-    active_package = (
-        pnpm_root
-        / "global"
-        / "v11"
-        / "active-hash"
-        / "node_modules"
-        / "@openai"
-        / "codex"
-    )
+    active_package = pnpm_root / "global" / "v11" / "active-hash" / "node_modules" / "@openai" / "codex"
     active_js = active_package / "bin" / "codex.js"
     active_js.parent.mkdir(parents=True)
     active_js.write_text("// active Codex", encoding="utf-8")

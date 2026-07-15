@@ -1376,14 +1376,33 @@ func finishCommittedSetupTransaction(transaction setupTransaction) (bool, error)
 }
 
 func rollbackSetupTransaction(transaction setupTransaction) error {
+	return rollbackSetupTransactionWithRuntime(
+		transaction,
+		stopOwnedServices,
+		startMissingServices,
+	)
+}
+
+func rollbackSetupTransactionWithRuntime(
+	transaction setupTransaction,
+	stopServices func(string, string) (serviceState, error),
+	startServices func(string, string, serviceState) (serviceState, error),
+) error {
+	restoreServices := transaction.PreviousServices
 	currentGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	if pathExists(currentGateway) {
 		if err := rejectReparseTree(transaction.InstallRoot); err != nil {
 			return err
 		}
-		if _, err := stopOwnedServices(currentGateway, transaction.DataRoot); err != nil {
+		stopped, err := stopServices(currentGateway, transaction.DataRoot)
+		if err != nil {
 			return err
 		}
+		// A later invocation can start an exact-owned runtime while an older
+		// intent remains pending (for example, after a locked-file rollback).
+		// Preserve services this recovery invocation actually stopped instead of
+		// losing them to the intent's now-stale pre-operation snapshot.
+		restoreServices = mergeServiceStates(restoreServices, stopped)
 	}
 	if err := rollbackTransactionFiles(transaction); err != nil {
 		return err
@@ -1394,11 +1413,18 @@ func rollbackSetupTransaction(transaction setupTransaction) error {
 	}
 	if transaction.PreviousState != nil {
 		gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
-		if _, err := startMissingServices(gatewayPath, transaction.DataRoot, transaction.PreviousServices); err != nil {
+		if _, err := startServices(gatewayPath, transaction.DataRoot, restoreServices); err != nil {
 			restoreErrors = append(restoreErrors, err)
 		}
 	}
 	return errors.Join(restoreErrors...)
+}
+
+func mergeServiceStates(left, right serviceState) serviceState {
+	return serviceState{
+		Gateway:  left.Gateway || right.Gateway,
+		Watchdog: left.Watchdog || right.Watchdog,
+	}
 }
 
 func nativeInstallRuntimeConvergenceOps() installRuntimeConvergenceOps {

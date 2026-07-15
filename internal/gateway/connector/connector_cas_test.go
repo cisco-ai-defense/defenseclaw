@@ -316,7 +316,7 @@ func TestAtomicTransformSuccessfulCommitClearsCompleteReceipt(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("atomicTransformFile: %v", err)
 			}
-			intentPath, _, err := atomicTransformIntentPath(path)
+			_, intentPath, err := atomicTransformIntentPath(path)
 			if err != nil {
 				t.Fatalf("resolve completion receipt path: %v", err)
 			}
@@ -574,7 +574,7 @@ func TestAtomicTransformClearedCompleteReceiptLeavesStableNoMutationGap(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	intentPath, _, err := atomicTransformIntentPath(path)
+	_, intentPath, err := atomicTransformIntentPath(path)
 	if err != nil {
 		t.Fatal(err)
 	}
