@@ -19,8 +19,10 @@ namespace DefenseClaw
     {
         private const uint LOGON_WITH_PROFILE = 0x00000001;
         private const uint CREATE_SUSPENDED = 0x00000004;
-        private const uint CREATE_NO_WINDOW = 0x08000000;
+        private const uint CREATE_NEW_CONSOLE = 0x00000010;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const int STARTF_USESHOWWINDOW = 0x00000001;
+        private const short SW_HIDE = 0;
         private const uint SEM_FAILCRITICALERRORS = 0x0001;
         private const uint SEM_NOGPFAULTERRORBOX = 0x0002;
         private const uint TOKEN_QUERY = 0x0008;
@@ -355,7 +357,13 @@ namespace DefenseClaw
                 passwordBuffer = Marshal.SecureStringToGlobalAllocUnicode(password);
                 STARTUPINFO startupInfo = new STARTUPINFO();
                 startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-                startupInfo.lpDesktop = @"winsta0\default";
+                // A console-backed PowerShell receives valid CONIN$/CONOUT$
+                // standard handles during process initialization. Hide its
+                // window, and leave lpDesktop null so the child inherits the
+                // exact station/desktop whose ACL GrantInteractiveDesktop
+                // updated instead of assuming the hosted runner uses Default.
+                startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+                startupInfo.wShowWindow = SW_HIDE;
                 bool created;
                 int createError = 0;
                 uint previousErrorMode = SetErrorMode(
@@ -369,7 +377,7 @@ namespace DefenseClaw
                         LOGON_WITH_PROFILE,
                         applicationPath,
                         BuildCommandLine(applicationPath, arguments),
-                        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        CREATE_SUSPENDED | CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
                         IntPtr.Zero,
                         workingDirectory,
                         ref startupInfo,

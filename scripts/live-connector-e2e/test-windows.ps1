@@ -750,6 +750,10 @@ try {
         $standardUserCIText,
         '(?s)function Invoke-ChildMode\b.*?(?=\r?\n    \$sandboxRoot = )'
     ).Value
+    $standardUserLauncherStart = [regex]::Match(
+        $standardUserLauncherText,
+        '(?s)public static DisposableStandardUserProcess Start\b.*?(?=\r?\n        private static IntPtr OpenToken)'
+    ).Value
     $sameLiveProcessFunction = [regex]::Match(
         $standardUserCIText,
         '(?s)function Get-SameLiveProcess\b.*?(?=\r?\nfunction )'
@@ -793,6 +797,12 @@ try {
         $standardUserLauncherText -notmatch 'WindowsPrincipal' -and
         $standardUserLauncherText -match 'TokenIsElevated != 0') `
         'disposable-user launcher validates identity/elevation and bounds the complete process tree'
+    Assert-True ($standardUserLauncherStart -match 'CREATE_SUSPENDED\s*\|\s*CREATE_NEW_CONSOLE\s*\|\s*CREATE_UNICODE_ENVIRONMENT' -and
+        $standardUserLauncherStart -match 'startupInfo\.dwFlags\s*=\s*STARTF_USESHOWWINDOW' -and
+        $standardUserLauncherStart -match 'startupInfo\.wShowWindow\s*=\s*SW_HIDE' -and
+        $standardUserLauncherStart -notmatch 'CREATE_NO_WINDOW' -and
+        $standardUserLauncherStart -notmatch 'startupInfo\.lpDesktop\s*=') `
+        'disposable PowerShell starts with hidden console-backed stdio on the exact inherited desktop'
     Assert-True ($standardUserCIText -match 'Disable-LocalUser' -and
         $standardUserCIText -match 'GetOwnerSid' -and
         $standardUserCIText -match 'Stop-AndVerifyDisposableSidProcesses' -and
