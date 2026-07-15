@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -102,15 +103,17 @@ func openWindowsCorrelationKeyDirectory(path string) (windows.Handle, error) {
 	// Omitting FILE_SHARE_DELETE pins this path component. The caller retains a
 	// handle for every ancestor, so later absolute-path operations cannot be
 	// redirected by renaming any component after validation.
-	handle, err := windows.CreateFile(
-		name,
-		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			name,
+			windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	}, false)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return 0, keyStoreError(KeyStoreErrorInvalidDataDir)
@@ -141,21 +144,55 @@ func closeWindowsCorrelationKeyDirectories(handles []windows.Handle) {
 	}
 }
 
+func openWindowsCorrelationHandle(
+	open func() (windows.Handle, error),
+	retryAccessDenied bool,
+) (windows.Handle, error) {
+	var lastErr error
+	for attempt := 0; attempt < keyInstallAttempts; attempt++ {
+		handle, err := open()
+		if err == nil {
+			return handle, nil
+		}
+		lastErr = err
+		if !windowsCorrelationOpenRetryable(err, retryAccessDenied) {
+			return 0, err
+		}
+		if attempt+1 < keyInstallAttempts {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return 0, lastErr
+}
+
+func windowsCorrelationHandleBusy(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
+		errors.Is(err, windows.ERROR_DELETE_PENDING)
+
+}
+
+func windowsCorrelationOpenRetryable(err error, retryAccessDenied bool) bool {
+	return windowsCorrelationHandleBusy(err) || (retryAccessDenied && errors.Is(err, windows.ERROR_ACCESS_DENIED))
+}
+
 func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (CorrelationKey, bool, error) {
 	path := filepath.Join(dataDir, correlationKeyFilename)
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return CorrelationKey{}, false, keyStoreError(KeyStoreErrorUnavailable)
 	}
-	handle, err := windows.CreateFile(
-		name,
-		windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			name,
+			windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			windows.FILE_SHARE_READ,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	}, true)
 	if err != nil {
 		switch {
 		case errors.Is(err, windows.ERROR_FILE_NOT_FOUND):
@@ -346,17 +383,31 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 	if err != nil {
 		return false, keyStoreError(KeyStoreErrorInstall)
 	}
-	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+	for attempt := 0; attempt < keyInstallAttempts; attempt++ {
+		err := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+		if err == nil {
+			tempPresent = false
+			if err := runAfterLink(hooks); err != nil {
+				return false, keyStoreError(KeyStoreErrorSync)
+			}
+			return true, nil
+		}
 		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_FILE_EXISTS) {
 			return false, nil
 		}
-		return false, keyStoreError(KeyStoreErrorInstall)
+		if !windowsCorrelationOpenRetryable(err, true) {
+			return false, keyStoreError(KeyStoreErrorInstall)
+		}
+		if _, attributeErr := windows.GetFileAttributes(to); attributeErr == nil {
+			// A creator won but its destination is still transiently locked.
+			// The outer loop reloads it through the full handle and DACL checks.
+			return false, nil
+		}
+		if attempt+1 < keyInstallAttempts {
+			time.Sleep(time.Millisecond)
+		}
 	}
-	tempPresent = false
-	if err := runAfterLink(hooks); err != nil {
-		return false, keyStoreError(KeyStoreErrorSync)
-	}
-	return true, nil
+	return false, keyStoreError(KeyStoreErrorInstall)
 }
 
 func createWindowsCorrelationTemp(path string) (*os.File, error) {

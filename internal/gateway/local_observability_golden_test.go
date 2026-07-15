@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -65,7 +66,7 @@ func TestLocalObservabilityGoldenProducerScenario(t *testing.T) {
 	}
 
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
-	api := &APIServer{}
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
 	fixture.sidecar.setAPIServer(api)
 	rawConfig := hookModelV8BootstrapRaw(fixture.dataDir, endpoint, []string{"logs", "traces", "metrics"})
 	rawConfig = []byte(strings.Replace(
@@ -179,6 +180,23 @@ func TestLocalObservabilityGoldenProducerScenario(t *testing.T) {
 	rootStop.PreviousPhase = "responding"
 	rootStop.Phase = "completed"
 	rootStop.Sequence = 6
+	emitGoldenLineageRelationships(t, api, [][2]llmEventMeta{
+		{root, direct},
+		{direct, nested},
+		{nested, leaf},
+	})
+	seedGoldenPhaseTransitionBaseline(t, api, stamp, [][2]string{
+		{"session", "planning"},
+		{"planning", "model"},
+		{"planning", "tool"},
+		{"planning", "waiting"},
+		{"planning", "responding"},
+		{"model", "completed"},
+		{"tool", "planning"},
+		{"tool", "completed"},
+		{"waiting", "completed"},
+		{"responding", "completed"},
+	})
 	arguments := `{"command":"printf","marker":"local-observability-golden"}`
 	result := `{"stdout":"local-observability-golden"}`
 	rootArguments := `{"path":"README.md","marker":"local-observability-golden-root"}`
@@ -498,6 +516,127 @@ func emitGoldenLifecycle(t *testing.T, api *APIServer, ctx context.Context, meta
 	}
 	api.recordHookLifecycleMetric(ctx, meta)
 	api.emitHookLifecycleTransitionSpan(ctx, meta)
+}
+
+func emitGoldenLineageRelationships(
+	t *testing.T,
+	api *APIServer,
+	edges [][2]llmEventMeta,
+) {
+	t.Helper()
+	profile := api.hookProfileForConnector("codex")
+	repo, err := api.store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range edges {
+		parent, child := edge[0], edge[1]
+		payload := map[string]interface{}{
+			"hook_event_name":   "SubagentStart",
+			"event_id":          "golden-lineage-" + child.AgentID,
+			"session_id":        parent.SessionID,
+			"parent_session_id": parent.SessionID,
+			"child_session_id":  child.SessionID,
+			"parent_agent_id":   parent.AgentID,
+			"child_agent_id":    child.AgentID,
+			"root_session_id":   child.RootSessionID,
+			"root_agent_id":     child.RootAgentID,
+			"agent_depth":       child.AgentDepth,
+		}
+		rawBody, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := normalizeAgentHookRequestWithProfile("codex", payload, profile)
+		_, correlated, err := api.correlateHookOccurrence(
+			t.Context(), profile, req, rawBody,
+		)
+		if err != nil {
+			t.Fatalf("correlate golden lineage %s -> %s: %v", parent.AgentID, child.AgentID, err)
+		}
+		if correlated.ParentAgentID != parent.AgentID || correlated.AgentID != child.AgentID ||
+			correlated.ParentSessionID != parent.SessionID || correlated.SessionID != child.SessionID {
+			t.Fatalf(
+				"golden lineage %s -> %s resolved as parent=%s/%s child=%s/%s",
+				parent.AgentID, child.AgentID,
+				correlated.ParentAgentID, correlated.ParentSessionID,
+				correlated.AgentID, correlated.SessionID,
+			)
+		}
+		// Production persists the canonical audit record and its correlation
+		// observation immediately after the occurrence transaction. This golden
+		// fixture deliberately bypasses hook evaluation/finalization so it can
+		// isolate the generated observability signals; mirror that durable
+		// observation step here without emitting another Loki record.
+		if err := repo.RecordObservation(t.Context(), audit.CorrelationObservation{
+			RecordID:        "golden-lineage-record-" + child.AgentID,
+			SemanticEventID: audit.SemanticEventID(correlated.SemanticEventID),
+			Signal:          audit.CorrelationSignalLogs,
+			Bucket:          "agent_lifecycle",
+			EventName:       "subagent.started",
+			ObservedAt:      time.Now().UTC(),
+			SessionID:       correlated.SessionID,
+			TurnID:          correlated.TurnID,
+			AgentID:         correlated.AgentID,
+			Status:          audit.CorrelationObservationExportEligible,
+		}); err != nil {
+			t.Fatalf("persist golden lineage observation %s: %v", child.AgentID, err)
+		}
+		graph, err := repo.QueryGraph(t.Context(), audit.CorrelationGraphQuery{
+			Anchor: audit.CorrelationAnchor{AgentID: child.AgentID},
+		})
+		if err != nil {
+			t.Fatalf("read back golden lineage %s -> %s: %v", parent.AgentID, child.AgentID, err)
+		}
+		evidence := make(map[string]bool, len(graph.Evidence))
+		for _, item := range graph.Evidence {
+			evidence[item.RelationshipID] = true
+		}
+		var parentOf, delegatedBy bool
+		for _, relationship := range graph.Relationships {
+			if relationship.Status != audit.CorrelationRelationshipActive || !evidence[relationship.RelationshipID] {
+				continue
+			}
+			switch {
+			case relationship.Type == audit.CorrelationParentOf &&
+				relationship.FromKind == audit.CorrelationNodeAgent && relationship.FromID == parent.AgentID &&
+				relationship.ToKind == audit.CorrelationNodeAgent && relationship.ToID == child.AgentID:
+				parentOf = true
+			case relationship.Type == audit.CorrelationDelegatedBy &&
+				relationship.FromKind == audit.CorrelationNodeAgent && relationship.FromID == child.AgentID &&
+				relationship.ToKind == audit.CorrelationNodeAgent && relationship.ToID == parent.AgentID:
+				delegatedBy = true
+			}
+		}
+		if !parentOf || !delegatedBy {
+			t.Fatalf(
+				"golden lineage %s -> %s was not durably evidenced: parent_of=%t delegated_by=%t",
+				parent.AgentID, child.AgentID, parentOf, delegatedBy,
+			)
+		}
+	}
+}
+
+func seedGoldenPhaseTransitionBaseline(
+	t *testing.T,
+	api *APIServer,
+	stamp string,
+	transitions [][2]string,
+) {
+	t.Helper()
+	for index, transition := range transitions {
+		api.recordHookLifecycleMetric(t.Context(), llmEventMeta{
+			Source: "codex", Provider: "openai", Model: "gpt-5",
+			AgentID: "phase-baseline-" + stamp, AgentType: "baseline",
+			LifecycleEvent: "event", LifecycleState: "observed",
+			PreviousPhase: transition[0], Phase: transition[1],
+			Sequence: int64(index + 1),
+		})
+	}
+	// The generated local OTLP destination exports metrics once per second.
+	// Preserve the first cumulative point before the real golden transitions so
+	// the dashboard's range-scoped increase() query observes an actual delta.
+	time.Sleep(2200 * time.Millisecond)
 }
 
 func goldenLifecycleMeta(

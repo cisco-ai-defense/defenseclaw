@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -86,6 +87,92 @@ func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
 		t.Fatal("no creator returned a key")
 	}
 	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyRetriesTransientBusyHandle(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	path, err := windows.UTF16PtrFromString(filepath.Join(dir, correlationKeyFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		path,
+		windows.GENERIC_READ,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("open incompatible handle: %v", err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		released <- windows.CloseHandle(handle)
+	}()
+
+	loaded, loadErr := LoadOrCreateCorrelationKey(dir)
+	closeErr := <-released
+	if closeErr != nil {
+		t.Fatalf("close incompatible handle: %v", closeErr)
+	}
+	if loadErr != nil {
+		t.Fatalf("load after transient sharing violation: %v", loadErr)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("key changed while retrying the transient sharing violation")
+	}
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationHandleRetryLoopIsExercised(t *testing.T) {
+	const want = windows.Handle(0x1234)
+	attempts := 0
+	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+		attempts++
+		if attempts < 3 {
+			return 0, windows.ERROR_SHARING_VIOLATION
+		}
+		return want, nil
+	}, false)
+	if err != nil {
+		t.Fatalf("retry transient sharing violation: %v", err)
+	}
+	if handle != want || attempts != 3 {
+		t.Fatalf("handle=%v attempts=%d, want handle=%v attempts=3", handle, attempts, want)
+	}
+}
+
+func TestWindowsCorrelationKeyRetryableErrorClassification(t *testing.T) {
+	tests := []struct {
+		name              string
+		err               error
+		retryAccessDenied bool
+		want              bool
+	}{
+		{name: "sharing violation", err: windows.ERROR_SHARING_VIOLATION, want: true},
+		{name: "lock violation", err: windows.ERROR_LOCK_VIOLATION, want: true},
+		{name: "delete pending", err: windows.ERROR_DELETE_PENDING, want: true},
+		{name: "leaf access denied", err: windows.ERROR_ACCESS_DENIED, retryAccessDenied: true, want: true},
+		{name: "directory access denied", err: windows.ERROR_ACCESS_DENIED, want: false},
+		{name: "missing", err: windows.ERROR_FILE_NOT_FOUND, retryAccessDenied: true, want: false},
+		{name: "other", err: errors.New("other"), retryAccessDenied: true, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := windowsCorrelationOpenRetryable(test.err, test.retryAccessDenied); got != test.want {
+				t.Fatalf("retryable = %t, want %t", got, test.want)
+			}
+		})
+	}
 }
 
 func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
