@@ -97,15 +97,17 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-PII-SSN":        {AxisSensitiveAccess},
 		"JUDGE-EXFIL-FILE":     {AxisSensitiveAccess},
 		"JUDGE-EXFIL-CHANNEL":  {AxisEgressExternal},
+		"JUDGE-EXFIL-REPO":     {AxisSensitiveAccess, AxisEgressExternal},
 		"JUDGE-INJ-INSTRUCT":   {AxisIngressUntrusted},
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
 		// Command rules that open an egress channel
-		"CMD-CURL-UPLOAD":       {AxisEgressExternal},
+		"CMD-CURL-UPLOAD": {AxisEgressExternal},
+		// Command rules that read workspace or environment secrets
 		"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
-		"CMD-ARCHIVE-EXFIL":     {AxisSensitiveAccess, AxisEgressExternal},
-		"CMD-ENCODE-EXFIL":      {AxisSensitiveAccess, AxisEgressExternal},
-		"JUDGE-EXFIL-REPO":      {AxisSensitiveAccess, AxisEgressExternal},
 		"CMD-ENV-DUMP":          {AxisSensitiveAccess},
+		// Command rules that read secrets and egress in one step
+		"CMD-ARCHIVE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+		"CMD-ENCODE-EXFIL":  {AxisSensitiveAccess, AxisEgressExternal},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members
@@ -169,11 +171,12 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-CHILD-PROC":    CapExecShell,
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
-		"CMD-CURL-UPLOAD":       CapNetworkFetch,
-		"CMD-ARCHIVE-EXFIL":     CapNetworkFetch,
-		"CMD-ENCODE-EXFIL":      CapNetworkFetch,
+		"CMD-CURL-UPLOAD":   CapNetworkFetch,
+		"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
+		"CMD-ENCODE-EXFIL":  CapNetworkFetch,
+		"SRC-FETCH":         CapNetworkFetch,
+		// Filesystem writes
 		"CMD-WORKSPACE-ARCHIVE": CapWriteFS,
-		"SRC-FETCH":             CapNetworkFetch,
 		"SRC-FS-WRITE":          CapWriteFS,
 		// No capability for a bare secret / injection finding
 		"SEC-AWS-KEY":    CapUnknown,
