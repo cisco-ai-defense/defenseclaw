@@ -70,10 +70,15 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 		if !strings.Contains(actual, "-target windows_amd64 ") {
 			t.Fatalf("hook %d did not pass the canonical OS/architecture target: %s", index, actual)
 		}
+		matches := 0
 		for component := range components {
 			if strings.Contains(actual, "-component "+component+" ") {
 				components[component]++
+				matches++
 			}
+		}
+		if matches != 1 {
+			t.Fatalf("hook %d selected %d supported components, want 1: %s", index, matches, actual)
 		}
 	}
 	for component, count := range components {

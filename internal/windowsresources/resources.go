@@ -78,7 +78,7 @@ var componentMetadataByName = map[Component]componentMetadata{
 		Description:      "DefenseClaw native gateway and command service",
 		FileDescription:  "DefenseClaw Gateway",
 		InternalName:     "defenseclaw-gateway",
-		OriginalFilename: "defenseclaw-gateway.exe",
+		OriginalFilename: "defenseclaw.exe",
 	},
 	ComponentHook: {
 		AssemblyName:     "Cisco.DefenseClaw.Hook",
@@ -92,7 +92,7 @@ var componentMetadataByName = map[Component]componentMetadata{
 		Description:      "DefenseClaw command, scanner, and observability launcher",
 		FileDescription:  "DefenseClaw Command Launcher",
 		InternalName:     "defenseclaw-launcher",
-		OriginalFilename: "defenseclaw.exe",
+		OriginalFilename: "defenseclaw-launcher.exe",
 	},
 	ComponentStartup: {
 		AssemblyName:     "Cisco.DefenseClaw.Startup",
@@ -353,6 +353,9 @@ func Apply(executable string, component Component, versionValue, iconPath string
 	}
 	if closeTemporaryErr != nil {
 		return fmt.Errorf("close resource output: %w", closeTemporaryErr)
+	}
+	if err := Verify(temporaryPath, component, versionValue, iconPath); err != nil {
+		return fmt.Errorf("verify resource output before publish: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("publish resource-complete executable: %w", err)
