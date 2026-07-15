@@ -1995,6 +1995,37 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_packaged_restart_uses_verified_sibling_from_hostile_working_directory(self, mock_run):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir, "installed")
+            python = root / "runtime" / "python" / "python.exe"
+            gateway = root / "bin" / "defenseclaw-gateway.exe"
+            hostile = Path(tmpdir, "hostile")
+            python.parent.mkdir(parents=True)
+            gateway.parent.mkdir(parents=True)
+            hostile.mkdir()
+            python.write_bytes(b"python")
+            gateway.write_bytes(b"gateway")
+            (hostile / "defenseclaw-gateway.exe").write_bytes(b"shadow")
+
+            previous = os.getcwd()
+            try:
+                os.chdir(hostile)
+                with (
+                    patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": str(root)}),
+                    patch.object(sys, "executable", str(python)),
+                ):
+                    self.assertTrue(_restart_defense_gateway(tmpdir))
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(mock_run.call_args.args[0], [str(gateway.resolve()), "start"])
+
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     def test_starts_when_not_running(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway

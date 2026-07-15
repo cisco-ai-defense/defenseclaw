@@ -61,6 +61,18 @@ function Assert-NativeWindowsX64 {
     }
 }
 
+function Get-StableHookRuntimeExecutable {
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'could not resolve the current user LocalAppData Known Folder'
+    }
+    return [IO.Path]::GetFullPath(
+        (Join-Path $localAppData 'DefenseClaw\HookRuntime\defenseclaw-hook.exe')
+    )
+}
+
 function Get-CiscoAuthenticodeState([string]$Path) {
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     $publisher = if ($signature.SignerCertificate) {
@@ -2331,7 +2343,7 @@ function Assert-WizardConnectorHealth(
         [string]$hookRows[0].detail -notmatch 'healthy Windows-native executable registration') {
         throw "wizard doctor did not validate the selected native hook: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
     }
-    $expectedHookExecutable = Join-Path (Split-Path -Parent $Launcher) 'defenseclaw-hook.exe'
+    $expectedHookExecutable = Get-StableHookRuntimeExecutable
     if (([string]$hookRows[0].detail).IndexOf(
         $expectedHookExecutable,
         [StringComparison]::OrdinalIgnoreCase
@@ -2689,6 +2701,28 @@ function Invoke-SetupAcceptance {
         Invoke-Installed $launcher @(
             'setup', 'claude-code', '--yes', '--no-restart'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-add-claudecode.log') | Out-Null
+
+        # Windows searches the working directory before PATH for a bare
+        # executable name. Prove the packaged Python CLI always restarts the
+        # verified gateway beside its native launcher, even when a checkout or
+        # other hostile directory contains a shadow copy with the same name.
+        $hostileGatewayRoot = Join-Path $root 'hostile-gateway-cwd'
+        [IO.Directory]::CreateDirectory($hostileGatewayRoot) | Out-Null
+        Copy-Item -LiteralPath $gateway `
+            -Destination (Join-Path $hostileGatewayRoot 'defenseclaw-gateway.exe') -Force
+        try {
+            Invoke-Installed $launcher @(
+                'setup', 'codex', '--yes', '--restart', '--mode', 'observe'
+            ) -Timeout 300 -Log (Join-Path $logs 'setup-hostile-cwd-restart.log') `
+                -WorkingDirectory $hostileGatewayRoot | Out-Null
+            Assert-OwnedManagedProcess (Get-GatewayIdentity $dataRoot) $gateway `
+                'hostile-working-directory gateway restart'
+            Assert-OwnedManagedProcess (Get-WatchdogIdentity $dataRoot) $gateway `
+                'hostile-working-directory watchdog restart'
+        } finally {
+            Invoke-Installed $gateway @('stop') @(0, 1) 90 `
+                (Join-Path $logs 'setup-hostile-cwd-stop.log') | Out-Null
+        }
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
         # installer acceptance must preserve the product's current support

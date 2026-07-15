@@ -66,6 +66,18 @@ function Get-EffectiveConnectorConfigPath(
     return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
 }
 
+function Get-StableHookRuntimeExecutable {
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'could not resolve the current user LocalAppData Known Folder'
+    }
+    return [IO.Path]::GetFullPath(
+        (Join-Path $localAppData 'DefenseClaw\HookRuntime\defenseclaw-hook.exe')
+    )
+}
+
 function Protect-TestDirectory([string]$Path) {
     $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -636,6 +648,10 @@ function Assert-DoctorHookRegistration {
     $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
     if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
     if ($rows[0].status -ne 'pass') { throw "doctor rejected setup-created $Connector hooks: $($rows[0].detail)" }
+    $expectedHookExecutable = Get-StableHookRuntimeExecutable
+    if ($rows[0].detail.IndexOf($expectedHookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "doctor validated an unexpected $Connector hook target: $($rows[0].detail)"
+    }
     if (Test-ObsoleteWindowsHookGuidance $rows[0].detail) {
         throw "doctor returned obsolete Unix guidance for native Windows $Connector hooks"
     }
@@ -862,7 +878,7 @@ function Assert-DoctorWindowsHookRegistration {
     if ($check.status -ne 'pass' -or $check.detail -notmatch 'healthy Windows-native executable registration') {
         throw "Doctor did not validate the registered $Connector Windows hook: $($check.status) $($check.detail)"
     }
-    $hookExecutable = (Get-Command 'defenseclaw-hook' -ErrorAction Stop).Source
+    $hookExecutable = Get-StableHookRuntimeExecutable
     if ($check.detail.IndexOf($hookExecutable, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw "Doctor validated an unexpected hook target: $($check.detail)"
     }

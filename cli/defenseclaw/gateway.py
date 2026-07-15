@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from typing import Any
 from urllib.parse import quote
 
@@ -339,21 +340,33 @@ def resolve_gateway_binary() -> str | None:
 
     Resolution order:
 
-    1. ``DEFENSECLAW_GATEWAY_BIN`` — explicit env override used by
+    1. The verified sibling from a native Windows installation.  The native
+       launcher supplies ``DEFENSECLAW_INSTALL_ROOT`` only after validating
+       install state; this helper additionally requires ``sys.executable`` to
+       be that root's embedded Python runtime.  This path deliberately wins
+       over the working directory, overrides, and ``PATH`` so an unrelated
+       ``defenseclaw-gateway.exe`` cannot shadow the installed service.
+    2. ``DEFENSECLAW_GATEWAY_BIN`` — explicit env override used by
        tests, packagers, and vendored distributions that drop the
        binary somewhere non-standard.  Returned verbatim (even when the
        file is missing) so the real ``exec`` error surfaces to the
        caller rather than a generic "not found" from here.
-    2. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+    3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    3. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
+    4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
     """
+    packaged_root = packaged_windows_install_root()
+    if packaged_root:
+        # A corroborated package must fail closed when its sibling is missing;
+        # never fall through to a working-directory/PATH shadow.
+        return packaged_windows_gateway_path()
+
     override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
     if override:
         return override
@@ -367,6 +380,49 @@ def resolve_gateway_binary() -> str | None:
         return canonical
 
     return None
+
+
+def packaged_windows_gateway_path() -> str | None:
+    """Return the gateway sibling for a corroborated native Windows runtime.
+
+    ``DEFENSECLAW_INSTALL_ROOT`` is not trusted by itself: developer shells and
+    child processes may set arbitrary environment values.  A packaged CLI is
+    recognized only when the current interpreter is the embedded Python at the
+    same root and the sibling gateway is runnable.  Native setup can then use
+    this absolute path for every lifecycle operation without Windows' current-
+    directory executable search taking precedence over ``PATH``.
+    """
+
+    root = packaged_windows_install_root()
+    if not root:
+        return None
+
+    candidate = os.path.join(root, "bin", "defenseclaw-gateway.exe")
+    if _is_runnable_file(candidate):
+        return os.path.abspath(candidate)
+    return None
+
+
+def packaged_windows_install_root() -> str | None:
+    """Return a native install root corroborated by the running interpreter."""
+
+    if os.name != "nt":
+        return None
+
+    install_root = os.environ.get("DEFENSECLAW_INSTALL_ROOT", "").strip()
+    if not install_root or "\x00" in install_root or not os.path.isabs(install_root):
+        return None
+
+    root = os.path.abspath(install_root)
+    expected_python = os.path.join(root, "runtime", "python", "python.exe")
+    try:
+        actual_python = os.path.normcase(os.path.realpath(sys.executable))
+        packaged_python = os.path.normcase(os.path.realpath(expected_python))
+    except OSError:
+        return None
+    if actual_python != packaged_python:
+        return None
+    return root
 
 
 def _is_runnable_file(path: str) -> bool:

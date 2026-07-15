@@ -90,6 +90,21 @@ class WindowsHookDoctorTests(unittest.TestCase):
             with self.assertRaisesRegex(_InspectionError, "trusted Windows Program Files"):
                 doctor_hooks._default_claude_managed_settings_paths()
 
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder contract")
+    def test_known_folder_lookup_ignores_process_profile_overrides(self) -> None:
+        folder_id = "f1b32785-6fba-4fcf-9d55-7b8e7f157091"
+        expected = doctor_hooks._windows_known_folder_path(folder_id)
+        self.assertTrue(expected)
+
+        spoofed = str(self.root / "spoofed-local-app-data")
+        with patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": spoofed, "USERPROFILE": str(self.root / "spoofed-profile")},
+        ):
+            observed = doctor_hooks._windows_known_folder_path(folder_id)
+
+        self.assertEqual(os.path.normcase(observed), os.path.normcase(expected))
+
     def _runtime(self, name: str = "defenseclaw-hook.exe", body: bytes | None = None) -> Path:
         path = self.install / name
         if body is None:

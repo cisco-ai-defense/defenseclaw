@@ -168,22 +168,71 @@ class _WindowsGUID(ctypes.Structure):
 
 
 def _windows_known_folder_path(folder_id: str) -> str:
-    """Resolve a Known Folder without trusting spoofable environment values."""
+    """Resolve a Known Folder for the explicit current-process token.
+
+    Passing a null token to ``SHGetKnownFolderPath`` can consult process-level
+    profile overrides.  Connector test and agent processes legitimately set
+    ``USERPROFILE`` and ``LOCALAPPDATA``, so bind the lookup to the same token
+    that native Setup uses instead of letting those values move the trust
+    boundary.
+    """
     if os.name != "nt" or not hasattr(ctypes, "windll"):
         return ""
     raw = uuid.UUID(folder_id).bytes_le
     guid = _WindowsGUID.from_buffer_copy(raw)
-    result = ctypes.c_wchar_p()
+    result = ctypes.c_void_p()
+    token = ctypes.c_void_p()
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
     shell32 = ctypes.windll.shell32
     ole32 = ctypes.windll.ole32
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    advapi32.OpenProcessToken.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.OpenProcessToken.restype = ctypes.c_int
+    shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(_WindowsGUID),
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+
+    # TOKEN_QUERY | TOKEN_IMPERSONATE, as required when a non-null token is
+    # supplied to SHGetKnownFolderPath.
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        0x0008 | 0x0004,
+        ctypes.byref(token),
+    ):
+        return ""
     try:
-        status = int(shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(result)))
-        if status != 0 or not result.value:
-            return ""
-        return os.path.abspath(result.value)
+        try:
+            status = int(
+                shell32.SHGetKnownFolderPath(
+                    ctypes.byref(guid),
+                    0,
+                    token,
+                    ctypes.byref(result),
+                )
+            )
+            if status != 0 or not result.value:
+                return ""
+            return os.path.abspath(ctypes.wstring_at(result.value))
+        finally:
+            if result.value:
+                ole32.CoTaskMemFree(result)
     finally:
-        if result:
-            ole32.CoTaskMemFree(result)
+        kernel32.CloseHandle(token)
 
 
 def _codex_system_requirements_path() -> str:
