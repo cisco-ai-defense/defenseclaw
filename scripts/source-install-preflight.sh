@@ -22,7 +22,7 @@ usage() {
 
 [[ $# -eq 6 ]] || usage
 
-readonly MODE="$1"
+readonly REQUESTED_MODE="$1"
 readonly REPO_ROOT_INPUT="$2"
 readonly INSTALL_DIR_INPUT="$3"
 readonly VENV_BIN="$4"
@@ -33,10 +33,18 @@ if [[ "${OS:-}" == "Windows_NT" ]]; then
     IS_WINDOWS=1
 fi
 
-case "${MODE}" in
-    check|claim|ensure-dir|publish-cli|publish-gateway) ;;
+DEV_RECLAIM_SOURCE=0
+case "${REQUESTED_MODE}" in
+    check|claim|ensure-dir|publish-cli|publish-gateway)
+        MODE="${REQUESTED_MODE}"
+        ;;
+    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway)
+        DEV_RECLAIM_SOURCE=1
+        MODE="${REQUESTED_MODE#dev-}"
+        ;;
     *) usage ;;
 esac
+readonly MODE DEV_RECLAIM_SOURCE
 
 refuse() {
     echo "error: source install refused: $1" >&2
@@ -88,7 +96,6 @@ readonly EXPECTED_CLI="${REPO_ROOT}/${VENV_BIN}/${CLI_NAME}"
 readonly GATEWAY_PATH="${INSTALL_DIR}/${GATEWAY_NAME}"
 readonly EXPECTED_GATEWAY="${REPO_ROOT}/${GATEWAY_NAME}"
 readonly MANAGED_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-readonly DEV_RECLAIM_SOURCE="${DEFENSECLAW_SOURCE_DEV_RECLAIM:-0}"
 readonly PATH_COMMAND="${CLI_NAME%.exe}"
 readonly PUBLISH_HELPER="${REPO_ROOT}/scripts/source-install-publish.py"
 readonly PUBLISH_MODULE="${REPO_ROOT}/cli/defenseclaw/install_publish.py"
@@ -170,12 +177,22 @@ check_owner() {
     local marker_gateway_digest=""
 
     if [[ -e "${MARKER}" || -L "${MARKER}" ]]; then
-        if [[ "${DEV_RECLAIM_SOURCE}" == "1" ]]; then
-            if ! VERIFIED_MARKER_DIGEST="$(sha256_regular "${MARKER}")"; then
-                refuse "the existing developer source-install marker is not a regular file"
+        if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 ]]; then
+            if ! marker_fields="$(
+                python3 "${SOURCE_IDENTITY_HELPER}" validate-marker \
+                    --path "${MARKER}" \
+                    --checkout-root "${REPO_ROOT}" \
+                    --source-release "${SOURCE_RELEASE}" \
+                    --compatibility-epoch "${SOURCE_INSTALL_COMPATIBILITY_EPOCH}" \
+                    --runtime-config-version "${SOURCE_RUNTIME_CONFIG_VERSION}" \
+                    --allow-source-transition 2>&1
+            )"; then
+                refuse "the developer source-install marker is invalid or belongs to another checkout (${marker_fields})"
             fi
-            [[ "${VERIFIED_MARKER_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
-                || refuse "the existing developer source-install marker returned an invalid digest"
+            IFS=$'\t' read -r VERIFIED_MARKER_DIGEST marker_gateway_digest <<< "${marker_fields}"
+            [[ "${VERIFIED_MARKER_DIGEST}" =~ ^[0-9a-f]{64}$ \
+               && "${marker_gateway_digest}" =~ ^[0-9a-f]{64}$ ]] \
+                || refuse "the developer source-install marker returned an invalid digest contract"
             marker_reclaim=1
         else
             if ! marker_fields="$(
@@ -243,7 +260,7 @@ check_owner() {
         # `make all` is the explicit developer-machine reinstall workflow and
         # opts into reclaiming this one exact-checkout layout; the successful
         # gateway publication records the strict marker for later rebuilds.
-        if [[ "${DEV_RECLAIM_SOURCE}" == "1" \
+        if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 \
            && ( "${marker_reclaim}" -eq 1 || -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ) ]]; then
             bind_dev_gateway
         elif [[ -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ]]; then

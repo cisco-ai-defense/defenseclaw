@@ -342,6 +342,7 @@ def validate_marker(
     source_release: str,
     compatibility_epoch: int,
     runtime_version: int,
+    allow_source_transition: bool = False,
 ) -> tuple[str, str]:
     """Return exact marker and gateway digests after v2 identity checks."""
 
@@ -377,16 +378,17 @@ def validate_marker(
         or marker_root != expected_root
     ):
         raise SourceIdentityError(f"source-install marker belongs to a different checkout ({marker_root!r})")
-    expected_scalars = {
-        "source_release": source_release,
-        "source_install_compatibility_epoch": compatibility_epoch,
-        "runtime_config_version": runtime_version,
-    }
-    for key, expected in expected_scalars.items():
-        if payload.get(key) != expected:
-            raise SourceIdentityError(
-                f"source-install marker {key}={payload.get(key)!r} does not match checkout {expected!r}"
-            )
+    if not allow_source_transition:
+        expected_scalars = {
+            "source_release": source_release,
+            "source_install_compatibility_epoch": compatibility_epoch,
+            "runtime_config_version": runtime_version,
+        }
+        for key, expected in expected_scalars.items():
+            if payload.get(key) != expected:
+                raise SourceIdentityError(
+                    f"source-install marker {key}={payload.get(key)!r} does not match checkout {expected!r}"
+                )
     gateway_digest = payload.get("gateway_sha256")
     if not isinstance(gateway_digest, str) or SHA256_RE.fullmatch(gateway_digest) is None:
         raise SourceIdentityError("source-install marker gateway_sha256 is invalid")
@@ -442,6 +444,7 @@ def _parser() -> argparse.ArgumentParser:
     marker.add_argument("--source-release", required=True)
     marker.add_argument("--compatibility-epoch", type=int, required=True)
     marker.add_argument("--runtime-config-version", type=int, required=True)
+    marker.add_argument("--allow-source-transition", action="store_true")
 
     render = subparsers.add_parser("render-marker")
     render.add_argument("--checkout-root", type=Path, required=True)
@@ -477,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_release=args.source_release,
                 compatibility_epoch=args.compatibility_epoch,
                 runtime_version=args.runtime_config_version,
+                allow_source_transition=args.allow_source_transition,
             )
             print(f"{marker_digest}\t{gateway_digest}")
         elif args.command == "render-marker":

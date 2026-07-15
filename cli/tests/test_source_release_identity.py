@@ -77,13 +77,12 @@ def _preflight(
         "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
         "PATH": "/usr/bin:/bin",
     }
-    if dev_reclaim:
-        environment["DEFENSECLAW_SOURCE_DEV_RECLAIM"] = "1"
+    requested_mode = f"dev-{mode}" if dev_reclaim else mode
     return subprocess.run(
         [
             "/bin/bash",
             str(ROOT / "scripts/source-install-preflight.sh"),
-            mode,
+            requested_mode,
             str(repo),
             str(install_dir),
             ".venv/bin",
@@ -335,6 +334,51 @@ def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_rejects_foreign_checkout_marker(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original_gateway = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    foreign_marker = _marker_payload(repo, installed_gateway)
+    foreign_marker["checkout_root"] = str(tmp_path / "different-checkout")
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(foreign_marker, sort_keys=True) + "\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "belongs to a different checkout" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original_gateway
+    assert marker.read_bytes() == original_marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_direct_install_ignores_developer_reclaim_environment_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original = installed_gateway.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+    monkeypatch.setenv("DEFENSECLAW_SOURCE_DEV_RECLAIM", "1")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-gateway")
+
+    assert completed.returncode != 0
+    assert "original release identity is unknowable" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 @pytest.mark.parametrize(
     ("field", "mismatched"),
     (
@@ -579,7 +623,10 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert main.index("source_install_ownership check") < main.index("check_os")
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
     assert "all: _source-install-dev-preflight" in makefile
-    assert "$(MAKE) --no-print-directory install DEFENSECLAW_SOURCE_DEV_RECLAIM=1" in makefile
+    assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
+    assert "source-install-preflight.sh dev-check" in makefile
+    assert "source-install-preflight.sh dev-publish-gateway" in makefile
+    assert "source-install-preflight.sh dev-claim" in makefile
     assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
     gateway_start = makefile.index("\ngateway-install:", cli_start) + 1

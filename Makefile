@@ -51,7 +51,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight _source-install-dev-preflight \
+        _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
@@ -104,7 +104,7 @@ check-version-sync:
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
 all: _source-install-dev-preflight
-	@$(MAKE) --no-print-directory install DEFENSECLAW_SOURCE_DEV_RECLAIM=1
+	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -442,9 +442,52 @@ _source-install-preflight:
 # exact symlink/copy owned by this checkout.  Direct install targets remain
 # fail-closed so they cannot become an alternate release upgrader.
 _source-install-dev-preflight:
-	@DEFENSECLAW_SOURCE_DEV_RECLAIM=1 ./scripts/source-install-preflight.sh check \
+	@./scripts/source-install-preflight.sh dev-check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+# Developer-only publication used by `make all`.  Keep the dev modes literal
+# here so ordinary install targets cannot inherit or opt into the reclaim path.
+_source-dev-install: _source-install-dev-preflight
+	@$(MAKE) --no-print-directory pycli
+	@./scripts/source-install-preflight.sh dev-ensure-dir \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-publish-cli \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@if [ -x "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" ]; then \
+		python3 ./scripts/source-install-publish.py symlink \
+			"$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" || true; \
+	fi
+	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
+	             mcp-scanner mcp-scanner-api; do \
+		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
+		if [ -x "$$src" ]; then \
+			python3 ./scripts/source-install-publish.py symlink \
+				"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true; \
+		fi; \
+	done
+	@$(MAKE) --no-print-directory gateway
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
+	fi
+	@./scripts/source-install-preflight.sh dev-publish-gateway \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-claim \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@$(MAKE) --no-print-directory $(SOURCE_PLUGIN_INSTALL_TARGET)
+	@echo ""
+	@echo "All components installed:"
+	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
+	else \
+		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
+	fi
 
 cli-install: _source-install-preflight
 	@$(MAKE) --no-print-directory pycli
