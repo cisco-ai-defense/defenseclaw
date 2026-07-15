@@ -317,6 +317,15 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 
 	var findings []string
 
+	// Cloud-controlled per-inspection redaction directive. Only the
+	// managed DefenseClawInspect response carries is_redaction_enabled;
+	// the OSS InspectResponse lacks the key, so redactionEnabled stays
+	// nil (no directive) there. true => redact, false => store raw.
+	var redactionEnabled *bool
+	if v, ok := data["is_redaction_enabled"].(bool); ok {
+		redactionEnabled = &v
+	}
+
 	if classRaw, ok := data["classifications"].([]interface{}); ok {
 		for _, c := range classRaw {
 			if s, ok := c.(string); ok && s != "" && s != "NONE_VIOLATION" {
@@ -340,9 +349,10 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 
 	if isSafe && apiAction != "block" {
 		return &ScanVerdict{
-			Action:   "allow",
-			Severity: "NONE",
-			Scanner:  "ai-defense",
+			Action:           "allow",
+			Severity:         "NONE",
+			Scanner:          "ai-defense",
+			RedactionEnabled: redactionEnabled,
 		}
 	}
 
@@ -371,10 +381,11 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	}
 
 	return &ScanVerdict{
-		Action:   action,
-		Severity: severity,
-		Reason:   reason,
-		Findings: findings,
-		Scanner:  "ai-defense",
+		Action:           action,
+		Severity:         severity,
+		Reason:           reason,
+		Findings:         findings,
+		Scanner:          "ai-defense",
+		RedactionEnabled: redactionEnabled,
 	}
 }

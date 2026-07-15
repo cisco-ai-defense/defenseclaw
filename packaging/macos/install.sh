@@ -94,6 +94,8 @@ SUPPORT_DIR="${INSTALL_PREFIX}"
 LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
 PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
 LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
+GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
 
 # Legacy paths + label from pre-Cisco-path DefenseClaw installs. These
@@ -104,6 +106,8 @@ LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
 LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
 LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
+LEGACY_GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist"
+LEGACY_GUARDIAN_LAUNCHD_LABEL="com.defenseclaw.hook-guardian"
 
 # The daemon runs as root — the managed cloud auth provider requires
 # root to read its credential store. We therefore do NOT create a
@@ -117,6 +121,7 @@ LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
 # account for upgrades from those installs.
 
 TARGET_USER=""
+TARGET_HOME=""
 AGENT_VERSION=""
 
 # ---- helpers ------------------------------------------------------------
@@ -124,6 +129,89 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+INSTALL_TEMP_FILES=()
+cleanup_install_temporaries() {
+  local path
+  for path in "${INSTALL_TEMP_FILES[@]-}"; do
+    [[ -n "${path}" ]] || continue
+    rm -f -- "${path}"
+  done
+}
+trap cleanup_install_temporaries EXIT
+
+forget_install_temporary() {
+  local expected="$1" index
+  for index in "${!INSTALL_TEMP_FILES[@]}"; do
+    if [[ "${INSTALL_TEMP_FILES[${index}]}" == "${expected}" ]]; then
+      unset "INSTALL_TEMP_FILES[${index}]"
+      return
+    fi
+  done
+}
+
+install_file_no_replace() {
+  local source="$1" destination="$2" owner="$3" group="$4" mode="$5"
+  local temporary
+  [[ ! -e "${destination}" && ! -L "${destination}" ]] \
+    || die "install destination appeared after fresh-host preflight: ${destination}"
+  temporary="$(mktemp "${destination}.new.XXXXXX")" \
+    || die "could not reserve a private install file beside ${destination}"
+  INSTALL_TEMP_FILES+=("${temporary}")
+  install -o "${owner}" -g "${group}" -m "${mode}" "${source}" "${temporary}"
+  ln "${temporary}" "${destination}" \
+    || die "install destination appeared concurrently and was preserved: ${destination}"
+  rm -f -- "${temporary}"
+  forget_install_temporary "${temporary}"
+}
+
+create_install_directory_no_replace() {
+  local path="$1" owner="$2" group="$3" mode="$4"
+  [[ ! -e "${path}" && ! -L "${path}" ]] \
+    || die "install directory appeared after fresh-host preflight: ${path}"
+  mkdir "${path}" \
+    || die "install directory appeared concurrently and was preserved: ${path}"
+  chown "${owner}:${group}" "${path}"
+  chmod "${mode}" "${path}"
+}
+
+ensure_shared_install_parent() {
+  local path="$1"
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    [[ -d "${path}" && ! -L "${path}" ]] \
+      || die "shared install parent is not a real directory: ${path}"
+  else
+    create_install_directory_no_replace "${path}" root wheel 0755
+  fi
+  local owner mode acl_output acl_line normalized permissions permission
+  local -a acl_permissions
+  owner="$(stat -f '%u' "${path}")" \
+    || die "cannot inspect shared install parent owner: ${path}"
+  mode="$(stat -f '%Lp' "${path}")" \
+    || die "cannot inspect shared install parent mode: ${path}"
+  [[ "${owner}" == "0" ]] \
+    || die "shared install parent is not root-owned: ${path}"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || die "shared install parent is group/other writable: ${path} (${mode})"
+  acl_output="$(ls -lde -- "${path}")" \
+    || die "cannot inspect shared install parent ACL: ${path}"
+  while IFS= read -r acl_line; do
+    normalized="$(printf '%s' "${acl_line}" | tr '[:upper:]' '[:lower:]')"
+    normalized="${normalized#"${normalized%%[![:space:]]*}"}"
+    [[ "${normalized}" =~ ^[0-9]+: ]] || continue
+    [[ "${normalized}" == *" allow "* ]] || continue
+    permissions="${normalized#* allow }"
+    permissions="${permissions%% *}"
+    IFS=',' read -r -a acl_permissions <<<"${permissions}"
+    for permission in "${acl_permissions[@]}"; do
+      case "${permission}" in
+        write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
+          die "shared install parent has a write-capable ACL: ${path}"
+          ;;
+      esac
+    done
+  done <<<"${acl_output}"
+}
 
 # shellcheck source=lib/installer_lib.sh
 . "${SCRIPT_DIR}/lib/installer_lib.sh"
@@ -144,6 +232,10 @@ Gateway options:
                             managed daemon uses to inspect content.
                             Use 'preview' only for internal validation against
                             the aiteam preview deployment.
+  --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
+                            Defense host for adhoc testing. Takes precedence
+                            over --env. Must be a full http(s) URL, e.g.
+                            https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
@@ -166,6 +258,7 @@ MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
 AID_ENV="${DEFAULT_ENV}"
+OVERRIDE_ENDPOINT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -173,6 +266,7 @@ while [[ $# -gt 0 ]]; do
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
     --env)              AID_ENV="${2:?}"; shift 2;;
+    --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
@@ -191,8 +285,23 @@ case "${MODE}" in
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
 
-AID_ENDPOINT="$(aid_endpoint_for_env "${AID_ENV}")" || \
+# --override-endpoint (when set) wins over --env; resolve_aid_endpoint
+# validates it and strips a trailing slash. Distinct return codes let us
+# report exactly which flag was wrong.
+_ep_rc=0
+AID_ENDPOINT="$(resolve_aid_endpoint "${AID_ENV}" "${OVERRIDE_ENDPOINT}")" || _ep_rc=$?
+if (( _ep_rc == 2 )); then
+  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
+elif (( _ep_rc != 0 )); then
   die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
+fi
+unset _ep_rc
+if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
+  case "${OVERRIDE_ENDPOINT}" in
+    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
+  esac
+  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
+fi
 
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
   die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"
@@ -280,15 +389,85 @@ if [[ -n "${TARGET_USER}" ]]; then
     die "could not resolve home for --user ${TARGET_USER}"
 fi
 
+# This bundle is a fresh-install surface, not an updater.  Refuse an
+# existing consumer, legacy-managed, or current-managed installation before
+# building a replacement binary, unloading launchd, or writing any installed
+# path.  In-place changes must be driven by a release-owned staged upgrader so
+# the 0.8.4 controller bridge and rollback contract cannot be bypassed.
+_existing_install_markers=(
+  "${INSTALL_PREFIX}"
+  "${LOGS_DIR}"
+  "${PLIST_DST}"
+  "${GUARDIAN_PLIST_DST}"
+  "${LEGACY_INSTALL_PREFIX}"
+  "${LEGACY_SUPPORT_DIR}"
+  "${LEGACY_LOGS_DIR}"
+  "${LEGACY_PLIST_DST}"
+  "${LEGACY_GUARDIAN_PLIST_DST}"
+)
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  for _installed_command in defenseclaw defenseclaw-gateway; do
+    _installed_command_path="$(command -v "${_installed_command}" 2>/dev/null || true)"
+    [[ -n "${_installed_command_path}" ]] \
+      && _existing_install_markers+=("${_installed_command_path}")
+  done
+fi
+if [[ -n "${TARGET_HOME}" ]]; then
+  _existing_install_markers+=(
+    "${TARGET_HOME}/.defenseclaw"
+    "${TARGET_HOME}/.local/bin/defenseclaw"
+    "${TARGET_HOME}/.local/bin/defenseclaw-gateway"
+  )
+fi
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  # A system-wide managed daemon would contend with a consumer gateway in any
+  # account, including an account other than --user/SUDO_USER. Always enumerate
+  # every local account's configured home instead of assuming /Users/<name>.
+  _local_users="$(dscl . -list /Users 2>/dev/null)" \
+    || die "could not enumerate local users to prove this is a fresh DefenseClaw host; no changes were made"
+  while IFS= read -r _local_user; do
+    [[ -n "${_local_user}" ]] || continue
+    _candidate_home="$(dscl . -read "/Users/${_local_user}" NFSHomeDirectory 2>/dev/null \
+      | sed -n 's/^NFSHomeDirectory: //p')"
+    [[ -n "${_candidate_home}" ]] || continue
+    _existing_install_markers+=(
+      "${_candidate_home}/.defenseclaw"
+      "${_candidate_home}/.local/bin/defenseclaw"
+      "${_candidate_home}/.local/bin/defenseclaw-gateway"
+    )
+  done <<< "${_local_users}"
+fi
+for _marker in "${_existing_install_markers[@]}"; do
+  if [[ -e "${_marker}" || -L "${_marker}" ]]; then
+    die "existing DefenseClaw installation detected at ${_marker}; no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
+  fi
+done
+for _label in \
+  "${LAUNCHD_LABEL}" \
+  "${GUARDIAN_LAUNCHD_LABEL}" \
+  "${LEGACY_LAUNCHD_LABEL}" \
+  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"; do
+  if launchctl print "system/${_label}" >/dev/null 2>&1; then
+    die "existing DefenseClaw launchd job detected (${_label}); no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner."
+  fi
+done
+unset _existing_install_markers _marker _label _local_users _local_user _candidate_home \
+  _installed_command _installed_command_path
+
 # Resolve the binary. Lookup order matches PLIST_SRC:
 #   1. --binary                              (explicit override)
-#   2. ${SCRIPT_DIR}/defenseclaw-gateway     (standalone bundle)
+#   2. ${SCRIPT_DIR}/defenseclaw             (standalone bundle artifact)
 #   3. ${REPO_ROOT}/defenseclaw-gateway      (dev tree)
 #   4. `go build` from ${REPO_ROOT}/cmd/defenseclaw  (dev-tree fallback)
+#
+# The shipped bundle names the artifact "defenseclaw" (see
+# scripts/build-macos-bundle.sh); the dev-tree build keeps the
+# "defenseclaw-gateway" name to match `make gateway`. Either way it is
+# installed to the runtime path ${GATEWAY_BIN} (.../bin/defenseclaw-gateway).
 if [[ -z "${BINARY_SRC}" ]]; then
-  if [[ -x "${SCRIPT_DIR}/defenseclaw-gateway" ]]; then
+  if [[ -x "${SCRIPT_DIR}/defenseclaw" ]]; then
     # Standalone bundle layout — trust the shipped binary.
-    BINARY_SRC="${SCRIPT_DIR}/defenseclaw-gateway"
+    BINARY_SRC="${SCRIPT_DIR}/defenseclaw"
     SKIP_BUILD="true"
   else
     # Repo-tree layout — either a pre-built binary at REPO_ROOT
@@ -306,29 +485,21 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
-# Refuse to clobber a running install silently. Sweep BOTH the current
-# Cisco-path label and the legacy pre-Cisco-path label so an upgrade
-# from an older install doesn't leave the legacy daemon loaded (which
-# would fight the new one for port 18970 and cause AUTH_INVALID_TOKEN
-# on every hook — the two daemons issue distinct gateway tokens and
-# whichever binds the port first drops the hook script's request).
+# Repeat the launchd/path boundary immediately before mutation. A deployment
+# that appears after the first preflight belongs to the concurrent installer;
+# never boot it out or remove its plist.
 for _lbl_plist in \
   "${LAUNCHD_LABEL}:${PLIST_DST}" \
-  "${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}"; do
+  "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
+  "${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}" \
+  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"; do
   _lbl="${_lbl_plist%%:*}"
   _plist="${_lbl_plist#*:}"
   if launchctl print "system/${_lbl}" >/dev/null 2>&1; then
-    warn "${_lbl} is currently loaded — bootouting before reinstall"
-    launchctl bootout "system/${_lbl}" 2>/dev/null || true
-    launchctl bootout system "${_plist}" 2>/dev/null || true
+    die "DefenseClaw launchd job appeared after fresh-host preflight and was preserved: ${_lbl}"
   fi
-  # Even if the daemon is not loaded, a stale plist under
-  # /Library/LaunchDaemons/ will be re-loaded on next boot. Remove it
-  # so `launchctl bootstrap` on the new plist has the field to itself.
-  if [[ "${_lbl}" == "${LEGACY_LAUNCHD_LABEL}" && -f "${_plist}" ]]; then
-    log "removing legacy plist so launchd cannot re-load it: ${_plist}"
-    rm -f "${_plist}"
-  fi
+  [[ ! -e "${_plist}" && ! -L "${_plist}" ]] \
+    || die "DefenseClaw plist appeared after fresh-host preflight and was preserved: ${_plist}"
 done
 unset _lbl_plist _lbl _plist
 
@@ -341,14 +512,12 @@ log "installing binary -> ${GATEWAY_BIN}"
 # already present — they may be shared with other Cisco software whose
 # permissions we shouldn't touch. Create them with `mkdir -p` only when
 # absent; unconditionally create + own only the DefenseClaw subtree.
-for parent in /opt/cisco /opt/cisco/secureclient; do
-  if [[ ! -d "${parent}" ]]; then
-    install -d -o root -g wheel -m 0755 "${parent}"
-  fi
+for parent in /opt /opt/cisco /opt/cisco/secureclient; do
+  ensure_shared_install_parent "${parent}"
 done
-install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}"
-install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}/bin"
-install    -o root -g wheel -m 0755 "${BINARY_SRC}" "${GATEWAY_BIN}"
+create_install_directory_no_replace "${INSTALL_PREFIX}" root wheel 0755
+create_install_directory_no_replace "${INSTALL_PREFIX}/bin" root wheel 0755
+install_file_no_replace "${BINARY_SRC}" "${GATEWAY_BIN}" root wheel 0755
 
 log "creating support dirs under ${SUPPORT_DIR}"
 # SUPPORT_DIR (= INSTALL_PREFIX) is root:wheel 0755. The
@@ -363,32 +532,34 @@ RUNTIME_DIR="${SUPPORT_DIR}/runtime"
 # test_launchd_gateway_plist_uses_managed_paths CI assertion).
 # Root-owned per docs — "root-owned authorization-record directory".
 GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
-install -d -o root -g wheel -m 0755 "${CONFIG_DIR}"
-install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
-install -d -o root -g wheel -m 0750 "${GUARDIAN_AUTH_DIR}"
+create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
+create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
+create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
 # LOGS_DIR — the /Library/Logs/Cisco/ and SecureClient/ ancestors may
 # be pre-existing and shared with other Cisco software. Same reasoning
 # as /opt/cisco above: only create them (with our default perms) when
 # absent, and unconditionally create + own only our leaf DefenseClaw/
 # directory.
-for parent in /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
-  if [[ ! -d "${parent}" ]]; then
-    install -d -o root -g wheel -m 0755 "${parent}"
-  fi
+for parent in /Library/Logs /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
+  ensure_shared_install_parent "${parent}"
 done
-install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
+create_install_directory_no_replace "${LOGS_DIR}" root wheel 0750
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
-if [[ -f "${CONFIG_PATH}" ]]; then
-  BACKUP="${CONFIG_PATH}.$(date +%Y%m%d-%H%M%S).bak"
-  cp -p "${CONFIG_PATH}" "${BACKUP}"
-  log "backed up existing config to ${BACKUP}"
-fi
+[[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
+  || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
 log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_PATH}"
-chown root:wheel "${CONFIG_PATH}"
-chmod 0640 "${CONFIG_PATH}"
+CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
+  || die "could not reserve a private managed-config staging file"
+INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+chown root:wheel "${CONFIG_TMP}"
+chmod 0640 "${CONFIG_TMP}"
+ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
+  || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
+rm -f -- "${CONFIG_TMP}"
+forget_install_temporary "${CONFIG_TMP}"
 
 log "chowning runtime dirs to root:wheel (daemon runs as root)"
 # Every DefenseClaw-owned directory is root:wheel. The daemon runs as
@@ -401,7 +572,7 @@ chown -R root:wheel "${RUNTIME_DIR}" "${LOGS_DIR}"
 # calls above; managed_enterprise trust check accepts them unchanged.
 
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
-install -o root -g wheel -m 0644 "${PLIST_SRC}" "${PLIST_DST}"
+install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 
 # The shipped plist deliberately omits UserName/GroupName so the daemon
 # runs as root (uid 0). If a stale plist from a pre-root DefenseClaw

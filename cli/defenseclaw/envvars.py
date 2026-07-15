@@ -47,6 +47,7 @@ __all__ = [
     "CATEGORY_TELEMETRY",
     "CATEGORY_RUNTIME_PATH",
     "CATEGORY_HOOK_INTERNAL",
+    "CATEGORY_UPGRADE_INTERNAL",
     "CATEGORY_CREDENTIAL",
     "CATEGORY_DISCOVERY",
     "CATEGORY_SPLUNK_BRIDGE",
@@ -62,6 +63,7 @@ CATEGORY_DEBUG = "debug"
 CATEGORY_TELEMETRY = "telemetry"
 CATEGORY_RUNTIME_PATH = "runtime_path"
 CATEGORY_HOOK_INTERNAL = "hook_internal"
+CATEGORY_UPGRADE_INTERNAL = "upgrade_internal"
 CATEGORY_CREDENTIAL = "credential"
 CATEGORY_DISCOVERY = "discovery"
 CATEGORY_SPLUNK_BRIDGE = "splunk_bridge"
@@ -74,6 +76,7 @@ ALLOWED_CATEGORIES = frozenset(
         CATEGORY_TELEMETRY,
         CATEGORY_RUNTIME_PATH,
         CATEGORY_HOOK_INTERNAL,
+        CATEGORY_UPGRADE_INTERNAL,
         CATEGORY_CREDENTIAL,
         CATEGORY_DISCOVERY,
         CATEGORY_SPLUNK_BRIDGE,
@@ -90,6 +93,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # Special-case: DEFENSECLAW_SCHEMA_VALIDATION is "off" to disable (the
 # inverse pattern). Tracked explicitly to keep ``is_truthy`` clean.
 _DISABLE_BY_OFF = frozenset({"DEFENSECLAW_SCHEMA_VALIDATION"})
+_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,8 @@ class EnvVar:
             return False
         if self.name in _DISABLE_BY_OFF:
             return v != "on"
+        if self.name in _ACTIVE_WHEN_NONEMPTY:
+            return True
         return v in _TRUTHY
 
 

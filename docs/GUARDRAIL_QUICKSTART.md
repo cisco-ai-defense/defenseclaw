@@ -381,14 +381,17 @@ is configured in OpenClaw with a valid API key.
 
 ### Upgrading DefenseClaw
 
-Use the built-in upgrade command to update without losing configuration:
+Use the current release-owned resolver in latest mode to update without losing
+configuration and to stage any required bridge:
+
+Installed users should use the authenticated POSIX or PowerShell download-and-
+verify command in [CLI Reference — upgrade](CLI.md#upgrade). That command runs
+the signed `defenseclaw-upgrade.sh` or `defenseclaw-upgrade.ps1` release asset;
+it does not require a source checkout. The shorthand below is only for a
+checkout of the current release:
 
 ```bash
-# Upgrade to the latest release
-defenseclaw upgrade --yes
-
-# Upgrade to a specific release
-defenseclaw upgrade --version 0.3.0 --yes
+./scripts/upgrade.sh --yes
 ```
 
 This backs up config files, downloads and replaces the gateway binary and

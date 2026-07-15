@@ -94,13 +94,25 @@ private struct GeneralSettings: View {
                 if let update = appState.availableRuntimeUpdate {
                     LabeledContent("Available", value: update.tag)
                     runtimeStatus
-                    if case .failed = appState.runtimeUpgradeState, !appState.runtimeUpgradeLog.isEmpty {
+                    if let command = runtimeUpgradeCommand {
+                        Button("Copy Upgrade Command") {
+                            copyToPasteboard(command)
+                        }
+                        .controlSize(.small)
+                        Text(command)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Authenticated runtime upgrade command")
+                    }
+                    if shouldShowRuntimeUpgradeLog {
                         Button("Copy Full Upgrade Log") {
                             copyToPasteboard(appState.runtimeUpgradeLog)
                         }
                         .controlSize(.small)
                     }
-                    Text("Runs `defenseclaw upgrade --yes`: downloads release artifacts, migrates, and restarts the gateway. Configuration is preserved.")
+                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -109,13 +121,11 @@ private struct GeneralSettings: View {
                 if let payload = RuntimePayload.bundled {
                     LabeledContent("Bundled payload", value: "v\(payload.version)")
                     installStateRow
-                    Button(appState.installedRuntimeVersion == nil
-                           ? "Install Runtime v\(payload.version) (bundled)"
-                           : "Repair / Reinstall Runtime (v\(payload.version) bundled)") {
+                    Button("Install Runtime v\(payload.version) (fresh install only)") {
                         Task { await appState.installBundledRuntime() }
                     }
                     .disabled(appState.runtimeInstallState.isRunning || runtimeActionDisabled)
-                    Text("Lays the runtime bundled in this app into ~/.defenseclaw and ~/.local/bin. Configuration, tokens, and the audit database are never touched. Dependency download from PyPI requires network.")
+                    Text("Fresh installs only. If an existing or partial runtime is detected, this action makes no changes and directs you to the release-owned latest-mode upgrade resolver. A true fresh install lays the bundled runtime into ~/.defenseclaw and ~/.local/bin; dependency download from PyPI requires network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -191,15 +201,32 @@ private struct GeneralSettings: View {
         case .checking:
             Text("Checking…").font(.caption).foregroundStyle(.secondary)
         case .installing, .downloading:
-            Text(appState.runtimeUpgradeLogTail.isEmpty ? "Running `defenseclaw upgrade`…" : appState.runtimeUpgradeLogTail)
+            Text(appState.runtimeUpgradeLogTail.isEmpty ? "Preparing release-owned resolver guidance…" : appState.runtimeUpgradeLogTail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+        case .actionRequired(let guidance, _):
+            Text(guidance).font(.caption).foregroundStyle(Cisco.blue).lineLimit(3)
         case .failed(let why):
             Text(why).font(.caption).foregroundStyle(Cisco.red).lineLimit(2)
         default:
             EmptyView()
         }
+    }
+
+    private var shouldShowRuntimeUpgradeLog: Bool {
+        guard !appState.runtimeUpgradeLog.isEmpty else { return false }
+        return switch appState.runtimeUpgradeState {
+        case .failed: true
+        default: false
+        }
+    }
+
+    private var runtimeUpgradeCommand: String? {
+        if case .actionRequired(_, let command) = appState.runtimeUpgradeState {
+            return command
+        }
+        return nil
     }
 
     private var macAppButtonTitle: String {
@@ -214,8 +241,8 @@ private struct GeneralSettings: View {
     private var runtimeButtonTitle: String {
         switch appState.runtimeUpgradeState {
         case .checking: "Checking Runtime…"
-        case .downloading, .installing: "Upgrading Runtime…"
-        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Upgrade Runtime"
+        case .downloading, .installing: "Preparing Upgrade Command…"
+        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Show Upgrade Command"
         }
     }
 
@@ -261,8 +288,7 @@ private struct GeneralSettings: View {
 
     private var runtimeActionDisabled: Bool {
         if appState.runtimeVersionCheckInProgress { return true }
-        // Bundled-payload install and `defenseclaw upgrade` mutate the same
-        // venv/gateway — one at a time.
+        // Do not overlap bundled-payload installation with upgrade guidance.
         if appState.runtimeInstallState.isRunning { return true }
         return switch appState.runtimeUpgradeState {
         case .checking, .downloading, .installing: true

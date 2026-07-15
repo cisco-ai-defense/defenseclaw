@@ -61,6 +61,18 @@
 // once-per-process warning when they observe the setting so the
 // runtime state stays auditable without spamming reload loops.
 //
+// # Agent-reason carve-out
+//
+// managed_enterprise deployments need a much narrower exception: the
+// operator running the local coding agent (codex/cursor/claude) must
+// always see the full, non-redacted block/allow reason in the agent's
+// own UI, even with redaction otherwise on. SetAgentReasonRedactionDisabled
+// enables this and ReasonForAgent is the single entry point that honors
+// it. Unlike the disable-all flag it affects ONLY the reason handed back
+// to the agent — every persistent and enterprise sink (SQLite, Splunk,
+// OTel, webhooks, OS toasts) still redacts because those routes call the
+// ForSink* helpers directly.
+//
 // # Output format
 //
 // Redactions follow a single, parseable shape:
@@ -146,6 +158,32 @@ func DisableAll() bool {
 	return false
 }
 
+// agentReasonRedactionDisabled is a narrower, agent-scoped carve-out
+// from the unconditional-redaction contract, distinct from the
+// process-wide DisableAll kill-switch above.
+//
+// In managed_enterprise the operator running the local coding agent
+// (codex/cursor/claude) must always see the full, non-redacted verdict
+// reason in the agent's own UI — otherwise a redacted "<redacted len=N
+// sha=...>" placeholder makes the block/allow explanation useless to
+// the person who triggered it. Unlike DisableAll this affects ONLY the
+// reason handed back to the agent via ReasonForAgent; every persistent
+// or enterprise sink (SQLite audit, gateway.jsonl, OTel/AI Defense
+// telemetry, webhooks, OS toasts) keeps redacting because those routes
+// call ForSink* directly and never consult this flag.
+//
+// Wired from Privacy + deployment_mode at sidecar startup and hot
+// reload (see internal/cli/root.go applyPrivacyConfig and
+// internal/gateway/sidecar.go applyConfigReload). Reads use atomic.Bool
+// so the hook hot path stays lock-free.
+var agentReasonRedactionDisabled atomic.Bool
+
+// SetAgentReasonRedactionDisabled flips the agent-scoped reason
+// carve-out documented on agentReasonRedactionDisabled. Intended to be
+// set once from the deployment_mode wiring (true in managed_enterprise);
+// tests may toggle it under t.Cleanup. Idempotent and atomic.
+func SetAgentReasonRedactionDisabled(v bool) { agentReasonRedactionDisabled.Store(v) }
+
 // hashPrefixHex is the number of leading hex characters of SHA-256
 // preserved in the placeholder. 8 hex chars (32 bits) is enough to
 // correlate distinct values within a single incident window without
@@ -213,6 +251,15 @@ func ForSinkString(s string) string {
 	if DisableAll() {
 		return s
 	}
+	return redactString(s)
+}
+
+// redactString is the unconditional redaction core for ForSinkString.
+// It never consults DisableAll, so callers that must force redaction
+// even under the global opt-out (the cloud-authoritative
+// SinkPolicyRedact directive) route here directly. ForSinkString wraps
+// it with the DisableAll short-circuit to preserve today's behavior.
+func redactString(s string) string {
 	if s == "" {
 		return "<empty>"
 	}
@@ -322,6 +369,12 @@ func ForSinkEntity(value string) string {
 	if DisableAll() {
 		return value
 	}
+	return redactEntity(value)
+}
+
+// redactEntity is the unconditional redaction core for ForSinkEntity;
+// see redactString for why the DisableAll check is hoisted out.
+func redactEntity(value string) string {
 	if value == "" {
 		return "<empty>"
 	}
@@ -361,6 +414,12 @@ func ForSinkMessageContent(content string) string {
 	if DisableAll() {
 		return content
 	}
+	return redactMessageContent(content)
+}
+
+// redactMessageContent is the unconditional redaction core for
+// ForSinkMessageContent; see redactString for the split rationale.
+func redactMessageContent(content string) string {
 	if content == "" {
 		return "<empty>"
 	}
@@ -392,10 +451,36 @@ func Reason(reason string) string {
 // Idempotent: if the input has already been through redaction (i.e.
 // contains "<redacted" markers and no other content), it is returned
 // unchanged.
+// ReasonForAgent renders a verdict reason for the LOCAL coding agent's
+// own UI (the codex/cursor/claude hook-response reason and its nested
+// output message fields). In managed_enterprise the operator running the
+// agent must see the full reason regardless of privacy.disable_redaction,
+// so this bypasses redaction when the agent-reason carve-out is set (see
+// SetAgentReasonRedactionDisabled). Otherwise it falls through to
+// ForSinkReason, so non-managed deployments keep redacting per the flag.
+//
+// This is intentionally the ONLY redaction entry point that honors the
+// carve-out: persistent and enterprise sinks call ForSink* directly and
+// remain redacted.
+func ReasonForAgent(reason string) string {
+	if agentReasonRedactionDisabled.Load() {
+		return reason
+	}
+	return ForSinkReason(reason)
+}
+
 func ForSinkReason(reason string) string {
 	if DisableAll() {
 		return reason
 	}
+	return redactReason(reason)
+}
+
+// redactReason is the unconditional redaction core for ForSinkReason;
+// see redactString for the split rationale. It retains the trusted
+// passthrough / already-redacted fast paths because those are part of
+// the redaction contract, not the DisableAll opt-out.
+func redactReason(reason string) string {
 	if reason == "" {
 		return ""
 	}
@@ -564,7 +649,13 @@ func redactReasonTokenDepth(t string, depth int) string {
 		if isSafeReasonToken(t) {
 			return t
 		}
-		return ForSinkString(t)
+		// redactString (not ForSinkString) so this core stays
+		// unconditional: ForSinkReason already short-circuited
+		// DisableAll before reaching here, and the
+		// cloud-authoritative SinkPolicyRedact path enters via
+		// redactReason expecting a real redaction even when the
+		// local DisableAll opt-out is on.
+		return redactString(t)
 	}
 	if idx := strings.Index(t, ": "); idx > 0 {
 		prefix := t[:idx]
@@ -598,7 +689,7 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(rest) {
 				return prefix + ":" + rest
 			}
-			return prefix + ":" + ForSinkString(rest)
+			return prefix + ":" + redactString(rest)
 		}
 	}
 	if isSafeReasonToken(t) {
@@ -617,10 +708,10 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(val) {
 				return key + "=" + val
 			}
-			return key + "=" + ForSinkString(val)
+			return key + "=" + redactString(val)
 		}
 	}
-	return ForSinkString(t)
+	return redactString(t)
 }
 
 // redactWhitespaceTokens handles "key=value [key=value …]" audit
@@ -636,7 +727,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		if i == 0 && start > 0 {
 			leading := strings.TrimSpace(clause[:start])
 			if leading != "" {
-				b.WriteString(ForSinkString(leading))
+				b.WriteString(redactString(leading))
 				b.WriteByte(' ')
 			}
 		}
@@ -648,7 +739,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		segment = strings.TrimRight(segment, " \t")
 		eq := strings.IndexByte(segment, '=')
 		if eq < 0 {
-			b.WriteString(ForSinkString(segment))
+			b.WriteString(redactString(segment))
 		} else {
 			key := segment[:eq]
 			value := segment[eq+1:]
@@ -661,7 +752,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 			case isSafeKVValue(value):
 				b.WriteString(value)
 			default:
-				b.WriteString(ForSinkString(value))
+				b.WriteString(redactString(value))
 			}
 		}
 		if i+1 < len(boundaries) {
@@ -768,6 +859,12 @@ func ForSinkEvidence(content string, matchStart, matchEnd int) string {
 	if DisableAll() {
 		return content
 	}
+	return redactEvidence(content, matchStart, matchEnd)
+}
+
+// redactEvidence is the unconditional redaction core for
+// ForSinkEvidence; see redactString for the split rationale.
+func redactEvidence(content string, matchStart, matchEnd int) string {
 	if content == "" {
 		return "<empty>"
 	}

@@ -987,7 +987,14 @@ func (a *APIServer) enrichHookPhase(meta llmEventMeta) llmEventMeta {
 		}
 		a.hookPhaseStateOrder = append(a.hookPhaseStateOrder, key)
 	}
-	meta.PreviousPhase = firstNonEmpty(state.phase, "unknown")
+	// Leave PreviousPhase empty (=> omitted / null) when there is no prior
+	// phase. The gateway-event schema's agent_previous_phase enum permits the
+	// real phases or null but NOT the "unknown" sentinel — emitting "unknown"
+	// makes gatewaylog reject the event on a schema violation and DROP it
+	// entirely (so it never reaches the audit or OTEL sinks). The metrics path
+	// re-derives an "unknown" label from an empty value (telemetry/metrics.go),
+	// so agent phase-transition metrics are unaffected.
+	meta.PreviousPhase = state.phase
 	state.sequence++
 	state.phase = meta.Phase
 	meta.Sequence = state.sequence

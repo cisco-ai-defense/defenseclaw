@@ -264,6 +264,40 @@ aid_endpoint_for_env() {
   esac
 }
 
+# resolve_aid_endpoint ENV OVERRIDE -> stdout effective endpoint
+#
+# When OVERRIDE is non-empty it wins over ENV: this is the --override-endpoint
+# adhoc-testing seam that lets an operator point the managed daemon at an
+# arbitrary AI Defense host (e.g. a personal preview tenant) without adding a
+# new --env case. The override is validated as a well-formed http(s) URL with
+# no whitespace or double-quote (it is later rendered into a quoted YAML
+# scalar) and any trailing slash is stripped for consistent path joining.
+#
+# Return codes let the caller emit a precise error:
+#   0 - success (endpoint on stdout)
+#   1 - unknown ENV (and no override) — invalid --env
+#   2 - override supplied but malformed — invalid --override-endpoint
+#
+# Kept pure (stdout only, no warn/log) so tests can exercise precedence and
+# validation without the AID cloud being reachable.
+resolve_aid_endpoint() {
+  local env="$1"
+  local override="$2"
+  if [[ -n "${override}" ]]; then
+    # Require a non-empty URL authority (host) right after "//": the
+    # first authority char must not be a delimiter (/ ? #), so hostless
+    # values like "https:///" or "https://?tenant=x" are rejected. The
+    # whole value must also be free of whitespace, double quotes, and
+    # backslashes — it is rendered into a double-quoted YAML scalar where
+    # a backslash would be an escape sequence and a quote would break out.
+    local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
+    [[ "${override}" =~ ${re} ]] || return 2
+    printf '%s\n' "${override%/}"
+    return 0
+  fi
+  aid_endpoint_for_env "${env}"
+}
+
 # render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after AID_ENDPOINT are the full connector list (primary + others).
@@ -360,6 +394,30 @@ EOF
 # and internal/managed/cloudreg for the client-side implementation.
 cisco_ai_defense:
   endpoint: "${aid_endpoint}"
+
+# OpenTelemetry. In managed_enterprise the gateway auto-provisions a Cisco AI
+# Defense event-ingest LOG sink from cisco_ai_defense.endpoint above: it POSTs
+# DefenseClaw's own events to ${aid_endpoint}/api/v1/defenseclaw/events/ingest with
+# a CMID bearer token (see internal/telemetry/cisco_aid_log_exporter.go). That
+# sink is independent of otel.destinations[] and needs no user collector.
+# otel.enabled is turned on so the telemetry provider (and that managed sink)
+# are active; the "enabled requires a destination" rule is waived when the
+# managed sink is present (see config.hasManagedAIDLogSink). Add entries under
+# otel.destinations[] only if you also want to fan out to your own OTLP backend.
+# Set DEFENSECLAW_DEBUG=1 for a stderr line confirming each successful send.
+otel:
+  enabled: true
+
+# Continuous AI discovery (endpoint inventory). Enabled in managed_enterprise
+# so the sidecar scans for supported connectors and broader "shadow AI" usage
+# signals and ships the inventory to AI Defense as discovery events over the
+# managed AID log sink above (see internal/inventory/ai_discovery.go and
+# internal/telemetry/cisco_aid_log_exporter.go). emit_otel defaults on, which is
+# what carries the inventory to that sink; other ai_discovery.* keys keep their
+# built-in defaults (mode enhanced, scan intervals). The scanner is a no-op
+# unless enabled, so this block is required for endpoint inventory to flow.
+ai_discovery:
+  enabled: true
 
 # asset_policy is intentionally disabled in this managed_enterprise
 # rollout. The AID cloud is the single authoritative source of block

@@ -18,7 +18,7 @@
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg" /></a>
-  <a href="https://go.dev/"><img alt="Go 1.26.2" src="https://img.shields.io/badge/go-1.26.2-00ADD8.svg" /></a>
+  <a href="https://go.dev/"><img alt="Go 1.26.4" src="https://img.shields.io/badge/go-1.26.4-00ADD8.svg" /></a>
   <a href="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="https://discord.com/invite/nKWtDcXxtx"><img alt="Discord: Join us" src="https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&amp;logoColor=white" /></a>
 </p>
@@ -91,12 +91,12 @@ Project Markdown documentation is centralized under [docs/](docs/). Package-loca
 | Requirement | Version |
 |-------------|---------|
 | Python | 3.10+ |
-| Go | 1.26.2+ |
+| Go | 1.26.4+ |
 | Node.js | 18+ for the OpenClaw plugin |
 | uv | Recommended for Python installs |
 | Docker | Optional, for local observability and Splunk bundles |
 
-### Install from source
+### Build from source (developers only)
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
@@ -104,10 +104,20 @@ cd defenseclaw
 make all
 ```
 
+The source targets and `scripts/install-dev.sh` are development tooling, not an
+upgrade path. They refuse to overwrite a release-managed installation or one
+owned by another checkout. Repeat builds are allowed only while the checkout's
+reviewed release, source-install compatibility epoch, and runtime schema still
+match its strict ownership marker. A source-owned version transition has no
+tested in-place path: keep that checkout and state unchanged, use an isolated
+fresh developer `HOME`/install directory, or contact support. Release-managed
+installations must use the release-owned `scripts/upgrade.sh` or
+`scripts/upgrade.ps1` resolver.
+
 ### Install with the release script
 
 ```bash
-VERSION=0.8.3
+VERSION=0.8.4
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail
@@ -228,6 +238,17 @@ See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), the
 [Galileo guide](docs-site/content/docs/observability/galileo.mdx), and
 [schema ownership map](schemas/README.md). Splunk-specific setup is in
 [docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
+
+An installed, coherent `0.8.4` bridge can migrate with the built-in
+`defenseclaw upgrade --yes`; it first acquires authenticated `0.8.4` rollback
+artifacts before backup or service stop. For `0.8.3` or older, do not execute
+any obsolete raw-network hint printed by the frozen built-in CLI. Authenticate
+the current release-owned resolver and run it in latest mode, without a version
+override. The migration backs up and atomically converts configuration,
+preserves narrower routing/redaction behavior and root/subagent Agent360
+compatibility, refreshes owned local dashboards without resetting volumes, and
+never requires a separate apply command. See [CLI Reference — upgrade](docs/CLI.md#upgrade)
+for the authenticated resolver bootstrap.
 
 For Splunk Observability Cloud, use the dashboard bundle at
 [bundles/splunk_o11y_dashboards/README.md](bundles/splunk_o11y_dashboards/README.md):

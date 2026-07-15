@@ -1,11 +1,17 @@
 [project]
 name = "defenseclaw"
-version = "0.8.0"
+version = "0.8.4"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
+    # Floor stays at 8.1.8 (not the patched 8.3.3) so the published-wheel
+    # install path — a plain `uv pip install` that ignores the [tool.uv]
+    # litellm override below — can still resolve: cisco-ai-mcp-scanner pulls
+    # litellm==1.83.7 there, which hard-pins click==8.1.8. The locked/synced
+    # env (which honors the litellm>=1.84 override) resolves click to a
+    # patched 8.4.x, so `uv run pip-audit` sees no click advisory.
     "click>=8.1.8,<9",
     "pyyaml==6.0.3",
     "requests==2.33.0",
@@ -135,7 +141,9 @@ override-dependencies = [
     # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1.
     "cryptography>=48.0.1,<49",
     # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
-    "litellm>=1.84.0,<2",
+    # LiteLLM 1.92.0 has no portable wheel, so keep supported installers on
+    # the reviewed wheel line until upstream restores Windows/macOS artifacts.
+    "litellm>=1.84.0,<1.92.0",
     # litellm pins exact transitive versions that conflict with what
     # cisco-ai-skill-scanner 2.0.11 (and our own pins) expect. We
     # override to a single compatible version per package — the newer

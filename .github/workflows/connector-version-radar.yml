@@ -1,0 +1,378 @@
+# Daily upstream connector version radar and isolated macOS upgrade regression
+# harness. This workflow is intentionally separate from connector-live-e2e.yml:
+# the existing hosted Layer A contract matrix remains unchanged, while only
+# trusted default-branch code can reach the persistent connector-lab runner.
+
+name: Connector Version Radar
+
+on:
+  schedule:
+    # Stagger away from the existing 09:00 UTC connector contract matrix.
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+    inputs:
+      connector:
+        description: "Connector to check (or all)"
+        type: choice
+        default: all
+        options:
+          - all
+          - codex
+          - claudecode
+          - antigravity
+      force:
+        description: "Run even when the candidate was already attempted"
+        type: boolean
+        default: false
+      baseline_version:
+        description: "Optional exact baseline (single connector only; e.g. 0.142.5)"
+        type: string
+        default: ""
+      candidate_version:
+        description: "Optional exact candidate (single connector only; e.g. 0.144.1)"
+        type: string
+        default: ""
+
+# The lab is persistent. Prevent overlap and never cancel a harness midway
+# through connector config restoration. GitHub retains at most one pending run.
+concurrency:
+  group: connector-version-radar-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect new connector versions
+    # A manual dispatch may select another ref in the UI. Never send that ref's
+    # code to the persistent runner.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, macOS, ARM64, connector-lab, defenseclaw-macos]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      any_new: ${{ steps.radar.outputs.any_new }}
+      matrix: ${{ steps.radar.outputs.matrix }}
+      status: ${{ steps.radar.outputs.status }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+
+      - name: Establish LaunchAgent PATH and private state path
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            "${HOME}/.local/bin" \
+            "${HOME}/.npm-global/bin" \
+            /opt/homebrew/bin \
+            /usr/local/bin; do
+            echo "${path}" >> "${GITHUB_PATH}"
+          done
+          state_dir="${HOME}/Library/Application Support/DefenseClawConnectorLab"
+          mkdir -p "${state_dir}" "${RUNNER_TEMP}/connector-version-radar-detection"
+          chmod 700 "${state_dir}"
+          echo "RADAR_STATE=${state_dir}/version-radar-state.json" >> "${GITHUB_ENV}"
+          echo "RADAR_OUTPUT=${RUNNER_TEMP}/connector-version-radar-detection/radar.json" >> "${GITHUB_ENV}"
+
+      - name: Validate manual overrides
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          SELECTED_CONNECTOR: ${{ inputs.connector }}
+          BASELINE_VERSION: ${{ inputs.baseline_version }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          if { [ -n "${BASELINE_VERSION}" ] || [ -n "${CANDIDATE_VERSION}" ]; } && \
+             [ "${SELECTED_CONNECTOR}" = all ]; then
+            echo "::error::Version overrides require one connector, not 'all'."
+            exit 1
+          fi
+          for value in "${BASELINE_VERSION}" "${CANDIDATE_VERSION}"; do
+            [ -z "${value}" ] || [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+              echo "::error::Version overrides must be exact semantic versions: ${value}"
+              exit 1
+            }
+          done
+
+      - name: Query installed and upstream stable versions
+        id: radar
+        shell: bash
+        env:
+          SELECTED_CONNECTOR: ${{ inputs.connector || 'all' }}
+          FORCE_REQUESTED: ${{ inputs.force || false }}
+          BASELINE_OVERRIDE: ${{ inputs.baseline_version || '' }}
+          CANDIDATE_OVERRIDE: ${{ inputs.candidate_version || '' }}
+        run: |
+          set -euo pipefail
+          args=(
+            check
+            --state "${RADAR_STATE}"
+            --output "${RADAR_OUTPUT}"
+            --github-output "${GITHUB_OUTPUT}"
+          )
+          if [ "${SELECTED_CONNECTOR}" != all ]; then
+            args+=(--connector "${SELECTED_CONNECTOR}")
+          fi
+          # Explicit versions describe a deliberate comparison, so they imply
+          # force even if the detected latest version was already attempted.
+          if [ "${FORCE_REQUESTED}" = true ] || \
+             [ -n "${BASELINE_OVERRIDE}" ] || [ -n "${CANDIDATE_OVERRIDE}" ]; then
+            args+=(--force)
+          fi
+          python3 scripts/connector-version-radar.py "${args[@]}"
+
+      - name: Snapshot radar state for audit
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/connector-version-radar-detection/state-after-check.json"
+          if [ -f "${RADAR_STATE:-}" ]; then
+            /bin/cp -p "${RADAR_STATE}" "${destination}"
+          fi
+
+      - name: Upload detection evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: connector-version-radar-detection
+          path: ${{ runner.temp }}/connector-version-radar-detection
+          if-no-files-found: warn
+          retention-days: 30
+          include-hidden-files: true
+
+  live:
+    name: Upgrade ${{ matrix.connector }} ${{ inputs.baseline_version || matrix.baseline_version }} to ${{ inputs.candidate_version || matrix.candidate_version }}
+    needs: detect
+    if: ${{ needs.detect.outputs.any_new == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, macOS, ARM64, connector-lab, defenseclaw-macos]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # Preserve the machine-local state file and connector config transaction
+      # even if more connector-lab runners are added later.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Establish connector and Homebrew PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            "${HOME}/.local/bin" \
+            "${HOME}/.npm-global/bin" \
+            /opt/homebrew/bin \
+            /usr/local/bin; do
+            echo "${path}" >> "${GITHUB_PATH}"
+          done
+
+      - name: Build repository-local DefenseClaw
+        shell: bash
+        run: |
+          set -euo pipefail
+          make pycli gateway
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
+          echo "${GITHUB_WORKSPACE}" >> "${GITHUB_PATH}"
+          test -x "${GITHUB_WORKSPACE}/.venv/bin/defenseclaw"
+          test -x "${GITHUB_WORKSPACE}/defenseclaw-gateway"
+
+      - name: Resolve exact comparison versions
+        id: versions
+        shell: bash
+        env:
+          DISCOVERED_BASELINE: ${{ matrix.baseline_version }}
+          DISCOVERED_CANDIDATE: ${{ matrix.candidate_version }}
+          BASELINE_OVERRIDE: ${{ inputs.baseline_version || '' }}
+          CANDIDATE_OVERRIDE: ${{ inputs.candidate_version || '' }}
+        run: |
+          set -euo pipefail
+          baseline="${BASELINE_OVERRIDE:-${DISCOVERED_BASELINE}}"
+          candidate="${CANDIDATE_OVERRIDE:-${DISCOVERED_CANDIDATE}}"
+          for value in "${baseline}" "${candidate}"; do
+            [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+              echo "::error::Refusing invalid comparison version: ${value}"
+              exit 1
+            }
+          done
+          echo "baseline=${baseline}" >> "${GITHUB_OUTPUT}"
+          echo "candidate=${candidate}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run isolated upgrade regression harness
+        id: harness
+        shell: bash
+        env:
+          CONNECTOR: ${{ matrix.connector }}
+          BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
+          CANDIDATE_VERSION: ${{ steps.versions.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          result_root="${RUNNER_TEMP}/connector-version-radar/${CONNECTOR}-${CANDIDATE_VERSION}"
+          mkdir -p "${result_root}/harness"
+          echo "result_root=${result_root}" >> "${GITHUB_OUTPUT}"
+          set +e
+          bash scripts/live-connector-e2e/upgrade-regression.sh \
+            --connector "${CONNECTOR}" \
+            --baseline-version "${BASELINE_VERSION}" \
+            --candidate-version "${CANDIDATE_VERSION}" \
+            --results "${result_root}/results.jsonl" \
+            --classification-output "${result_root}/classification.json" \
+            --artifacts-dir "${result_root}/harness" \
+            --mode action
+          harness_rc=$?
+          set -e
+          echo "exit_code=${harness_rc}" >> "${GITHUB_OUTPUT}"
+          # Defer failure until state and artifacts have been handled.
+          exit 0
+
+      - name: Record meaningful radar outcome
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CONNECTOR: ${{ matrix.connector }}
+          FALLBACK_CANDIDATE: ${{ steps.versions.outputs.candidate }}
+          RESOLVED_CANDIDATE: ${{ steps.harness.outputs.candidate_version }}
+          CLASSIFICATION: ${{ steps.harness.outputs.classification }}
+          RESULT_ROOT: ${{ steps.harness.outputs.result_root }}
+          BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
+          BASELINE_OVERRIDE: ${{ inputs.baseline_version || '' }}
+          CANDIDATE_OVERRIDE: ${{ inputs.candidate_version || '' }}
+        run: |
+          set -euo pipefail
+          state="${HOME}/Library/Application Support/DefenseClawConnectorLab/version-radar-state.json"
+          version="${RESOLVED_CANDIDATE:-${FALLBACK_CANDIDATE}}"
+          if [ -n "${BASELINE_OVERRIDE}" ] || [ -n "${CANDIDATE_OVERRIDE}" ]; then
+            echo "Not advancing daily radar state for an explicit historical/manual comparison."
+            if [ -n "${RESULT_ROOT}" ] && [ -f "${state}" ]; then
+              /bin/cp -p "${state}" "${RESULT_ROOT}/radar-state-after.json"
+            fi
+            exit 0
+          fi
+          case "${CLASSIFICATION}" in
+            pass)
+              python3 scripts/connector-version-radar.py mark \
+                --state "${state}" --connector "${CONNECTOR}" \
+                --version "${version}" --result passed
+              ;;
+            candidate_regression)
+              if [ "${BASELINE_VERSION}" != "${version}" ]; then
+                # The harness proved this exact baseline before the candidate
+                # failed. Preserve it as the next comparison's known-good
+                # release even if the globally installed CLI auto-updates.
+                python3 scripts/connector-version-radar.py mark \
+                  --state "${state}" --connector "${CONNECTOR}" \
+                  --version "${BASELINE_VERSION}" --result passed
+              fi
+              python3 scripts/connector-version-radar.py mark \
+                --state "${state}" --connector "${CONNECTOR}" \
+                --version "${version}" --result attempted
+              ;;
+            *)
+              echo "Not advancing radar state for classification=${CLASSIFICATION:-missing}; a later run will retry."
+              ;;
+          esac
+          if [ -n "${RESULT_ROOT}" ] && [ -f "${state}" ]; then
+            /bin/cp -p "${state}" "${RESULT_ROOT}/radar-state-after.json"
+          fi
+
+      - name: Upload live evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: connector-version-radar-${{ matrix.connector }}-${{ steps.versions.outputs.candidate }}
+          path: ${{ steps.harness.outputs.result_root }}
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+
+      - name: Propagate harness classification
+        if: ${{ always() }}
+        shell: bash
+        env:
+          HARNESS_EXIT_CODE: ${{ steps.harness.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          case "${HARNESS_EXIT_CODE:-4}" in
+            0) exit 0 ;;
+            2|3|4|5) exit "${HARNESS_EXIT_CODE}" ;;
+            *) echo "::error::Unexpected harness exit code: ${HARNESS_EXIT_CODE:-missing}"; exit 4 ;;
+          esac
+
+  report:
+    name: Report connector regressions
+    needs: [detect, live]
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Download radar evidence
+        if: ${{ needs.live.result != 'skipped' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: connector-version-radar-*
+          path: radar-results
+          # Keep one subdirectory per artifact. The reporter recursively reads
+          # JSONL files, and flattening can overwrite identical result names.
+          merge-multiple: false
+
+      - name: Ensure regression label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create connector-regression \
+            --description "Upstream connector version compatibility regression" \
+            --color d73a4a \
+            --force
+
+      - name: Render summary and open or update the regression issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p radar-results
+          open_flag=()
+          while IFS= read -r -d '' classification; do
+            if jq -e '.classification == "candidate_regression"' "${classification}" >/dev/null; then
+              open_flag+=(--open-issue)
+              break
+            fi
+          done < <(find radar-results -name classification.json -type f -print0)
+          python3 scripts/live-connector-e2e/report.py \
+            --results-dir radar-results \
+            "${open_flag[@]}" \
+            --run-url "${RUN_URL}"

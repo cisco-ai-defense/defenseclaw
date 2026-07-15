@@ -47,6 +47,7 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import config as config_module  # noqa: E402
 from defenseclaw.config import (  # noqa: E402
     Config,
     GatewayConfig,
@@ -56,6 +57,16 @@ from defenseclaw.config import (  # noqa: E402
     _merge_preserving_unmodeled,
     _owned_top_level_keys,
 )
+
+
+class TestConfigVersionPreflight(unittest.TestCase):
+    def test_invalid_utf8_is_normalized_to_config_version_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "wb") as stream:
+                stream.write(b"config_version: 7\ninvalid: \xff\n")
+            with self.assertRaisesRegex(config_module.ConfigVersionError, "schema version"):
+                config_module.source_config_version(path=path)
 
 
 def _make_cfg(tmpdir: str, **overrides) -> Config:

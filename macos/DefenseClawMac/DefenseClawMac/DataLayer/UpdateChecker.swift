@@ -39,6 +39,10 @@ enum UpgradeState: Equatable {
     case checking
     case downloading
     case installing
+    /// No mutation failed; the operator must complete an external authenticated action.
+    /// Keep human-readable guidance separate from the exact runnable command so
+    /// copy actions never put explanatory prose on the operator's pasteboard.
+    case actionRequired(guidance: String, command: String)
     case failed(String)
 }
 
@@ -73,12 +77,12 @@ actor UpdateChecker {
 
     /// Latest Mac-app release.
     func latestRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.repo)
+        await fetchLatest(repo: Self.repo, requireSelfUpdateAsset: true)
     }
 
     /// Latest DefenseClaw runtime release (upstream repo).
     func latestRuntimeRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.runtimeRepo)
+        await fetchLatest(repo: Self.runtimeRepo, requireSelfUpdateAsset: false)
     }
 
     /// Parse "defenseclaw, version 0.7.0"-style output into "0.7.0".
@@ -88,7 +92,7 @@ actor UpdateChecker {
         return String(output[range])
     }
 
-    private func fetchLatest(repo: String) async -> ReleaseInfo? {
+    private func fetchLatest(repo: String, requireSelfUpdateAsset: Bool) async -> ReleaseInfo? {
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -97,22 +101,29 @@ actor UpdateChecker {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = dict["tag_name"] as? String
         else { return nil }
+        return Self.releaseInfo(
+            from: dict,
+            repo: repo,
+            tag: tag,
+            requireSelfUpdateAsset: requireSelfUpdateAsset
+        )
+    }
+
+    nonisolated static func releaseInfo(
+        from dict: [String: Any],
+        repo: String,
+        tag: String,
+        requireSelfUpdateAsset: Bool
+    ) -> ReleaseInfo? {
         let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        let appZips = assets.filter {
-            let name = ($0["name"] as? String) ?? ""
-            return name.hasPrefix("DefenseClawMac-")
-                && name.contains("-macos-arm64")
-                && name.hasSuffix(".zip")
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let zip = Self.selectSelfUpdateAsset(from: assets, version: version)
+        if requireSelfUpdateAsset && zip == nil {
+            return nil
         }
-        // Prefer a Developer ID signed + notarized artifact once release
-        // credentials are configured. Until then, releases intentionally use
-        // the explicit "unverified" suffix.
-        let zip = appZips.first {
-            !(($0["name"] as? String) ?? "").contains("-unverified")
-        } ?? appZips.first
         return ReleaseInfo(
             tag: tag,
-            version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+            version: version,
             assetName: (zip?["name"] as? String) ?? "",
             assetURL: (zip?["browser_download_url"] as? String) ?? "",
             assetSHA256: ((zip?["digest"] as? String) ?? "")
@@ -122,13 +133,40 @@ actor UpdateChecker {
         )
     }
 
+    nonisolated static func isEligibleSelfUpdateAsset(name: String, version: String) -> Bool {
+        name == "DefenseClawMac-\(version)-macos-arm64.zip"
+    }
+
+    nonisolated static func selectSelfUpdateAsset(
+        from assets: [[String: Any]],
+        version: String
+    ) -> [String: Any]? {
+        assets.first {
+            let name = ($0["name"] as? String) ?? ""
+            return Self.isEligibleSelfUpdateAsset(name: name, version: version)
+        }
+    }
+
     // MARK: - Download + install + restart
+
+    struct ZipArchiveEntry: Equatable {
+        var path: String
+        var mode: String
+    }
+
+    enum ArchiveValidationResult: Equatable {
+        case success(appBundleName: String)
+        case failure(String)
+    }
 
     /// Downloads the release zip, swaps the current bundle, and relaunches.
     /// Returns an error message, or never returns (the app restarts) on success.
     func downloadAndInstall(_ release: ReleaseInfo, progress: @Sendable @escaping (UpgradeState) -> Void) async -> String? {
         guard Self.isNewer(release.version, than: Self.currentVersion) else {
             return "Refusing to install version \(release.version) over \(Self.currentVersion)."
+        }
+        guard Self.isEligibleSelfUpdateAsset(name: release.assetName, version: release.version) else {
+            return "The release asset is not the exact verified macOS app update for \(release.version)."
         }
         guard let assetURL = URL(string: release.assetURL), !release.assetURL.isEmpty else {
             return "The latest release has no downloadable zip asset."
@@ -169,6 +207,16 @@ actor UpdateChecker {
         // Unpack with ditto (preserves bundle structure + signature).
         let unpackDir = stage.appendingPathComponent("unpacked")
         try? FileManager.default.createDirectory(at: unpackDir, withIntermediateDirectories: true)
+        let entries = await Self.listZipEntries(zipPath)
+        guard entries.exitCode == 0 else {
+            return "Could not inspect update archive: \(entries.output)"
+        }
+        switch Self.validateUpdateArchive(entries: Self.parseZipEntries(entries.output)) {
+        case .success:
+            break
+        case .failure(let message):
+            return "Refusing unsafe update archive: \(message)"
+        }
         let unzip = await Self.runProcess("/usr/bin/ditto", ["-xk", zipPath.path, unpackDir.path])
         guard unzip.exitCode == 0 else { return "Unpack failed: \(unzip.output)" }
         let appNames = (try? FileManager.default.contentsOfDirectory(atPath: unpackDir.path))?
@@ -194,13 +242,11 @@ actor UpdateChecker {
         guard signature.exitCode == 0 else {
             return "The downloaded app failed code-signature verification: \(signature.output)"
         }
-        if !release.assetName.contains("-unverified") {
-            let assessment = await Self.runProcess(
-                "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
-            )
-            guard assessment.exitCode == 0 else {
-                return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
-            }
+        let assessment = await Self.runProcess(
+            "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
+        )
+        guard assessment.exitCode == 0 else {
+            return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
         }
 
         // Swap the running bundle: move the old aside (the running process keeps
@@ -259,6 +305,60 @@ actor UpdateChecker {
     }
 
     // MARK: - Process helper
+
+    nonisolated static func validateUpdateArchive(entries: [ZipArchiveEntry]) -> ArchiveValidationResult {
+        guard !entries.isEmpty else {
+            return .failure("archive is empty")
+        }
+        var topLevelNames = Set<String>()
+        var appBundleName: String?
+        for entry in entries {
+            let path = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = path.split(separator: "/", omittingEmptySubsequences: true).first else {
+                return .failure("empty archive path")
+            }
+            guard !path.hasPrefix("/"), !path.hasPrefix("~") else {
+                return .failure("unsafe path \(path)")
+            }
+            let components = path.split(separator: "/", omittingEmptySubsequences: true)
+            guard !components.contains("..") else {
+                return .failure("unsafe path \(path)")
+            }
+            guard !entry.mode.hasPrefix("l") && !entry.mode.hasPrefix("h") else {
+                return .failure("link entry \(path) is not allowed")
+            }
+            guard entry.mode.hasPrefix("-") || entry.mode.hasPrefix("d") else {
+                return .failure("unsupported archive entry type for \(path)")
+            }
+            let root = String(first)
+            topLevelNames.insert(root)
+            if root.hasSuffix(".app") {
+                if appBundleName == nil {
+                    appBundleName = root
+                } else if appBundleName != root {
+                    return .failure("archive must contain a single top-level .app bundle")
+                }
+            }
+        }
+        guard topLevelNames.count == 1, let appBundleName else {
+            return .failure("archive must contain a single top-level .app bundle")
+        }
+        return .success(appBundleName: appBundleName)
+    }
+
+    nonisolated static func parseZipEntries(_ output: String) -> [ZipArchiveEntry] {
+        output.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            let fields = line.split(separator: " ", maxSplits: 9, omittingEmptySubsequences: true)
+            guard fields.count == 10, fields[0].count == 10 else { return nil }
+            return ZipArchiveEntry(path: String(fields[9]), mode: String(fields[0]))
+        }
+    }
+
+    nonisolated static func listZipEntries(_ zipPath: URL) async -> (exitCode: Int32, output: String) {
+        await runProcess("/usr/bin/zipinfo", ["-l", zipPath.path])
+    }
 
     nonisolated static func runProcess(
         _ launchPath: String,

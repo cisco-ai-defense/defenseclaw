@@ -152,6 +152,86 @@ t_aid_endpoint_env_selection() {
   fi
 }
 
+t_otel_block_enabled_for_managed_sink() {
+  # render_config must emit an otel block with enabled: true so the managed
+  # Cisco AI Defense log sink is active on a fresh install. The sink itself is
+  # gated on managed_enterprise + cisco_ai_defense.endpoint (no user
+  # destination required — see config.hasManagedAIDLogSink), so no
+  # otel.destinations[] entry is rendered.
+  local out
+  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  assert_contains     "${out}" "$(printf 'otel:\n  enabled: true')" "otel block enables telemetry"
+  assert_not_contains "${out}" "destinations:"                       "no user otel destinations rendered"
+}
+
+t_ai_discovery_enabled_for_endpoint_inventory() {
+  # render_config must emit an ai_discovery block with enabled: true so the
+  # continuous discovery scanner runs and ships the endpoint inventory to AI
+  # Defense as discovery events over the managed AID log sink. Without this the
+  # scanner is a no-op (NewContinuousDiscoveryService returns nil when
+  # ai_discovery.enabled is false) and no inventory flows.
+  local out
+  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  assert_contains "${out}" "$(printf 'ai_discovery:\n  enabled: true')" "ai_discovery block enables the inventory scanner"
+}
+
+t_resolve_aid_endpoint_precedence() {
+  # resolve_aid_endpoint backs the --override-endpoint adhoc-testing seam.
+  # An empty override falls back to the --env-derived host; a non-empty
+  # override wins outright, has its trailing slash stripped, and is
+  # validated as an http(s) URL.
+  local out rc
+
+  # Fallback to --env when no override.
+  out="$(resolve_aid_endpoint prod "")"
+  assert_eq "${out}" "${TEST_AID_ENDPOINT_PROD}"    "empty override falls back to --env prod host"
+  out="$(resolve_aid_endpoint preview "")"
+  assert_eq "${out}" "${TEST_AID_ENDPOINT_PREVIEW}" "empty override falls back to --env preview host"
+
+  # Override wins over --env (even a valid --env).
+  out="$(resolve_aid_endpoint prod "https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com")"
+  assert_eq "${out}" "https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com" \
+    "override takes precedence over --env"
+
+  # Trailing slash stripped for consistent path joining downstream.
+  out="$(resolve_aid_endpoint prod "https://host.example.com/")"
+  assert_eq "${out}" "https://host.example.com" "trailing slash stripped from override"
+
+  # http:// is allowed (adhoc/local) — the plaintext warning is emitted by
+  # install.sh, not this pure helper.
+  out="$(resolve_aid_endpoint preview "http://localhost:8080")"
+  assert_eq "${out}" "http://localhost:8080" "plaintext http override accepted by resolver"
+
+  # Malformed override -> rc 2 (distinct from unknown-env rc 1) so the
+  # caller can attribute the error to the right flag.
+  rc=0; resolve_aid_endpoint prod "not-a-url"        >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override without scheme -> rc 2"
+  rc=0; resolve_aid_endpoint prod "ftp://host"       >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "non-http(s) scheme -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https://a b.com"  >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with whitespace -> rc 2"
+  rc=0; resolve_aid_endpoint prod 'https://a".com'   >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with double-quote -> rc 2"
+  rc=0; resolve_aid_endpoint prod 'https://a\.com'   >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with backslash -> rc 2"
+
+  # Hostless overrides must be rejected: without an authority the rendered
+  # cisco_ai_defense.endpoint has no usable host and inspection/export
+  # silently fails at runtime.
+  rc=0; resolve_aid_endpoint prod "https:///"          >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with empty authority -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https:///api"       >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with empty authority + path -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https://?tenant=x"  >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with query but no host -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https://#frag"      >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with fragment but no host -> rc 2"
+
+  # No override + unknown env -> rc 1 (delegates to aid_endpoint_for_env).
+  rc=0; resolve_aid_endpoint staging "" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 1 "unknown env with no override -> rc 1"
+}
+
 t_preview_env_endpoint_ends_up_in_config() {
   # End-to-end at the render layer: an installer running with --env
   # preview must produce a config.yaml whose cisco_ai_defense.endpoint
@@ -211,5 +291,8 @@ run_case "renderer pass-through: redaction on"  t_redaction_pass_through_on
 run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
 run_case "cisco_ai_defense block emitted with installer endpoint" t_cisco_ai_defense_block_emitted
 run_case "aid_endpoint_for_env maps flags to hosts"               t_aid_endpoint_env_selection
+run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink
+run_case "ai_discovery enabled for endpoint inventory"           t_ai_discovery_enabled_for_endpoint_inventory
+run_case "resolve_aid_endpoint override precedence + validation"  t_resolve_aid_endpoint_precedence
 run_case "--env preview lands in rendered config"                 t_preview_env_endpoint_ends_up_in_config
 run_case "rendered YAML parses"     t_yaml_parses

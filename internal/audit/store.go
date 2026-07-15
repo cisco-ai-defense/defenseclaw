@@ -131,6 +131,15 @@ type Event struct {
 	// It is intentionally not persisted in SQLite audit_events; callers that
 	// need durable structured records should use their native table/log path.
 	Structured map[string]any `json:"structured,omitempty"`
+
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive (Cisco AI Defense is_redaction_enabled) so the
+	// audit-mirror sanitization path can honor a per-inspection "store
+	// raw" / "force redact" decision instead of only the global config.
+	// Tri-state: nil = no directive (honor local config), true = force
+	// redact, false = store raw. In-process control metadata only —
+	// never serialized (json:"-").
+	RedactionEnabled *bool `json:"-"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.

@@ -500,6 +500,38 @@ func TestWriter_StrictMode_ValidEventPassesThrough(t *testing.T) {
 	}
 }
 
+// TestValidator_PreviousPhaseUnknownRejected_EmptyAllowed locks in the
+// agent_previous_phase contract that a past bug violated: the enum permits the
+// real phases or null, but NOT the "unknown" sentinel. llm_event_emit once
+// defaulted the first (predecessor-less) phase to "unknown", which made
+// gatewaylog reject and DROP the whole lifecycle/llm_prompt event — so it never
+// reached the audit or OTEL / Cisco AI Defense sinks. The fix leaves it empty
+// (=> null via omitempty); this test guards both directions.
+func TestValidator_PreviousPhaseUnknownRejected_EmptyAllowed(t *testing.T) {
+	v := newRepoValidator(t)
+	base := func() Event {
+		return Event{
+			EventType:     EventLifecycle,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Lifecycle:     &LifecyclePayload{Subsystem: "gateway", Transition: "start"},
+			AgentPhase:    "planning",
+		}
+	}
+
+	ok := base()
+	ok.AgentPreviousPhase = "" // omitted => null => valid (no predecessor)
+	if err := v.Validate(ok); err != nil {
+		t.Fatalf("empty agent_previous_phase must be valid: %v", err)
+	}
+
+	bad := base()
+	bad.AgentPreviousPhase = "unknown"
+	if err := v.Validate(bad); err == nil {
+		t.Fatal(`agent_previous_phase="unknown" must be rejected by the schema`)
+	}
+}
+
 func TestWriter_StrictMode_ObserverInvoked(t *testing.T) {
 	v := newRepoValidator(t)
 	w, err := New(Config{Validator: v})
