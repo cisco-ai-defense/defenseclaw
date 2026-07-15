@@ -167,6 +167,18 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
 	home, trustedNativeState := trustedNativeHookHome()
+	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
+		// The administrator-owned runtime failed trust validation. Do not read its
+		// sidecar/token or contact any endpoint derived from those files; hand an
+		// unavailable strict runtime directly to hookexec's fail-closed boundary.
+		return hookexec.Options{
+			Connector:          connector,
+			Event:              event,
+			FailMode:           "closed",
+			StrictAvailability: true,
+			ManagedEnterprise:  true,
+		}
+	}
 	if !trustedNativeState {
 		home = config.DefaultDataPath()
 	}
@@ -230,6 +242,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		HookDir:            hookDir,
 		Token:              token,
 		StrictAvailability: hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
+		ManagedEnterprise:  enterpriseManaged,
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),
 			os.Getenv("TRACEPARENT"),
@@ -244,11 +257,6 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()
 	}
-	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
-	}
-
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			if !trustedNativeState || n <= 1<<20 {

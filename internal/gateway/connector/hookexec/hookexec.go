@@ -89,6 +89,9 @@ type Options struct {
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
 	// transport failures and a missing token fail closed instead of open.
 	StrictAvailability bool
+	// ManagedEnterprise marks an administrator-managed runtime. User-owned
+	// Home/.disabled state must never turn that policy into a no-op.
+	ManagedEnterprise bool
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
@@ -131,15 +134,15 @@ func Run(ctx context.Context, opts Options) int {
 		return blockExit
 	}
 
-	// DEFENSECLAW_HOME guard: if the data dir is gone or the operator dropped
-	// a .disabled file, return the connector's explicit no-op response. Cursor
-	// requires valid JSON even for an intentional allow; other connectors keep
-	// their existing empty response because openAllow is unset for them.
+	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
+	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
+	// (and invalid runtimes also set StrictAvailability), so a missing or
+	// disabled machine-policy home must block instead of bypassing enforcement.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
-		return emit(opts.Stdout, sp.openAllow)
+		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
-		return emit(opts.Stdout, sp.openAllow)
+		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
 	}
 
 	failMode := normalizeFailMode(opts.FailMode)
@@ -395,6 +398,14 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
+		return emit(opts.Stdout, sp.unreachableStrict)
+	}
+	return emit(opts.Stdout, sp.openAllow)
+}
+
+func handleUnavailableHome(opts Options, sp spec, reason string) int {
+	if opts.StrictAvailability || opts.ManagedEnterprise {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)

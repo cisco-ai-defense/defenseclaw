@@ -159,8 +159,12 @@ func trustedNativeHookHome() (string, bool) {
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	enterprisePrepared := nativeEnterpriseHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable)
 	enterpriseHome := nativeEnterpriseHookRuntimeSnapshot.home
+	enterpriseErr := nativeEnterpriseHookRuntimeSnapshot.err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	if enterprisePrepared {
+		if enterpriseErr != nil {
+			return "", true
+		}
 		if !filepath.IsAbs(strings.TrimSpace(enterpriseHome)) {
 			// filepath.Clean("") is ".". Preserve an empty/invalid managed home
 			// as unavailable so the fail-closed path never reads project-relative

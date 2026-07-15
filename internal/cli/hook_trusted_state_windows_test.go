@@ -6,12 +6,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
 
@@ -178,6 +181,13 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "open")
 	userRuntime := filepath.Join(t.TempDir(), ".defenseclaw")
+	hookDir := filepath.Join(userRuntime, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg"), []byte(`{"gateway_addr":"127.0.0.1:65530"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stubEnterpriseManagedRuntimeResolver(t, func(string) (string, bool, error) {
 		return userRuntime, false, errors.New("tampered managed ownership state")
 	})
@@ -185,8 +195,15 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 		t.Fatal("invalid enterprise runtime was allowed to no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
-	if opts.Home != userRuntime || opts.FailMode != "closed" || !opts.StrictAvailability {
+	if opts.Home != "" || opts.HookDir != "" || opts.APIAddr != "" || opts.Token != "" ||
+		opts.FailMode != "closed" || !opts.StrictAvailability {
 		t.Fatalf("invalid managed runtime did not fail closed: %+v", opts)
+	}
+	var stdout, stderr bytes.Buffer
+	opts.Stdout = &stdout
+	opts.Stderr = &stderr
+	if code := hookexec.Run(context.Background(), opts); code != 2 {
+		t.Fatalf("untrusted enterprise runtime hook exit = %d, stdout=%q, stderr=%q; want fail-closed exit 2", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -288,6 +305,12 @@ func TestNativeHookRuntimeEmptyEnterpriseHomeFailsClosedWithoutDotFallback(t *te
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
 	if opts.Home == "." || opts.FailMode != "closed" || !opts.StrictAvailability {
 		t.Fatalf("empty enterprise runtime did not remain fail-closed without dot fallback: %+v", opts)
+	}
+	var stdout, stderr bytes.Buffer
+	opts.Stdout = &stdout
+	opts.Stderr = &stderr
+	if code := hookexec.Run(context.Background(), opts); code != 2 {
+		t.Fatalf("empty enterprise runtime hook exit = %d, stdout=%q, stderr=%q; want fail-closed exit 2", code, stdout.String(), stderr.String())
 	}
 }
 
