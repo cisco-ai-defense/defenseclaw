@@ -36,6 +36,7 @@ class Shard:
 def discover_test_files(test_root: Path) -> list[Path]:
     """Return every pytest test module below *test_root* exactly once."""
 
+    test_root = test_root.resolve()
     files = {
         path.resolve()
         for pattern in ("test_*.py", "*_test.py")

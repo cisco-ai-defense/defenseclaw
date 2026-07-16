@@ -296,28 +296,7 @@ jobs:
           git tag "$RELEASE_TAG"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
 
-      - name: Build OpenClaw plugin and populate embed tree
-        run: make extensions
-
-      - name: Restore tracked generated files before GoReleaser
-        run: |
-          set -euo pipefail
-          git restore --worktree -- \
-            extensions/defenseclaw/dist \
-            internal/gateway/connector/openclaw_extension/.placeholder
-          git diff --exit-code
-
-      - name: Build gateway archives and SBOMs
-        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
-        with:
-          version: "v2.15.4"
-          # These archives are transformed into protected runtime envelopes
-          # below. Sign only the final sealed candidate, never transient bytes.
-          args: release --clean --skip=sign
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-      - name: Build stamped CLI, plugin, and upgrade policy
+      - name: Stamp runtime source version before native builds
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
@@ -334,6 +313,35 @@ jobs:
           scripts/stamp-version.sh "$RELEASE_TAG"
           python3 scripts/source_release_identity.py check \
             --expected-release "$RELEASE_TAG"
+
+      - name: Build OpenClaw plugin and populate embed tree
+        run: make extensions
+
+      - name: Restore tracked generated files before GoReleaser
+        run: |
+          set -euo pipefail
+          git restore --worktree -- \
+            extensions/defenseclaw/dist \
+            internal/gateway/connector/openclaw_extension/.placeholder
+          git diff --exit-code -- \
+            extensions/defenseclaw/dist \
+            internal/gateway/connector/openclaw_extension/.placeholder
+
+      - name: Build gateway archives and SBOMs
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
+        with:
+          version: "v2.15.4"
+          # These archives are transformed into protected runtime envelopes
+          # below. Sign only the final sealed candidate, never transient bytes.
+          args: release --clean --skip=sign
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Build stamped CLI, plugin, and upgrade policy
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
           make dist-cli
           make dist-plugin
           make dist-upgrade-manifest

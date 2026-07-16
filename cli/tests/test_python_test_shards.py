@@ -40,6 +40,17 @@ def test_discovers_pytest_modules_once(tmp_path: Path) -> None:
     assert set(discover_test_files(tmp_path)) == expected
 
 
+def test_discovers_modules_from_relative_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    test_root = Path("tests")
+    expected = {_write(test_root / "nested" / "test_relative.py", 10)}
+
+    assert set(discover_test_files(test_root)) == expected
+
+
 def test_partition_is_deterministic_exhaustive_and_balanced(tmp_path: Path) -> None:
     files = [_write(tmp_path / f"test_{index}.py", size) for index, size in enumerate((100, 80, 60, 40, 20, 10))]
 

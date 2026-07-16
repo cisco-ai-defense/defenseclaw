@@ -65,7 +65,9 @@ def test_release_dispatch_version_is_stamped_without_a_version_only_pr() -> None
     identity_check = workflow.index(
         "python3 scripts/source_release_identity.py check", build_stamp
     )
-    assert build_stamp < identity_check
+    extension_build = workflow.index("run: make extensions", build_stamp)
+    gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
+    assert build_stamp < identity_check < extension_build < gateway_build
 
     macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(
         encoding="utf-8"
