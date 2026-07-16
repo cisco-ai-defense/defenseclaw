@@ -246,6 +246,15 @@ prepare_userspace_for() {
 
 # ---- local-user enumeration --------------------------------------------
 
+# _enumerate_users_warn — internal helper that emits a per-filter drop
+# reason when DC_INSTALLER_ENUMERATE_VERBOSE=1. install.sh flips this on
+# so its install.log records why user X was excluded from targets.yaml;
+# unit tests leave it off so the sourced-library harness stays quiet.
+_enumerate_users_warn() {
+  [[ "${DC_INSTALLER_ENUMERATE_VERBOSE:-}" == "1" ]] || return 0
+  printf '[install] WARN: enumerate_local_users skipping %s: %s\n' "$1" "$2" >&2
+}
+
 # enumerate_local_users -> stdout, one line per eligible user in the form:
 #   user:uid:gid:home
 #
@@ -254,28 +263,62 @@ prepare_userspace_for() {
 # Reads OpenDirectory via dscl — same pattern the fresh-install preflight in
 # install.sh already uses (see the block that gates on _existing_install_markers).
 #
-# Pure: no writes, no sudo. Callers under test can seed a fake dscl by
-# putting a shim ahead of PATH.
+# Pure: no writes, no sudo. When DC_INSTALLER_ENUMERATE_VERBOSE=1 each
+# filter drop emits a WARN on stderr so install.log captures why a
+# specific user was excluded. Off by default (tests source this library
+# and would otherwise emit spurious warns).
 enumerate_local_users() {
   local names name uid gid home
-  names="$(dscl . -list /Users UniqueID 2>/dev/null)" || return 0
+  names="$(dscl . -list /Users UniqueID 2>/dev/null)" || {
+    _enumerate_users_warn "(all users)" "dscl . -list /Users UniqueID failed — cannot enumerate local users"
+    return 0
+  }
   # dscl output is "user   uid". Filter and normalize in one pass.
   while IFS= read -r line; do
     name="$(printf '%s' "${line}" | awk '{print $1}')"
     uid="$(printf '%s' "${line}" | awk '{print $2}')"
-    [[ -n "${name}" && -n "${uid}" ]] || continue
+    if [[ -z "${name}" || -z "${uid}" ]]; then
+      _enumerate_users_warn "${name:-?}" "dscl row is missing name or uid: '${line}'"
+      continue
+    fi
     # Filter system accounts.
     case "${name}" in
-      _*|daemon|nobody|root) continue;;
+      _*|daemon|nobody|root)
+        _enumerate_users_warn "${name}" "system account (name matches system-user pattern)"
+        continue;;
     esac
-    [[ "${uid}" =~ ^[0-9]+$ ]] || continue
-    (( uid >= 500 )) || continue
+    if ! [[ "${uid}" =~ ^[0-9]+$ ]]; then
+      _enumerate_users_warn "${name}" "uid '${uid}' is not numeric"
+      continue
+    fi
+    if (( uid < 500 )); then
+      _enumerate_users_warn "${name}" "uid ${uid} is below the local-user threshold (500)"
+      continue
+    fi
 
     home="$(dscl . -read "/Users/${name}" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
-    [[ -n "${home}" ]] || continue
-    [[ "${home}" == /Users/* ]] || continue
-    [[ -d "${home}" && ! -L "${home}" ]] || continue
-    home_perms_ok "${home}" || continue
+    if [[ -z "${home}" ]]; then
+      _enumerate_users_warn "${name}" "NFSHomeDirectory is empty in Open Directory"
+      continue
+    fi
+    if [[ "${home}" != /Users/* ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is not under /Users/ (network / mobile / MDM account)"
+      continue
+    fi
+    if [[ ! -d "${home}" ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is not a directory (may not be mounted)"
+      continue
+    fi
+    if [[ -L "${home}" ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is a symlink — refusing to follow"
+      continue
+    fi
+    if ! home_perms_ok "${home}"; then
+      local _mode
+      _mode="$(stat -f '%Lp' "${home}" 2>/dev/null || stat -c '%a' "${home}" 2>/dev/null || echo '?')"
+      _enumerate_users_warn "${name}" "home '${home}' is group/other writable (mode ${_mode}) — hook guardian will refuse"
+      continue
+    fi
 
     gid="$(dscl . -read "/Users/${name}" PrimaryGroupID 2>/dev/null | sed -n 's/^PrimaryGroupID: //p')"
     [[ "${gid}" =~ ^[0-9]+$ ]] || gid="20"

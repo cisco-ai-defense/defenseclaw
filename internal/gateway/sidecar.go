@@ -2584,6 +2584,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 		}
 		if guardianManagedLifecycle {
+			// See the multi-connector variant below for the design rationale
+			// on unverifiedEscalationAfter. Same 60s threshold, same
+			// once-per-transition emit pattern.
+			const unverifiedEscalationAfter = 60 * time.Second
+			unverifiedSince := time.Now()
+			escalated := false
 			publishHealth := func() {
 				covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, []string{conn.Name()})
 				state := StateStarting
@@ -2606,6 +2612,25 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"lifecycle_manager":   "enterprise_hook_guardian",
 					"guardian_verified":   covered,
 				})
+				if covered {
+					if escalated {
+						emitLifecycle(ctx, "hook_guardian", "verified", map[string]string{
+							"connector": conn.Name(),
+							"unverified_seconds": fmt.Sprintf("%d",
+								int(time.Since(unverifiedSince).Seconds())),
+						})
+					}
+					unverifiedSince = time.Now()
+					escalated = false
+					return
+				}
+				if !escalated && time.Since(unverifiedSince) >= unverifiedEscalationAfter {
+					emitError(ctx, "hook_guardian", "unverified",
+						fmt.Sprintf("hook guardian has not authorized connector %q after %s (last status: %s)",
+							conn.Name(), unverifiedEscalationAfter, status),
+						nil)
+					escalated = true
+				}
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
@@ -3054,6 +3079,20 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	if hookEnforcement {
 		summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
 	}
+	// The guardian-unverified state is silent by design at t+0 — a fresh
+	// install just installed hooks and the guardian's first reconcile tick
+	// (5-min interval on the shipped plist) has not yet run. But if we're
+	// STILL unverified after unverifiedEscalationAfter, that's not
+	// "starting up" any more, that's a broken install (missing
+	// protected_targets.json, guardian plist not loaded, etc.) — the
+	// silent-skip failure mode that shipped today.
+	//
+	// Emit exactly once when we cross the threshold, and again on
+	// recovery. gateway.jsonl + gateway.err.log + every configured OTel
+	// destination pick it up.
+	const unverifiedEscalationAfter = 60 * time.Second
+	unverifiedSince := time.Now()
+	escalated := false
 	publishHealth := func() {
 		covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, succeeded)
 		state := StateStarting
@@ -3073,6 +3112,26 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			"lifecycle_manager":   "enterprise_hook_guardian",
 			"guardian_verified":   covered,
 		})
+		if covered {
+			if escalated {
+				emitLifecycle(ctx, "hook_guardian", "verified", map[string]string{
+					"connectors": strings.Join(succeeded, ","),
+					"unverified_seconds": fmt.Sprintf("%d",
+						int(time.Since(unverifiedSince).Seconds())),
+				})
+			}
+			unverifiedSince = time.Now()
+			escalated = false
+			return
+		}
+		if !escalated && time.Since(unverifiedSince) >= unverifiedEscalationAfter {
+			emitError(ctx, "hook_guardian", "unverified",
+				fmt.Sprintf("hook guardian has not authorized %d configured connector(s) after %s: %s (last status: %s)",
+					len(succeeded), unverifiedEscalationAfter,
+					strings.Join(succeeded, ","), status),
+				nil)
+			escalated = true
+		}
 	}
 	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))

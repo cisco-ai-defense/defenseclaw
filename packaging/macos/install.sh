@@ -190,6 +190,33 @@ log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Persistent log sink. Under `.pkg` postinstall / installd, the caller's
+# stderr is closed and every warn/die from install.sh disappears — that
+# is exactly what let the "no target user; skipping per-user hook wiring"
+# silent-skip bug ship undetected. Mirror both streams to a file beside
+# gateway.log so admins have a durable record of what the installer did.
+#
+# Requires root to create /Library/Logs/... — non-root invocations (tests,
+# --help) skip the tee. The file is root:wheel 0640 so it never becomes a
+# reader-writable side channel.
+if [[ $EUID -eq 0 ]] && [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
+  _install_log_dir="/Library/Logs/Cisco/SecureClient/DefenseClaw"
+  _install_log_path="${_install_log_dir}/install.log"
+  if mkdir -p "${_install_log_dir}" 2>/dev/null; then
+    # Create/touch the file with restrictive perms BEFORE tee opens it for
+    # append. Ownership is set explicitly so a pre-existing world-readable
+    # file left by a bad install doesn't leak WARN payloads.
+    touch "${_install_log_path}" 2>/dev/null || true
+    chown root:wheel "${_install_log_path}" 2>/dev/null || true
+    chmod 0640       "${_install_log_path}" 2>/dev/null || true
+    printf '\n===== install.sh start %s (argv: %s) =====\n' "$(date -u +%FT%TZ)" "$*" \
+      >> "${_install_log_path}" 2>/dev/null || true
+    exec  > >(tee -a "${_install_log_path}")
+    exec 2> >(tee -a "${_install_log_path}" >&2)
+  fi
+  unset _install_log_dir _install_log_path
+fi
+
 INSTALL_TEMP_FILES=()
 cleanup_install_temporaries() {
   local path
@@ -306,6 +333,12 @@ Per-user hook wiring:
   --user USER               Target macOS user (default: \$SUDO_USER)
   --agent-version VERSION   Override agent version (auto-detected if omitted)
   --skip-connector          Don't wire user-space hooks (gateway only)
+  --allow-empty-users       Proceed even when no eligible local users are
+                            found. Only pass this on lab / demo boxes where
+                            zero user coverage is intentional; production
+                            installs should fail loud (default) so admins
+                            notice broken enumeration before the guardian
+                            silently ships a zero-target manifest.
 
   -h, --help                Show this help
 
@@ -319,6 +352,7 @@ CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
 AID_ENV="${DEFAULT_ENV}"
 OVERRIDE_ENDPOINT=""
+ALLOW_EMPTY_USERS="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -335,6 +369,7 @@ while [[ $# -gt 0 ]]; do
     --user)             TARGET_USER="${2:?}"; shift 2;;
     --agent-version)    AGENT_VERSION="${2:?}"; shift 2;;
     --skip-connector)   SKIP_CONNECTOR="true"; shift;;
+    --allow-empty-users) ALLOW_EMPTY_USERS="true"; shift;;
     -h|--help)          usage; exit 0;;
     *) die "unknown flag: $1 (try --help)";;
   esac
@@ -732,11 +767,20 @@ fi
 
 if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   log "enumerating eligible local users"
-  USER_LINES="$(enumerate_local_users || true)"
+  # DC_INSTALLER_ENUMERATE_VERBOSE=1 makes enumerate_local_users emit a
+  # WARN for every user it drops with the specific filter reason (system
+  # account, home not under /Users, mode bits, etc.). Piped into
+  # install.log via the tee at the top of this script, so admins can
+  # diagnose "why isn't user X in targets.yaml?" after the fact.
+  USER_LINES="$(DC_INSTALLER_ENUMERATE_VERBOSE=1 enumerate_local_users || true)"
   USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
   if [[ -z "${USER_LINES}" ]]; then
-    warn "no eligible local users detected on this host"
-    warn "  hooks will be wired for users that log in later once the enumerator's next 5-min tick runs"
+    if [[ "${ALLOW_EMPTY_USERS}" == "true" ]]; then
+      warn "no eligible local users detected on this host (--allow-empty-users given)"
+      warn "  hooks will be wired for users that log in later once the enumerator's next 5-min tick runs"
+    else
+      die "no eligible local users detected on this host — refusing to install with a zero-target hook-guardian manifest. If this box legitimately has no local users (lab / demo), rerun with --allow-empty-users to proceed; otherwise investigate why enumerate_local_users returned empty (check dscl, home dir perms, /Users layout)."
+    fi
   else
     log "  found ${USER_COUNT} eligible user(s):"
     while IFS=: read -r _u _uid _gid _home; do
@@ -751,6 +795,16 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     || die "could not reserve a private manifest staging file"
   INSTALL_TEMP_FILES+=("${MANIFEST_TMP}")
   render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" > "${MANIFEST_TMP}"
+  # Belt-and-suspenders: catch the case where user_lines was non-empty
+  # AND the connector CSV was non-empty but the rendered cross product
+  # still produced zero targets (e.g. every connector was filtered out
+  # as unsupported). Without this check the guardian would happily
+  # reconcile a "0 targets, all ok" manifest and the daemon would look
+  # green while enforcing nothing.
+  MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
+  if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]] && [[ "${ALLOW_EMPTY_USERS}" != "true" ]]; then
+    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
+  fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"
   ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
