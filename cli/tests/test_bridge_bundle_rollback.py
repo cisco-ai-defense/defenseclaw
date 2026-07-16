@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from defenseclaw import windows_acl
 from defenseclaw.commands import cmd_upgrade
 from defenseclaw.commands.cmd_upgrade import (
     _parse_bundle_rollback_metadata,
@@ -25,6 +26,107 @@ from defenseclaw.commands.cmd_upgrade import (
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def test_fsync_claimed_file_rejects_named_reparse_point(tmp_path: Path) -> None:
+    import defenseclaw.bundle_refresh as bundle_refresh
+
+    regular = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=1,
+        st_ino=2,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+        st_file_attributes=0,
+    )
+    reparse = SimpleNamespace(**vars(regular))
+    reparse.st_file_attributes = 0x00000400
+
+    with (
+        patch.object(bundle_refresh.os, "fstat", return_value=regular),
+        patch.object(bundle_refresh.os, "lstat", return_value=reparse),
+        patch.object(bundle_refresh.os, "fsync") as fsync,
+    ):
+        with pytest.raises(OSError, match="changed while syncing"):
+            bundle_refresh._fsync_claimed_file(17, tmp_path / "member")
+
+    fsync.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("platform", "windows_exclusive_lease", "rejects_skew"),
+    [("nt", True, False), ("nt", False, True), ("posix", False, True)],
+)
+def test_fsync_claimed_file_tolerates_only_exclusive_windows_ctime_flush_skew(
+    tmp_path: Path,
+    platform: str,
+    windows_exclusive_lease: bool,
+    rejects_skew: bool,
+) -> None:
+    import defenseclaw.bundle_refresh as bundle_refresh
+
+    before = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=1,
+        st_ino=2,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+        st_file_attributes=0,
+    )
+    after = SimpleNamespace(**vars(before))
+    after.st_ctime_ns += 1
+    path = tmp_path / "member"
+    outcome = pytest.raises(OSError, match="changed while syncing") if rejects_skew else nullcontext()
+    security = object()
+
+    with (
+        patch.object(bundle_refresh.os, "name", platform),
+        patch.object(bundle_refresh.os, "fstat", side_effect=[before, after]),
+        patch.object(bundle_refresh.os, "lstat", side_effect=[before, after]),
+        patch.object(bundle_refresh.os, "fsync") as fsync,
+        patch.object(windows_acl, "capture_fd", side_effect=[security, security]) as capture_fd,
+        outcome,
+    ):
+        bundle_refresh._fsync_claimed_file(
+            17,
+            path,
+            windows_exclusive_lease=windows_exclusive_lease,
+        )
+
+    fsync.assert_called_once_with(17)
+    assert capture_fd.call_count == (2 if windows_exclusive_lease else 0)
+
+
+def test_fsync_claimed_file_rejects_windows_security_change(tmp_path: Path) -> None:
+    import defenseclaw.bundle_refresh as bundle_refresh
+
+    unchanged = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=1,
+        st_ino=2,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+        st_file_attributes=0,
+    )
+
+    with (
+        patch.object(bundle_refresh.os, "name", "nt"),
+        patch.object(bundle_refresh.os, "fstat", return_value=unchanged),
+        patch.object(bundle_refresh.os, "lstat", return_value=unchanged),
+        patch.object(bundle_refresh.os, "fsync") as fsync,
+        patch.object(windows_acl, "capture_fd", side_effect=[object(), object()]),
+        pytest.raises(OSError, match="changed while syncing"),
+    ):
+        bundle_refresh._fsync_claimed_file(
+            17,
+            tmp_path / "member",
+            windows_exclusive_lease=True,
+        )
+
+    fsync.assert_called_once_with(17)
 
 
 def _write_restart_intent(backup_dir: Path, *, restart_required: bool) -> Path:
@@ -105,8 +207,18 @@ def _write_backup(
         "restart_required": False,
     }
     if schema_version == 2:
+        old_windows_security: dict[str, object] = {}
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            old_windows_security = {
+                relative: cmd_upgrade._windows_security_to_recovery_json(
+                    windows_acl.capture_path(str(managed / relative))
+                )
+                for relative in files
+            }
         metadata["created_sha256"] = created_sha256
-        metadata["old_windows_security"] = {}
+        metadata["old_windows_security"] = old_windows_security
     metadata_path = root / "refresh-backup.json"
     metadata_path.write_text(
         json.dumps(metadata),
@@ -1235,6 +1347,10 @@ def test_schema_one_target_created_inventory_fails_before_deleting_anything(
     assert manifest.read_bytes() == b"target bytes\n"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="schema 1 intentionally lacks exact Windows owner/DACL rollback state",
+)
 def test_schema_one_without_target_created_paths_remains_rollback_compatible(
     tmp_path: Path,
 ) -> None:
@@ -1485,6 +1601,7 @@ def test_non_posix_fallback_rejects_mocked_windows_reparse_points(
         )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises the generic non-Windows path fallback")
 def test_non_posix_fallback_restores_and_deletes_real_files(tmp_path: Path) -> None:
     import defenseclaw.bundle_refresh as bundle_refresh
 
@@ -1519,6 +1636,7 @@ def test_non_posix_fallback_restores_and_deletes_real_files(tmp_path: Path) -> N
     assert not created.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises the generic non-Windows path fallback")
 def test_non_posix_fallback_revalidates_ancestors_after_copy(tmp_path: Path) -> None:
     import defenseclaw.bundle_refresh as bundle_refresh
 
@@ -1630,6 +1748,7 @@ def test_posix_rollback_authenticates_backup_before_destination_publish(
     assert not list(destination.parent.glob(".rollback-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises the generic non-Windows path fallback")
 @pytest.mark.parametrize("mutation", ["digest-mismatch", "source-race"])
 def test_fallback_rollback_authenticates_backup_before_destination_publish(
     tmp_path: Path,
@@ -1722,7 +1841,11 @@ def test_windows_fallback_authenticates_before_private_staging_and_publish(
         assert held
         _assert_destination_snapshot(destination, before)
         events.append("private-write")
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
         try:
             view = memoryview(payload)
             while view:
@@ -1856,7 +1979,11 @@ def test_windows_rollback_holds_parent_chain_across_mkdir_and_delete(
     def write_private(path: str, payload: bytes, observed_security: object) -> None:
         assert held
         assert observed_security is security
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
         try:
             os.write(descriptor, payload)
         finally:

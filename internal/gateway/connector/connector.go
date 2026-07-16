@@ -331,11 +331,11 @@ type HookCapabilityProvider interface {
 //     emission. nil when the connector does not emit native OTLP (cursor,
 //     windsurf, hermes today). Non-nil for codex (TOML), claudecode (env),
 //     geminicli (JSON + path-token), copilot (env).
-//   - Decode: optional decoder that translates a connector-specific raw
-//     payload into the shared HookProfileRequest shape. codex and
-//     claudecode set this so their bespoke per-connector evaluators
-//     can run from the unified handler with no extra HTTP surface.
-//     nil = caller uses the generic normalizeAgentHookRequest path.
+//   - Decode: optional decoder for connector-specific event/content/tool
+//     wire shape. Identity fields returned by Decode are advisory only and
+//     MUST NOT override Correlation bindings; the gateway accepts correlation
+//     identity exclusively from the resolved versioned CorrelationSpec.
+//     nil = caller uses the generic content decoder.
 //   - MapVerdict: optional verdict mapper for connectors whose mode →
 //     action translation deviates from the generic mapHookAction (codex
 //     never enforces alert; claudecode's "can enforce" gate covers
@@ -346,10 +346,16 @@ type HookCapabilityProvider interface {
 //     ("hook_output", "codex_output", "claude_code_output"). nil =
 //     caller uses hookOutputFor and the "hook_output" field.
 type HookProfile struct {
-	Name                    string
-	Capabilities            HookCapability
-	SupportsTraceparent     bool
-	NativeOTLP              *NativeOTLPSpec
+	Name                string
+	Capabilities        HookCapability
+	SupportsTraceparent bool
+	NativeOTLP          *NativeOTLPSpec
+	// Correlation is the versioned, connector-scoped identity map used by
+	// the unified hook normalizer. A zero/unknown profile intentionally falls
+	// back to exact canonical keys only; it never enables vendor-field
+	// guessing. ConnectorInstanceID is setup/authentication-owned and is not
+	// part of this payload mapping.
+	Correlation             CorrelationSpec
 	ContractID              string
 	HookScriptVersion       string
 	HookConfigPathTemplates []string
@@ -396,19 +402,47 @@ type HookProfile struct {
 // keys are present. The unified collector treats empty fields as
 // "not provided" and falls back to generic-extraction helpers.
 type HookProfileRequest struct {
-	ConnectorName string
-	HookEventName string
-	SessionID     string
-	TurnID        string
-	AgentID       string
-	AgentName     string
-	AgentType     string
-	CWD           string
-	ToolName      string
-	Content       string
-	Direction     string
-	Model         string
-	Payload       map[string]interface{}
+	ConnectorName             string
+	HookEventName             string
+	SemanticEventID           string
+	LogicalEventID            string
+	ConnectorInstanceID       string
+	SessionID                 string
+	ThreadID                  string
+	TurnID                    string
+	MessageID                 string
+	AgentID                   string
+	AgentName                 string
+	AgentType                 string
+	RootAgentID               string
+	ParentAgentID             string
+	ChildAgentID              string
+	RootSessionID             string
+	ParentSessionID           string
+	ChildSessionID            string
+	ToolInvocationID          string
+	ModelRequestID            string
+	ModelResponseID           string
+	SourceEventID             string
+	SourceSequence            string
+	SourceTimestamp           string
+	SourceNamespace           string
+	SourceIDKind              string
+	ExecutionID               string
+	StepID                    string
+	CorrelationProfileVersion CorrelationProfileVersion
+	CorrelationCompleteness   CorrelationCompleteness
+	CorrelationSurface        CorrelationSurface
+	CorrelationOrigins        map[CorrelationTarget]CorrelationOrigin
+	CorrelationValues         map[CorrelationTarget]CorrelationValue
+	CorrelationIdentifiers    []CorrelationValue
+	SuppressCorrelationEmit   bool
+	CWD                       string
+	ToolName                  string
+	Content                   string
+	Direction                 string
+	Model                     string
+	Payload                   map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's

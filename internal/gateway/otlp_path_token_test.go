@@ -5,9 +5,15 @@
 package gateway
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,10 +68,7 @@ func TestLookupOTLPPathToken_LazyReloadOnMiss(t *testing.T) {
 		t.Fatalf("lookupOTLPPathToken returned %q on first miss; want %q (lazy reload broken)", got, minted)
 	}
 
-	// Second call must serve from cache without redoing the load.
-	// We verify by checking that the cached entry's mtime matches the
-	// file mtime — any second read would have refreshed the timestamp
-	// to the new file mtime.
+	// Second call must serve from cache inside the bounded validation window.
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
 		t.Fatalf("second lookup returned %q; cache miss (want %q)", got, minted)
 	}
@@ -177,17 +180,12 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 		"0011223344556677" + "8899aabbccddeeff"
 	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
 
-	// Backdate the rate-limit + stat timestamps to simulate the
+	// Backdate the single authoritative validation timestamp to simulate the
 	// window elapsing.
 	api.otlpPathTokenMu.Lock()
-	if api.otlpPathTokenReloadAt == nil {
-		api.otlpPathTokenReloadAt = map[connector.OTLPPathTokenScope]time.Time{}
-	}
 	if api.otlpPathTokenLastStatAt == nil {
 		api.otlpPathTokenLastStatAt = map[connector.OTLPPathTokenScope]time.Time{}
 	}
-	api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI] =
-		time.Now().Add(-2 * otlpPathTokenReloadMinInterval)
 	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
 		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
 	api.otlpPathTokenMu.Unlock()
@@ -212,7 +210,7 @@ func TestLookupOTLPPathToken_NoDataDirSkipsReload(t *testing.T) {
 // TestLookupOTLPPathToken_DetectsRotation is the M1 regression test:
 // when an operator regenerates the on-disk token while the gateway
 // keeps running (post-rotation policy or security-incident response),
-// the in-memory cache MUST notice the mtime drift and reload. Without
+// the in-memory cache MUST securely reload the file content. Without
 // this check the gateway keeps authenticating the old token and every
 // loopback OTLP request 401s after the rotation until restart.
 func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
@@ -236,10 +234,8 @@ func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
 		t.Fatalf("pre-rotation lookup = %q, want %q", got, original)
 	}
 
-	// Operator rotates the token. We have to bump the mtime past
-	// what SetOTLPPathTokens stamped so the stat detects drift —
-	// some filesystems (HFS+, ext4 with noatime) have 1s mtime
-	// granularity, hence the explicit Chtimes.
+	// Operator rotates the token. The explicit timestamp change retains the
+	// historical coverage; same-mtime replacement has its own regression below.
 	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, rotated)
 	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
 	future := time.Now().Add(2 * time.Second)
@@ -252,14 +248,141 @@ func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
 	api.otlpPathTokenMu.Lock()
 	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
 		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
-	if api.otlpPathTokenReloadAt != nil {
-		api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI] =
-			time.Now().Add(-2 * otlpPathTokenReloadMinInterval)
-	}
 	api.otlpPathTokenMu.Unlock()
 
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != rotated {
 		t.Errorf("post-rotation lookup = %q, want rotated token %q (M1 rotation refresh broken)", got, rotated)
+	}
+}
+
+func TestLookupOTLPPathToken_DetectsSameMtimeAtomicReplacement(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	original := strings.Repeat("a", 64)
+	rotated := strings.Repeat("b", 64)
+	path := writePathTokenFile(t, tmp, connector.OTLPScopeCodex, original)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat original token: %v", err)
+	}
+	cfg := &config.Config{DataDir: tmp}
+	cfg.Gateway.Token = "gateway-master"
+	api := &APIServer{scannerCfg: cfg}
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{connector.OTLPScopeCodex: original})
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != original {
+		t.Fatal("initial token lookup failed")
+	}
+
+	temp := path + ".replacement"
+	if err := os.WriteFile(temp, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Chtimes(temp, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("preserve replacement mtime: %v", err)
+	}
+	if err := os.Rename(temp, path); err != nil {
+		t.Fatalf("atomic replacement: %v", err)
+	}
+	expireOTLPTokenValidation(t, api, connector.OTLPScopeCodex)
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != rotated {
+		t.Fatal("same-mtime atomic replacement did not rotate cached token")
+	}
+	assertScopedOTLPAuth(t, api, original, http.StatusUnauthorized)
+	assertScopedOTLPAuth(t, api, rotated, http.StatusOK)
+}
+
+func TestLookupOTLPPathToken_DetectsDeleteRecreateWithoutIntermediateLookup(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	original := strings.Repeat("c", 64)
+	rotated := strings.Repeat("d", 64)
+	path := writePathTokenFile(t, tmp, connector.OTLPScopeCodex, original)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat original token: %v", err)
+	}
+	cfg := &config.Config{DataDir: tmp}
+	cfg.Gateway.Token = "gateway-master"
+	api := &APIServer{scannerCfg: cfg}
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{connector.OTLPScopeCodex: original})
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != original {
+		t.Fatal("initial token lookup failed")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("delete token: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatalf("recreate token: %v", err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("preserve recreated mtime: %v", err)
+	}
+	// No lookup occurs between delete and recreate.
+	expireOTLPTokenValidation(t, api, connector.OTLPScopeCodex)
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != rotated {
+		t.Fatal("delete+recreate did not rotate cached token")
+	}
+	assertScopedOTLPAuth(t, api, original, http.StatusUnauthorized)
+	assertScopedOTLPAuth(t, api, rotated, http.StatusOK)
+}
+
+func TestLookupOTLPPathToken_RejectsSymlinkReplacement(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	original := strings.Repeat("e", 64)
+	rotated := strings.Repeat("f", 64)
+	path := writePathTokenFile(t, tmp, connector.OTLPScopeCodex, original)
+	cfg := &config.Config{DataDir: tmp}
+	cfg.Gateway.Token = "gateway-master"
+	api := &APIServer{scannerCfg: cfg}
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{connector.OTLPScopeCodex: original})
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != original {
+		t.Fatal("initial token lookup failed")
+	}
+	target := filepath.Join(tmp, "attacker-token")
+	if err := os.WriteFile(target, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove token for symlink replacement: %v", err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		if os.IsPermission(err) || (runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314))) {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		t.Fatalf("replace token with symlink: %v", err)
+	}
+	expireOTLPTokenValidation(t, api, connector.OTLPScopeCodex)
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != "" {
+		t.Fatal("symlink replacement retained or loaded an authorized token")
+	}
+	assertScopedOTLPAuth(t, api, original, http.StatusUnauthorized)
+	assertScopedOTLPAuth(t, api, rotated, http.StatusUnauthorized)
+}
+
+func expireOTLPTokenValidation(t *testing.T, api *APIServer, scope connector.OTLPPathTokenScope) {
+	t.Helper()
+	api.otlpPathTokenMu.Lock()
+	api.otlpPathTokenLastStatAt[scope] = time.Now().Add(-2 * otlpPathTokenStatMinInterval)
+	api.otlpPathTokenMu.Unlock()
+}
+
+func assertScopedOTLPAuth(t *testing.T, api *APIServer, token string, want int) {
+	t.Helper()
+	called := false
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/otlp/codex/"+token+"/v1/logs", nil)
+	request.RemoteAddr = "127.0.0.1:54321"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != want {
+		t.Fatalf("scoped token auth status=%d want=%d", response.Code, want)
+	}
+	if called != (want == http.StatusOK) {
+		t.Fatalf("scoped token handler called=%v want=%v", called, want == http.StatusOK)
 	}
 }
 
@@ -276,6 +399,7 @@ func TestLookupOTLPPathToken_DropsCacheOnFileRemoval(t *testing.T) {
 	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
+	cfg.Gateway.Token = "gateway-master"
 	api := &APIServer{scannerCfg: cfg}
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
 		connector.OTLPScopeGeminiCLI: minted,
@@ -296,6 +420,49 @@ func TestLookupOTLPPathToken_DropsCacheOnFileRemoval(t *testing.T) {
 
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
 		t.Errorf("post-removal lookup = %q, want \"\" (cache must drop on file removal)", got)
+	}
+	assertScopedOTLPAuth(t, api, minted, http.StatusUnauthorized)
+}
+
+func TestLookupOTLPPathToken_ConcurrentDueRemovalNeverReturnsStale(t *testing.T) {
+	const workers = 64
+	for attempt := 0; attempt < 20; attempt++ {
+		tmp := t.TempDir()
+		minted := strings.Repeat(string(rune('a'+attempt%6)), 64)
+		path := writePathTokenFile(t, tmp, connector.OTLPScopeCodex, minted)
+		cfg := &config.Config{DataDir: tmp}
+		cfg.Gateway.Token = "gateway-master"
+		api := &APIServer{scannerCfg: cfg}
+		api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+			connector.OTLPScopeCodex: minted,
+		})
+		if got := api.lookupOTLPPathToken(string(connector.OTLPScopeCodex)); got != minted {
+			t.Fatalf("attempt %d initial lookup=%q want minted token", attempt, got)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("attempt %d remove token: %v", attempt, err)
+		}
+		expireOTLPTokenValidation(t, api, connector.OTLPScopeCodex)
+
+		start := make(chan struct{})
+		results := make(chan string, workers)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for range workers {
+			go func() {
+				defer wg.Done()
+				<-start
+				results <- api.lookupOTLPPathToken(string(connector.OTLPScopeCodex))
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		for got := range results {
+			if got != "" {
+				t.Fatalf("attempt %d concurrent due lookup returned revoked token %q", attempt, got)
+			}
+		}
 	}
 }
 

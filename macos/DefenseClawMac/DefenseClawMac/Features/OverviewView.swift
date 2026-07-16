@@ -81,7 +81,7 @@ struct OverviewView: View {
                 } label: {
                     Label("Run Health Check", systemImage: "stethoscope")
                 }
-                .disabled(doctorRunning)
+                .disabled(doctorRunning || !appState.installationMutationsAllowed)
                 Button {
                     refresh()
                 } label: {
@@ -185,6 +185,7 @@ struct OverviewView: View {
                 } label: {
                     Label("Scan Skills", systemImage: "wand.and.rays")
                 }
+                .disabled(!appState.installationMutationsAllowed)
                 Button {
                     appState.selectedPanel = .inventory
                 } label: {
@@ -203,12 +204,13 @@ struct OverviewView: View {
                     Label(appState.gatewayReachable ? "Restart Gateway" : "Start Gateway",
                           systemImage: appState.gatewayReachable ? "arrow.clockwise.circle" : "play.circle")
                 }
+                .disabled(!appState.installationMutationsAllowed)
                 Button {
                     runDoctor()
                 } label: {
                     Label("Run Doctor", systemImage: "stethoscope")
                 }
-                .disabled(doctorRunning)
+                .disabled(doctorRunning || !appState.installationMutationsAllowed)
                 Menu {
                     Button("Validate Configuration") {
                         runOverviewCommand(title: "Validate configuration", arguments: ["config", "validate"], category: "info")
@@ -409,6 +411,10 @@ struct OverviewView: View {
                                 appState.configureDetectedConnector(c.name)
                             }
                             .controlSize(.small)
+                            .disabled(
+                                candidate?.canConfigureInline == true
+                                    && !appState.installationMutationsAllowed
+                            )
                             .help(candidate?.canConfigureInline == true
                                   ? "Add \(friendlyConnectorName(c.name)) in observe mode without replacing existing connectors. Briefly restarts the DefenseClaw gateway to wire the agent's hooks."
                                   : "Open Setup for \(friendlyConnectorName(c.name))")
@@ -654,6 +660,7 @@ struct OverviewView: View {
                             Button("Fix") { appState.fixScanner(s) }
                                 .buttonStyle(.borderless)
                                 .font(.caption.weight(.semibold))
+                                .disabled(!appState.installationMutationsAllowed)
                                 .help("Link \(s.name) into ~/.local/bin so the CLI and gateway can find it")
                         }
                     }
@@ -874,69 +881,36 @@ struct OverviewView: View {
         var vendor: String
         var confidence: String  // " 98%"
         var seenLabel: String   // "seen 3m ago"
-        var id: String { "\(badge)-\(name)-\(vendor)" }
+        var id: String
     }
 
-    /// Sort (state rank, -confidence, -last_seen, name), dedup by
-    /// connector/component/display key, cap 8 with overflow.
+    private var aiAgentSignals: [AISignal] {
+        AIOverviewGrouping.agentSignals(from: appState.aiSnapshot.signals)
+    }
+
+    /// Local models belong in the full AI Discovery table, not the agent-only
+    /// Overview card or its eight-row cap.
     private var aiOverviewRows: (rows: [AIOverviewRow], overflow: Int) {
-        func stateRank(_ state: String) -> Int {
-            switch state.lowercased() {
-            case "new": 0
-            case "changed": 1
-            case "active", "": 2
-            case "gone": 3
-            default: 4
-            }
-        }
-        func displayName(_ s: AISignal) -> String {
-            s.name.nonEmpty ?? s.product.nonEmpty ?? s.signatureID.nonEmpty ?? s.signalID.nonEmpty ?? "(unknown)"
-        }
-        let sorted = appState.aiSnapshot.signals.sorted { a, b in
-            let ra = stateRank(a.state), rb = stateRank(b.state)
-            if ra != rb { return ra < rb }
-            if a.confidence != b.confidence { return a.confidence > b.confidence }
-            let ta = a.lastSeen?.timeIntervalSince1970 ?? 0
-            let tb = b.lastSeen?.timeIntervalSince1970 ?? 0
-            if ta != tb { return ta > tb }
-            return displayName(a).lowercased() < displayName(b).lowercased()
-        }
-        var seen = Set<String>()
-        var unique: [AISignal] = []
-        for signal in sorted {
-            let key: String
-            if !signal.supportedConnector.isEmpty {
-                key = "connector:\(signal.supportedConnector.lowercased())"
-            } else if !signal.ecosystem.isEmpty || !signal.componentName.isEmpty {
-                key = "component:\(signal.ecosystem.lowercased()):\(signal.componentName.lowercased())"
-            } else {
-                // TUI display key uses the vendor label WITH the version
-                // suffix, so same-vendor different-version signals stay apart.
-                var vendorLabel = signal.vendor.nonEmpty ?? signal.category.nonEmpty ?? "-"
-                if !signal.version.isEmpty { vendorLabel += " \(signal.version)" }
-                key = "display:\(vendorLabel.lowercased()):\(displayName(signal).lowercased())"
-            }
-            if seen.insert(key).inserted { unique.append(signal) }
-        }
+        let sorted = AIOverviewGrouping.sortedSignals(aiAgentSignals)
+        let unique = AIOverviewGrouping.uniqueSignals(sorted)
         let overflow = max(unique.count - 8, 0)
         let rows = unique.prefix(8).map { signal -> AIOverviewRow in
-            let badge: String = switch signal.state.lowercased() {
+            let normalizedState = signal.state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let badge: String = switch normalizedState {
             case "new": "[NEW]"
             case "changed": "[CHG]"
             case "gone": "[GONE]"
             default: "[OK ]"
             }
-            var vendor = signal.vendor.nonEmpty ?? signal.category.nonEmpty ?? "-"
-            if !signal.version.isEmpty { vendor += " \(signal.version)" }
-            if !signal.supportedConnector.isEmpty { vendor += " (\(signal.supportedConnector))" }
             let pct = AIConfidence.percent(signal.confidence, roundingRule: .toNearestOrAwayFromZero)
             let seenLabel = signal.lastSeen.map { "seen \(DCDates.relative($0))" } ?? "seen -"
             return AIOverviewRow(
                 badge: badge,
-                name: displayName(signal),
-                vendor: vendor,
+                name: AIOverviewGrouping.displayName(signal),
+                vendor: AIOverviewGrouping.displayVendor(signal),
                 confidence: String(format: "%3d%%", pct),
-                seenLabel: seenLabel
+                seenLabel: seenLabel,
+                id: AIOverviewGrouping.rowID(signal)
             )
         }
         return (Array(rows), overflow)
@@ -944,6 +918,11 @@ struct OverviewView: View {
 
     private var aiCard: some View {
         let box = aiOverviewRows
+        let summary = AIOverviewGrouping.summaryParts(
+            from: appState.aiSnapshot.signals,
+            lastScan: appState.aiSnapshot.lastScan,
+            privacyMode: appState.aiSnapshot.privacyMode
+        )
         return DCCard("Discovered AI Agents", systemImage: "sparkle.magnifyingglass") {
             if !appState.aiFetchEverSucceeded {
                 Text("ai discovery offline - run: defenseclaw agent discovery status")
@@ -953,41 +932,46 @@ struct OverviewView: View {
                 Text("disabled - run: defenseclaw agent discovery enable")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if appState.aiSnapshot.signals.isEmpty {
-                Text("no AI agents detected yet - try: defenseclaw agent discover")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             } else {
-                // Rich-panel parity: first 8 rows + "+N more".
-                ForEach(box.rows) { row in
-                    HStack(spacing: 8) {
-                        Text(row.badge)
-                            .font(.caption2.weight(.bold).monospaced())
-                            .foregroundStyle(aiBadgeColor(row.badge))
-                        Text(row.name)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .frame(maxWidth: 170, alignment: .leading)
-                        Text(row.vendor)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(row.confidence)
-                            .font(.caption2.monospacedDigit())
-                        Text(row.seenLabel)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                // TUI math: overflow counts rows beyond the rendered 8-cap.
-                if box.overflow > 0 {
-                    Text("+\(box.overflow) more")
-                        .font(.caption2)
+                Text(summary.joined(separator: " · "))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if aiAgentSignals.isEmpty {
+                    Text("no AI usage detected yet - try: defenseclaw agent discovery scan")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                } else {
+                    // Rich-panel parity: first 8 rows + "+N more".
+                    ForEach(box.rows) { row in
+                        HStack(spacing: 8) {
+                            Text(row.badge)
+                                .font(.caption2.weight(.bold).monospaced())
+                                .foregroundStyle(aiBadgeColor(row.badge))
+                            Text(row.name)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .frame(maxWidth: 170, alignment: .leading)
+                            Text(row.vendor)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(row.confidence)
+                                .font(.caption2.monospacedDigit())
+                            Text(row.seenLabel)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    // TUI math: overflow counts rows beyond the rendered 8-cap.
+                    if box.overflow > 0 {
+                        Text("+\(box.overflow) more")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("See all →") { appState.selectedPanel = .aiDiscovery }
+                        .controlSize(.small)
                 }
-                Button("See all →") { appState.selectedPanel = .aiDiscovery }
-                    .controlSize(.small)
             }
         }
     }
@@ -1035,9 +1019,14 @@ struct OverviewView: View {
     /// pulse→fetchedAt→pulse loop. Hero enforcement counts come from
     /// AppState.overviewEnforcementMetrics so they reconcile with the menu bar.
     private func loadData() async {
-        summary = await appState.audit.enforcementSummary()
-        hourly = await appState.audit.hourlyEnforcement24h()
+        let installationGeneration = appState.installationGeneration
+        let freshSummary = await appState.audit.enforcementSummary()
+        guard installationGeneration == appState.installationGeneration else { return }
+        let freshHourly = await appState.audit.hourlyEnforcement24h()
             .map { HourlyPoint(hour: $0.hour, klass: $0.action, count: $0.count) }
+        guard installationGeneration == appState.installationGeneration else { return }
+        summary = freshSummary
+        hourly = freshHourly
     }
 
     private func runDoctor() {
@@ -1048,6 +1037,7 @@ struct OverviewView: View {
             let result = await appState.runCommand(
                 title: "DefenseClaw Doctor",
                 arguments: ["doctor"],
+                mutation: true,
                 category: "info",
                 origin: "Overview",
                 successEffects: ["Diagnostic results refreshed"]
@@ -1056,7 +1046,9 @@ struct OverviewView: View {
             // The CLI rewrites <data_dir>/doctor_cache.json at the end of
             // every run (even failing ones) — reload it for the Doctor card
             // instead of scraping stdout.
-            appState.doctorCache = DoctorCache.load() ?? appState.doctorCache
+            appState.doctorCache = DoctorCache.load(
+                dataDirectory: appState.installationContext.dataDirectory
+            ) ?? appState.doctorCache
             doctorRunning = false
         }
     }
@@ -1074,6 +1066,7 @@ struct OverviewView: View {
                 title: title,
                 binary: binary,
                 arguments: arguments,
+                mutation: category != "info",
                 category: category,
                 origin: "Overview",
                 successEffects: effects,

@@ -415,23 +415,48 @@ jobs:
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          # v4 config schema: legacy `splunk:` block is rejected at startup.
-          # Point the local Splunk container (brought up by the "Start
-          # Splunk" step above) at the new generic sinks framework.
-          cfg.pop('splunk', None)
+          # Configure the local and mock HEC collectors as canonical v8
+          # destinations. JSONL is explicit in v8, so keep one optional test
+          # destination for the envelope/correlation assertions below.
           mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
-          cfg['audit_sinks'] = [
+          observability = cfg.setdefault('observability', {})
+          destinations = observability.setdefault('destinations', [])
+          managed_names = {'e2e-gateway-jsonl', 'splunk-local', 'splunk-mock'}
+          destinations[:] = [
+              destination for destination in destinations
+              if destination.get('name') not in managed_names
+          ]
+          destinations.extend([
+              {
+                  'name':    'e2e-gateway-jsonl',
+                  'kind':    'jsonl',
+                  'enabled': True,
+                  'path':    os.path.expanduser('~/.defenseclaw/gateway.jsonl'),
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
+                  },
+              },
               {
                   'name':    'splunk-local',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_local',
-                      'source':     'defenseclaw',
-                      'sourcetype': 'defenseclaw:json',
-                      'insecure_skip_verify': True,
+                  'endpoint':   'https://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'tls': {'insecure_skip_verify': True},
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
               # Phase 6 mock HEC collector — observability_assertions.sh
@@ -442,16 +467,23 @@ jobs:
                   'name':    'splunk-mock',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_mock',
-                      'source':     'defenseclaw-mock',
-                      'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                  'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_mock',
+                  'source':     'defenseclaw-mock',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
-          ]
+          ])
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -462,6 +494,7 @@ jobs:
               yaml.dump(cfg, f, default_flow_style=False)
           PY
 
+          defenseclaw config validate
           defenseclaw-gateway restart || defenseclaw-gateway start
           # Wait up to 30s for the sidecar to become healthy rather than a
           # fixed 5s sleep (self-hosted runners can be slow under load).
@@ -482,12 +515,12 @@ jobs:
             exit 1
           }
 
-      - name: Validate gateway.jsonl schema
+      - name: Validate canonical v8 JSONL destination
         run: |
-          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
-            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          if [ -s ~/.defenseclaw/gateway.jsonl ]; then
+            python3 scripts/assert-observability-v8-jsonl.py ~/.defenseclaw/gateway.jsonl --min-records 1
           else
-            echo "gateway.jsonl not yet populated — skipping schema check"
+            echo "optional v8 JSONL test destination not yet populated — deferred until post-traffic assertions"
           fi
 
       # `make install` only installs the runtime venv (cli-install →
@@ -523,10 +556,6 @@ jobs:
       - name: Observability assertions
         if: always()
         run: |
-          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
-            echo "gateway.jsonl not populated — skipping observability assertions"
-            exit 0
-          fi
           MOCK_ARGS=()
           # Core profile runs with guardrail disabled, so there will
           # never be a defenseclaw:judge envelope — passing
@@ -1286,23 +1315,48 @@ jobs:
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          # v4 config schema: legacy `splunk:` block is rejected at startup.
-          # Point the local Splunk container (brought up by the "Start
-          # Splunk" step above) at the new generic sinks framework.
-          cfg.pop('splunk', None)
+          # Configure the local and mock HEC collectors as canonical v8
+          # destinations. JSONL is explicit in v8, so keep one optional test
+          # destination for the envelope/correlation assertions below.
           mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
-          cfg['audit_sinks'] = [
+          observability = cfg.setdefault('observability', {})
+          destinations = observability.setdefault('destinations', [])
+          managed_names = {'e2e-gateway-jsonl', 'splunk-local', 'splunk-mock'}
+          destinations[:] = [
+              destination for destination in destinations
+              if destination.get('name') not in managed_names
+          ]
+          destinations.extend([
+              {
+                  'name':    'e2e-gateway-jsonl',
+                  'kind':    'jsonl',
+                  'enabled': True,
+                  'path':    os.path.expanduser('~/.defenseclaw/gateway.jsonl'),
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
+                  },
+              },
               {
                   'name':    'splunk-local',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_local',
-                      'source':     'defenseclaw',
-                      'sourcetype': 'defenseclaw:json',
-                      'insecure_skip_verify': True,
+                  'endpoint':   'https://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'tls': {'insecure_skip_verify': True},
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
               # Phase 6 mock HEC collector (see core job for rationale).
@@ -1310,16 +1364,23 @@ jobs:
                   'name':    'splunk-mock',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_mock',
-                      'source':     'defenseclaw-mock',
-                      'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                  'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_mock',
+                  'source':     'defenseclaw-mock',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
-          ]
+          ])
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -1360,6 +1421,7 @@ jobs:
               yaml.dump(cfg, f, default_flow_style=False)
           PY
 
+          defenseclaw config validate
           defenseclaw-gateway restart || defenseclaw-gateway start
           # Wait up to 30s for the sidecar to become healthy rather than a
           # fixed 5s sleep (self-hosted runners can be slow under load).
@@ -1380,13 +1442,13 @@ jobs:
             exit 1
           }
 
-      - name: Validate gateway.jsonl schema
+      - name: Validate canonical v8 JSONL destination
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
         run: |
-          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
-            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          if [ -s ~/.defenseclaw/gateway.jsonl ]; then
+            python3 scripts/assert-observability-v8-jsonl.py ~/.defenseclaw/gateway.jsonl --min-records 1
           else
-            echo "gateway.jsonl not yet populated — skipping schema check"
+            echo "optional v8 JSONL test destination not yet populated — deferred until post-traffic assertions"
           fi
 
       # `make install` only installs the runtime venv (cli-install →
@@ -1424,12 +1486,8 @@ jobs:
       # request_id format, and audit.db correlation after E2E
       # traffic has been driven through the sidecar.
       - name: Observability assertions
-        if: always()
+        if: ${{ always() && env.FULL_LIVE_SKIP != '1' }}
         run: |
-          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
-            echo "gateway.jsonl not populated — skipping observability assertions"
-            exit 0
-          fi
           MOCK_ARGS=()
           # Full-live only expects a defenseclaw:judge envelope when
           # the live guardrail was actually enabled — otherwise the

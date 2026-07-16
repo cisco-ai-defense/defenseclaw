@@ -18,66 +18,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// sinkPtr is a tiny helper to build a *[]AuditSink override dimension.
-func sinkPtr(ss ...AuditSink) *[]AuditSink {
-	out := append([]AuditSink(nil), ss...)
-	return &out
-}
-
 func webhookPtr(ws ...WebhookConfig) *[]WebhookConfig {
 	out := append([]WebhookConfig(nil), ws...)
 	return &out
-}
-
-func TestObservability_EffectiveAuditSinks_TriState(t *testing.T) {
-	global := []AuditSink{{Name: "global-sink", Kind: SinkKindHTTPJSONL}}
-	connSink := AuditSink{Name: "codex-sink", Kind: SinkKindHTTPJSONL}
-
-	obs := ObservabilityConfig{
-		Connectors: map[string]PerConnectorObservability{
-			// override: route codex to its own sink
-			"codex": {AuditSinks: sinkPtr(connSink)},
-			// suppress: explicit empty list drops global for claudecode
-			"claudecode": {AuditSinks: sinkPtr()},
-			// inherit-via-other-dimension: webhooks set but audit_sinks nil
-			"hermes": {Webhooks: webhookPtr(WebhookConfig{URL: "https://x"})},
-		},
-	}
-
-	t.Run("override wins", func(t *testing.T) {
-		got := obs.EffectiveAuditSinks("codex", global)
-		if len(got) != 1 || got[0].Name != "codex-sink" {
-			t.Fatalf("codex effective = %+v, want [codex-sink]", got)
-		}
-	})
-
-	t.Run("empty list suppresses global", func(t *testing.T) {
-		got := obs.EffectiveAuditSinks("claudecode", global)
-		if len(got) != 0 {
-			t.Fatalf("claudecode effective = %+v, want [] (suppressed)", got)
-		}
-	})
-
-	t.Run("nil dimension inherits global", func(t *testing.T) {
-		got := obs.EffectiveAuditSinks("hermes", global)
-		if len(got) != 1 || got[0].Name != "global-sink" {
-			t.Fatalf("hermes effective = %+v, want [global-sink] (inherit)", got)
-		}
-	})
-
-	t.Run("unknown connector inherits global (no silent drop)", func(t *testing.T) {
-		got := obs.EffectiveAuditSinks("windsurf", global)
-		if len(got) != 1 || got[0].Name != "global-sink" {
-			t.Fatalf("windsurf effective = %+v, want [global-sink] (inherit)", got)
-		}
-	})
-
-	t.Run("empty connector inherits global", func(t *testing.T) {
-		got := obs.EffectiveAuditSinks("", global)
-		if len(got) != 1 || got[0].Name != "global-sink" {
-			t.Fatalf("\"\" effective = %+v, want [global-sink]", got)
-		}
-	})
 }
 
 func TestObservability_EffectiveWebhooks_TriState(t *testing.T) {
@@ -86,7 +29,7 @@ func TestObservability_EffectiveWebhooks_TriState(t *testing.T) {
 		Connectors: map[string]PerConnectorObservability{
 			"codex":      {Webhooks: webhookPtr(WebhookConfig{Name: "codex-hook", URL: "https://codex.example"})},
 			"claudecode": {Webhooks: webhookPtr()}, // suppress
-			"hermes":     {AuditSinks: sinkPtr()},  // other dim set, webhooks inherit
+			"hermes":     {},
 		},
 	}
 	if got := obs.EffectiveWebhooks("codex", global); len(got) != 1 || got[0].Name != "codex-hook" {
@@ -106,11 +49,11 @@ func TestObservability_EffectiveWebhooks_TriState(t *testing.T) {
 func TestObservability_ConnectorLookup_AliasInsensitive(t *testing.T) {
 	obs := ObservabilityConfig{
 		Connectors: map[string]PerConnectorObservability{
-			"open-hands": {AuditSinks: sinkPtr(AuditSink{Name: "oh", Kind: SinkKindHTTPJSONL})},
+			"open-hands": {Webhooks: webhookPtr(WebhookConfig{Name: "oh"})},
 		},
 	}
 	// Registry-canonical "openhands" must resolve the "open-hands" alias key.
-	got := obs.EffectiveAuditSinks("openhands", nil)
+	got := obs.EffectiveWebhooks("openhands", nil)
 	if len(got) != 1 || got[0].Name != "oh" {
 		t.Fatalf("openhands effective = %+v, want [oh] via alias", got)
 	}
@@ -133,11 +76,9 @@ func TestObservability_Validate_RejectsDuplicateAlias(t *testing.T) {
 	}
 }
 
-// TestObservability_LoadRoundTrip de-risks the viper tri-state: an explicit
-// empty list must survive Load() as a non-nil pointer to an empty slice
-// (suppress), an absent dimension as nil (inherit), and a populated list as
-// an override. It also asserts Save() re-marshals the same YAML shape the
-// Python writer produces.
+// TestObservability_LoadRoundTrip pins decoder fidelity for the explicit
+// upgrade path: historical sink overrides must survive legacy Load without
+// becoming callable target-runtime routing policy.
 func TestObservability_LoadRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", tmpDir)
@@ -198,17 +139,6 @@ observability:
 	// hermes: only webhooks set; audit_sinks must be nil (inherit)
 	if pc := conns["hermes"]; pc.AuditSinks != nil {
 		t.Fatalf("hermes.audit_sinks = %v, want nil (inherit)", pc.AuditSinks)
-	}
-
-	// Resolver behavior end-to-end after Load.
-	if got := cfg.Observability.EffectiveAuditSinks("codex", cfg.AuditSinks); len(got) != 1 || got[0].Name != "codex-jsonl" {
-		t.Fatalf("codex effective post-load = %+v", got)
-	}
-	if got := cfg.Observability.EffectiveAuditSinks("claudecode", cfg.AuditSinks); len(got) != 0 {
-		t.Fatalf("claudecode effective post-load = %+v, want [] (suppressed)", got)
-	}
-	if got := cfg.Observability.EffectiveAuditSinks("hermes", cfg.AuditSinks); len(got) != 1 || got[0].Name != "global-jsonl" {
-		t.Fatalf("hermes effective post-load = %+v, want [global-jsonl]", got)
 	}
 
 	// Save round-trip: the marshaled YAML must keep the suppress + override

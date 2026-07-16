@@ -260,9 +260,9 @@
         "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
         "last_seen":      { "type": ["string", "null"], "format": "date-time" },
         "detector":       { "type": ["string", "null"], "maxLength": 64,
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "component":      { "type": ["object", "null"],
-          "description": "populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
           "properties": {
             "ecosystem": { "type": ["string", "null"], "maxLength": 64 },
             "name":      { "type": ["string", "null"], "maxLength": 256 },
@@ -271,7 +271,7 @@
           }
         },
         "model":          { "type": ["object", "null"],
-          "description": "local model metadata; populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 local-model field; canonical v8 producers do not populate it.",
           "required": ["id", "status"],
           "properties": {
             "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -286,7 +286,7 @@
           }
         },
         "runtime":        { "type": ["object", "null"],
-          "description": "populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
           "properties": {
             "pid":        { "type": ["integer", "null"], "minimum": 0 },
             "ppid":       { "type": ["integer", "null"], "minimum": 0 },
@@ -297,33 +297,33 @@
           }
         },
         "last_active_at": { "type": ["string", "null"], "format": "date-time",
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "identity_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "identity_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "presence_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "presence_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "identity_factors": { "type": ["array", "null"],
-          "description": "populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
         },
         "presence_factors": { "type": ["array", "null"],
-          "description": "populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
         },
         "detectors":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16,
-          "description": "populated only when privacy.disable_redaction=true" },
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
         "evidence":       { "type": ["array", "null"], "maxItems": 32,
-          "description": "populated only when privacy.disable_redaction=true",
+          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
           "items": { "$ref": "#/$defs/AIDiscoveryEvidence" }
         },
         "raw_paths":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32,
-          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" }
+          "description": "Historical pre-v8 raw-path field; canonical v8 producers never populate it." }
       }
     },
     "AIDiscoveryFactor": {
@@ -349,7 +349,7 @@
         "value_hash":    { "type": ["string", "null"], "maxLength": 256 },
         "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
         "raw_path":      { "type": ["string", "null"], "maxLength": 4096,
-          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" },
+          "description": "Historical pre-v8 raw-path field; canonical v8 producers never populate it." },
         "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "match_kind":    { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] }
       }

@@ -566,6 +566,24 @@ verify_refusal_invariants() {
             grep -Eiq "schema|protocol|minimum source|required bridge|upgrade bridge|without --version|upgrade.*first|source version|tested.*matrix|published-baseline" "${log_file}" \
                 || die "refusal log did not explain the protocol/source bridge requirement"
             ;;
+        artifact-provenance)
+            # A protocol-2 controller must not honor the legacy test-only
+            # --allow-unverified escape hatch for a modern target.  In an
+            # unsigned PR candidate this authentication refusal necessarily
+            # happens before the signed schema/source policy can be trusted.
+            grep -Fq -- \
+                "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks" \
+                "${log_file}" \
+                || die "modern controller did not reject the legacy unverified override"
+            grep -Fq \
+                "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" \
+                "${log_file}" \
+                || die "modern controller did not identify the unsigned candidate envelope"
+            grep -Fq \
+                "Modern release provenance is mandatory; --allow-unverified cannot override it." \
+                "${log_file}" \
+                || die "modern controller did not explain the mandatory provenance boundary"
+            ;;
         legacy-schema)
             grep -Eiq "schema|protocol|upgrade script shipped with that release" "${log_file}" \
                 || die "legacy schema-aware refusal did not explain its forward-compatibility gate"
@@ -823,6 +841,13 @@ run_protocol_case() {
         else
             installed_refusal_mode="artifact-envelope"
         fi
+    elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature; then
+        # The PR refusal job deliberately has no release-workflow Fulcio
+        # identity.  A modern controller therefore must stop at immutable
+        # artifact authentication, before it may trust candidate schema or
+        # source-version policy.  Older controllers retain their separate
+        # schema/artifact compatibility assertions above.
+        installed_refusal_mode="artifact-provenance"
     fi
 
     local source_too_old=0

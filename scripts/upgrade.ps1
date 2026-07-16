@@ -557,7 +557,6 @@ function Validate-Manifest {
             if ($tested -notcontains $source) { Fail "Windows tested sources must be a subset of tested_source_versions." }
             $windowsSeen[$source] = $true; $windowsTested += $source; $previous = $source
         }
-        if ($windowsTested.Count -eq 0) { Fail "Windows tested-source list must not be empty." }
         $expectedRuntimeConfig=if($ReleaseVersion -eq "0.8.4"){7}else{8}
         if(-not $runtimeConfigProperty -or -not(Test-Integer $runtimeConfigProperty.Value) -or [int64]$runtimeConfigProperty.Value -ne $expectedRuntimeConfig){
             Fail "Schema-2 manifest runtime_config_version does not match its release boundary."
@@ -616,9 +615,18 @@ function Validate-Manifest {
             if ($seen.ContainsKey($source) -or (Compare-Version $source $minimum) -ge 0) { Fail "Invalid auto_bridge_from." }
             $seen[$source] = $true
         }
-        if($tested -notcontains $bridge -or $windowsTested -notcontains $bridge){
-            Fail "Required bridge is absent from a signed tested-source matrix."
+        if($tested -notcontains $bridge){
+            Fail "Required bridge is absent from the signed global tested-source matrix."
         }
+        if($windowsTested.Count -eq 0){
+            Fail "Windows upgrades to $ReleaseVersion are unsupported by the signed release policy. Required bridge $bridge was not published for Windows. No changes were made: no services were stopped and no installed artifacts were changed."
+        }
+        if($windowsTested -notcontains $bridge){
+            Fail "Required bridge is absent from the signed Windows tested-source matrix."
+        }
+    }
+    if($expectedSchema -eq 2 -and $windowsTested.Count -eq 0){
+        Fail "Windows tested-source list must not be empty."
     }
     if ($minProtocol -gt 1 -and $count -ne 3) { Fail "Protocol-2 release lacks a complete bridge contract." }
     if ((Compare-Version $ReleaseVersion "0.8.5") -ge 0) {

@@ -186,7 +186,7 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	fake := &countingScanner{name: "skill-scanner"}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
 
@@ -250,7 +250,7 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	fake := &countingScanner{name: "skill-scanner"}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
 

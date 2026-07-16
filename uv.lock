@@ -869,13 +869,14 @@ wheels = [
 
 [[package]]
 name = "defenseclaw"
-version = "0.8.4"
+version = "0.8.5"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11'" },
     { name = "cisco-ai-skill-scanner" },
     { name = "click" },
+    { name = "jsonschema" },
     { name = "opentelemetry-proto" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -911,6 +912,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.8,<9" },
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.30" },
     { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.60" },
+    { name = "jsonschema", specifier = ">=4.23.0,<5" },
     { name = "opentelemetry-proto", specifier = ">=1.28.0,<2" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "requests", specifier = "==2.33.0" },

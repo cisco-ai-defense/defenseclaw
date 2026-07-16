@@ -17,11 +17,13 @@
 package audit
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -151,6 +153,7 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		TraceID:         "trace-42",
 		RequestID:       "req-42",
 		SessionID:       "sess-42",
+		TurnID:          "turn-42",
 		AgentName:       "openclaw",
 		AgentInstanceID: "instance-42",
 		PolicyID:        "strict",
@@ -178,6 +181,7 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		{"TraceID", got.TraceID, in.TraceID},
 		{"RequestID", got.RequestID, in.RequestID},
 		{"SessionID", got.SessionID, in.SessionID},
+		{"TurnID", got.TurnID, in.TurnID},
 		{"AgentName", got.AgentName, in.AgentName},
 		{"AgentInstanceID", got.AgentInstanceID, in.AgentInstanceID},
 		{"PolicyID", got.PolicyID, in.PolicyID},
@@ -189,6 +193,10 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
 		}
+	}
+	byTarget, err := store.ListEventsByTarget(in.Target, 10)
+	if err != nil || len(byTarget) != 1 || byTarget[0].TurnID != in.TurnID {
+		t.Fatalf("ListEventsByTarget turn roundtrip: events=%+v err=%v", byTarget, err)
 	}
 }
 
@@ -261,8 +269,9 @@ func TestStoreLogEventAutoPopulatesSidecarInstanceID(t *testing.T) {
 	}
 
 	logger := NewLogger(store)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 	if err := logger.LogEvent(Event{
-		Action:   "gateway-tool-call",
+		Action:   string(ActionInstallClean),
 		Target:   "shell",
 		Severity: "INFO",
 	}); err != nil {
@@ -542,7 +551,7 @@ func TestInitIdempotent(t *testing.T) {
 	}
 }
 
-func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
+func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -553,7 +562,8 @@ func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
 	}
 
 	if err := store.LogEvent(Event{
-		Action:   "scan",
+		ID:       "eligible-alert",
+		Action:   "scan-finding",
 		Target:   "skill/test-skill",
 		Details:  "found suspicious behavior",
 		Severity: "HIGH",
@@ -561,41 +571,42 @@ func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
 		t.Fatalf("LogEvent alert: %v", err)
 	}
 
-	n, err := store.AcknowledgeAlerts("all")
+	if err := store.LogEvent(Event{
+		ID: "ineligible-platform", Action: "sidecar-start", Target: "gateway",
+		Details: "healthy", Severity: "HIGH",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name
+	) VALUES
+		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
+		 'HIGH', 'security.finding', 'finding.observed'),
+		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
+		 'HIGH', 'platform.health', 'subsystem.degraded')`); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
 	if err != nil {
-		t.Fatalf("AcknowledgeAlerts: %v", err)
+		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("RowsAffected = %d, want 1", n)
+	targetIDs := map[string]bool{}
+	for _, target := range targets {
+		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-
+	if len(targets) != 2 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] {
+		t.Fatalf("targets=%+v", targets)
+	}
 	alerts, err := store.ListAlerts(10)
 	if err != nil {
-		t.Fatalf("ListAlerts: %v", err)
+		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("ListAlerts returned %d rows after acknowledgement, want 0", len(alerts))
+	alertIDs := map[string]bool{}
+	for _, alert := range alerts {
+		alertIDs[alert.ID] = true
 	}
-
-	events, err := store.ListEvents(10)
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
-	if len(events) != 2 {
-		t.Fatalf("ListEvents returned %d rows, want 2", len(events))
-	}
-
-	foundAck := false
-	for _, event := range events {
-		if event.Action == "acknowledge-alerts" {
-			foundAck = true
-			if event.Severity != "ACK" {
-				t.Fatalf("acknowledge-alerts severity = %q, want ACK", event.Severity)
-			}
-		}
-	}
-	if !foundAck {
-		t.Fatal("expected acknowledge-alerts event to remain in audit history")
+	if len(alerts) != 2 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] {
+		t.Fatalf("alerts=%+v", alerts)
 	}
 }
 

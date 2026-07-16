@@ -18,6 +18,7 @@ effective env-name override takes precedence over canonical names, and
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -59,6 +60,22 @@ def _make_cfg(data_dir: str, **overrides) -> Config:
     )
     kwargs.update(overrides)
     return Config(**kwargs)
+
+
+def _make_v8_cfg(data_dir: str, destinations: list[dict]) -> tuple[Config, str]:
+    path = os.path.join(data_dir, "config.yaml")
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "config_version": 8,
+                "data_dir": data_dir,
+                "observability": {"destinations": destinations},
+            },
+            stream,
+        )
+    cfg = _make_cfg(data_dir)
+    cfg._source_config_version = 8
+    return cfg, path
 
 
 class RequirementPredicateTests(unittest.TestCase):
@@ -181,6 +198,59 @@ class RequirementPredicateTests(unittest.TestCase):
         on = _make_cfg("/tmp/dc-test", splunk=SplunkConfig(enabled=True))
         self.assertEqual(C._splunk_token(on), C.Requirement.REQUIRED)
 
+    def test_splunk_required_for_enabled_v8_hec_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "soc",
+                        "kind": "splunk_hec",
+                        "endpoint": "https://splunk.example.com/services/collector/event",
+                        "token_env": "MY_SPLUNK_HEC_TOKEN",
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._splunk_token(cfg), C.Requirement.REQUIRED)
+                spec = C.lookup("SPLUNK_ACCESS_TOKEN")
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec.resolve_env_name(cfg), "MY_SPLUNK_HEC_TOKEN")
+
+    def test_disabled_v8_splunk_reference_is_not_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "soc",
+                        "kind": "splunk_hec",
+                        "enabled": False,
+                        "endpoint": "https://splunk.example.com/services/collector/event",
+                        "token_env": "MY_SPLUNK_HEC_TOKEN",
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._splunk_token(cfg), C.Requirement.NOT_USED)
+
+    def test_splunk_o11y_header_reference_is_recognized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "splunk-o11y",
+                        "kind": "otlp",
+                        "protocol": "http/protobuf",
+                        "endpoint": "https://ingest.us1.signalfx.com",
+                        "headers": {"X-SF-Token": {"env": "SPLUNK_ACCESS_TOKEN"}},
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._splunk_token(cfg), C.Requirement.REQUIRED)
+
     def test_galileo_key_required_only_for_enabled_destination(self):
         off = _make_cfg("/tmp/dc-test")
         self.assertEqual(C._galileo_key(off), C.Requirement.NOT_USED)
@@ -217,6 +287,66 @@ class RequirementPredicateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(C._galileo_key(custom_name), C.Requirement.REQUIRED)
+
+    def test_galileo_key_uses_enabled_v8_header_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "galileo-production",
+                        "kind": "otlp",
+                        "preset": "galileo",
+                        "protocol": "http/protobuf",
+                        "endpoint": "https://api.galileo.ai/otel/traces",
+                        "headers": {
+                            "Galileo-API-Key": {"env": "MY_GALILEO_KEY"},
+                            "project": "defenseclaw",
+                            "logstream": "production",
+                        },
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._galileo_key(cfg), C.Requirement.REQUIRED)
+                spec = C.lookup("GALILEO_API_KEY")
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec.resolve_env_name(cfg), "MY_GALILEO_KEY")
+                self.assertEqual(
+                    spec.resolve_bound_endpoint(cfg),
+                    "https://api.galileo.ai",
+                )
+
+    def test_v8_bound_endpoint_never_exposes_path_query_or_fragment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "galileo-secret-path",
+                        "kind": "otlp",
+                        "preset": "galileo",
+                        "protocol": "http/protobuf",
+                        "endpoint": (
+                            "https://api.galileo.ai/tenant/path-secret-canary"
+                            "?access_token=query-secret#fragment-secret"
+                        ),
+                        "headers": {
+                            "Galileo-API-Key": {"env": "MY_GALILEO_KEY"},
+                            "project": "defenseclaw",
+                            "logstream": "production",
+                        },
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._galileo_key(cfg), C.Requirement.REQUIRED)
+                spec = C.lookup("GALILEO_API_KEY")
+                self.assertIsNotNone(spec)
+                bound = spec.resolve_bound_endpoint(cfg)
+                self.assertEqual(bound, "https://api.galileo.ai")
+                for secret in ("path-secret-canary", "query-secret", "fragment-secret"):
+                    self.assertNotIn(secret, bound)
 
     def test_defenseclaw_llm_key_not_used_when_nothing_uses_llm(self):
         cfg = _make_cfg("/tmp/dc-test")
@@ -507,6 +637,105 @@ class ClassifyTests(unittest.TestCase):
                 missing = {s.spec.env_name for s in C.missing_required(cfg)}
                 self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", missing)
                 self.assertIn("CISCO_AI_DEFENSE_API_KEY", missing)
+
+    def test_classify_includes_each_enabled_v8_destination_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "soc-primary",
+                        "kind": "splunk_hec",
+                        "endpoint": "https://splunk.example.com/services/collector/event",
+                        "token_env": "SPLUNK_PRIMARY_TOKEN",
+                    },
+                    {
+                        "name": "soc-secondary",
+                        "kind": "splunk_hec",
+                        "endpoint": "https://splunk-secondary.example.com/services/collector/event",
+                        "token_env": "SPLUNK_SECONDARY_TOKEN",
+                    },
+                    {
+                        "name": "galileo",
+                        "kind": "otlp",
+                        "preset": "galileo",
+                        "protocol": "http/protobuf",
+                        "endpoint": "https://api.galileo.ai/otel/traces",
+                        "headers": {
+                            "Galileo-API-Key": {"env": "GALILEO_PRODUCTION_KEY"},
+                            "project": "defenseclaw",
+                            "logstream": "production",
+                        },
+                    },
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                required_refs = {
+                    status.resolution.env_name
+                    for status in C.classify(cfg)
+                    if status.spec.feature in {"observability.splunk", "observability.galileo"}
+                    and status.requirement is C.Requirement.REQUIRED
+                }
+            self.assertEqual(
+                required_refs,
+                {
+                    "SPLUNK_PRIMARY_TOKEN",
+                    "SPLUNK_SECONDARY_TOKEN",
+                    "GALILEO_PRODUCTION_KEY",
+                },
+            )
+
+    def test_classify_loads_v8_observability_config_once(self):
+        from defenseclaw.observability import v8_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "soc",
+                        "kind": "splunk_hec",
+                        "endpoint": "https://splunk.example.com/services/collector/event",
+                        "token_env": "MY_SPLUNK_HEC_TOKEN",
+                    }
+                ],
+            )
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False),
+                patch.object(
+                    v8_config,
+                    "load_validate_v8",
+                    wraps=v8_config.load_validate_v8,
+                ) as load_config,
+            ):
+                C.classify(cfg)
+                self.assertEqual(load_config.call_count, 1)
+
+                # Direct helper calls remain uncached after classify exits.
+                C._splunk_token(cfg)
+                self.assertEqual(load_config.call_count, 2)
+
+    def test_classify_caches_empty_and_none_v8_ref_results(self):
+        from defenseclaw.observability import v8_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(tmp, [])
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                with patch.object(
+                    v8_config,
+                    "load_validate_v8",
+                    wraps=v8_config.load_validate_v8,
+                ) as load_empty:
+                    C.classify(cfg)
+                    self.assertEqual(load_empty.call_count, 1)
+
+                with patch.object(
+                    v8_config,
+                    "load_validate_v8",
+                    side_effect=ValueError("synthetic invalid config"),
+                ) as load_none:
+                    C.classify(cfg)
+                    self.assertEqual(load_none.call_count, 1)
 
 
 if __name__ == "__main__":

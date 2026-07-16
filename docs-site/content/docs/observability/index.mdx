@@ -1,211 +1,362 @@
 ---
 title: Observability
-description: Every prompt, tool call, scan finding, and HITL decision lands in your SIEM and your dashboards. DefenseClaw ships local Grafana/Loki/Tempo and local Splunk stacks you can stand up with one command.
+description: Configure DefenseClaw v8 logs, traces, metrics, redaction, local history, and independent export destinations from one observability graph.
 keywords:
   - DefenseClaw observability
-  - defenseclaw setup splunk
-  - defenseclaw setup local-observability
+  - config version 8
   - OTLP
   - Splunk HEC
-  - Grafana
-  - audit sinks
+  - Galileo
+  - Grafana Agent360
 ---
 
-The DefenseClaw gateway is observable by design. Every decision — admission, guardrail verdict, judge call, scanner finding, HITL approval — is structured, correlated by `trace_id`/`span_id`, and emitted on three independent rails:
+DefenseClaw v8 uses one pipeline for audit evidence, security findings,
+guardrail decisions, agent lifecycle, model/tool activity, platform health, and
+diagnostics:
 
-<DefenseClawDemo scenario="observability-correlation" />
+```text
+agent · guardrail · scan · policy · platform
+                     |
+                     v
+       bucket collection (logs/traces/metrics)
+                     |
+                     v
+              canonical record
+                     |
+       +-------------+--------------+----------------+
+       |             |              |                |
+       v             v              v                v
+ local SQLite   select/redact   select/redact    select/redact
+  all logs          OTLP         Splunk HEC        Galileo
+                  L/T/M             logs            traces
+```
 
-## What you just saw
+Collection happens once; every destination independently selects, redacts, and
+delivers its own projection.
 
-The same synthetic Cursor enforcement decision used on the homepage kept its trace, span, session, connector, decision, rule, and severity dimensions across local evidence and configured export rails. The example does not imply delivery to an OTLP, Splunk, or webhook destination that an operator has not configured.
+The source of truth is `observability:` under `config_version: 8`. It owns
+collection, local retention, resource attributes, sampling, metric policy,
+redaction profiles, destination routing, and transport settings. Notification
+webhooks remain a separate product surface.
 
-<Flow
-  direction="TB"
-  caption="Three independent sinks fanned out below the gateway. Failure on one rail does not affect the others."
->
-  <Node id="gateway" kind="gateway">{`DefenseClaw Gateway\nadmission · guardrail ·\njudge · scan decisions`}</Node>
-  <Node id="otel" kind="connector">{`OpenTelemetry\nCollector`}</Node>
-  <Node id="hec" kind="connector">Splunk HEC</Node>
-  <Node id="local" kind="datastore">{`Local JSONL\n~/.defenseclaw/gateway.jsonl`}</Node>
-  <Node id="loki" kind="datastore">{`Loki · Tempo ·\nPrometheus`}</Node>
-  <Node id="splunk" kind="datastore">Splunk app</Node>
-  <Node id="grafana" kind="datastore">Grafana</Node>
-  <Node id="tui" kind="operator">DefenseClaw TUI</Node>
-  <Edge from="gateway" to="otel" label="OTLP" />
-  <Edge from="gateway" to="hec" label="HEC JSON" />
-  <Edge from="gateway" to="local" label="JSONL" />
-  <Edge from="otel" to="loki" />
-  <Edge from="hec" to="splunk" />
-  <Edge from="local" to="tui" />
-  <Edge from="loki" to="grafana" />
-</Flow>
+Connector-native OTLP ingress is separate from outbound destination routing. For
+Codex, setup owns three loopback-only, scoped-token endpoints under
+`/otlp/codex/<scoped-token>/v1/{logs,metrics,traces}`; see the
+[Codex connector guide](/docs/connectors/codex) for credential, permission, and
+teardown behavior.
 
-You can use any combination of those — they're independent sinks, not exclusive backends. Most teams start with one of the bundled local stacks while they're building policy, then add their production SIEM as a second sink without rewriting anything.
+## Full-fidelity defaults
 
-## The two bundled stacks
+The minimal configuration is:
+
+```yaml
+config_version: 8
+observability: {}
+```
+
+It resolves to four important defaults:
+
+- all registered logs, traces, and metrics are collected;
+- mandatory local SQLite stores every collected log unredacted;
+- there is no remote export until a destination is configured;
+- an enabled destination with no `send` or `routes` exports every bucket and
+  every signal its kind supports, unredacted.
+
+<Callout type="warn" title="Enabled destinations export full content by default">
+Full fidelity can include prompts, responses, tool arguments/results, evidence,
+paths, and identifiers. Apply a redaction profile before sending to a trust
+boundary that must not receive that content.
+</Callout>
+
+Use generated views instead of expanding every default into YAML:
+
+```bash
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw config reference observability
+defenseclaw observability plan
+```
+
+## Buckets
+
+Every canonical record belongs to one bucket:
+
+| Bucket | What it answers |
+| --- | --- |
+| `compliance.activity` | Who or what attempted, applied, rejected, or failed a control-plane change? |
+| `security.finding` | What durable risk was found, with status, evidence, and remediation? |
+| `guardrail.evaluation` | What runtime inspection ran and what decision did it reach, including clean evaluations? |
+| `enforcement.action` | What block, quarantine, disable, approval, or other policy action was attempted/applied? |
+| `model.io` | What model operation ran, with permitted content, usage, latency, and outcome? |
+| `tool.activity` | What tool ran, with permitted arguments/results, status, and latency? |
+| `asset.scan` | What skill/MCP/plugin/source scan ran and how did the scan stage behave? |
+| `asset.lifecycle` | How did an asset move through discovery, install, enable, quarantine, restore, or removal? |
+| `network.egress` | What outbound operation or egress policy decision occurred? |
+| `agent.lifecycle` | How did root agents, subagents, turns, workflows, phases, and executions progress? |
+| `ai.discovery` | What AI components and runtimes were discovered? |
+| `telemetry.ingest` | What inbound OTLP leaf was accepted, normalized, rejected, or re-exported? |
+| `platform.health` | Are gateway, storage, exporters, queues, guardrail, and sidecar healthy? |
+| `diagnostic` | What explicit debug/diagnostic fact does not belong to another product bucket? |
+
+Evaluations and findings are not process/summary copies of the same object. A
+guardrail evaluation records an inspection and its decision; zero or more durable
+security findings may result. An asset scan records the scan operation; findings
+remain in `security.finding`. An asset lifecycle transition also produces an
+`enforcement.action` only when a policy action is attempted.
+
+## Destination capabilities and fan-out
+
+| Destination kind | Signals it can receive |
+| --- | --- |
+| `jsonl`, `console`, `splunk_hec`, `http_jsonl` | logs |
+| `prometheus` | metrics |
+| `otlp` | logs, traces, metrics |
+| Galileo preset | traces |
+
+This configuration sends everything supported to both destinations:
+
+```yaml
+config_version: 8
+observability:
+  destinations:
+    - name: engineering
+      kind: otlp
+      protocol: grpc
+      endpoint: otel.example.com:4317
+      headers:
+        Authorization: {env: OTEL_AUTHORIZATION}
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+```
+
+`engineering` receives all logs, traces, and metrics. `soc` receives all logs
+because Splunk HEC is logs-only. Both receive unredacted projections because no
+policy overrides the default. Local SQLite also receives every collected log.
+
+Adding destinations is fan-out, not failover or a selection of one backend. Each
+leg has independent filtering, redaction, queueing, delivery, and health.
+
+## Narrow a destination
+
+Use concise `send` for the normal case:
+
+```yaml
+observability:
+  destinations:
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      send:
+        signals: [logs]
+        buckets: [compliance.activity, security.finding, enforcement.action]
+        redaction_profile: strict
+```
+
+Use ordered `routes` for source/action/severity filters or exclusions:
+
+```yaml
+observability:
+  destinations:
+    - name: archive
+      kind: otlp
+      protocol: http/protobuf
+      endpoint: https://otel.example.com
+      routes:
+        - name: drop-diagnostics
+          signals: [logs, traces, metrics]
+          selector: {buckets: [diagnostic]}
+          action: drop
+        - name: high-security
+          signals: [logs, traces]
+          selector:
+            buckets: [security.finding, enforcement.action]
+            min_severity: HIGH
+          action: send
+          redaction_profile: sensitive
+```
+
+Routes are first-match-wins per destination and signal. Different selector
+fields are ANDed; values in one field are ORed. An unmatched record is not sent
+to that destination. Supported selectors are `buckets`, `sources`, `connectors`,
+`actions`, `event_names`, and `min_severity`.
+
+Collection is earlier and controls runtime cost. If a bucket has
+`collect.traces: false`, no destination route can recreate those traces. A small
+SQLite-only mandatory compliance floor survives normal log collection disablement.
+
+## Tune bounded delivery
+
+Every optional destination has independent routing, projection, queueing, retry,
+and health. JSONL and console accept queue count/byte controls. Splunk HEC, HTTP
+JSONL, and OTLP also accept push-batch count/byte/delay controls. Prometheus is
+pull-based and rejects `batch`.
+
+| Field | Default | Bounds |
+| --- | ---: | --- |
+| `batch.max_queue_size` | `2048` | `1..65536` records |
+| `batch.max_queue_bytes` | `67108864` | `4198400..268435456` bytes |
+| `batch.max_export_batch_size` | `512` | `1..8192`, no greater than queue count |
+| `batch.max_export_batch_bytes` | `8388608` | `4263936..67108864` encoded bytes |
+| `batch.scheduled_delay_ms` | `5000` | `1..600000`; Galileo's omitted preset value is `1000` |
+| `timeout_ms` | `10000` | positive bounded milliseconds |
+
+If a queue count or byte limit would be exceeded, DefenseClaw drops the newest
+attempted enqueue, preserves older FIFO work and mandatory SQLite history, and
+records bounded health telemetry. Sibling destinations continue independently.
+Transient or ambiguous acknowledgement failures retry the exact immutable
+projection; a lost acknowledgement can create a duplicate, so consumers use the
+record ID for deduplication. See the generated
+[configuration reference](/docs/reference/configuration) for kind-specific fields.
+
+## Edit bucket and redaction policy safely
+
+Bucket names form a closed fourteen-name catalog; operators override collection
+or delivery but cannot add names in `config.yaml`. Back up the source with private
+permissions, edit only deliberate overrides, and validate before activation:
+
+```bash
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
+defenseclaw-gateway restart
+defenseclaw doctor
+```
+
+Stop if validation fails. A global or bucket redaction profile also changes local
+SQLite. To preserve full-fidelity local history while redacting a remote trust
+boundary, apply the profile only to that destination's `send` or matching route.
+
+## Centralized redaction
+
+Profile resolution is route, then bucket, then global default, then catalog:
+
+```yaml
+observability:
+  defaults:
+    redaction_profile: sensitive
+  buckets:
+    model.io:
+      redaction_profile: content
+  redaction_profiles:
+    soc:
+      extends: sensitive
+      detectors: [pii, credentials, secrets]
+      field_classes:
+        content: detect
+        evidence: detect
+        path: hash
+        credential: remove
+```
+
+`detect` replaces only sensitive substrings; `whole` redacts the full field;
+`hash` creates a nonreversible same-install correlation token; `remove` omits;
+and `preserve` retains. See [Redaction](/docs/reference/redaction) for built-ins,
+field classes, examples, and migration behavior.
+
+A field-processing failure replaces the complete affected field with a safe
+fail-closed token and never falls back to raw content. A classification,
+projection-context, traversal, or complete-record serialization/size failure
+rejects that destination's projection; independently successful destinations
+continue. Profile `none` intentionally preserves content but still enforces
+schema, type, size, and serialization limits.
+
+## Local history
+
+Exactly one generated `local-sqlite` destination stores every collected log and
+mandatory floor event. It cannot be disabled or filtered:
+
+```yaml
+observability:
+  local:
+    path: ~/.defenseclaw/audit.db
+    judge_bodies_path: ~/.defenseclaw/judge_bodies.db
+    retention_days: 90
+```
+
+`retention_days: 0` means retain indefinitely and produces a capacity warning.
+Raw judge-body capture is controlled separately by
+`guardrail.retain_judge_bodies`.
+
+## Choose an operator view
 
 <Cards>
   <Card
-    title="Local OTel + Grafana stack"
+    title="Local OTel + Grafana"
     href="/docs/observability/local-observability"
-    description="One-command Compose stack: OTel Collector, Loki, Tempo, Prometheus, Grafana — all wired to the gateway by setup local-observability up."
+    description="Collector, Loki, Tempo, Prometheus, and Grafana with the complete DefenseClaw dashboard bundle."
   />
   <Card
-    title="Splunk (local + Enterprise)"
-    href="/docs/observability/splunk"
-    description="defenseclaw setup splunk runs three independent pipelines: --logs (local Splunk in Docker), --enterprise (remote HEC), --o11y (Splunk Observability Cloud)."
-  />
-  <Card
-    title="Galileo (Cloud + self-hosted)"
-    href="/docs/observability/galileo"
-    description="First-class traces-only OTLP destination with a guided wizard, canary test, and native coexistence with the local stack."
-  />
-  <Card
-    title="Agent360 drill-down"
+    title="Agent360"
     href="/docs/observability/agent360"
-    description="Visual per-agent guide to lifecycle, models, tools, tokens, cost, security decisions, topology, and Tempo trace drill-down."
+    description="Prompt-to-outcome lifecycle DAG with distinct session/prompt facts, recursive lineage provenance, per-agent grouped request work with raw terminal drill-down, real collaboration updates, approvals, outcomes, and Tempo traces."
+  />
+  <Card
+    title="Galileo"
+    href="/docs/observability/galileo"
+    description="Generated rich trace projection for agent, workflow, model, tool, retrieval, and guardrail/judge operations."
+  />
+  <Card
+    title="Splunk"
+    href="/docs/observability/splunk"
+    description="Logs through HEC plus Splunk Observability Cloud OTLP dashboards and detectors."
   />
   <Card
     title="Grafana dashboard catalog"
     href="/docs/observability/grafana-dashboards"
-    description="Purpose, ownership, data sources, drill-down paths, and empty-state semantics for every bundled dashboard."
+    description="Dashboard ownership, data sources, drill-down paths, and empty-state semantics."
   />
 </Cards>
 
-## What lands in observability
+The `defenseclaw-genai-rich-v1` trace profile preserves root agents, subagents,
+turns, workflows, lifecycle/execution/phase IDs, model and tool operations,
+retrieval, approvals, guardrail/judge spans, links, events, and stable correlation.
+The `local-observability-v1` consumer profile protects the Agent360 and bundled
+dashboard query contract. If an operator narrows the local destination, plan and
+setup output report partial dashboard coverage.
 
-Every event has the same envelope so you can correlate across rails:
+Local dashboards consume the canonical OTEL projection as delivered and do not
+redact, mask, or hide fields again. DefenseClaw centrally applies the selected
+profile before export; Grafana displays or links every field present after that
+projection, including content when the producer supplies it.
 
-```json
-{
-  "ts": "2026-05-08T12:00:01.234Z",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "span_id": "00f067aa0ba902b7",
-  "connector": "codex",
-  "agent": "claudecode",
-  "session_id": "...",
-  "kind": "guardrail.verdict",
-  "decision": "deny",
-  "rule": "secrets/aws_access_key",
-  "severity": "high",
-  "actor": { "operator": "vineeth", "host": "..." },
-  "payload": { "matched": "AKIA****", "tool": "fs.write" }
-}
-```
+## Upgrade from v7
 
-The `connector` field is the multi-connector dimension: it names which hook connector (`codex`, `claudecode`, `antigravity`, …) the event came from. One gateway can serve several connectors at once, so every rail carries it — see [Filter by connector](#filter-by-connector) below.
-
-The `kind` field is your top-level taxonomy:
-
-| `kind` | Emitted when |
-| --- | --- |
-| `admission.scan` | Skill or MCP scanner finishes a scan |
-| `admission.decision` | Watcher applies an OPA verdict |
-| `guardrail.verdict` | A regex / LLM judge / inspector resolves |
-| `judge.call` | The LLM judge is invoked (with model + token usage) |
-| `hitl.prompt` | Operator is asked for approval |
-| `hitl.decision` | Operator answered allow/deny |
-| `tool.call` / `tool.result` | The agent invoked an MCP/native tool |
-| `proxy.request` / `proxy.response` | Gateway-proxied LLM call |
-| `gateway.lifecycle` | Start / reload / shutdown |
-
-You don't pick the schema in `setup` — you pick the *destinations*. Process-wide
-traces, metrics, and logs use named `otel.destinations[]`; audit-only forwarding
-uses `audit_sinks[]`. Both live in `~/.defenseclaw/config.yaml`, and the bundled
-commands maintain them without storing credential values there.
-
-## Manage destinations safely
-
-Destination names are identities: a new name adds a route, while an existing
-name updates only that route. Inspect and preview before writing:
+Run the normal command:
 
 ```bash
-defenseclaw setup observability list
-defenseclaw setup observability list --json
-defenseclaw setup observability add otlp --name production-tempo \
-  --endpoint collector.example.com:4317 --signals traces --dry-run
+defenseclaw upgrade --yes
 ```
 
-The list distinguishes `otel` from `audit_sinks` and shows kind, enabled state,
-signals, preset, and endpoint. The TUI Overview's full-width
-**Observability Destinations · Runtime** panel shows the runtime-loaded version
-of the same inventory, including process/global/connector scope, explicit
-connector suppression, and Galileo schema eligibility plus acknowledged,
-rejected, and failed delivery. It never shows
-headers or credential values. Open **0 Setup → Observability / Galileo** to
-add, update, enable, disable, test, or remove destinations.
+The upgrader backs up the source, converts and validates the complete v8 candidate,
+preserves narrower v7 collection/routing/redaction behavior, refreshes owned local
+dashboard assets without resetting data volumes, restarts, and checks health. No
+separate migration approval or apply command is required. The v8 gateway does not
+rewrite v7 configuration at startup or run both formats in parallel.
 
-## Audit contracts
+Live v8 observability policy lives in YAML. Ambient `DEFENSECLAW_OTEL_*`, standard
+`OTEL_EXPORTER_OTLP_*`, and `DEFENSECLAW_DISABLE_REDACTION` values are upgrade-only
+inputs, not runtime routing/redaction controls. YAML names credential environment
+references with `token_env`, `bearer_env`, or `{env: NAME}`; secret values stay out
+of the source and rendered plan.
 
-`gateway.jsonl` is still the live structured runtime log. `audit_events` is the SQLite audit store used by the TUI, exports, and audit sinks. The `details` column is intentionally backward-compatible text; new machine-readable audit payloads live in `structured_json` and export as `structured`.
-
-Connector hook audit rows use `schemas/hook-audit-envelope.json` (`schema: "defenseclaw.hook.v1"`). During migration, the same hook envelope is also embedded in `details_json=` inside `details` so existing Splunk SPL and grep workflows keep working. New consumers should read `structured`.
-
-## Filter by connector
-
-When one gateway enforces guardrail policy for several hook connectors at once (see [Multi-connector](/docs/setup/guardrail/multi-connector)), every rail carries a connector dimension so you can slice telemetry per connector:
-
-| Rail | Where the connector lives | Example filter |
-| --- | --- | --- |
-| OTel metrics | `connector` metric label | `defenseclaw_connector_hook_invocations_total{connector="codex"}` |
-| OTel spans / logs | `defenseclaw.connector.source` attribute | filter spans on `defenseclaw.connector.source = "codex"` |
-| Audit rows / OTLP-ingest audit rows | top-level `connector` field, plus `structured.connector` on hook rows | `connector="codex"` |
-| Splunk HEC | top-level `connector`, and `structured.connector` on hook events | `structured.connector="codex"` |
-
-The OTel **resource** attribute `defenseclaw.claw.mode` reports `multi` when more than one connector is active, so you can also tell a fan-out gateway apart from a single-connector one. Grafana's **Connectors (Overview)** and **Connector Detail** boards are built on the `connector` metric label, and the **Guardrail Evaluations** board is connector-filterable. See [Local observability stack](/docs/observability/local-observability#bundled-grafana-dashboards) and [Splunk](/docs/observability/splunk).
-
-<Callout title="Reading multi-connector charts">
-On a multi-connector gateway, totals show the whole active roster. Use the `connector` label or field to split Codex, Claude Code, Hermes, OpenCode, OmniGent, and other hook peers; the same dimension appears in Grafana, Splunk, JSONL, and the TUI.
-</Callout>
-
-## Pick a starting point
-
-<Tabs items={['Local first', 'Production SIEM', 'Both']}>
-  <Tab value="Local first">
-The fastest way to *see* what DefenseClaw is doing. One command brings up Grafana on `:3000` with pre-built dashboards.
-
-```bash
-defenseclaw setup local-observability up
-```
-
-→ [Local observability stack](/docs/observability/local-observability)
-  </Tab>
-  <Tab value="Production SIEM">
-You already have Splunk in the org. Point HEC at the gateway and you're done — no extra infra to operate.
-
-```bash
-defenseclaw setup splunk --enterprise \
-  --hec-endpoint https://splunk.example.com:8088 \
-  --hec-token "$DEFENSECLAW_SPLUNK_HEC_TOKEN"
-```
-
-→ [Splunk integration](/docs/observability/splunk)
-  </Tab>
-  <Tab value="Both">
-Run the local Grafana stack for engineering teams and forward the same events to Splunk for SOC. Each sink is independent — failures don't cascade.
-
-```bash
-defenseclaw setup local-observability up
-defenseclaw setup splunk --enterprise --hec-endpoint ... --hec-token ...
-```
-
-The gateway will fan out every event to both rails. Verify with `defenseclaw tui` (audit panel) or `tail -f ~/.defenseclaw/gateway.jsonl | jq`.
-  </Tab>
-</Tabs>
+See [Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
 
 ## Common questions
 
 <Accordions>
-  <Accordion title="Where is the local audit JSONL?">
-    `~/.defenseclaw/gateway.jsonl`. Always written, even when remote sinks are configured. Useful as a fallback when the network is down. Inspect with `tail -f ~/.defenseclaw/gateway.jsonl | jq`, or open the audit panel inside `defenseclaw tui`.
+  <Accordion title="If I configure multiple destinations, does every bucket go to all of them?">
+    By default, yes, within each kind's signal capability. Each enabled destination with omitted policy gets all reviewed buckets and every signal it supports. `send` or `routes` can narrow one destination without affecting another.
   </Accordion>
-  <Accordion title="What if a sink fails?">
-    Sinks are isolated. A 500 from Splunk HEC does not stop OTLP traces or local JSONL. The gateway emits a `sink_failure` metric and surfaces the error in the TUI, but the agent traffic is never blocked by an observability outage.
+  <Accordion title="Does one export failure block agent traffic or another export?">
+    No. Optional destinations have independent bounded queues and health. Mandatory SQLite durability is a startup/runtime requirement, but an optional backend outage degrades only that leg.
   </Accordion>
-  <Accordion title="Can I send to my own OTLP collector?">
-    Yes. Use `defenseclaw setup observability add otlp --endpoint ...`, or pass `--endpoint` to `setup local-observability up`. Named entries under `otel.destinations[]` can fan the same telemetry out to multiple OTLP gRPC/HTTP backends. See the [Galileo guide](/docs/observability/galileo) for a local-plus-cloud example.
+  <Accordion title="Can I disable construction cost for noisy telemetry?">
+    Yes. Set `observability.buckets.<bucket>.collect.<signal>: false`. Collection runs before routing and sampling. Mandatory SQLite-only floor facts remain minimal and content-safe.
   </Accordion>
-  <Accordion title="Does observability slow the gateway down?">
-    The gateway batches and ships out-of-band. Hot-path overhead is a single channel send. The Splunk HEC and OTLP exporters tolerate temporary backpressure with bounded queues.
+  <Accordion title="How do I see what omissions actually mean?">
+    Run `defenseclaw observability plan` or `defenseclaw config show --effective --section observability`. The source remains concise; effective views show generated local policy, routes, profiles, capabilities, and warnings.
   </Accordion>
 </Accordions>

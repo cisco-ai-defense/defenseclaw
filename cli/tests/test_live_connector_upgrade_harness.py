@@ -89,6 +89,15 @@ def test_block_probe_forbids_model_retries() -> None:
     assert "Do not retry, rewrite, encode, split, or run an alternative command." in text
 
 
+def test_harness_captures_quiescent_v8_canonical_evidence() -> None:
+    text = HARNESS.read_text(encoding="utf-8")
+    assert "for name in gateway.log audit.db judge_bodies.db watchdog.log" in text
+    assert "gateway.jsonl" not in text
+
+    cleanup = text[text.index("dc_upgrade_cleanup() {") : text.index("trap dc_upgrade_cleanup EXIT")]
+    assert cleanup.index("defenseclaw-gateway stop") < cleanup.index("dc_upgrade_copy_artifacts")
+
+
 def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None:
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"

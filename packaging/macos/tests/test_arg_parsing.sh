@@ -11,7 +11,7 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
-  assert_contains "${out}" "--disable-redaction"     "disable redaction flag in help"
+  assert_not_contains "${out}" "--disable-redaction" "removed global redaction flag"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
 }
@@ -77,28 +77,6 @@ t_uninstall_help_omits_service_user() {
   assert_not_contains "${out}" "--service-user" "uninstall --help must not mention --service-user (root-mode daemon)"
 }
 
-t_install_default_redaction_is_on() {
-  # Parse install.sh's own defaults section directly so we're asserting
-  # the actual install-time contract, not just what render_config emits
-  # when handed a value. If a future edit flips this back to
-  # "true" (redaction off by default), this test catches it before
-  # anything ships.
-  local default
-  default="$(awk '
-    /^DISABLE_REDACTION=/ {
-      # DISABLE_REDACTION="false"
-      match($0, /"([^"]+)"/, m)
-      print m[1]
-      exit
-    }' "${INSTALL_SH}" 2>/dev/null)"
-  # awk on macOS has no `match` capture — fall back to a portable parse.
-  if [[ -z "${default}" ]]; then
-    default="$(grep -E '^DISABLE_REDACTION=' "${INSTALL_SH}" | head -1 \
-      | sed -E 's/^DISABLE_REDACTION="?([^"]+)"?.*/\1/')"
-  fi
-  assert_eq "${default}" "false" "install.sh DISABLE_REDACTION default is false (redaction ON)"
-}
-
 t_install_bad_port_exits_nonzero() {
   local out rc=0
   out="$("${INSTALL_SH}" --port 99999 2>&1)" || rc=$?
@@ -141,6 +119,9 @@ t_install_help_documents_override_endpoint() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--override-endpoint URL" "override-endpoint flag in help"
   assert_contains "${out}" "Takes precedence"        "override-endpoint precedence note in help"
+  assert_contains "${out}" "HTTPS origin"            "override-endpoint HTTPS requirement in help"
+  assert_contains "${out}" "Paths, credentials, query, and fragments are refused" \
+    "override-endpoint bare-origin restriction in help"
 }
 
 t_install_bad_override_endpoint_exits_nonzero() {
@@ -150,7 +131,33 @@ t_install_bad_override_endpoint_exits_nonzero() {
   local out rc=0
   out="$("${INSTALL_SH}" --override-endpoint "not-a-url" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "malformed --override-endpoint should exit non-zero"
-  assert_contains "${out}" "--override-endpoint must be a full http(s) URL" "explains override URL requirement"
+  assert_contains "${out}" "--override-endpoint must be an HTTPS bare origin" "explains override URL requirement"
+}
+
+t_install_plaintext_override_rejected_before_mutation() {
+  # The deliberately invalid port is a no-side-effect backstop if endpoint
+  # validation ever regresses. The expected endpoint error proves plaintext
+  # is rejected first, before even the remaining argument validation, root
+  # preflight, config rendering, or installed-file writes.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "http://localhost:8080" --port invalid 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "plaintext --override-endpoint should exit non-zero"
+  assert_contains "${out}" "--override-endpoint must be an HTTPS bare origin" \
+    "plaintext override rejected at endpoint validation"
+  assert_not_contains "${out}" "--port must be" "endpoint rejection precedes later argument validation"
+  assert_not_contains "${out}" "installing binary" "endpoint rejection precedes installed-file mutation"
+}
+
+t_install_https_override_accepted_before_preflight() {
+  # Pair with the plaintext case using the same invalid-port backstop. Reaching
+  # the port error proves the HTTPS bare origin passed installer validation;
+  # the backstop guarantees the test cannot reach root or filesystem mutation.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "https://aid.example.test:8443/" --port invalid 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "HTTPS override test should stop at invalid-port backstop"
+  assert_contains "${out}" "--port must be" "HTTPS bare origin accepted by installer validation"
+  assert_not_contains "${out}" "--override-endpoint must be" "HTTPS bare origin is not rejected"
+  assert_not_contains "${out}" "installing binary" "test backstop precedes installed-file mutation"
 }
 
 t_install_default_env_is_prod() {
@@ -163,6 +170,18 @@ t_install_default_env_is_prod() {
     return 1
   fi
   assert_eq "${default}" "prod" "install.sh DEFAULT_ENV must be prod"
+}
+
+t_install_userspace_ownership_stays_descriptor_anchored() {
+  local body
+  body="$(cat "${INSTALL_SH}")"
+  assert_contains "${body}" \
+    'prepare_userspace_for "${c}" "${TARGET_HOME}" "${TARGET_UID}" "${TARGET_GID}"' \
+    "installer passes target ownership into anchored userspace preparation"
+  assert_not_contains "${body}" 'chown -h "${TARGET_UID}:${TARGET_GID}"' \
+    "installer never applies connector ownership by pathname"
+  assert_not_contains "${body}" "DC_AGENT_TARGETS" \
+    "installer has no post-preparation pathname ownership list"
 }
 
 t_uninstall_unknown_flag() {
@@ -191,12 +210,14 @@ run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_
 run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
 run_case "install non-root rejected"      t_install_requires_root
-run_case "install default redaction on"   t_install_default_redaction_is_on
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
 run_case "install --override-endpoint documented" t_install_help_documents_override_endpoint
 run_case "install --override-endpoint garbage rejected" t_install_bad_override_endpoint_exits_nonzero
+run_case "install plaintext --override-endpoint rejected before mutation" t_install_plaintext_override_rejected_before_mutation
+run_case "install HTTPS --override-endpoint accepted before preflight" t_install_https_override_accepted_before_preflight
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
+run_case "install userspace ownership is descriptor-anchored" t_install_userspace_ownership_stays_descriptor_anchored
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

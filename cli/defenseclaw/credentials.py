@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import enum
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config
@@ -288,9 +290,154 @@ def _virustotal_key(cfg: Config) -> Requirement:
     return Requirement.REQUIRED
 
 
+@dataclass(frozen=True)
+class _ObservabilityCredentialRef:
+    """One enabled canonical-v8 destination environment reference."""
+
+    env_name: str
+    feature: str
+    endpoint: str
+
+
+_ObservabilityCredentialRefs = tuple[_ObservabilityCredentialRef, ...] | None
+_OBSERVABILITY_REF_CACHE: ContextVar[
+    dict[int, _ObservabilityCredentialRefs] | None
+] = ContextVar("credential_observability_ref_cache", default=None)
+
+
+def _header_env_reference(headers: object, name: str) -> str:
+    if not isinstance(headers, Mapping):
+        return ""
+    wanted = name.casefold()
+    for key, value in headers.items():
+        if str(key).casefold() != wanted or not isinstance(value, Mapping):
+            continue
+        env_name = value.get("env")
+        return str(env_name).strip() if isinstance(env_name, str) else ""
+    return ""
+
+
+def _credential_endpoint_authority(endpoint: str) -> str:
+    """Return only the display-safe scheme/host/port for a key binding.
+
+    The validated v8 source projection intentionally masks endpoint paths,
+    queries, and fragments because providers may embed credentials there.
+    Credential prompts need only the destination authority to catch a
+    region/host mismatch, so never propagate even the masked path marker.
+    """
+
+    value = str(endpoint or "").strip()
+    if not value or value in {"[REDACTED_URL]", "—"}:
+        return ""
+    has_scheme = "://" in value
+    try:
+        parsed = urlsplit(value if has_scheme else f"//{value}")
+        hostname = parsed.hostname
+        if not hostname:
+            return ""
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+    except (TypeError, ValueError):
+        return ""
+    return f"{parsed.scheme}://{host}" if has_scheme else host
+
+
+def _load_v8_observability_credential_refs(
+    cfg: Config,
+) -> _ObservabilityCredentialRefs:
+    """Return validated enabled destination refs, or ``None`` off the v8 path.
+
+    The legacy Python dataclass intentionally does not model the canonical v8
+    destination graph. Read the active source through the existing offline v8
+    validator instead of guessing from retired Splunk/OTel compatibility DTOs.
+    Validation retains environment-reference names while masking literal header
+    values and performs no secret resolution or network I/O.
+    """
+
+    if getattr(cfg, "_source_config_version", None) != 8:
+        return None
+    try:
+        from defenseclaw.config import config_path  # noqa: PLC0415
+        from defenseclaw.observability.v8_config import load_validate_v8  # noqa: PLC0415
+
+        path = config_path()
+        source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    except (OSError, ValueError):
+        # Credential UX is advisory. The owning config validation/upgrade path
+        # reports malformed or unavailable source with its precise safe error.
+        return None
+
+    observability = source.get("observability")
+    destinations = observability.get("destinations") if isinstance(observability, Mapping) else None
+    if not isinstance(destinations, list):
+        return ()
+
+    refs: list[_ObservabilityCredentialRef] = []
+    seen: set[tuple[str, str]] = set()
+    for destination in destinations:
+        if not isinstance(destination, Mapping) or destination.get("enabled") is False:
+            continue
+        kind = str(destination.get("kind") or "").strip()
+        endpoint = _credential_endpoint_authority(
+            str(destination.get("endpoint") or "").strip()
+        )
+        candidates: list[tuple[str, str]] = []
+        if kind == "splunk_hec":
+            token_env = destination.get("token_env")
+            if isinstance(token_env, str) and token_env.strip():
+                candidates.append(("observability.splunk", token_env.strip()))
+        if kind == "otlp":
+            headers = destination.get("headers")
+            splunk_env = _header_env_reference(headers, "X-SF-Token")
+            if splunk_env:
+                candidates.append(("observability.splunk", splunk_env))
+            if str(destination.get("preset") or "").strip() == "galileo":
+                galileo_env = _header_env_reference(headers, "Galileo-API-Key")
+                if galileo_env:
+                    candidates.append(("observability.galileo", galileo_env))
+        for feature, env_name in candidates:
+            identity = (feature, env_name)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            refs.append(_ObservabilityCredentialRef(env_name, feature, endpoint))
+    return tuple(refs)
+
+
+def _v8_observability_credential_refs(
+    cfg: Config,
+) -> _ObservabilityCredentialRefs:
+    """Return v8 refs, memoized only for the active classification pass."""
+
+    cache = _OBSERVABILITY_REF_CACHE.get()
+    key = id(cfg)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    refs = _load_v8_observability_credential_refs(cfg)
+    if cache is not None:
+        # Membership, rather than truthiness, deliberately caches both the
+        # empty tuple and ``None`` fallback results.
+        cache[key] = refs
+    return refs
+
+
+def _v8_refs_for_feature(
+    cfg: Config,
+    feature: str,
+) -> tuple[_ObservabilityCredentialRef, ...] | None:
+    refs = _v8_observability_credential_refs(cfg)
+    if refs is None:
+        return None
+    return tuple(ref for ref in refs if ref.feature == feature)
+
+
 def _splunk_token(cfg: Config) -> Requirement:
-    # Splunk observability is opt-in; enabled only when the operator has
-    # wired up a sink via `defenseclaw setup observability`.
+    refs = _v8_refs_for_feature(cfg, "observability.splunk")
+    if refs is not None:
+        return Requirement.REQUIRED if refs else Requirement.NOT_USED
+    # Upgrade/preview compatibility for callers still holding a v7 DTO.
     sp = getattr(cfg, "splunk", None)
     if sp is None or not getattr(sp, "enabled", False):
         return Requirement.NOT_USED
@@ -298,6 +445,10 @@ def _splunk_token(cfg: Config) -> Requirement:
 
 
 def _galileo_key(cfg: Config) -> Requirement:
+    refs = _v8_refs_for_feature(cfg, "observability.galileo")
+    if refs is not None:
+        return Requirement.REQUIRED if refs else Requirement.NOT_USED
+    # Upgrade/preview compatibility for callers still holding a v7 DTO.
     otel = getattr(cfg, "otel", None)
     if not getattr(otel, "enabled", False):
         return Requirement.NOT_USED
@@ -311,6 +462,9 @@ def _galileo_key(cfg: Config) -> Requirement:
 
 
 def _galileo_endpoint(cfg: Config) -> str:
+    refs = _v8_refs_for_feature(cfg, "observability.galileo")
+    if refs is not None:
+        return refs[0].endpoint if refs else ""
     otel = getattr(cfg, "otel", None)
     if not getattr(otel, "enabled", False):
         return ""
@@ -384,8 +538,18 @@ def _virustotal_env(cfg: Config) -> str:
 
 
 def _splunk_env(cfg: Config) -> str:
+    refs = _v8_refs_for_feature(cfg, "observability.splunk")
+    if refs is not None:
+        return refs[0].env_name if refs else ""
     sp = getattr(cfg, "splunk", None)
     return getattr(sp, "hec_token_env", "") if sp is not None else ""
+
+
+def _galileo_env(cfg: Config) -> str:
+    refs = _v8_refs_for_feature(cfg, "observability.galileo")
+    if refs is not None:
+        return refs[0].env_name if refs else ""
+    return ""
 
 
 def _inspect_llm_env(cfg: Config) -> str:
@@ -453,7 +617,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
     CredentialSpec(
         env_name="SPLUNK_ACCESS_TOKEN",
         feature="observability.splunk",
-        description="Splunk HEC token for audit forwarding",
+        description="Token referenced by an enabled canonical Splunk destination",
         required=_splunk_token,
         effective_env_name=_splunk_env,
     ),
@@ -462,6 +626,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         feature="observability.galileo",
         description="Galileo API key for OTLP trace export",
         required=_galileo_key,
+        effective_env_name=_galileo_env,
         bound_endpoint=_galileo_endpoint,
     ),
     CredentialSpec(
@@ -484,6 +649,72 @@ _BY_NAME: dict[str, CredentialSpec] = {spec.env_name: spec for spec in CREDENTIA
 def lookup(env_name: str) -> CredentialSpec | None:
     """Return the registered spec for *env_name*, or None if unknown."""
     return _BY_NAME.get(env_name)
+
+
+# ---------------------------------------------------------------------------
+# Canonical-v8 observability credential discovery
+# ---------------------------------------------------------------------------
+
+
+def _observability_ref_predicate(
+    feature: str,
+    env_name: str,
+) -> Callable[[Config], Requirement]:
+    def _check(cfg: Config) -> Requirement:
+        refs = _v8_refs_for_feature(cfg, feature)
+        if refs is None:
+            return Requirement.NOT_USED
+        return (
+            Requirement.REQUIRED
+            if any(ref.env_name == env_name for ref in refs)
+            else Requirement.NOT_USED
+        )
+
+    return _check
+
+
+def _observability_ref_endpoint(
+    feature: str,
+    env_name: str,
+) -> Callable[[Config], str]:
+    def _resolve(cfg: Config) -> str:
+        refs = _v8_refs_for_feature(cfg, feature)
+        if refs is None:
+            return ""
+        for ref in refs:
+            if ref.env_name == env_name:
+                return ref.endpoint
+        return ""
+
+    return _resolve
+
+
+def discover_observability_credentials(cfg: Config) -> list[CredentialSpec]:
+    """Return runtime specs for every enabled v8 Splunk/Galileo env ref.
+
+    The first ref for each feature is represented by the stable static entry
+    above. Additional independently named destinations may use different
+    environment references, so append ad-hoc specs and let :func:`classify`
+    de-duplicate the first one by its resolved environment name.
+    """
+
+    refs = _v8_observability_credential_refs(cfg)
+    if refs is None:
+        return []
+    descriptions = {
+        "observability.splunk": "Token referenced by an enabled canonical Splunk destination",
+        "observability.galileo": "Galileo API key referenced by an enabled canonical OTLP destination",
+    }
+    return [
+        CredentialSpec(
+            env_name=ref.env_name,
+            feature=ref.feature,
+            description=descriptions[ref.feature],
+            required=_observability_ref_predicate(ref.feature, ref.env_name),
+            bound_endpoint=_observability_ref_endpoint(ref.feature, ref.env_name),
+        )
+        for ref in refs
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +950,8 @@ def classify(cfg: Config) -> list[CredentialStatus]:
     """Classify every registered credential against the current config.
 
     The order follows ``CREDENTIALS`` so the UX is stable across runs.
-    Custom-provider env keys discovered in
+    Additional canonical-v8 observability references and custom-provider env
+    keys discovered in
     ``~/.defenseclaw/custom-providers.json`` are appended after the
     static registry so they show up in ``defenseclaw keys list`` /
     ``doctor`` without polluting the canonical ordering.
@@ -728,6 +960,16 @@ def classify(cfg: Config) -> list[CredentialStatus]:
     configured a custom env var (e.g. ``judge.api_key_env``), we show
     the name they actually wired up — not the canonical default.
     """
+    token = _OBSERVABILITY_REF_CACHE.set({})
+    try:
+        return _classify_once(cfg)
+    finally:
+        _OBSERVABILITY_REF_CACHE.reset(token)
+
+
+def _classify_once(cfg: Config) -> list[CredentialStatus]:
+    """Classify credentials within an initialized per-call cache scope."""
+
     data_dir = getattr(cfg, "data_dir", "") or ""
     statuses: list[CredentialStatus] = []
     seen: set[str] = set()
@@ -741,7 +983,11 @@ def classify(cfg: Config) -> list[CredentialStatus]:
                 resolution=resolve(env_name, data_dir),
             )
         )
-    for spec in discover_custom_provider_credentials(cfg):
+    discovered = (
+        *discover_observability_credentials(cfg),
+        *discover_custom_provider_credentials(cfg),
+    )
+    for spec in discovered:
         if spec.env_name in seen:
             continue
         seen.add(spec.env_name)

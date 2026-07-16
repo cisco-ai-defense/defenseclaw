@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
@@ -187,7 +188,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Configure gateway host, ports, TLS, and auth.",
     "Configure the LLM guardrail proxy and judge.",
     "Configure Splunk HEC or local Splunk integration.",
-    "Add and manage Galileo, unified OTel, and audit sink destinations.",
+    "Add and manage canonical v8 observability destinations.",
     "Add chat or incident notifier webhooks.",
     "Initialize and configure OpenShell sandbox policy.",
     "Register an external skill or MCP catalog source.",
@@ -483,6 +484,8 @@ class SetupPanelModel:
 
     def __init__(self, cfg: object | Mapping[str, Any] | None = None) -> None:
         self.config = cfg
+        self.observability_status: V8OperatorStatus | None = None
+        self.observability_status_error = ""
         self.mode: SetupMode = "wizards"
         self.active_wizard = SetupWizard.CONNECTOR_SETUP
         self.active_section = 0
@@ -493,7 +496,11 @@ class SetupPanelModel:
         self.restart_queue = RestartQueue()
         self.last_saved_at: datetime | None = None
         self.readiness_checks = build_readiness_checks(cfg, None, None, (), self.restart_queue)
-        self.sections = build_setup_sections(cfg)
+        self.sections = build_setup_sections(
+            cfg,
+            observability_status=self.observability_status,
+            observability_status_error=self.observability_status_error,
+        )
         self.wizard_status: dict[SetupWizard, str] = {}
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
         self.form_fields: list[WizardFormField] = []
@@ -512,7 +519,9 @@ class SetupPanelModel:
     def set_config(self, cfg: object | Mapping[str, Any] | None) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
         self.config = cfg
-        self.sections = build_setup_sections(cfg)
+        self.observability_status = None
+        self.observability_status_error = ""
+        self.sections = build_setup_sections(cfg, observability_status=None)
         if active_name:
             for index, section in enumerate(self.sections):
                 if section.name == active_name:
@@ -526,6 +535,36 @@ class SetupPanelModel:
         # changes; otherwise we keep showing rows derived from the
         # snapshot captured at __init__ time even after `setup` runs.
         self.rebuild_readiness_checks()
+
+    def set_observability_status(
+        self,
+        status: V8OperatorStatus | None,
+        *,
+        error: str = "",
+    ) -> None:
+        """Install the masked canonical v8 plan without losing config edits."""
+
+        self.observability_status = status
+        self.observability_status_error = error.strip()
+        active_name = self.sections[self.active_section].name if self.sections else ""
+        rebuilt = build_setup_sections(
+            self.config,
+            observability_status=status,
+            observability_status_error=self.observability_status_error,
+        )
+        existing = {section.name: section for section in self.sections}
+        self.sections = tuple(
+            section if section.name == "Observability" else existing.get(section.name, section)
+            for section in rebuilt
+        )
+        if active_name:
+            self.active_section = next(
+                (index for index, section in enumerate(self.sections) if section.name == active_name),
+                self.active_section,
+            )
+        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+        current = self.current_section()
+        self.active_line = _clamp(self.active_line, 0, max(0, len(current.fields) - 1) if current else 0)
 
     def rebuild_readiness_checks(
         self,
@@ -838,12 +877,12 @@ class SetupPanelModel:
             section = self.current_section()
             if field is None:
                 return SetupFocusedRowAction("config", "none", "", "No config row is focused.")
-            if section is not None and section.name == "Audit Sinks":
+            if section is not None and section.name == "Observability":
                 return SetupFocusedRowAction(
                     "config",
-                    "open_audit_sinks_editor",
+                    "open_observability_editor",
                     "E",
-                    "Open the interactive Audit Sinks editor for list entries.",
+                    "Open the canonical destination editor.",
                 )
             if section is not None and section.name == "Webhooks":
                 return SetupFocusedRowAction(
@@ -1236,7 +1275,11 @@ class SetupPanelModel:
 
 
 def build_setup_sections(
-    cfg: object | Mapping[str, Any] | None, os_name: str | None = None
+    cfg: object | Mapping[str, Any] | None,
+    os_name: str | None = None,
+    *,
+    observability_status: V8OperatorStatus | None = None,
+    observability_status_error: str = "",
 ) -> tuple[ConfigSection, ...]:
     """Return the Go Setup config section/field catalog.
 
@@ -1277,19 +1320,6 @@ def build_setup_sections(
                 _field(cfg, "Agent Name", "agent.name", hint="Human-readable display name."),
             ),
             "Logical agent identity used for aggregation, webhooks, and enterprise reporting.",
-        ),
-        ConfigSection(
-            "Privacy",
-            (
-                _field(
-                    cfg,
-                    "Disable Redaction",
-                    "privacy.disable_redaction",
-                    "bool",
-                    hint="true stores raw content in all sinks.",
-                ),
-            ),
-            "Redaction and privacy controls for audit DB, OTel, Splunk, webhooks, and terminal logs.",
         ),
         ConfigSection(
             "Notifications",
@@ -1424,9 +1454,13 @@ def build_setup_sections(
             ),
             "Health-check loop that restarts the gateway process when it becomes unresponsive.",
         ),
-        ConfigSection("Audit Sinks", tuple(_audit_sink_summary_fields(cfg)), "Read-only audit sink summary."),
+        ConfigSection(
+            "Observability",
+            _v8_observability_fields(observability_status, error=observability_status_error),
+            "Canonical v8 collection, retention, routing, and per-route redaction policy.",
+            "Read-only effective plan; press E to manage destinations through setup observability.",
+        ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
-        ConfigSection("OTel", tuple(_otel_fields(cfg)), "OpenTelemetry exporter config."),
         ConfigSection(
             "Skill Actions", tuple(action_matrix_fields("skill_actions", cfg)), "Skill admission response matrix."
         ),
@@ -1547,7 +1581,6 @@ def _local_observability_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("No Config", "bool", value="no", default="no"),
         WizardFormField("Signals", "string", value="traces,metrics,logs", default="traces,metrics,logs"),
         WizardFormField("Service Name", "string", value="defenseclaw", default="defenseclaw"),
-        WizardFormField("Audit Sink", "bool", value="yes", default="yes"),
         WizardFormField("Confirm Reset", "bool", value="no", default="no"),
         WizardFormField("Service", "string"),
         WizardFormField("Follow", "bool", value="no", default="no"),
@@ -1858,7 +1891,7 @@ def wizard_form_defs(
     if wizard == SetupWizard.SPLUNK:
         return splunk_wizard_fields()
     if wizard == SetupWizard.OBSERVABILITY:
-        return observability_wizard_fields("splunk-o11y")
+        return observability_wizard_fields("splunk-o11y", cfg)
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
     if wizard == SetupWizard.SANDBOX:
@@ -1897,7 +1930,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda cfg=None: _custom_providers_wizard_fields(),
     SetupWizard.GUARDRAIL: lambda cfg=None: guardrail_wizard_fields(cfg),
     SetupWizard.SPLUNK: lambda cfg=None: splunk_wizard_fields(),
-    SetupWizard.OBSERVABILITY: lambda cfg=None: observability_wizard_fields("splunk-o11y"),
+    SetupWizard.OBSERVABILITY: lambda cfg=None: observability_wizard_fields("splunk-o11y", cfg),
     SetupWizard.WEBHOOKS: lambda cfg=None: webhook_wizard_fields("slack"),
     SetupWizard.REGISTRIES: lambda cfg=None: registry_wizard_fields(),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda cfg=None: notifications_routing_wizard_fields(cfg),
@@ -2198,7 +2231,7 @@ def _local_observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[
             "Start the local stack",
             summary="Bring up the bundled OTel stack (needs Docker).",
             presets={"@Action": "up"},
-            fields=("Action", "Timeout", "Signals", "Audit Sink", "No Wait"),
+            fields=("Action", "Timeout", "Signals", "No Wait"),
         ),
         WizardGoal(
             "url",
@@ -2410,30 +2443,30 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
         WizardGoal(
             "list",
             "List destinations",
-            summary="List global destinations or one connector's per-connector sinks.",
+            summary="List canonical process-wide destinations.",
             presets={"@Action": "list"},
-            fields=("Action", "Connector", "JSON Output"),
+            fields=("Action", "JSON Output"),
         ),
         WizardGoal(
             "enable",
             "Enable a destination",
-            summary="Enable a global or per-connector audit sink by name.",
+            summary="Enable a canonical destination by name.",
             presets={"@Action": "enable"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "disable",
             "Disable a destination",
-            summary="Disable a global or per-connector audit sink by name.",
+            summary="Disable a canonical destination by name.",
             presets={"@Action": "disable"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "remove",
             "Remove a destination",
-            summary="Remove a global or per-connector audit sink by name.",
+            summary="Remove a canonical destination by name.",
             presets={"@Action": "remove"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "splunk-o11y",
@@ -2824,11 +2857,10 @@ def _seed_parametrized_fields(
     presets and Webhook channel types). Returns ``None`` when no swap applies.
     """
 
-    del cfg
     if wizard == SetupWizard.OBSERVABILITY:
         preset_id = (presets.get("@Preset") or "").strip()
         if preset_id:
-            return observability_wizard_fields(preset_id)
+            return observability_wizard_fields(preset_id, cfg)
     if wizard == SetupWizard.WEBHOOKS:
         channel = (presets.get("@Type") or "").strip()
         if channel:
@@ -2997,14 +3029,6 @@ def ai_discovery_wizard_fields(
         ),
         WizardFormField("Output / Privacy", "section"),
         WizardFormField(
-            "Emit OTel",
-            "bool",
-            "--emit-otel",
-            "--no-emit-otel",
-            value=_cfg_bool("emit_otel", True),
-            default=_cfg_bool("emit_otel", True),
-        ),
-        WizardFormField(
             "Honor Workspace Signatures",
             "bool",
             "--allow-workspace-signatures",
@@ -3080,7 +3104,6 @@ def _build_ai_discovery_args(fields: Sequence[WizardFormField]) -> tuple[str, ..
         ("Package Manifests", "--include-package-manifests", "--no-include-package-manifests"),
         ("Env Var Names", "--include-env-var-names", "--no-include-env-var-names"),
         ("Network Domains", "--include-network-domains", "--no-include-network-domains"),
-        ("Emit OTel", "--emit-otel", "--no-emit-otel"),
         ("Honor Workspace Signatures", "--allow-workspace-signatures", "--no-allow-workspace-signatures"),
         ("Store Raw Local Paths", "--store-raw-local-paths", "--no-store-raw-local-paths"),
     )
@@ -3491,13 +3514,10 @@ def build_wizard_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
-            # ``--human-approval`` / ``--disable-redaction`` are tri-state on
+            # ``--human-approval`` is tri-state on
             # the CLI (default=None), so emit the explicit on/off form rather
             # than relying on the "skip when value==default" shortcut.
-            if wizard == SetupWizard.GUARDRAIL and field.flag in {
-                "--human-approval",
-                "--disable-redaction",
-            }:
+            if wizard == SetupWizard.GUARDRAIL and field.flag == "--human-approval":
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
                 elif field.value == "no" and field.no_flag:
@@ -3646,33 +3666,6 @@ def mask_wizard_secret_values(
     return tuple(masked)
 
 
-def redaction_desired_action(currently_disabled: bool) -> str:
-    return "on" if currently_disabled else "off"
-
-
-def redaction_toggle_intent(currently_disabled: bool) -> SetupCommandIntent:
-    action = redaction_desired_action(currently_disabled)
-    return SetupCommandIntent(
-        label=f"setup redaction {action}",
-        args=("setup", "redaction", action, "--yes"),
-        category="setup",
-        origin="redaction-modal",
-    )
-
-
-def redaction_consequence_copy(currently_disabled: bool) -> tuple[str, ...]:
-    if currently_disabled:
-        return (
-            "Re-enables redaction - placeholders return on the next sidecar boot.",
-            "Existing already-emitted audit rows, Splunk events, OTel logs, and webhooks stay as written.",
-        )
-    return (
-        "Disabling redaction writes RAW content to SQLite audit DB.",
-        "RAW content also reaches Splunk HEC, OTel log exporters, webhooks, gateway.log, and the Logs panel.",
-        "Only proceed if every downstream sink lives in the same trust boundary as this install.",
-    )
-
-
 def notifications_desired_action(currently_enabled: bool) -> str:
     return "off" if currently_enabled else "on"
 
@@ -3691,7 +3684,7 @@ def notifications_consequence_copy(currently_enabled: bool) -> tuple[str, ...]:
     if currently_enabled:
         return (
             "Turning notifications OFF stops the toaster.",
-            "Audit DB, Splunk, OTel, and webhooks are NOT affected.",
+            "Event history, telemetry destinations, and webhooks are NOT affected.",
         )
     return (
         "Turning notifications ON surfaces hook, guardrail, and asset-policy blocks.",
@@ -4255,7 +4248,6 @@ def _guardrail_wizard_fields_for(
         overrides.get("--judge-bedrock-auth-mode") or judge_bedrock_auth_mode
     ).strip().lower() or "api_key"
     hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
-    redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
     def j_strategy(dv: Mapping[str, str]) -> bool:
         return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
 
@@ -4478,9 +4470,6 @@ def _guardrail_wizard_fields_for(
             default=str(get_config_value(cfg, "guardrail.hilt.min_severity", "HIGH") or "HIGH").upper(),
             options=("HIGH", "MEDIUM", "LOW", "CRITICAL"),
         ),
-        WizardFormField(
-            "Disable Redaction", "bool", "--disable-redaction", "--enable-redaction", value=redaction, default=redaction
-        ),
         WizardFormField("Post-Setup", "section"),
         WizardFormField("Restart After", "bool", "--restart", "--no-restart", value="yes", default="yes"),
         WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
@@ -4566,7 +4555,10 @@ def splunk_wizard_follow_up_intents(
     )
 
 
-def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
+def observability_wizard_fields(
+    preset_id: str,
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
     fields: list[WizardFormField] = [
         WizardFormField(
             "Action",
@@ -4585,15 +4577,6 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
         ),
         WizardFormField("Name", "string", "--name", hint="Optional for add; required for enable/disable/remove."),
         WizardFormField("Enabled", "bool", "--enabled", "--disabled", value="yes", default="yes"),
-        WizardFormField(
-            "Connector",
-            "choice",
-            "--connector",
-            value="",
-            default="",
-            options=("", *CONNECTORS),
-            hint="Optional: scope this audit sink to one connector; blank keeps the CLI default/global behavior.",
-        ),
         WizardFormField("JSON Output", "bool", value="no", default="no", hint="For list actions."),
         WizardFormField("Dry Run", "bool", "--dry-run", value="no", default="no"),
     ]
@@ -4703,9 +4686,6 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
                 WizardFormField("Endpoint", "string", "--endpoint", required=True),
                 WizardFormField(
                     "Protocol", "choice", "--protocol", value="grpc", default="grpc", options=("grpc", "http")
-                ),
-                WizardFormField(
-                    "Target", "choice", "--target", value="otel", default="otel", options=("otel", "audit_sinks")
                 ),
                 WizardFormField(
                     "Signals", "string", "--signals", value="traces,metrics,logs", default="traces,metrics,logs"
@@ -4990,8 +4970,6 @@ def _build_local_observability_args(fields: Sequence[WizardFormField]) -> tuple[
             args.extend(("--signals", signals))
         if (service := wizard_field_value(fields, "Service Name")) and service != "defenseclaw":
             args.extend(("--service-name", service))
-        if wizard_bool_value(fields, "Audit Sink", "yes") == "no":
-            args.append("--no-audit-sink")
     elif action == "reset" and wizard_bool_value(fields, "Confirm Reset", "no") == "yes":
         args.append("--yes")
     elif action == "logs":
@@ -5571,7 +5549,6 @@ def _ai_discovery_section(cfg: object | Mapping[str, Any] | None) -> ConfigSecti
         ),
         _field(cfg, "Max Files", "ai_discovery.max_files_per_scan", "int", hint="Max files per scan."),
         _field(cfg, "Max File Bytes", "ai_discovery.max_file_bytes", "int", hint="Skip larger files."),
-        _field(cfg, "Emit OTel", "ai_discovery.emit_otel", "bool", hint="Emit sanitized AI visibility telemetry."),
         _field(
             cfg,
             "Store Raw Local Paths",
@@ -5658,53 +5635,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             ),
         ),
         "NVIDIA OpenShell sandbox integration.",
-    )
-
-
-def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
-    return (
-        _header(".. Process-wide policy .."),
-        _field(cfg, "Enabled", "otel.enabled", "bool", hint="Master OpenTelemetry export switch."),
-        _header(".. Traces .."),
-        _field(
-            cfg,
-            "Sampler",
-            "otel.traces.sampler",
-            "choice",
-            (
-                "always_on",
-                "always_off",
-                "traceidratio",
-                "parentbased_always_on",
-                "parentbased_always_off",
-                "parentbased_traceidratio",
-            ),
-            "Trace sampler.",
-        ),
-        _field(cfg, "Sampler Arg", "otel.traces.sampler_arg", hint="Trace sampler argument."),
-        _header(".. Logs .."),
-        _field(
-            cfg,
-            "Emit individual findings",
-            "otel.logs.emit_individual_findings",
-            "bool",
-            hint="One record per finding.",
-        ),
-        _header(".. Metrics .."),
-        _field(
-            cfg, "Export interval (s)", "otel.metrics.export_interval_s", "int", hint="Seconds between metric pushes."
-        ),
-        _field(
-            cfg, "Temporality", "otel.metrics.temporality", "choice", ("delta", "cumulative"), "Metric temporality."
-        ),
-        _header(".. Batch .."),
-        _field(
-            cfg, "Max export batch size", "otel.batch.max_export_batch_size", "int", hint="Max records per request."
-        ),
-        _field(cfg, "Scheduled delay (ms)", "otel.batch.scheduled_delay_ms", "int", hint="Batch flush delay."),
-        _field(cfg, "Max queue size", "otel.batch.max_queue_size", "int", hint="In-memory queue size."),
-        _header(".. Resource .."),
-        _field(cfg, "Attributes", "otel.resource.attributes", hint="CSV resource attributes."),
     )
 
 
@@ -5916,6 +5846,69 @@ def _connector_hook_map_fields(cfg: object | Mapping[str, Any] | None) -> tuple[
     return tuple(out)
 
 
+def _v8_observability_fields(
+    status: V8OperatorStatus | None,
+    *,
+    error: str = "",
+) -> tuple[ConfigField, ...]:
+    """Render the masked compiler-owned v8 plan as read-only config rows."""
+
+    how_to = _header(
+        "How to edit",
+        "observability.hint",
+        "press E to manage destinations; collection, routes, redaction, and retention live in config.yaml",
+    )
+    if status is None:
+        return (_header("Status", "observability.status", error.strip() or "loading canonical effective plan..."), how_to)
+
+    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    fields: list[ConfigField] = [
+        _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
+        _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),
+        _header("Local SQLite", "observability.local.path", status.local_path or "(default)"),
+        _header("Retention", "observability.local.retention_days", retention),
+        _header(
+            "Judge Bodies",
+            "observability.local.judge_bodies_path",
+            ("enabled · " if status.judge_bodies_enabled else "disabled · ")
+            + (status.judge_bodies_path or "(default)"),
+        ),
+        _header(".. Destinations .."),
+    ]
+    if not status.destinations:
+        fields.append(_header("Destinations", "observability.destinations", "none configured"))
+    for destination in status.destinations:
+        signals = ",".join(destination.selected_signals) or "none"
+        buckets = ",".join(destination.buckets) or "none"
+        state = "enabled" if destination.enabled else "disabled"
+        summary = (
+            f"{destination.kind} · {state} · signals={signals} · "
+            f"redaction={destination.redaction_label} · buckets={buckets} · "
+            f"limits={destination.delivery_limits_label}"
+        )
+        if destination.endpoint:
+            summary += f" · {destination.endpoint}"
+        fields.append(_header(destination.name, f"observability.destinations.{destination.name}", summary))
+    fields.append(_header(".. Collection Buckets .."))
+    for bucket in status.buckets:
+        signals = ",".join(bucket.collected_signals) or "disabled"
+        fields.append(
+            _header(
+                bucket.name,
+                f"observability.buckets.{bucket.name}",
+                f"collect={signals} · local_redaction={bucket.redaction_profile}",
+            )
+        )
+    if status.warnings:
+        fields.append(_header(".. Warnings .."))
+        fields.extend(
+            _header(code, f"observability.warnings.{index}", f"{path}: {summary}")
+            for index, (code, path, summary) in enumerate(status.warnings)
+        )
+    fields.append(how_to)
+    return tuple(fields)
+
+
 def _llm_override_fields(
     cfg: object | Mapping[str, Any] | None,
     label: str,
@@ -5931,36 +5924,6 @@ def _llm_override_fields(
         _field(cfg, "Timeout (s)", prefix + ".timeout", "int", hint="Per-request timeout."),
         _field(cfg, "Max Retries", prefix + ".max_retries", "int", hint="Retry count."),
     )
-
-
-def _audit_sink_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
-    sinks = get_config_value(cfg, "audit_sinks", ()) or ()
-    hint = ConfigField(
-        "How to edit",
-        "audit_sinks.hint",
-        "header",
-        "press E to open the interactive editor",
-        "press E to open the interactive editor",
-    )
-    if not sinks:
-        return (
-            ConfigField("Status", "audit_sinks.summary", "header", "no sinks configured", "no sinks configured"),
-            hint,
-        )
-    out = []
-    for sink in sinks:
-        name = str(_mapping_or_attr(sink, "name", "sink"))
-        kind = str(_mapping_or_attr(sink, "kind", ""))
-        enabled = bool(_mapping_or_attr(sink, "enabled", True))
-        # ``kind`` is the audit-sink type (``stdout``, ``file``,
-        # ``splunk_hec``, …) — every lowercase value would be parsed
-        # as a Rich style and the kind/state would silently drop
-        # from the summary. Escape both bracket pairs.
-        state = "enabled" if enabled else "disabled"
-        summary = f"{name} \\[{kind}] \\[{state}]"
-        out.append(ConfigField(name, "audit_sinks." + name, "header", summary, summary))
-    out.append(hint)
-    return tuple(out)
 
 
 def _webhook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:

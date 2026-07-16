@@ -267,7 +267,13 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         )
         return
 
-    from defenseclaw.config import config_path, default_config, detect_environment, load
+    from defenseclaw.config import (
+        config_path,
+        default_config,
+        detect_environment,
+        load,
+        prepare_fresh_v8_config,
+    )
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
@@ -293,9 +299,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     is_new_config = not os.path.exists(cfg_file)
     if is_new_config:
         cfg = default_config()
+        prepare_fresh_v8_config(cfg)
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
     else:
         cfg = load()
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env
@@ -341,7 +350,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     store.init()
     click.echo(f"  Audit DB:      {cfg.audit_db}")
 
-    logger = Logger(store, cfg.splunk)
+    # Only a genuinely new/pre-v8 initialization lacks a canonical graph.
+    # Re-running init against v8 uses the process owner and fails closed if it
+    # is unavailable instead of silently dropping setup mutations.
+    logger = (
+        Logger.no_runtime()
+        if is_new_config or getattr(cfg, "_source_config_version", None) != 8
+        else Logger.from_config(cfg)
+    )
     logger.log_action("init", cfg.data_dir, f"environment={env}")
 
     ux.banner("Scanners")
@@ -537,19 +553,26 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         _rollup_status,
         run_first_run,
     )
-    from defenseclaw.config import default_data_path
+    from defenseclaw.config import config_path, default_data_path, source_config_version
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
+    # Reject a legacy source before discovery prompts or connector mutation.
+    # The hard cut requires the ordinary upgrade transaction to create v8;
+    # spending an entire interactive setup session before discovering that
+    # precondition is both misleading and, for multi-connector selection,
+    # previously let the follow-on merge reach Config.save and raise.
+    legacy_config = os.path.exists(config_path()) and source_config_version() != 8
     # --observe-all / --action-connectors express an explicit, scripted
     # connector selection. Honor them deterministically even on a TTY instead
     # of dropping into the wizard (which would silently ignore the flags).
     flag_driven_multi = observe_all or bool(_parse_connector_list(action_connectors))
     if (
-        not flag_driven_multi
+        not legacy_config
+        and not flag_driven_multi
         and not non_interactive
         and not yes
         and not json_summary
@@ -657,6 +680,20 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     )
     report = run_first_run(opts)
 
+    config_upgrade_required = any(
+        step.name == "Config" and step.status == "fail" and step.next_command == "defenseclaw upgrade"
+        for step in report.setup
+    )
+    if config_upgrade_required:
+        # Do not let multi-connector setup mutate the legacy object after the
+        # canonical backend has already rejected it. JSON remains a successful
+        # machine-readable status response; the human command exits non-zero.
+        if json_summary:
+            click.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        _render_first_run_report(report, CLIRenderer())
+        raise SystemExit(1)
+
     activated = [primary["connector"]]
     if extras:
         activated, sidecar_step = _activate_additional_connectors(
@@ -688,17 +725,13 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # "defenseclaw-gateway start"); recompute so the "Next" hints match
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
-            report.next_commands = _next_commands(
-                report.setup, report.readiness, report, report.profile
-            )
+            report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
     mode_warnings = _connector_mode_warnings(connector_settings)
     if mode_warnings:
         _append_mode_warning_steps(report, mode_warnings)
         report.status = _rollup_status(report.setup, report.readiness)
-        report.next_commands = _next_commands(
-            report.setup, report.readiness, report, report.profile
-        )
+        report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
     if json_summary:
         payload = report.to_dict()
@@ -841,21 +874,13 @@ def _untrusted_discovery_prefixes(
 ) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    wanted = {
-        connector_paths.normalize(connector)
-        for connector in connectors or []
-        if connector.strip()
-    }
+    wanted = {connector_paths.normalize(connector) for connector in connectors or [] if connector.strip()}
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     for name in order:
         if wanted and connector_paths.normalize(name) not in wanted:
             continue
         signal = disc.agents.get(name)
-        if (
-            signal is None
-            or signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR
-            or not signal.binary_path
-        ):
+        if signal is None or signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR or not signal.binary_path:
             continue
         resolved_bin = os.path.realpath(signal.binary_path)
         parent = os.path.dirname(resolved_bin)
@@ -1266,8 +1291,7 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         report.setup.append(
             StepResult(
@@ -1378,9 +1402,7 @@ def _build_noninteractive_connector_settings(
             quiet=quiet,
         )
     )
-    downgrade_by_connector = {
-        warning["connector"]: warning for warning in action_downgrades
-    }
+    downgrade_by_connector = {warning["connector"]: warning for warning in action_downgrades}
     settings: list[dict] = []
     for name in configured:
         is_action = name in action_set
@@ -1461,9 +1483,7 @@ def _prompt_first_run(
             trusted_prompt_cache=trusted_prompt_cache,
         )
     )
-    downgrade_by_connector = {
-        warning["connector"]: warning for warning in action_downgrades
-    }
+    downgrade_by_connector = {warning["connector"]: warning for warning in action_downgrades}
 
     # The action-only policy knobs (fail-mode + HITL) are asked once and
     # shared across every connector being enabled in action mode.
@@ -1682,9 +1702,7 @@ def _activate_additional_connectors(
     if gate != ["*"]:
         selected_set = set(selected_keys)
         gc.judge.hook_connectors = [
-            connector_paths.normalize(c)
-            for c in gate
-            if c and connector_paths.normalize(c) in selected_set
+            connector_paths.normalize(c) for c in gate if c and connector_paths.normalize(c) in selected_set
         ]
 
     # Keep the singular mirror pointing at the sorted-first connector so
@@ -2076,7 +2094,7 @@ def _validate_gateway_token(env_name: str, token: str) -> None:
     is therefore untrusted. A value containing a newline, carriage return, or
     NUL would be parsed as a *second* KEY=VALUE assignment by the config
     loader, letting an attacker inject arbitrary environment entries (e.g.
-    DEFENSECLAW_DISABLE_REDACTION=1). Fail clearly at the boundary where the
+    DEFENSECLAW_GATEWAY_URL=https://attacker.invalid). Fail clearly at the boundary where the
     token enters rather than relying solely on the writer's sanitization.
     """
     try:

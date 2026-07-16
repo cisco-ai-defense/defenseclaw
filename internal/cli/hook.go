@@ -54,7 +54,7 @@ func newHookCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		// The hook is a short-lived per-event subprocess. Skip the daemon's
-		// PersistentPreRunE/PostRun (config load, audit store open, OTel init):
+		// PersistentPreRunE/PostRun (config load and audit store open):
 		// they are slow, can fail when the gateway is mid-setup, and would
 		// hold the audit DB on every keystroke an agent makes.
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
@@ -97,7 +97,7 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
 	}
 	if apiAddr == "" {
-		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
 	// The gateway is always a local, loopback-bound sidecar: setup bakes
@@ -111,7 +111,7 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	if !hookIsLoopbackAddr(apiAddr) {
 		fmt.Fprintf(os.Stderr,
 			"defenseclaw: ignoring non-loopback gateway address %q; using local gateway\n", apiAddr)
-		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
 	// Precedence mirrors the .sh `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-baked}"`:

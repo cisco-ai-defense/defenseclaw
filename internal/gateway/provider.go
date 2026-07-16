@@ -574,24 +574,32 @@ func (o *privateUpstreamPeerObserver) allowedPrivatePeers() []string {
 	return peers
 }
 
+// providerEgressEmitter is the narrow audit boundary provider transport needs.
+// The owning proxy supplies its bound emitter so authoritative v8 routing is
+// preserved; provider transport must not select a process-global telemetry
+// path on its own.
+type providerEgressEmitter func(context.Context, gatewaylog.EgressPayload)
+
 // doProviderRequest executes a provider request and emits one audit event for
 // each allowlisted private address actually used by net/http. GotConn runs for
 // both fresh and pooled connections, so the event describes the dial path that
 // carried traffic rather than an earlier DNS guess.
-func doProviderRequest(req *http.Request) (*http.Response, error) {
+func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Response, error) {
 	observedReq, observer := observePrivateUpstreamPeers(req)
 	resp, err := providerHTTPClient.Do(observedReq)
 	for _, peer := range observer.allowedPrivatePeers() {
-		emitEgress(req.Context(), gatewaylog.EgressPayload{
-			TargetHost:   req.URL.Hostname(),
-			ResolvedIP:   peer,
-			TargetPath:   req.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "private-upstream",
-			Decision:     "allow",
-			Reason:       "private-ip-allowed",
-			Source:       "go",
-		})
+		if emit != nil {
+			emit(req.Context(), gatewaylog.EgressPayload{
+				TargetHost:   req.URL.Hostname(),
+				ResolvedIP:   peer,
+				TargetPath:   req.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "private-upstream",
+				Decision:     "allow",
+				Reason:       "private-ip-allowed",
+				Source:       "go",
+			})
+		}
 		fmt.Fprintf(os.Stderr, "[guardrail] ALLOWED upstream connection: host=%s peer=%s (operator allowlist)\n", req.URL.Hostname(), peer)
 	}
 	return resp, err

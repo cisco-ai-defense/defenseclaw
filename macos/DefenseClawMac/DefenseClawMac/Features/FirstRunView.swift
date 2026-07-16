@@ -114,6 +114,12 @@ struct FirstRunView: View {
                 checkRow("Gateway", ok: appState.gatewayReachable)
             }
 
+            if let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if cliFound { setupForm } else { installer }
 
             if let entry = runningEntry {
@@ -158,7 +164,7 @@ struct FirstRunView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(setupInvalid)
+                        .disabled(setupInvalid || !appState.installationMutationsAllowed)
                     }
                 }
             }
@@ -253,6 +259,7 @@ struct FirstRunView: View {
                             Label(discoveryRequested ? "Detect Again" : "Detect Installed Agents",
                                   systemImage: "magnifyingglass")
                         }
+                        .disabled(!appState.installationMutationsAllowed)
                         Text("Runs `defenseclaw agent discover`, which executes each detected agent CLI's --version to identify it.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -305,7 +312,7 @@ struct FirstRunView: View {
             VStack(alignment: .leading, spacing: 10) {
                 GroupBox("Install the Bundled DefenseClaw Runtime") {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into ~/.defenseclaw and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
+                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into \(appState.installationContext.homeRoot.path) and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
                             .font(.callout).foregroundStyle(.secondary)
                         installStateRow
                         HStack {
@@ -318,7 +325,10 @@ struct FirstRunView: View {
                                 Label("Install DefenseClaw Runtime v\(payload.version)", systemImage: "arrow.down.circle.fill")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(appState.runtimeInstallState.isRunning)
+                            .disabled(
+                                appState.runtimeInstallState.isRunning
+                                    || !appState.installationMutationsAllowed
+                            )
                             Button("Open Activity") {
                                 appState.selectedPanel = .activity
                                 dismiss()
@@ -461,12 +471,20 @@ struct FirstRunView: View {
     }
 
     private func discoverConnectors() async {
+        guard appState.installationMutationsAllowed else {
+            connectorDiscoveryError = appState.installationReadOnlyReason
+                ?? "This installation is read only."
+            return
+        }
         connectorDiscoveryInProgress = true
         connectorDiscoveryError = nil
         // --refresh: every call here follows an explicit user action, and the
         // runtime's discovery cache lives 24h — a stale hit would hide an
         // agent installed since the last scan.
-        let result = await appState.cli.run(arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"])
+        let result = await appState.cli.run(
+            arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"],
+            mutation: true
+        )
         let allDetected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []

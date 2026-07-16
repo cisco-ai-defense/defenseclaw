@@ -111,7 +111,21 @@ func processStartIdentity(pid int) (string, error) {
 // killStaleProcesses finds and kills any defenseclaw-gateway processes that
 // are not tracked by the PID file. This prevents orphaned daemons from
 // accumulating across restarts. The watchdog PID is preserved.
-func (d *Daemon) killStaleProcesses() {
+func (d *Daemon) killStaleProcesses() error {
+	trackedPID, watchdogPID, err := d.protectedDaemonPIDs()
+	if err != nil {
+		return err
+	}
+
+	// Linux exposes both the executable and the NUL-delimited environment
+	// through /proc, which lets us prove a candidate is one of our daemon
+	// children for this exact data directory.  Other Unix platforms do not
+	// provide an equivalent race-bounded proof here, so stale cleanup remains
+	// best-effort and deliberately does nothing there.
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
 	self, _ := os.Executable()
 	binName := filepath.Base(self)
 	if binName == "" || binName == "." {
@@ -120,19 +134,23 @@ func (d *Daemon) killStaleProcesses() {
 
 	out, err := exec.Command("pgrep", "-f", binName).Output()
 	if err != nil {
-		return
-	}
-
-	trackedPID := 0
-	if info, err := d.readPIDInfo(); err == nil {
-		trackedPID = info.PID
+		return nil
 	}
 	myPID := os.Getpid()
-	watchdogPID := d.readWatchdogPID()
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pid, err := strconv.Atoi(strings.TrimSpace(line))
 		if err != nil || pid <= 0 || pid == myPID || pid == trackedPID || pid == watchdogPID {
+			continue
+		}
+		startIdentity, proven := d.proveStaleDaemonProcess(pid, self)
+		if !proven {
+			continue
+		}
+		// Re-read the kernel process identity immediately before signalling.
+		// If the inspected process exited and its PID was reused, fail closed.
+		currentIdentity, err := processStartIdentity(pid)
+		if err != nil || currentIdentity == "" || currentIdentity != startIdentity {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -142,17 +160,55 @@ func (d *Daemon) killStaleProcesses() {
 		fmt.Fprintf(os.Stderr, "[daemon] killing stale gateway process (PID %d)\n", pid)
 		_ = proc.Signal(syscall.SIGTERM)
 	}
+	return nil
 }
 
-// readWatchdogPID reads the watchdog PID from watchdog.pid in the data dir.
-func (d *Daemon) readWatchdogPID() int {
-	data, err := os.ReadFile(filepath.Join(d.dataDir, "watchdog.pid"))
+// proveStaleDaemonProcess returns the Linux start identity only after proving
+// that pid is the exact gateway executable running as a daemon child for this
+// Daemon's data directory.  pgrep -f candidates are untrusted: a phase-two
+// mutator wrapper legitimately contains "defenseclaw-gateway start" in its
+// argv, and signalling it would race the real child against upgrade rollback.
+func (d *Daemon) proveStaleDaemonProcess(pid int, executable string) (string, bool) {
+	if runtime.GOOS != "linux" || pid <= 0 || executable == "" {
+		return "", false
+	}
+	startIdentity, err := processStartIdentity(pid)
+	if err != nil || startIdentity == "" {
+		return "", false
+	}
+
+	actualExecutable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
-		return 0
+		return "", false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0
+	// A replaced gateway can remain alive on its deleted inode.  Linux marks
+	// that link with " (deleted)"; it is still the stale instance we intend to
+	// stop when every other identity signal agrees.
+	actualExecutable = strings.TrimSuffix(actualExecutable, " (deleted)")
+	expectedExecutable := executable
+	if resolved, resolveErr := filepath.EvalSymlinks(expectedExecutable); resolveErr == nil {
+		expectedExecutable = resolved
 	}
-	return pid
+	if filepath.Clean(actualExecutable) != filepath.Clean(expectedExecutable) {
+		return "", false
+	}
+
+	environment, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil || len(environment) == 0 || len(environment) > 4*1024*1024 {
+		return "", false
+	}
+	markerCount := 0
+	dataDirCount := 0
+	for _, entry := range strings.Split(string(environment), "\x00") {
+		switch entry {
+		case EnvDaemon + "=1":
+			markerCount++
+		case EnvDataDir + "=" + d.dataDir:
+			dataDirCount++
+		}
+	}
+	if markerCount != 1 || dataDirCount != 1 {
+		return "", false
+	}
+	return startIdentity, true
 }

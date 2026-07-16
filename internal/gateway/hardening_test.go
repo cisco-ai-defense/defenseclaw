@@ -465,7 +465,7 @@ func TestNotificationQueue(t *testing.T) {
 
 func TestActiveSessionsPruning(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	router := NewEventRouter(nil, store, logger, true, nil)
+	router := NewEventRouter(nil, store, logger, true)
 
 	router.activeSessionsMu.Lock()
 	router.activeSessions["old"] = time.Now().Add(-2 * time.Hour)
@@ -483,7 +483,7 @@ func TestActiveSessionsPruning(t *testing.T) {
 
 func TestTrackSessionPrunes(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	router := NewEventRouter(nil, store, logger, true, nil)
+	router := NewEventRouter(nil, store, logger, true)
 
 	router.activeSessionsMu.Lock()
 	for i := 0; i < maxActiveSessions+10; i++ {

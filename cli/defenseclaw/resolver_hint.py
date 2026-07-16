@@ -9,6 +9,11 @@ import re
 
 DEFAULT_REPOSITORY = "cisco-ai-defense/defenseclaw"
 RESOLVER_COMPLETENESS_MARKER = "# DefenseClaw upgrade resolver complete v1"
+COSIGN_BOOTSTRAP_VERSION = "2.6.3"
+_COSIGN_DARWIN_AMD64_SHA256 = "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be"
+_COSIGN_DARWIN_ARM64_SHA256 = "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e"
+_COSIGN_LINUX_AMD64_SHA256 = "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4"
+_COSIGN_LINUX_ARM64_SHA256 = "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917"
 _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -40,14 +45,40 @@ def authenticated_resolver_instructions(
         "  umask 077\n"
         '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"\n'
         "  trap 'rm -rf \"$d\"' EXIT\n"
-        "  command -v cosign >/dev/null\n"
+        '  cosign_bin="$(command -v cosign || true)"\n'
+        '  if [ -z "$cosign_bin" ]; then\n'
+        '    platform="$(uname -s | tr \'[:upper:]\' \'[:lower:]\')/$(uname -m)"\n'
+        '    case "$platform" in\n'
+        "      darwin/x86_64) cosign_asset='cosign-darwin-amd64'; "
+        f"cosign_sha='{_COSIGN_DARWIN_AMD64_SHA256}' ;;\n"
+        "      darwin/arm64) cosign_asset='cosign-darwin-arm64'; "
+        f"cosign_sha='{_COSIGN_DARWIN_ARM64_SHA256}' ;;\n"
+        "      linux/x86_64|linux/amd64) cosign_asset='cosign-linux-amd64'; "
+        f"cosign_sha='{_COSIGN_LINUX_AMD64_SHA256}' ;;\n"
+        "      linux/aarch64|linux/arm64) cosign_asset='cosign-linux-arm64'; "
+        f"cosign_sha='{_COSIGN_LINUX_ARM64_SHA256}' ;;\n"
+        "      *) echo 'Unsupported platform for automatic Cosign verification.' >&2; exit 1 ;;\n"
+        "    esac\n"
+        '    cosign_bin="$d/$cosign_asset"\n'
+        "    curl --fail --silent --show-error --location \\\n"
+        "      --proto '=https' --proto-redir '=https' --tlsv1.2 \\\n"
+        "      --max-filesize 209715200 --output \"$cosign_bin\" \\\n"
+        f"      'https://github.com/sigstore/cosign/releases/download/v{COSIGN_BOOTSTRAP_VERSION}/'$cosign_asset\n"
+        '    if command -v sha256sum >/dev/null; then\n'
+        '      cosign_actual="$(sha256sum "$cosign_bin" | awk \'{print $1}\')"\n'
+        "    else\n"
+        '      cosign_actual="$(shasum -a 256 "$cosign_bin" | awk \'{print $1}\')"\n'
+        "    fi\n"
+        '    [ "$cosign_actual" = "$cosign_sha" ]\n'
+        '    chmod 700 "$cosign_bin"\n'
+        '  fi\n'
         "  for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig "
         "checksums.txt.pem; do\n"
         f"    curl --fail --silent --show-error --location --proto '=https' "
         f"--proto-redir '=https' --tlsv1.2 "
         f"--output \"$d/$name\" '{asset_base}/'$name\n"
         "  done\n"
-        "  cosign verify-blob --certificate \"$d/checksums.txt.pem\" "
+        "  \"$cosign_bin\" verify-blob --certificate \"$d/checksums.txt.pem\" "
         "--signature \"$d/checksums.txt.sig\" \\\n"
         f"    --certificate-identity '{identity}' \\\n"
         f"    --certificate-oidc-issuer '{issuer}' \"$d/checksums.txt\"\n"
@@ -66,6 +97,7 @@ def authenticated_resolver_instructions(
         "  bash \"$d/defenseclaw-upgrade.sh\" --yes\n"
         ")\n"
         "Windows PowerShell:\n"
+        "# Preflight refusal only: no 0.8.4 Windows bridge binaries were published.\n"
         "& {\n"
         "  $ErrorActionPreference = 'Stop'\n"
         "  $d = Join-Path ([IO.Path]::GetTempPath()) "

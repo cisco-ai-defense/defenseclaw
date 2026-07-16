@@ -19,9 +19,16 @@
 
 import Foundation
 
+private struct GatewayMutationDenied: LocalizedError {
+    let reason: String
+    var errorDescription: String? { "Operation refused by the Mac app: \(reason)" }
+}
+
 actor GatewayClient {
     private var baseURL: URL?
     private var token: String?
+    private var mutationsAllowed: Bool
+    private var mutationDenialReason: String
     private let session: URLSession
 
     static let defaultTimeout: TimeInterval = 5
@@ -30,9 +37,15 @@ actor GatewayClient {
     private static let pathSegmentCharacters = CharacterSet.alphanumerics
         .union(CharacterSet(charactersIn: "-._~"))
 
-    init(config: DefenseClawConfig = DefenseClawConfig()) {
+    init(
+        config: DefenseClawConfig = DefenseClawConfig(),
+        mutationsAllowed: Bool = false,
+        mutationDenialReason: String = "This installation is read only."
+    ) {
         self.baseURL = config.baseURL
         self.token = config.gatewayToken
+        self.mutationsAllowed = mutationsAllowed
+        self.mutationDenialReason = mutationDenialReason
         let conf = URLSessionConfiguration.ephemeral
         conf.timeoutIntervalForRequest = Self.defaultTimeout
         conf.waitsForConnectivity = false
@@ -44,6 +57,11 @@ actor GatewayClient {
         token = config.gatewayToken
     }
 
+    func update(installationContext: InstallationContext) {
+        mutationsAllowed = installationContext.permitsMutation
+        mutationDenialReason = installationContext.accessMode.reason ?? "This installation is read only."
+    }
+
     // MARK: - Request plumbing
 
     private func request(
@@ -52,6 +70,9 @@ actor GatewayClient {
         queryItems: [URLQueryItem] = [],
         timeout: TimeInterval = GatewayClient.defaultTimeout
     ) async throws -> Data {
+        if method != "GET", !mutationsAllowed {
+            throw GatewayMutationDenied(reason: mutationDenialReason)
+        }
         guard let baseURL, Self.isLoopback(baseURL) else {
             throw GatewayError.badResponse("refusing non-loopback gateway URL")
         }
@@ -148,7 +169,10 @@ actor GatewayClient {
         snap.version = dict["version"] as? String
 
         // Subsystems: any nested object with a state/status field becomes a row.
-        let known = ["watcher", "api", "guardrail", "telemetry", "ai_discovery", "sinks", "sandbox", "gateway", "watchdog"]
+        let known = [
+            "watcher", "api", "guardrail", "telemetry", "ai_discovery",
+            "sinks", "sandbox", "gateway", "watchdog", "managed",
+        ]
         for key in known {
             if let sub = dict[key] as? [String: Any],
                let state = (sub["state"] as? String) ?? (sub["status"] as? String) {
@@ -507,8 +531,9 @@ actor GatewayClient {
         snap.goneSignals = (summary["gone_signals"] as? Int) ?? 0
         snap.privacyMode = (summary["privacy_mode"] as? String) ?? (summary["mode"] as? String) ?? ""
         snap.lastScan = DCDates.parse(summary["scanned_at"] ?? summary["last_scan"] ?? summary["lastScan"])
-        let signals = (dict["signals"] as? [[String: Any]]) ?? (dict["components"] as? [[String: Any]]) ?? []
-        snap.signals = signals.map(decodeSignal)
+        let signalPayload = dict["signals"] ?? dict["components"]
+        let signals = AISignalDecoding.signalMappings(from: signalPayload)
+        snap.signals = signals.map(AISignalDecoding.decode)
         snap.components = signals.map(decodeComponent)
         if snap.totalDetected == 0 { snap.totalDetected = snap.signals.count }
         snap.averageConfidence = normalizeConfidence(summary["avg_confidence"] ?? summary["average_confidence"])
@@ -516,42 +541,6 @@ actor GatewayClient {
             snap.averageConfidence = snap.signals.map(\.confidence).reduce(0, +) / Double(snap.signals.count)
         }
         return snap
-    }
-
-    private func decodeSignal(_ r: [String: Any]) -> AISignal {
-        let component = r["component"] as? [String: Any]
-        let presenceBand = (r["presence_band"] as? String) ?? ""
-        // Scores are `omitempty` in the current gateway, so an exact zero can
-        // arrive as a band without a numeric field. Also remember an explicit
-        // zero from other compatible gateways; both mean the axis was reported.
-        let presenceAxisReported = AIPresenceAxis.wasReported(
-            rawScore: r["presence_score"],
-            band: presenceBand
-        )
-        return AISignal(
-            state: (r["state"] as? String) ?? "",
-            product: (r["product"] as? String) ?? (r["name"] as? String) ?? "?",
-            vendor: (r["vendor"] as? String) ?? "",
-            category: (r["category"] as? String) ?? "",
-            detector: (r["detector"] as? String) ?? "",
-            version: (component?["version"] as? String) ?? (r["version"] as? String) ?? "",
-            ecosystem: (component?["ecosystem"] as? String) ?? "",
-            componentName: (component?["name"] as? String) ?? "",
-            source: (r["source"] as? String) ?? "",
-            confidence: normalizeConfidence(r["confidence"]),
-            identityScore: normalizeConfidence(r["identity_score"]),
-            identityBand: (r["identity_band"] as? String) ?? "",
-            presenceScore: normalizeConfidence(r["presence_score"]),
-            presenceBand: presenceBand,
-            presenceAxisReported: presenceAxisReported,
-            firstSeen: DCDates.parse(r["first_seen"]),
-            lastSeen: DCDates.parse(r["last_seen"]),
-            lastActive: DCDates.parse(r["last_active_at"]),
-            name: (r["name"] as? String) ?? "",
-            supportedConnector: (r["supported_connector"] as? String) ?? "",
-            signalID: (r["signal_id"] as? String) ?? (r["id"] as? String) ?? "",
-            signatureID: (r["signature_id"] as? String) ?? ""
-        )
     }
 
     func aiComponents() async throws -> [AIComponent] {

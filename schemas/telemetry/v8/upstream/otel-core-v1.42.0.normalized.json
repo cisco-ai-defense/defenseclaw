@@ -1,0 +1,398 @@
+{
+  "format_version": 2,
+  "format": "defenseclaw-selected-semconv-v1",
+  "dependency_id": "otel_core",
+  "repository": "https://github.com/open-telemetry/semantic-conventions",
+  "revision": "ae3a98640194ed405c4c797281502e4d3bd258b3",
+  "source_archive": {
+    "url": "https://github.com/open-telemetry/semantic-conventions/archive/ae3a98640194ed405c4c797281502e4d3bd258b3.tar.gz",
+    "sha256": "4a45d4e3d78690af6ae852d867f6b08e7f39b2e402f43eec05c70ffab813a086"
+  },
+  "source_tree_sha256": "8a0b832c763e42042f706c5f272140196b11e9be8c1b1dd5b722494dd71efdf3",
+  "full_normalized_inventory_sha256": "183e280c15e0d55155cb6997a33c0b0097b2112315ecfb6c1a59f61aa75cfae6",
+  "selection": {
+    "policy": "authored-extension-closure-v1",
+    "attribute_ids_sha256": "d23b4aa1a9faa2d44ea0d7f90f332873993e4866d620625fc878eee8faf37eab"
+  },
+  "source_files": [
+    {
+      "path": "model/db/registry.yaml",
+      "sha256": "aea21c24780d0ad69854aadbf977bad6bc074f0f0c9276708ae790bc750462a7"
+    },
+    {
+      "path": "model/deployment/registry.yaml",
+      "sha256": "e5e34a56564df265c807e76e00a437442b9d4e47a0e40cc056d9697e3cd7e127"
+    },
+    {
+      "path": "model/error/registry.yaml",
+      "sha256": "57917c22a8ae56ebc0f048742a0caafece16abc7f405cba6e51319be32866561"
+    },
+    {
+      "path": "model/exceptions/registry.yaml",
+      "sha256": "6754a8d009e6f4dc9cb799e55aa35db89c9f818e4daf8e5a4ef024760e73af6e"
+    },
+    {
+      "path": "model/host/registry.yaml",
+      "sha256": "0bab4245f31608520be0f26cc6281077f987c3b8f647b19b6da4a92f45a52e86"
+    },
+    {
+      "path": "model/http/registry.yaml",
+      "sha256": "8d44e243c6f18bb21dea653fdbf2e34b40750cafc0604d894e914c637c0a8c5d"
+    },
+    {
+      "path": "model/network/registry.yaml",
+      "sha256": "d59384d3c7f2d5085d61b6b1e0cdba9a0377b159f1bb8cdd230540aca0d9101f"
+    },
+    {
+      "path": "model/os/registry.yaml",
+      "sha256": "0f613400d0ddb9001c936056e176bd0ecbe09565cd8edd18f1e47015c0c8082e"
+    },
+    {
+      "path": "model/server/registry.yaml",
+      "sha256": "a31e5eae1cefaed4d94132d8530a819de88d3dc097e46a150695193e923be755"
+    },
+    {
+      "path": "model/service/registry.yaml",
+      "sha256": "1d0be703a9970e94f8f52000d63f0660bf485434df941923abbc03b110f97ef7"
+    },
+    {
+      "path": "model/url/registry.yaml",
+      "sha256": "240dc7a4482ad15b98e1ace908abb3562e329579b083aa17b4189ef7c5f83fbb"
+    },
+    {
+      "path": "model/user/registry.yaml",
+      "sha256": "45f126a0916f7cefdf885eb3d3315683ebe38fc8c6a8ac34a2a27ae61d6016c5"
+    }
+  ],
+  "attributes": [
+    {
+      "id": "db.collection.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/db/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "db.operation.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/db/registry.yaml#/groups/0/attributes/2",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "deployment.environment.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/deployment/registry.yaml#/groups/0/attributes/3",
+      "enum": [
+        "development",
+        "production",
+        "staging",
+        "test"
+      ],
+      "deprecated": false
+    },
+    {
+      "id": "error.type",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/error/registry.yaml#/groups/0/attributes/0",
+      "enum": [
+        "_OTHER"
+      ],
+      "deprecated": false
+    },
+    {
+      "id": "exception.message",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/exceptions/registry.yaml#/groups/0/attributes/1",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "exception.stacktrace",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/exceptions/registry.yaml#/groups/0/attributes/2",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "exception.type",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/exceptions/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "host.arch",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "development",
+      "stability_source": "upstream",
+      "source_pointer": "model/host/registry.yaml#/groups/0/attributes/3",
+      "enum": [
+        "amd64",
+        "arm32",
+        "arm64",
+        "ia64",
+        "ppc32",
+        "ppc64",
+        "s390x",
+        "x86"
+      ],
+      "deprecated": false
+    },
+    {
+      "id": "host.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "development",
+      "stability_source": "upstream",
+      "source_pointer": "model/host/registry.yaml#/groups/0/attributes/1",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "http.request.method",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/http/registry.yaml#/groups/0/attributes/2",
+      "enum": [
+        "CONNECT",
+        "DELETE",
+        "GET",
+        "HEAD",
+        "OPTIONS",
+        "PATCH",
+        "POST",
+        "PUT",
+        "QUERY",
+        "TRACE",
+        "_OTHER"
+      ],
+      "deprecated": false
+    },
+    {
+      "id": "http.response.status_code",
+      "allowed_types": [
+        "int64"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/http/registry.yaml#/groups/0/attributes/9",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "http.route",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/http/registry.yaml#/groups/0/attributes/10",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "network.protocol.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/network/registry.yaml#/groups/0/attributes/10",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "network.protocol.version",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/network/registry.yaml#/groups/0/attributes/11",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "os.type",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "development",
+      "stability_source": "upstream",
+      "source_pointer": "model/os/registry.yaml#/groups/0/attributes/0",
+      "enum": [
+        "aix",
+        "darwin",
+        "dragonflybsd",
+        "freebsd",
+        "hpux",
+        "linux",
+        "netbsd",
+        "openbsd",
+        "solaris",
+        "windows",
+        "z_os",
+        "zos"
+      ],
+      "deprecated": false
+    },
+    {
+      "id": "server.address",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/server/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "server.port",
+      "allowed_types": [
+        "int64"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/server/registry.yaml#/groups/0/attributes/1",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "service.instance.id",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/service/registry.yaml#/groups/0/attributes/3",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "service.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/service/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "service.namespace",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/service/registry.yaml#/groups/0/attributes/2",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "service.version",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/service/registry.yaml#/groups/0/attributes/1",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "url.full",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/url/registry.yaml#/groups/0/attributes/3",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "url.scheme",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/url/registry.yaml#/groups/0/attributes/9",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "user.id",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "development",
+      "stability_source": "upstream",
+      "source_pointer": "model/user/registry.yaml#/groups/0/attributes/3",
+      "enum": [],
+      "deprecated": false
+    }
+  ]
+}

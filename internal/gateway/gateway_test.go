@@ -28,7 +28,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +36,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"gopkg.in/yaml.v3"
 
@@ -46,22 +44,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := audit.NewStore(dbPath)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	if err := store.Init(); err != nil {
-		t.Fatalf("Store.Init: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store, audit.NewLogger(store)
+	return testStoreAndV8Logger(t)
+}
+
+func testStoreAndV8Logger(t *testing.T) (*audit.Store, *audit.Logger) {
+	t.Helper()
+	fixture := newSidecarRuntimeFixture(t, true)
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime})
+	return fixture.store, logger
 }
 
 func bindTestConfigRuntime(t *testing.T, api *APIServer) {
@@ -71,14 +69,18 @@ func bindTestConfigRuntime(t *testing.T, api *APIServer) {
 	}
 	path := configFilePathForSnapshot(api.scannerCfg)
 	api.scannerCfg.ConfigFilePath = path
-	data, err := yaml.Marshal(map[string]any{
-		"config_version":  7,
-		"data_dir":        api.scannerCfg.DataDir,
-		"deployment_mode": api.scannerCfg.DeploymentMode,
+	reloadMode := api.scannerCfg.Gateway.ConfigReload.Mode
+	if reloadMode == "" {
+		reloadMode = "hot"
+	}
+	source := map[string]any{
+		"config_version": 8,
+		"data_dir":       api.scannerCfg.DataDir,
+		"observability":  map[string]any{},
 		"gateway": map[string]any{
 			"token": api.scannerCfg.Gateway.Token,
 			"config_reload": map[string]any{
-				"mode": api.scannerCfg.Gateway.ConfigReload.Mode,
+				"mode": reloadMode,
 			},
 		},
 		"guardrail": map[string]any{
@@ -92,7 +94,11 @@ func bindTestConfigRuntime(t *testing.T, api *APIServer) {
 				"min_severity": api.scannerCfg.Guardrail.HILT.MinSeverity,
 			},
 		},
-	})
+	}
+	if api.scannerCfg.DeploymentMode != "" {
+		source["deployment_mode"] = api.scannerCfg.DeploymentMode
+	}
+	data, err := yaml.Marshal(source)
 	if err != nil {
 		t.Fatalf("marshal API config: %v", err)
 	}
@@ -100,7 +106,7 @@ func bindTestConfigRuntime(t *testing.T, api *APIServer) {
 		t.Fatalf("write API config: %v", err)
 	}
 
-	initial, err := config.LoadFromFile(path)
+	initial, err := config.LoadRuntimeV8File(path)
 	if err != nil {
 		t.Fatalf("load API config: %v", err)
 	}
@@ -110,7 +116,7 @@ func bindTestConfigRuntime(t *testing.T, api *APIServer) {
 	var liveMu sync.RWMutex
 	live := cloneConfig(initial)
 	api.SetConfigRuntime(func(context.Context, string) error {
-		next, err := config.LoadFromFile(path)
+		next, err := config.LoadRuntimeV8File(path)
 		if err != nil {
 			return err
 		}
@@ -1490,6 +1496,23 @@ func TestApprovalRequestPayloadNestedRequest(t *testing.T) {
 	}
 }
 
+func TestApprovalRequestPayloadMergesTopLevelAndNestedCorrelationAliases(t *testing.T) {
+	raw := `{"id":"req-rich","requestId":"request-top","agentExecutionId":"execution-top","request":{"runId":"run-nested","turnId":"turn-nested","operationId":"operation-nested","sessionKey":"agent:child:subagent:one","sessionId":"session-child-1","agentId":"agent-child","rootAgentId":"agent-root","parentAgentId":"agent-parent","agentLifecycleId":"lifecycle-child","agentDepth":2,"agentPhase":"approval","agentSequence":7,"toolId":"tool-shell","toolName":"shell","toolCallId":"tool-call-1","destinationApp":"terminal"}}`
+	var payload ApprovalRequestPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	correlation := payload.CorrelationContext()
+	if correlation.RequestID != "request-top" || correlation.RunID != "run-nested" ||
+		correlation.SessionID != "session-child-1" || correlation.AgentID != "agent-child" ||
+		correlation.LifecycleID != "lifecycle-child" || correlation.ExecutionID != "execution-top" ||
+		correlation.ToolCallID != "tool-call-1" || correlation.DestinationApp != "terminal" ||
+		correlation.Depth == nil || *correlation.Depth != 2 ||
+		correlation.Sequence == nil || *correlation.Sequence != 7 || correlation.Phase != "approval" {
+		t.Fatalf("merged approval correlation=%+v", correlation)
+	}
+}
+
 func TestApprovalRequestPayloadWithoutPlan(t *testing.T) {
 	raw := `{"id":"req-2"}`
 	var p ApprovalRequestPayload
@@ -2120,7 +2143,7 @@ func TestApprovalDangerousChecksArgvWhenRawCmdEmpty(t *testing.T) {
 
 func TestRouteToolCallEvent(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "shell", Status: "running"})
 	evt := EventFrame{
@@ -2133,7 +2156,7 @@ func TestRouteToolCallEvent(t *testing.T) {
 
 func TestRouteToolCallFlaggedEvent(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	payload, _ := json.Marshal(ToolCallPayload{
 		Tool:   "shell",
@@ -2150,7 +2173,7 @@ func TestRouteToolCallFlaggedEvent(t *testing.T) {
 
 func TestRouteToolCallSafeEvent(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	payload, _ := json.Marshal(ToolCallPayload{
 		Tool:   "read_file",
@@ -2167,7 +2190,7 @@ func TestRouteToolCallSafeEvent(t *testing.T) {
 
 func TestRouteToolResultEvent(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	exitCode := 0
 	payload, _ := json.Marshal(ToolResultPayload{Tool: "shell", Output: "ok", ExitCode: &exitCode})
@@ -2181,7 +2204,7 @@ func TestRouteToolResultEvent(t *testing.T) {
 
 func TestRouteToolResultNilExitCode(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	payload, _ := json.Marshal(ToolResultPayload{Tool: "read_file", Output: "contents"})
 	evt := EventFrame{
@@ -2206,7 +2229,7 @@ func TestRouteUnknownEventIsNoOp(t *testing.T) {
 
 func TestRouteToolCallBadPayload(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	evt := EventFrame{
 		Type:    "event",
@@ -2218,7 +2241,7 @@ func TestRouteToolCallBadPayload(t *testing.T) {
 
 func TestRouteToolResultBadPayload(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	evt := EventFrame{
 		Type:    "event",
@@ -2230,7 +2253,7 @@ func TestRouteToolResultBadPayload(t *testing.T) {
 
 func TestRouteApprovalRequestBadPayload(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	evt := EventFrame{
 		Type:    "event",
@@ -2242,7 +2265,7 @@ func TestRouteApprovalRequestBadPayload(t *testing.T) {
 
 func TestNewEventRouterCreatesPolicy(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, true, nil)
+	r := NewEventRouter(nil, store, logger, true)
 	if r.policy == nil {
 		t.Error("policy should not be nil")
 	}
@@ -3195,7 +3218,7 @@ func TestAPIConfigPatchMethodNotAllowed(t *testing.T) {
 }
 
 func TestAPIScanResultHandlerLogsResult(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
+	store, logger := testStoreAndV8Logger(t)
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
 
 	body := []byte(`{
@@ -3236,6 +3259,30 @@ func TestAPIScanResultHandlerLogsResult(t *testing.T) {
 	}
 	if results[0].MaxSeverity != "HIGH" {
 		t.Errorf("max severity = %q, want HIGH", results[0].MaxSeverity)
+	}
+}
+
+func TestAPIScanResultHandlerRejectsUnboundRuntime(t *testing.T) {
+	store, _ := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store}
+	req := httptest.NewRequest(http.MethodPost, "/scan/result", strings.NewReader(`{
+		"scanner":"plugin-scanner",
+		"target":"/tmp/plugin",
+		"timestamp":"2026-03-24T12:00:00Z"
+	}`))
+	w := httptest.NewRecorder()
+
+	api.handleScanResult(w, req)
+
+	if w.Result().StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusServiceUnavailable)
+	}
+	results, err := store.ListScanResults(10)
+	if err != nil {
+		t.Fatalf("ListScanResults: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("unbound scan handler persisted %d forensic rows", len(results))
 	}
 }
 
@@ -3411,7 +3458,7 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
 
 	body := []byte(`{
-		"action":"admission",
+		"action":"gateway-tool-call",
 		"target":"/tmp/bad-plugin",
 		"actor":"plugin-test",
 		"details":"blocked",
@@ -3435,17 +3482,25 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	if err := json.NewDecoder(alertsW.Result().Body).Decode(&alerts); err != nil {
 		t.Fatalf("decode alerts: %v", err)
 	}
-	if len(alerts) != 1 {
-		t.Fatalf("alerts len = %d, want 1", len(alerts))
+	// /alerts is the mutable v7 acknowledgement queue. Canonical v8 history is
+	// immutable and therefore must not be projected into that queue.
+	if len(alerts) != 0 {
+		t.Fatalf("legacy acknowledgement queue included canonical rows: %#v", alerts)
 	}
-	if alerts[0].Action != "admission" {
-		t.Errorf("action = %q, want admission", alerts[0].Action)
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != string(audit.ActionGatewayToolCall) {
+		t.Fatalf("canonical event history = %#v, want one %q row", events, audit.ActionGatewayToolCall)
 	}
 }
 
 func TestAPIPolicyEvaluateFallback(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
+	runtime, _ := newProxyGeneratedTraceRuntime(t)
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 
 	blockReq := httptest.NewRequest(http.MethodPost, "/enforce/block", bytes.NewReader([]byte(`{"target_type":"plugin","target_name":"evil-plugin","reason":"malicious"}`)))
 	blockW := httptest.NewRecorder()
@@ -3507,18 +3562,9 @@ func TestAPIPolicyEvaluateFallback(t *testing.T) {
 }
 
 func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
+	api, capture := newGuardrailEventV8TestAPI(t)
 
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
-	api.SetOTelProvider(otelProvider)
-
-	if err := store.SetActionField("skill", "evil-skill", "install", "block", "malicious"); err != nil {
+	if err := api.store.SetActionField("skill", "evil-skill", "install", "block", "malicious"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3538,54 +3584,21 @@ func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	evaluations := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPolicyEvaluations)
+	latencies := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPolicyLatency)
+	admissions := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawAdmissionDecisions)
+	slo := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawSloBlockLatency)
+	if len(evaluations) != 1 || len(latencies) != 1 || len(admissions) != 1 || len(slo) != 1 {
+		t.Fatalf("generated policy metrics evaluations=%d latencies=%d admissions=%d slo=%d", len(evaluations), len(latencies), len(admissions), len(slo))
 	}
-
-	evalMetric := findMetric(rm, "defenseclaw.policy.evaluations")
-	if evalMetric == nil {
-		t.Fatal("expected defenseclaw.policy.evaluations metric after blocked admission")
-		return
-	}
-	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", evalMetric.Data)
-	}
-	blockedVal := counterByAttr(evalSum, "policy.verdict", "blocked")
-	if blockedVal != 1 {
-		t.Errorf("policy evaluations blocked = %d, want 1", blockedVal)
-	}
-	domainVal := counterByAttr(evalSum, "policy.domain", "admission")
-	if domainVal == 0 {
-		t.Error("expected policy.domain=admission attribute on counter")
-	}
-
-	latencyMetric := findMetric(rm, "defenseclaw.policy.latency")
-	if latencyMetric == nil {
-		t.Fatal("expected defenseclaw.policy.latency metric after admission evaluation")
-		return
-	}
-	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
-	if !ok {
-		t.Fatalf("expected Histogram[float64], got %T", latencyMetric.Data)
-	}
-	if len(latHist.DataPoints) == 0 {
-		t.Fatal("expected at least one histogram data point for policy latency")
+	if attributes := evaluations[0].Attributes(); attributes["defenseclaw.metric.policy.domain"] != "admission" ||
+		attributes["defenseclaw.metric.policy.verdict"] != "blocked" {
+		t.Fatalf("generated policy evaluation attributes=%v", attributes)
 	}
 }
 
 func TestAPIPolicyEvaluate_OTelMetrics_RejectedVerdict(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
-	api.SetOTelProvider(otelProvider)
+	api, capture := newGuardrailEventV8TestAPI(t)
 
 	body := []byte(`{
 		"domain":"admission",
@@ -3604,42 +3617,24 @@ func TestAPIPolicyEvaluate_OTelMetrics_RejectedVerdict(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-
-	evalMetric := findMetric(rm, "defenseclaw.policy.evaluations")
-	if evalMetric == nil {
-		t.Fatal("expected defenseclaw.policy.evaluations metric after rejected admission")
-		return
-	}
-	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", evalMetric.Data)
-	}
-	rejectedVal := counterByAttr(evalSum, "policy.verdict", "rejected")
-	if rejectedVal != 1 {
-		t.Errorf("policy evaluations rejected = %d, want 1", rejectedVal)
+	evaluations := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPolicyEvaluations)
+	if len(evaluations) != 1 || evaluations[0].Attributes()["defenseclaw.metric.policy.verdict"] != "rejected" {
+		t.Fatalf("generated rejected policy evaluations=%v", evaluations)
 	}
 }
 
 func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
 
 	policyDir := t.TempDir()
 	os.WriteFile(filepath.Join(policyDir, "data.json"), []byte(`{}`), 0o644)
 	os.WriteFile(filepath.Join(policyDir, "admission.rego"), []byte("package defenseclaw.admission\ndefault verdict = \"scan\"\n"), 0o644)
 
 	scanCfg := &config.Config{PolicyDir: policyDir}
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger, scannerCfg: scanCfg}
-	api.SetOTelProvider(otelProvider)
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: scanCfg}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 
 	req := httptest.NewRequest(http.MethodPost, "/policy/reload", nil)
 	w := httptest.NewRecorder()
@@ -3649,38 +3644,23 @@ func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	metrics := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPolicyReloads)
+	if len(metrics) != 1 || metrics[0].Attributes()["defenseclaw.metric.policy.status"] != "success" {
+		t.Fatalf("generated successful policy reload metrics=%v", metrics)
 	}
-
-	reloadMetric := findMetric(rm, "defenseclaw.policy.reloads")
-	if reloadMetric == nil {
-		t.Fatal("expected defenseclaw.policy.reloads metric after successful reload")
-		return
-	}
-	reloadSum, ok := reloadMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", reloadMetric.Data)
-	}
-	successVal := counterByAttr(reloadSum, "policy.status", "success")
-	if successVal != 1 {
-		t.Errorf("policy reloads success = %d, want 1", successVal)
+	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyUpdated, true); count != 1 {
+		t.Fatalf("generated successful policy reload events=%d", count)
 	}
 }
 
 func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
 
 	scanCfg := &config.Config{PolicyDir: "/nonexistent/policy/dir"}
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger, scannerCfg: scanCfg}
-	api.SetOTelProvider(otelProvider)
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: scanCfg}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 
 	req := httptest.NewRequest(http.MethodPost, "/policy/reload", nil)
 	w := httptest.NewRecorder()
@@ -3690,23 +3670,12 @@ func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusInternalServerError)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	metrics := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPolicyReloads)
+	if len(metrics) != 1 || metrics[0].Attributes()["defenseclaw.metric.policy.status"] != "failed" {
+		t.Fatalf("generated failed policy reload metrics=%v", metrics)
 	}
-
-	reloadMetric := findMetric(rm, "defenseclaw.policy.reloads")
-	if reloadMetric == nil {
-		t.Fatal("expected defenseclaw.policy.reloads metric after failed reload")
-		return
-	}
-	reloadSum, ok := reloadMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", reloadMetric.Data)
-	}
-	failedVal := counterByAttr(reloadSum, "policy.status", "failed")
-	if failedVal != 1 {
-		t.Errorf("policy reloads failed = %d, want 1", failedVal)
+	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyReloadRejected, true); count != 1 {
+		t.Fatalf("generated failed policy reload events=%d", count)
 	}
 }
 
@@ -3844,7 +3813,12 @@ func testAPIServerWithConfig(t *testing.T, mode string) *APIServer {
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = mode
-	return NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	// These tests assert policy semantics, not the production 200 ms SLA.
+	// The race detector and a loaded CI host can delay goroutine scheduling
+	// beyond that wall-clock budget even though the local scan is healthy.
+	api.inspectToolScanTimeout = 5 * time.Second
+	return api
 }
 
 func postInspect(t *testing.T, api *APIServer, body string) (*httptest.ResponseRecorder, ToolInspectVerdict) {
@@ -4145,325 +4119,59 @@ func TestHealthHandlerReturnsJSON(t *testing.T) {
 	}
 }
 
-func TestHealthEndpointNoSecrets(t *testing.T) {
-	health := NewSidecarHealth()
-	// Simulate what a fixed reportSinksHealth should produce when a
-	// Splunk sink is registered: no raw passwords or HEC tokens, only
-	// boolean "_set" indicators per sink row.
-	health.SetSinks(StateRunning, "", map[string]interface{}{
-		"count": 1,
-		"kinds": []string{"splunk_hec"},
-		"sinks": []map[string]interface{}{{
-			"name":             "splunk-prod",
-			"kind":             "splunk_hec",
-			"hec_endpoint":     "https://splunk.example.com:8088",
-			"index":            "defenseclaw",
-			"web_url":          "http://127.0.0.1:8000",
-			"web_user":         "admin",
-			"web_password_set": true,
-			"username":         "defenseclaw_local_user",
-			"password_set":     true,
-		}},
-	})
-	api := &APIServer{health: health}
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	api.handleHealth(w, req)
-
-	body := w.Body.String()
-
-	// The response must never contain actual password values.
-	for _, forbidden := range []string{`"web_password"`, `"password"`} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("health response contains %s — credentials must not be exposed via /health", forbidden)
-		}
-	}
-	// Confirm the boolean indicators are present instead.
-	for _, expected := range []string{`"web_password_set"`, `"password_set"`} {
-		if !strings.Contains(body, expected) {
-			t.Errorf("health response missing %s — expected boolean indicator", expected)
-		}
-	}
+type fakeRuntimeCanaryEmitter struct {
+	called      atomic.Int64
+	destination string
+	result      observabilityruntime.TraceCanaryResult
+	err         error
 }
 
-// ---------------------------------------------------------------------------
-// reportSinksHealth tests
-//
-// These exercise the contract that the CLI status renderer relies on:
-// every code path must emit a ``summary`` scalar so operators can tell
-// from one ``defenseclaw-gateway status`` row why the Sinks subsystem
-// is in its current state, even when ``DISABLED``.
-// ---------------------------------------------------------------------------
-
-func TestReportSinksHealth_NoSinksConfigured(t *testing.T) {
-	s := &Sidecar{
-		cfg:    &config.Config{AuditSinks: nil},
-		health: NewSidecarHealth(),
-	}
-	s.reportSinksHealth()
-	snap := s.health.Snapshot()
-	if snap.Sinks.State != StateDisabled {
-		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateDisabled)
-	}
-	summary, _ := snap.Sinks.Details["summary"].(string)
-	if !strings.Contains(summary, "no audit sinks configured") {
-		t.Errorf("summary = %q, want it to mention 'no audit sinks configured'", summary)
-	}
-	hint, _ := snap.Sinks.Details["hint"].(string)
-	if !strings.Contains(hint, "defenseclaw setup") {
-		t.Errorf("hint = %q, want it to point operators at the setup command", hint)
-	}
+func (emitter *fakeRuntimeCanaryEmitter) EmitTraceCanary(
+	_ context.Context,
+	destination string,
+) (observabilityruntime.TraceCanaryResult, error) {
+	emitter.called.Add(1)
+	emitter.destination = destination
+	return emitter.result, emitter.err
 }
 
-func TestDestinationRoutingHealthMarshal(t *testing.T) {
-	raw, err := json.Marshal(destinationRoutingHealth{
-		provider: &telemetry.Provider{}, destination: "filtered",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]float64
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"accepted", "dropped", "total", "accepted_percentage"} {
-		if _, ok := got[key]; !ok {
-			t.Errorf("routing health missing %q: %s", key, raw)
-		}
-	}
-}
-
-func TestDestinationSignalNamesDoesNotInventTraces(t *testing.T) {
-	destination := config.OTelDestinationConfig{}
-	destination.Metrics.Enabled = true
-	destination.Logs.Enabled = true
-	if got := destinationSignalNames(destination); !reflect.DeepEqual(got, []string{"metrics", "logs"}) {
-		t.Fatalf("destinationSignalNames() = %v, want [metrics logs]", got)
-	}
-}
-
-func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
-	var targetRequests atomic.Int64
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetRequests.Add(1)
-		if r.URL.Path != "/otel/traces" {
-			t.Errorf("collector path=%q", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer collector.Close()
-	var unrelatedRequests atomic.Int64
-	unrelated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		unrelatedRequests.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer unrelated.Close()
-
-	cfg := &config.Config{
-		Environment: "test",
-		Claw:        config.ClawConfig{Mode: config.ClawOpenClaw},
-		OTel: config.OTelConfig{
-			Enabled: true,
-			Traces:  config.OTelTracePolicyConfig{Sampler: "always_on", SamplerArg: "1.0"},
-			Batch: config.OTelBatchConfig{
-				MaxExportBatchSize: 16, ScheduledDelayMs: 10, MaxQueueSize: 32,
-			},
-			Destinations: []config.OTelDestinationConfig{{
-				Name: "galileo", Preset: "galileo", Enabled: true,
-				Protocol: "http", Endpoint: collector.URL,
-				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
-				SpanFilter: config.OTelSpanFilterConfig{Operations: []config.OTelSpanFilterOperationConfig{
-					{Name: "chat", RequireAttributes: []string{
-						"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
-						"gen_ai.input.messages", "gen_ai.output.messages",
-					}},
-					{Name: "invoke_agent", RequireAttributes: []string{
-						"gen_ai.operation.name", "gen_ai.agent.name",
-						"gen_ai.input.messages", "gen_ai.output.messages",
-					}},
-				}},
-			}, {
-				Name: "unrelated", Preset: "generic-otlp", Enabled: true,
-				Protocol: "http", Endpoint: unrelated.URL,
-				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
-			}},
-		},
-	}
-	provider, err := telemetry.NewProvider(context.Background(), cfg, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
-	api := &APIServer{otel: provider}
+func TestTelemetryCanaryPrefersGenerationOwnedRuntime(t *testing.T) {
+	emitter := &fakeRuntimeCanaryEmitter{result: observabilityruntime.TraceCanaryResult{
+		TraceID:      "0123456789abcdef0123456789abcdef",
+		Destination:  "otlp-primary",
+		Generation:   42,
+		Acknowledged: true,
+	}}
+	api := &APIServer{}
+	api.bindTelemetryCanaryRuntime(emitter)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
-		http.MethodPost, "/api/v1/telemetry/canary", strings.NewReader(`{"destination":"galileo"}`),
+		http.MethodPost, "/api/v1/telemetry/canary",
+		strings.NewReader(`{"destination":"otlp-primary"}`),
 	)
+
 	api.handleTelemetryCanary(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+
+	if recorder.Code != http.StatusOK || emitter.called.Load() != 1 ||
+		emitter.destination != "otlp-primary" {
+		t.Fatalf("status=%d called=%d destination=%q body=%s",
+			recorder.Code, emitter.called.Load(), emitter.destination, recorder.Body.String())
 	}
 	var payload struct {
-		TraceID      string                                `json:"trace_id"`
-		Acknowledged bool                                  `json:"acknowledged"`
-		Delivery     telemetry.DestinationDeliverySnapshot `json:"delivery"`
+		TraceID      string `json:"trace_id"`
+		Destination  string `json:"destination"`
+		Generation   uint64 `json:"generation"`
+		Acknowledged bool   `json:"acknowledged"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.Acknowledged || len(payload.TraceID) != 32 {
+	if payload.TraceID != emitter.result.TraceID || payload.Destination != "otlp-primary" ||
+		payload.Generation != 42 || !payload.Acknowledged {
 		t.Fatalf("payload=%+v", payload)
 	}
-	if payload.Delivery.Attempted != 2 || payload.Delivery.Delivered != 2 {
-		t.Fatalf("delivery=%+v want two acknowledged runtime spans", payload.Delivery)
-	}
-	if targetRequests.Load() == 0 || unrelatedRequests.Load() != 0 {
-		t.Fatalf(
-			"target requests=%d unrelated requests=%d; canary must be destination-scoped",
-			targetRequests.Load(), unrelatedRequests.Load(),
-		)
-	}
 }
 
-func TestReportSinksHealth_AllDisabledStillSurfacesEntries(t *testing.T) {
-	s := &Sidecar{
-		cfg: &config.Config{
-			AuditSinks: []config.AuditSink{
-				{
-					Name: "splunk-prod", Kind: config.SinkKindSplunkHEC, Enabled: false,
-					SplunkHEC: &config.SplunkHECSinkConfig{
-						Endpoint: "https://splunk.example.com:8088/services/collector/event",
-						Index:    "defenseclaw",
-					},
-				},
-				{
-					Name: "local-otlp-logs", Kind: config.SinkKindOTLPLogs, Enabled: false,
-					OTLPLogs: &config.OTLPLogsSinkConfig{
-						Endpoint: "127.0.0.1:4317", Protocol: "grpc",
-					},
-				},
-			},
-		},
-		health: NewSidecarHealth(),
-	}
-	s.reportSinksHealth()
-	snap := s.health.Snapshot()
-	if snap.Sinks.State != StateDisabled {
-		t.Fatalf("State = %q, want %q (all sinks disabled)",
-			snap.Sinks.State, StateDisabled)
-	}
-	summary, _ := snap.Sinks.Details["summary"].(string)
-	if !strings.Contains(summary, "0 of 2") {
-		t.Errorf("summary = %q, want it to report 0 of 2 enabled", summary)
-	}
-	// Per-sink scalar lines must be present so the CLI status row can
-	// render each configured (but disabled) sink.
-	sink1, _ := snap.Sinks.Details["sink_01"].(string)
-	if !strings.Contains(sink1, "splunk-prod") || !strings.Contains(sink1, "[disabled]") {
-		t.Errorf("sink_01 = %q, want 'splunk-prod ... [disabled]'", sink1)
-	}
-	sink2, _ := snap.Sinks.Details["sink_02"].(string)
-	if !strings.Contains(sink2, "local-otlp-logs") || !strings.Contains(sink2, "127.0.0.1:4317") {
-		t.Errorf("sink_02 = %q, want 'local-otlp-logs ... 127.0.0.1:4317'", sink2)
-	}
-}
-
-func TestReportSinksHealth_MixedEnabledDisabled(t *testing.T) {
-	s := &Sidecar{
-		cfg: &config.Config{
-			AuditSinks: []config.AuditSink{
-				{
-					Name: "splunk-prod", Kind: config.SinkKindSplunkHEC, Enabled: false,
-					SplunkHEC: &config.SplunkHECSinkConfig{
-						Endpoint: "https://splunk.example.com:8088/services/collector/event",
-					},
-				},
-				{
-					Name: "local-otlp-logs", Kind: config.SinkKindOTLPLogs, Enabled: true,
-					OTLPLogs: &config.OTLPLogsSinkConfig{
-						Endpoint: "127.0.0.1:4317", Protocol: "grpc",
-					},
-				},
-			},
-		},
-		health: NewSidecarHealth(),
-	}
-	s.reportSinksHealth()
-	snap := s.health.Snapshot()
-	if snap.Sinks.State != StateRunning {
-		t.Fatalf("State = %q, want %q (one sink enabled)",
-			snap.Sinks.State, StateRunning)
-	}
-	summary, _ := snap.Sinks.Details["summary"].(string)
-	if summary != "1 of 2 enabled" {
-		t.Errorf("summary = %q, want '1 of 2 enabled'", summary)
-	}
-	// Backward-compat structured fields still present for the
-	// /health JSON consumers (TUI / dashboards / external monitors).
-	if got, _ := snap.Sinks.Details["count"].(int); got != 1 {
-		t.Errorf("count = %v, want 1 (enabled count)", snap.Sinks.Details["count"])
-	}
-	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
-	if !ok || len(rows) != 2 {
-		t.Fatalf("sinks = %#v, want a 2-entry structured row slice",
-			snap.Sinks.Details["sinks"])
-	}
-	// Disabled sink row must still have ``enabled: false`` so JSON
-	// consumers can distinguish "not configured" from "configured
-	// but disabled" without losing context.
-	if rows[0]["enabled"] != false {
-		t.Errorf("rows[0].enabled = %v, want false", rows[0]["enabled"])
-	}
-	if rows[1]["enabled"] != true {
-		t.Errorf("rows[1].enabled = %v, want true", rows[1]["enabled"])
-	}
-}
-
-func TestReportSinksHealth_IncludesConnectorOverridesAndSuppression(t *testing.T) {
-	codexSinks := []config.AuditSink{
-		{
-			Name: "codex-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
-			OTLPLogs: &config.OTLPLogsSinkConfig{
-				Endpoint: "collector.example.test:4317", Protocol: "grpc",
-			},
-		},
-	}
-	claudeSinks := []config.AuditSink{}
-	s := &Sidecar{
-		cfg: &config.Config{
-			Observability: config.ObservabilityConfig{
-				Connectors: map[string]config.PerConnectorObservability{
-					"codex":      {AuditSinks: &codexSinks},
-					"claudecode": {AuditSinks: &claudeSinks},
-				},
-			},
-		},
-		health: NewSidecarHealth(),
-	}
-
-	s.reportSinksHealth()
-	snap := s.health.Snapshot()
-	if snap.Sinks.State != StateRunning {
-		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateRunning)
-	}
-	if got, _ := snap.Sinks.Details["summary"].(string); got != "1 of 2 enabled" {
-		t.Fatalf("summary = %q, want %q", got, "1 of 2 enabled")
-	}
-	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
-	if !ok || len(rows) != 2 {
-		t.Fatalf("sinks = %#v, want two connector-scoped rows", snap.Sinks.Details["sinks"])
-	}
-	if rows[0]["scope"] != "connector:claudecode" || rows[0]["suppressed"] != true {
-		t.Errorf("rows[0] = %#v, want claudecode suppression", rows[0])
-	}
-	if rows[1]["scope"] != "connector:codex" || rows[1]["name"] != "codex-otlp" {
-		t.Errorf("rows[1] = %#v, want codex OTLP sink", rows[1])
-	}
-}
-
-// ---------------------------------------------------------------------------
 // baseCommand and truncate tests (router helpers)
 // ---------------------------------------------------------------------------
 
@@ -4514,10 +4222,9 @@ func TestRouterAuditRedaction(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 
 	router := &EventRouter{
-		store:           store,
-		logger:          logger,
-		autoApprove:     true,
-		activeToolSpans: make(map[string][]*activeSpan),
+		store:       store,
+		logger:      logger,
+		autoApprove: true,
 	}
 
 	sensitiveArgs := `{"cmd":"curl -H 'Authorization: Bearer eyJhbGciOi...' https://api.example.com/secrets"}`
@@ -4580,19 +4287,21 @@ func TestRouterAuditRedaction(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleGuardrailEvent(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, capture := newGuardrailEventV8TestAPI(t)
+	ctx, spanContext := platformHealthCorrelatedContext(t)
 
 	body, _ := json.Marshal(guardrailEventRequest{
-		Direction: "prompt",
-		Model:     "gpt-4",
-		Action:    "allow",
-		Severity:  "NONE",
-		Reason:    "",
-		Findings:  []string{},
-		ElapsedMs: 1.5,
+		EvaluationID: "eval-basic",
+		Direction:    "prompt",
+		Model:        "gpt-4",
+		Action:       "allow",
+		Severity:     "NONE",
+		Reason:       "matched literal user@example.test",
+		Findings:     []string{},
+		ElapsedMs:    1.5,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	api.handleGuardrailEvent(w, req)
 
@@ -4606,33 +4315,43 @@ func TestHandleGuardrailEvent(t *testing.T) {
 		t.Errorf("response status = %q, want ok", resp["status"])
 	}
 
-	events, _ := store.ListEvents(10)
-	found := false
-	for _, e := range events {
-		if e.Action == "guardrail-verdict" {
-			found = true
-			if !strings.Contains(e.Details, "direction=prompt") {
-				t.Errorf("details missing direction: %s", e.Details)
-			}
-		}
+	rows := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(rows) != 1 || rows[0].Action != "guardrail-verdict" || rows[0].Mandatory != 0 ||
+		rows[0].Body["defenseclaw.evaluation.id"] != "eval-basic" ||
+		rows[0].Body["defenseclaw.guardrail.direction"] != "input" ||
+		rows[0].Body["gen_ai.request.model"] != "gpt-4" ||
+		rows[0].Body["defenseclaw.guardrail.reason"] != "matched literal user@example.test" {
+		t.Fatalf("generated guardrail event rows=%+v", rows)
 	}
-	if !found {
-		t.Error("expected guardrail-verdict audit event")
+	correlation := rows[0].Correlation
+	if correlation.TraceID != spanContext.TraceID().String() || correlation.SpanID != spanContext.SpanID().String() ||
+		correlation.RequestID != "request-platform" || correlation.SessionID != "session-platform" ||
+		correlation.TurnID != "turn-platform" || correlation.AgentID != "agent-platform" ||
+		correlation.PolicyID != "policy-platform" || correlation.ToolInvocationID != "tool-platform" ||
+		correlation.ConnectorID != "codex" || correlation.EvaluationID != "eval-basic" {
+		t.Fatalf("generated guardrail event correlation=%+v", correlation)
+	}
+	for _, metric := range capture.metricSnapshot() {
+		metricCorrelation := metric.CanonicalRecord().Correlation()
+		if metricCorrelation.TraceID != correlation.TraceID || metricCorrelation.SpanID != correlation.SpanID ||
+			metricCorrelation.EvaluationID != correlation.EvaluationID || metricCorrelation.ConnectorID != "codex" {
+			t.Fatalf("guardrail metric %s correlation=%+v", metric.Descriptor().Name, metricCorrelation)
+		}
 	}
 }
 
 func TestHandleGuardrailEventEmitsCanonicalIDs(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, capture := newGuardrailEventV8TestAPI(t)
 
 	body, _ := json.Marshal(guardrailEventRequest{
-		Direction: "prompt",
-		Model:     "gpt-4",
-		Action:    "block",
-		Severity:  "HIGH",
-		Reason:    "matched secrets",
-		Findings:  []string{"SEC-AWS-KEY:AWS access key", "ghp_abc123"},
-		ElapsedMs: 2.0,
+		EvaluationID: "eval-rules",
+		Direction:    "prompt",
+		Model:        "gpt-4",
+		Action:       "block",
+		Severity:     "HIGH",
+		Reason:       "matched secrets",
+		Findings:     []string{"SEC-AWS-KEY:AWS access key", "ghp_abc123"},
+		ElapsedMs:    2.0,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -4642,22 +4361,13 @@ func TestHandleGuardrailEventEmitsCanonicalIDs(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
 	}
 
-	events, _ := store.ListEvents(10)
-	var details string
-	for _, e := range events {
-		if e.Action == "guardrail-verdict" {
-			details = e.Details
-			break
-		}
+	rows := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(rows) != 1 {
+		t.Fatalf("generated guardrail event rows=%+v", rows)
 	}
-	if details == "" {
-		t.Fatal("expected guardrail-verdict audit event")
-	}
-	if !strings.Contains(details, "canonical=") {
-		t.Errorf("details missing canonical= field: %s", details)
-	}
-	if !strings.Contains(details, "SEC-AWS-KEY") {
-		t.Errorf("details missing SEC-AWS-KEY canonical id: %s", details)
+	rules, ok := rows[0].Body["defenseclaw.guardrail.rule_ids"].([]any)
+	if !ok || len(rules) == 0 || rules[0] != "SEC-AWS-KEY" {
+		t.Fatalf("generated canonical rule ids=%#v body=%v", rows[0].Body["defenseclaw.guardrail.rule_ids"], rows[0].Body)
 	}
 }
 
@@ -4678,7 +4388,7 @@ func TestHandleGuardrailEventMissingFields(t *testing.T) {
 	_, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), logger: logger}
 
-	body, _ := json.Marshal(guardrailEventRequest{Direction: "prompt"})
+	body, _ := json.Marshal(guardrailEventRequest{EvaluationID: "eval-missing", Direction: "prompt"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	api.handleGuardrailEvent(w, req)
@@ -4731,168 +4441,70 @@ func TestGuardrailInspector_SetScannerMode(t *testing.T) {
 // Guardrail event handler → OTel integration tests
 // ---------------------------------------------------------------------------
 
-func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	// v7 review finding H3: handleGuardrailEvent resolves the logical
-	// agent identity via SharedAgentRegistry().AgentID(). In
-	// production APIServer.Start() installs it; unit tests bypass
-	// Start() so we must seed it explicitly or gen_ai.agent.id on
-	// the token histogram will be "" and Splunk cost attribution
-	// breaks. InstallSharedAgentRegistry is idempotent and merges
-	// non-empty identity into any previously-installed (empty) shared
-	// registry, so this is safe even if earlier tests in the package
-	// already installed one.
+func TestHandleGuardrailEvent_GeneratedMetricsRecorded(t *testing.T) {
 	InstallSharedAgentRegistry("agent-h3-test", "openclaw")
-
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
-	api.SetOTelProvider(otelProvider)
-
-	tokIn := int64(250)
-	tokOut := int64(120)
+	api, capture := newGuardrailEventV8TestAPI(t)
+	tokIn, tokOut := int64(250), int64(120)
 	body, _ := json.Marshal(guardrailEventRequest{
-		Direction: "prompt",
-		Model:     "gpt-4",
-		Action:    "block",
-		Severity:  "HIGH",
-		Reason:    "malicious prompt injection detected",
-		Findings:  []string{"prompt-injection"},
-		ElapsedMs: 12.5,
-		TokensIn:  &tokIn,
-		TokensOut: &tokOut,
+		EvaluationID: "eval-metrics", Direction: "prompt", Model: "gpt-4", Action: "block",
+		Severity: "HIGH", Reason: "malicious prompt injection detected",
+		Findings: []string{"prompt-injection"}, ElapsedMs: 12.5,
+		TokensIn: &tokIn, TokensOut: &tokOut,
 	})
-
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	api.handleGuardrailEvent(w, req)
-
-	if w.Result().StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	metrics := capture.metricSnapshot()
+	evaluations := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawGuardrailEvaluations)
+	latencies := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawGuardrailLatency)
+	tokens := generatedMetricByName(metrics, observability.TelemetryInstrumentGenAIClientTokenUsage)
+	if len(evaluations) != 1 || len(latencies) != 1 || len(tokens) != 2 {
+		t.Fatalf("generated guardrail metric counts=%d/%d/%d", len(evaluations), len(latencies), len(tokens))
 	}
-
-	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
-	if evalMetric == nil {
-		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
-		return
+	if evaluations[0].Attributes()["defenseclaw.guardrail.effective_action"] != "block" ||
+		evaluations[0].Attributes()["defenseclaw.metric.guardrail.scanner"] != "guardrail-proxy" {
+		t.Fatalf("evaluation attributes=%v", evaluations[0].Attributes())
 	}
-	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", evalMetric.Data)
+	if value, ok := latencies[0].Value().Double(); !ok || value != 12.5 {
+		t.Fatalf("latency value=%v", latencies[0].Value())
 	}
-	blockVal := counterByAttr(evalSum, "guardrail.action_taken", "block")
-	if blockVal != 1 {
-		t.Errorf("guardrail evaluations block = %d, want 1", blockVal)
-	}
-
-	latencyMetric := findMetric(rm, "defenseclaw.guardrail.latency")
-	if latencyMetric == nil {
-		t.Fatal("expected defenseclaw.guardrail.latency metric")
-		return
-	}
-	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
-	if !ok {
-		t.Fatalf("expected Histogram[float64], got %T", latencyMetric.Data)
-	}
-	if len(latHist.DataPoints) == 0 {
-		t.Fatal("expected at least one histogram data point")
-	}
-	if latHist.DataPoints[0].Sum != 12.5 {
-		t.Errorf("latency sum = %f, want 12.5", latHist.DataPoints[0].Sum)
-	}
-
-	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
-	if tokenMetric == nil {
-		t.Fatal("expected gen_ai.client.token.usage metric")
-		return
-	}
-	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
-	if !ok {
-		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
-	}
-	var inputSum, outputSum float64
-	for _, dp := range tokenHist.DataPoints {
-		for _, attr := range dp.Attributes.ToSlice() {
-			if string(attr.Key) == "gen_ai.token.type" {
-				switch attr.Value.AsString() {
-				case "input":
-					inputSum += dp.Sum
-				case "output":
-					outputSum += dp.Sum
-				}
+	wantTokens := map[string]float64{"input": 250, "output": 120}
+	for _, metric := range tokens {
+		attributes := metric.Attributes()
+		tokenType, _ := attributes["gen_ai.token.type"].(string)
+		value, ok := metric.Value().Double()
+		if !ok || value != wantTokens[tokenType] ||
+			attributes["gen_ai.provider.name"] != "defenseclaw" ||
+			attributes["gen_ai.operation.name"] != "chat" ||
+			attributes["gen_ai.request.model"] != "gpt-4" {
+			t.Fatalf("token metric value/attributes=%v/%v", metric.Value(), attributes)
+		}
+		for _, key := range []string{"gen_ai.agent.id", "gen_ai.agent.name", "gen_ai.conversation.id"} {
+			if _, leaked := attributes[key]; leaked {
+				t.Fatalf("high-cardinality %q leaked into token attributes=%v", key, attributes)
 			}
 		}
 	}
-	if inputSum != 250 {
-		t.Errorf("input token sum = %v, want 250", inputSum)
-	}
-	if outputSum != 120 {
-		t.Errorf("output token sum = %v, want 120", outputSum)
-	}
-
-	// v7 review finding H3: gen_ai.agent.name and gen_ai.agent.id
-	// must land on the token histogram. Without these two
-	// dimensions Splunk cannot attribute spend to a specific agent
-	// (agent_name is the logical identity surfaced to operators;
-	// agent_id is the canonical id used for the registry / plugin
-	// protocol). Earlier versions of the test only asserted the
-	// token sums, so a regression that stopped plumbing agentID
-	// through RecordLLMTokens was invisible at the call-site level.
-	const wantAgentName = "openclaw"
-	var sawAgentName, sawAgentID bool
-	for _, dp := range tokenHist.DataPoints {
-		for _, attr := range dp.Attributes.ToSlice() {
-			switch string(attr.Key) {
-			case "gen_ai.agent.name":
-				if attr.Value.AsString() == wantAgentName {
-					sawAgentName = true
-				}
-			case "gen_ai.agent.id":
-				// Any non-empty agent.id satisfies the check — the
-				// shared registry produces a stable UUID we do not
-				// want to pin in the test.
-				if attr.Value.AsString() != "" {
-					sawAgentID = true
-				}
-			}
+	for _, metric := range metrics {
+		if metric.CanonicalRecord().Correlation().EvaluationID != "eval-metrics" {
+			t.Fatalf("metric %s correlation=%+v", metric.Descriptor().Name, metric.CanonicalRecord().Correlation())
 		}
-	}
-	if !sawAgentName {
-		t.Errorf("expected gen_ai.agent.name=%q on gen_ai.client.token.usage (review H3)", wantAgentName)
-	}
-	if !sawAgentID {
-		t.Error("expected non-empty gen_ai.agent.id on gen_ai.client.token.usage (review H3 — SharedAgentRegistry not propagated)")
 	}
 }
 
-func TestHandleGuardrailEvent_OTelNoTokensSkipsLLMMetric(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
-	api.SetOTelProvider(otelProvider)
-
+func TestHandleGuardrailEvent_GeneratedNoTokensSkipsTokenMetric(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
 	body, _ := json.Marshal(guardrailEventRequest{
-		Direction: "completion",
-		Model:     "claude-3",
-		Action:    "allow",
-		Severity:  "NONE",
-		ElapsedMs: 3.2,
+		EvaluationID: "eval-no-tokens",
+		Direction:    "completion",
+		Model:        "claude-3",
+		Action:       "allow",
+		Severity:     "NONE",
+		ElapsedMs:    3.2,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
@@ -4903,48 +4515,21 @@ func TestHandleGuardrailEvent_OTelNoTokensSkipsLLMMetric(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	metrics := capture.metricSnapshot()
+	if got := len(generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawGuardrailEvaluations)); got != 1 {
+		t.Fatalf("generated guardrail evaluations=%d, want 1", got)
 	}
-
-	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
-	if evalMetric == nil {
-		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
-		return
-	}
-
-	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
-	if tokenMetric != nil {
-		tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
-		if ok {
-			totalSum := 0.0
-			for _, dp := range tokenHist.DataPoints {
-				totalSum += dp.Sum
-			}
-			if totalSum != 0 {
-				t.Errorf("expected 0 token metrics when tokens_in/out are nil, got %v", totalSum)
-			}
-		}
+	if got := len(generatedMetricByName(metrics, observability.TelemetryInstrumentGenAIClientTokenUsage)); got != 0 {
+		t.Fatalf("generated token metrics=%d, want 0", got)
 	}
 }
 
-func TestHandleGuardrailEvent_OTelMultipleEvents(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
-	api.SetOTelProvider(otelProvider)
-
+func TestHandleGuardrailEvent_GeneratedMultipleEvents(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
 	events := []guardrailEventRequest{
-		{Direction: "prompt", Model: "gpt-4", Action: "allow", Severity: "NONE", ElapsedMs: 1.0},
-		{Direction: "prompt", Model: "gpt-4", Action: "block", Severity: "HIGH", ElapsedMs: 5.0},
-		{Direction: "completion", Model: "gpt-4", Action: "allow", Severity: "NONE", ElapsedMs: 2.0},
+		{EvaluationID: "eval-multi-1", Direction: "prompt", Model: "gpt-4", Action: "allow", Severity: "NONE", ElapsedMs: 1.0},
+		{EvaluationID: "eval-multi-2", Direction: "prompt", Model: "gpt-4", Action: "block", Severity: "HIGH", ElapsedMs: 5.0},
+		{EvaluationID: "eval-multi-3", Direction: "completion", Model: "gpt-4", Action: "allow", Severity: "NONE", ElapsedMs: 2.0},
 	}
 
 	for _, evt := range events {
@@ -4957,55 +4542,36 @@ func TestHandleGuardrailEvent_OTelMultipleEvents(t *testing.T) {
 		}
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	metrics := capture.metricSnapshot()
+	evaluations := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawGuardrailEvaluations)
+	latencies := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawGuardrailLatency)
+	if len(evaluations) != 3 || len(latencies) != 3 {
+		t.Fatalf("generated guardrail metric counts=%d/%d, want 3/3", len(evaluations), len(latencies))
 	}
-
-	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
-	if evalMetric == nil {
-		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
-		return
+	actions := map[string]int{}
+	for _, metric := range evaluations {
+		action, _ := metric.Attributes()["defenseclaw.guardrail.effective_action"].(string)
+		actions[action]++
 	}
-
-	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", evalMetric.Data)
+	if actions["allow"] != 2 || actions["block"] != 1 {
+		t.Fatalf("generated guardrail actions=%v, want allow=2 block=1", actions)
 	}
-
-	blockCount := counterByAttr(evalSum, "guardrail.action_taken", "block")
-	allowCount := counterByAttr(evalSum, "guardrail.action_taken", "allow")
-	if blockCount != 1 {
-		t.Errorf("block = %d, want 1", blockCount)
+	latencySum := 0.0
+	for _, metric := range latencies {
+		value, ok := metric.Value().Double()
+		if !ok {
+			t.Fatalf("generated latency is not double: %v", metric.Value())
+		}
+		latencySum += value
 	}
-	if allowCount != 2 {
-		t.Errorf("allow = %d, want 2", allowCount)
-	}
-
-	latencyMetric := findMetric(rm, "defenseclaw.guardrail.latency")
-	if latencyMetric == nil {
-		t.Fatal("expected defenseclaw.guardrail.latency metric")
-		return
-	}
-	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
-	if !ok {
-		t.Fatalf("expected Histogram[float64], got %T", latencyMetric.Data)
-	}
-	totalCount := uint64(0)
-	totalSum := 0.0
-	for _, dp := range latHist.DataPoints {
-		totalCount += dp.Count
-		totalSum += dp.Sum
-	}
-	if totalCount != 3 {
-		t.Errorf("latency count = %d, want 3", totalCount)
-	}
-	if totalSum != 8.0 {
-		t.Errorf("latency sum = %f, want 8.0", totalSum)
+	if latencySum != 8.0 {
+		t.Fatalf("generated latency sum=%f, want 8.0", latencySum)
 	}
 }
 
-// Metric collection helpers for gateway tests.
+// ---------------------------------------------------------------------------
+// Metric collection helpers shared by gateway tests that exercise legacy
+// compatibility readers. Live v8 producers use generatedMetricByName.
 
 func findMetric(rm metricdata.ResourceMetrics, name string) *metricdata.Metrics {
 	for _, sm := range rm.ScopeMetrics {
@@ -5033,14 +4599,14 @@ func counterByAttr(sum metricdata.Sum[int64], key, val string) int64 {
 // ---------------------------------------------------------------------------
 
 func TestHandleGuardrailEvaluate_Fallback(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, capture := newGuardrailEventV8TestAPI(t)
 
 	body, _ := json.Marshal(guardrailEvaluateRequest{
-		Direction:   "prompt",
-		Model:       "gpt-4",
-		Mode:        "action",
-		ScannerMode: "local",
+		EvaluationID: "eval-fallback",
+		Direction:    "prompt",
+		Model:        "gpt-4",
+		Mode:         "action",
+		ScannerMode:  "local",
 		LocalResult: &policy.GuardrailScanResult{
 			Action:   "block",
 			Severity: "HIGH",
@@ -5069,30 +4635,23 @@ func TestHandleGuardrailEvaluate_Fallback(t *testing.T) {
 		t.Errorf("severity = %q, want HIGH", resp.Severity)
 	}
 
-	events, _ := store.ListEvents(10)
-	found := false
-	for _, e := range events {
-		if e.Action == "guardrail-opa-verdict" {
-			found = true
-			if !strings.Contains(e.Details, "direction=prompt") {
-				t.Errorf("details missing direction: %s", e.Details)
-			}
-		}
-	}
-	if !found {
-		t.Error("expected guardrail-opa-verdict audit event")
+	rows := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(rows) != 1 || rows[0].Action != string(audit.ActionGuardrailOPAVerdict) ||
+		rows[0].Body["defenseclaw.evaluation.id"] != "eval-fallback" ||
+		rows[0].Body["defenseclaw.guardrail.direction"] != "input" {
+		t.Fatalf("generated OPA guardrail rows=%+v", rows)
 	}
 }
 
 func TestHandleGuardrailEvaluate_FallbackObserveMode(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, _ := newGuardrailEventV8TestAPI(t)
 
 	body, _ := json.Marshal(guardrailEvaluateRequest{
-		Direction:   "prompt",
-		Model:       "gpt-4",
-		Mode:        "observe",
-		ScannerMode: "local",
+		EvaluationID: "eval-observe",
+		Direction:    "prompt",
+		Model:        "gpt-4",
+		Mode:         "observe",
+		ScannerMode:  "local",
 		LocalResult: &policy.GuardrailScanResult{
 			Action:   "block",
 			Severity: "HIGH",
@@ -5123,14 +4682,14 @@ func TestHandleGuardrailEvaluate_FallbackObserveMode(t *testing.T) {
 }
 
 func TestHandleGuardrailEvaluate_CleanInput(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, _ := newGuardrailEventV8TestAPI(t)
 
 	body, _ := json.Marshal(guardrailEvaluateRequest{
-		Direction:   "prompt",
-		Model:       "gpt-4",
-		Mode:        "action",
-		ScannerMode: "local",
+		EvaluationID: "eval-clean",
+		Direction:    "prompt",
+		Model:        "gpt-4",
+		Mode:         "action",
+		ScannerMode:  "local",
 		LocalResult: &policy.GuardrailScanResult{
 			Action:   "allow",
 			Severity: "NONE",
@@ -5175,7 +4734,7 @@ func TestHandleGuardrailEvaluate_MissingFields(t *testing.T) {
 	_, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), logger: logger}
 
-	body, _ := json.Marshal(guardrailEvaluateRequest{Direction: "prompt"})
+	body, _ := json.Marshal(guardrailEvaluateRequest{EvaluationID: "eval-missing", Direction: "prompt"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	api.handleGuardrailEvaluate(w, req)
@@ -5198,14 +4757,14 @@ func TestHandleGuardrailEvaluate_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleGuardrailEvaluate_BothScanners(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+	api, _ := newGuardrailEventV8TestAPI(t)
 
 	body, _ := json.Marshal(guardrailEvaluateRequest{
-		Direction:   "prompt",
-		Model:       "claude-sonnet",
-		Mode:        "action",
-		ScannerMode: "both",
+		EvaluationID: "eval-both",
+		Direction:    "prompt",
+		Model:        "claude-sonnet",
+		Mode:         "action",
+		ScannerMode:  "both",
 		LocalResult: &policy.GuardrailScanResult{
 			Action:   "alert",
 			Severity: "MEDIUM",
@@ -6157,9 +5716,7 @@ func TestCSRFProtectKnownClientIdentities(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAPIMuxCSRFIntegration(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	health := NewSidecarHealth()
-	api := NewAPIServer(":0", health, nil, store, logger)
+	api, _ := newGuardrailEventV8TestAPI(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.handleHealth)
@@ -6197,7 +5754,7 @@ func TestAPIMuxCSRFIntegration(t *testing.T) {
 	})
 
 	t.Run("POST /v1/guardrail/event with all headers passes CSRF", func(t *testing.T) {
-		payload := `{"direction":"prompt","model":"gpt-4","action":"allow","severity":"NONE","reason":"","findings":[],"elapsed_ms":1.0}`
+		payload := `{"evaluation_id":"eval-csrf","direction":"prompt","model":"gpt-4","action":"allow","severity":"NONE","reason":"","findings":[],"elapsed_ms":1.0}`
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/guardrail/event", bytes.NewBufferString(payload))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", "guardrail-proxy")
@@ -6585,15 +6142,15 @@ func TestAPINetworkEgressHandlerRejectsInvalidBlockedFilter(t *testing.T) {
 }
 
 func TestAPINetworkEgressIngestDerivesAgentLifecycleCorrelation(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
+	store, logger := testStoreAndV8Logger(t)
 	meta := llmEventMeta{
 		Source: "codex", SessionID: "egress-session", AgentID: "egress-agent",
 		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
 	}
 	api := &APIServer{
 		store: store, logger: logger,
-		hookSessionTraces: map[string]hookSessionTrace{
-			hookSessionTraceKey(meta): {meta: meta},
+		hookSessionStates: map[string]hookSessionState{
+			hookSessionStateKey(meta): {meta: meta},
 		},
 	}
 	body := strings.NewReader(`{"hostname":"docs.example.com","policy_outcome":"allowed"}`)
@@ -6751,7 +6308,7 @@ func TestRunToolJudgeIgnoresPromptJudgeReentrancyFlag(t *testing.T) {
 
 func TestHandleToolCallQueuesJudgeWhenConcurrencyIsFull(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	router := NewEventRouter(nil, store, logger, true, nil)
+	router := NewEventRouter(nil, store, logger, true)
 
 	router.judgeSem = make(chan struct{}, 1)
 	router.judgeSem <- struct{}{}

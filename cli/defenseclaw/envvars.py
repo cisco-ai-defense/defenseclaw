@@ -90,11 +90,7 @@ ALLOWED_SECURITY_IMPACT = frozenset({"none", "low", "medium", "high"})
 # (internal/envvars/registry.go: isTruthy) so doctor and tests agree.
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# Special-case: DEFENSECLAW_SCHEMA_VALIDATION is "off" to disable (the
-# inverse pattern). Tracked explicitly to keep ``is_truthy`` clean.
-_DISABLE_BY_OFF = frozenset({"DEFENSECLAW_SCHEMA_VALIDATION"})
 _ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
-
 
 @dataclass(frozen=True)
 class Consumer:
@@ -120,23 +116,21 @@ class EnvVar:
     security_note: str = ""
     replacement_hint: str = ""
     deprecated: bool = False
+    migration_only: bool = False
 
     def is_active(self, env: dict[str, str] | None = None) -> bool:
         """Return True when this var is set to a value that activates the
         feature it controls.
 
-        For most opt-outs this means a truthy value (``1``/``true``/...).
-        ``DEFENSECLAW_SCHEMA_VALIDATION`` is inverted: setting it to
-        ``off`` (or any non-empty value other than ``on``) activates the
-        bypass. Empty or unset is always inactive.
+        For opt-outs this means a documented truthy value
+        (``1``/``true``/...). Empty, unset, and unrecognized values are
+        inactive.
         """
         environ = env if env is not None else os.environ
         raw = environ.get(self.name, "")
         v = raw.strip().lower()
         if not v:
             return False
-        if self.name in _DISABLE_BY_OFF:
-            return v != "on"
         if self.name in _ACTIVE_WHEN_NONEMPTY:
             return True
         return v in _TRUTHY
@@ -262,6 +256,39 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
             f"{path}: entry {name}: 'accepted_values' must be a list"
         )
 
+    boolean_fields = {
+        "deprecated": raw.get("deprecated", False),
+        "migration_only": raw.get("migration_only", False),
+        "surface_in_doctor": raw["surface_in_doctor"],
+    }
+    for field_name, value in boolean_fields.items():
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"{path}: entry {name}: {field_name} must be a boolean"
+            )
+    deprecated = boolean_fields["deprecated"]
+    migration_only = boolean_fields["migration_only"]
+    surface_in_doctor = boolean_fields["surface_in_doctor"]
+    if migration_only and not deprecated:
+        raise ValueError(
+            f"{path}: entry {name}: migration_only requires deprecated=true"
+        )
+    if migration_only and surface_in_doctor:
+        raise ValueError(
+            f"{path}: entry {name}: migration-only inputs cannot surface in doctor"
+        )
+    if (
+        deprecated
+        and category == CATEGORY_SECURITY_OPT_OUT
+        and impact == "high"
+        and not surface_in_doctor
+        and not migration_only
+    ):
+        raise ValueError(
+            f"{path}: entry {name}: deprecated high-impact opt-out must "
+            "surface in doctor or be migration_only"
+        )
+
     return EnvVar(
         name=name,
         category=category,
@@ -269,12 +296,13 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
         default=str(raw["default"]),
         accepted_values=tuple(str(v) for v in accepted),
         security_impact=impact,
-        surface_in_doctor=bool(raw["surface_in_doctor"]),
+        surface_in_doctor=surface_in_doctor,
         consumers=consumers,
         since=str(raw["since"]),
         security_note=str(raw.get("security_note", "")),
         replacement_hint=str(raw.get("replacement_hint", "")),
-        deprecated=bool(raw.get("deprecated", False)),
+        deprecated=deprecated,
+        migration_only=migration_only,
     )
 
 

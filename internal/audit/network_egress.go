@@ -19,14 +19,11 @@ package audit
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
-	"github.com/google/uuid"
 )
 
 // truncateUTF8 truncates s to at most maxBytes without splitting a UTF-8 code point.
@@ -158,16 +155,10 @@ func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
 	}
 }
 
-// LogNetworkEgress persists an outbound network call as a structured audit
-// row. For blocked calls it additionally:
-//   - writes a HIGH-severity entry to audit_events so the alert panel and
-//     /alerts endpoint surface it without a separate query;
-//   - forwards that alert to every configured audit sink;
-//   - mirrors that alert into the structured audit bridge so gateway.jsonl
-//     stays in sync with the SQLite/TUI alert surfaces;
-//   - emits an OTel alert counter.
-//
-// OTel audit-event counters are recorded for every call (allowed or blocked).
+// LogNetworkEgress persists the forensic network row and emits its canonical
+// generated v8 occurrence. The local event-history projection produced by the
+// runtime keeps alerts and existing queries compatible; remote routing,
+// redaction, logs, and metrics are owned exclusively by the v8 graph.
 func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -176,72 +167,23 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		e.Timestamp = time.Now().UTC()
 	}
 
-	// Snapshot the collaborator graph once at entry so a concurrent
-	// SetOTelProvider / SetSinks during shutdown cannot tear the
-	// interface reads below (L1 finding: writes to interface fields
-	// are two-word stores and are not atomic on most architectures).
-	sinksMgr, otel, structured := l.snapshot()
+	binding := l.runtimeV8BindingSnapshot()
+	if binding.emitter == nil {
+		return fmt.Errorf("audit: network egress v8 runtime is unavailable")
+	}
 
 	row := e.toRow()
 	if err := l.store.InsertNetworkEgressEvent(row); err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(ctx, "insert_network_egress")
-		}
 		return err
 	}
 
-	// Record OTel audit-event counter for every egress observation.
-	if otel != nil {
-		otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity())
-		otel.EmitNetworkEgressLog(ctx, telemetry.NetworkEgressLogAttrs{
-			SessionID: e.SessionID, Connector: e.Connector, AgentID: e.AgentID,
-			RootAgentID: e.RootAgentID, ParentAgentID: e.ParentAgentID, RootSessionID: e.RootSessionID,
-			LifecycleID: e.AgentLifecycleID, ExecutionID: e.AgentExecutionID, UserID: e.UserID,
-			ToolID: e.ToolID, Hostname: e.Hostname, HTTPMethod: e.HTTPMethod, Protocol: e.Protocol,
-			PolicyOutcome: e.PolicyOutcome, DecisionCode: e.DecisionCode, Blocked: e.Blocked,
-			Severity: e.effectiveSeverity(),
-		})
+	disposition, emitErr := l.emitNetworkEgressV8(ctx, e, row, binding)
+	if emitErr != nil {
+		return emitErr
 	}
-
-	if !e.Blocked {
-		return nil
+	if disposition == auditV8Unhandled {
+		return fmt.Errorf("audit: network egress has no canonical v8 family")
 	}
-
-	// Blocked call: raise an audit_events alert so the TUI and /alerts
-	// endpoint surface it without requiring a separate egress query.
-	redactedURL := row.URL
-	if len(redactedURL) > 200 {
-		redactedURL = truncateUTF8(redactedURL, 200)
-	}
-	alert := sanitizeEvent(Event{
-		ID:        uuid.New().String(),
-		Timestamp: e.Timestamp,
-		Action:    string(ActionNetworkEgressBlocked),
-		Target:    e.Hostname,
-		Actor:     "defenseclaw",
-		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
-			redactedURL, e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
-		Severity: "HIGH",
-		RunID:    currentRunID(),
-	})
-	if err := l.store.LogEvent(alert); err != nil {
-		// Non-fatal: the primary egress row is already persisted.
-		fmt.Fprintf(os.Stderr, "[audit] network egress: alert event write failed: %v\n", err)
-	} else {
-		// Mirror the same sink + structured-emitter contract used by the
-		// main Logger paths so blocked egress alerts land in downstream
-		// fan-out with stable IDs/correlation metadata.
-		l.forwardToSinksSnapshot(sinksMgr, alert)
-		l.emitStructuredSnapshot(structured, alert)
-	}
-
-	// Emit OTel alert counter.
-	if otel != nil {
-		// Egress enforcement is a gateway-global control, not attributable
-		// to one connector; record connector="unknown".
-		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy", "")
-	}
-
 	return nil
 }
 

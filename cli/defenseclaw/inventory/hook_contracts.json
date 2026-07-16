@@ -59,6 +59,13 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "native_otlp_auth": "path-token-loopback",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/otlp/codex/<scoped-token>/v1/<signal>",
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -92,7 +99,7 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v7",
           "hook_script": "claude-code-hook.sh",
           "hook_config_path_templates": [
             "~/.claude/settings.json"

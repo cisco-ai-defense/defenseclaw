@@ -834,7 +834,7 @@ All suppression patterns are compiled through a global LRU regex cache
 │  ├── Loads guardrail.* from config.yaml; reconciler hot-applies supported changes │
 │  ├── Health tracking: guardrail subsystem state                    │
 │  ├── REST API: POST /v1/guardrail/evaluate (optional HTTP OPA)      │
-│  └── OTel metrics: scanner attribution, latency, token counts      │
+│  └── Observability v8: correlated logs, spans, metrics, routing    │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -945,16 +945,17 @@ scripts/
 
 ## Per-Inspection Audit Events
 
-Every guardrail verdict is written to the SQLite audit store via two
-event types:
+Every terminal guardrail verdict is written once through the observability-v8
+router. SQLite receives the canonical `guardrail.evaluation.completed` local
+history projection before optional remote delivery:
 
 | Action | Trigger | Severity |
 |--------|---------|----------|
-| `guardrail-inspection` | `GuardrailProxy.recordTelemetry()` after inspection (`proxy.go`, `guardrail.go`) | From verdict |
-| `guardrail-opa-inspection` | `POST /v1/guardrail/evaluate` handler when that HTTP API is used (`api.go`) | From OPA output |
+| `guardrail-verdict` | `GuardrailProxy.recordTelemetry()` after inspection (`proxy.go`, `guardrail.go`) | From verdict |
+| `guardrail-opa-verdict` | `POST /v1/guardrail/evaluate` handler when that HTTP API is used (`api.go`) | From OPA output |
 
-These events are exportable via `defenseclaw-gateway audit export` and
-forwarded to Splunk when the SIEM adapter is enabled. Use the Python CLI's
+These canonical events are exportable through configured v8 destinations,
+including OTLP and Splunk HEC, with per-route redaction. Use the Python CLI's
 `defenseclaw alerts` command for the recent operator-facing findings view.
 
 ## Streaming Response Inspection

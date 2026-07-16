@@ -20,9 +20,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from click.testing import CliRunner
+from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.context import AppContext
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 
 class RotateTokenFileWriteTests(unittest.TestCase):
@@ -120,7 +122,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
 
         with TemporaryDirectory() as td:
             app = _make_rotate_ctx(td, ["claudecode", "codex"])
-            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+            with (
+                mock.patch.dict(os.environ, {}, clear=False),
+                mock.patch.object(cmd_setup, "_restart_services") as restart,
+            ):
                 result = CliRunner().invoke(
                     cmd_setup.rotate_token_cmd, ["--yes"], obj=app
                 )
@@ -133,6 +138,55 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 ["claudecode", "codex"],
             )
             # .env actually rotated on disk.
+            with open(os.path.join(td, ".env")) as fh:
+                self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", fh.read())
+
+    def test_rotation_audit_contains_metadata_but_never_token_material(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["claudecode", "codex"])
+            app.logger = mock.MagicMock()
+            events: list[str] = []
+            app.logger.log_action.side_effect = lambda *_args: events.append("audit")
+
+            def record_restart(*_args, **_kwargs) -> None:
+                self.assertEqual(os.environ.get("DEFENSECLAW_GATEWAY_TOKEN"), "a" * 64)
+                events.append("restart")
+
+            with (
+                mock.patch.dict(os.environ, {}, clear=False),
+                mock.patch.object(
+                    cmd_setup,
+                    "_restart_services",
+                    side_effect=record_restart,
+                ),
+                mock.patch.object(cmd_setup.secrets, "token_hex", return_value="a" * 64),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(events, ["restart", "audit"])
+            app.logger.log_action.assert_called_once_with(
+                ACTION_SETUP_GATEWAY,
+                "config",
+                "action=rotate-token active_connectors=2 restart=true",
+            )
+            self.assertNotIn("a" * 64, app.logger.log_action.call_args.args[2])
+
+    def test_default_rotation_attempts_restart_before_audit_failure(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            app.logger = mock.MagicMock()
+            app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+            with (
+                mock.patch.dict(os.environ, {}, clear=False),
+                mock.patch.object(cmd_setup, "_restart_services") as restart,
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            restart.assert_called_once()
             with open(os.path.join(td, ".env")) as fh:
                 self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", fh.read())
 
@@ -151,6 +205,21 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             # Token is still rotated even when the refresh is deferred.
             with open(os.path.join(td, ".env")) as fh:
                 self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", fh.read())
+
+    def test_no_restart_allows_explicit_offline_audit_staging(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            app.logger = mock.MagicMock()
+            app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd, ["--yes", "--no-restart"], obj=app
+                )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            restart.assert_not_called()
+            self.assertIn("canonical setup audit event was not recorded", result.output)
 
 
 if __name__ == "__main__":

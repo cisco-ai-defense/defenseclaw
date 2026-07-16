@@ -32,7 +32,7 @@ func TestEmitScanResult_RoundTripScanFindings(t *testing.T) {
 		}},
 		Duration: 5 * time.Millisecond,
 	}
-	scanID, err := scanner.EmitScanResult(context.Background(), nil, store, nil, r, scanner.AgentIdentity{AgentID: "a1"})
+	scanID, err := scanner.EmitScanResult(context.Background(), store, r, scanner.AgentIdentity{AgentID: "a1"})
 	if err != nil {
 		t.Fatal(err)
 	}

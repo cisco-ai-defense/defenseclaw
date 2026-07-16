@@ -32,7 +32,7 @@ The flags above explicitly set: connector, mode, and (optionally) rule pack. Eve
 | Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
 | Verify after setup | on | `--no-verify` |
 
 See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
@@ -50,7 +50,13 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-The proxy is in the data path but nothing blocks. Every prompt and response lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
+The proxy is in the data path but nothing blocks. Every collected prompt and
+response produces a projection in mandatory SQLite event history. On a fresh v8
+configuration, the effective local profile is `none`, so registered prompt,
+response, tool, path, and identifier fields can remain full fidelity. A global
+or bucket profile can redact the local projection; optional destinations receive
+their own selected projection. Run this for at least a week before promoting —
+see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
 
 </Tab>
 
@@ -102,6 +108,20 @@ Block MEDIUM and above, alert on LOW, and do not offer approval for findings tha
 </Tab>
 
 </Tabs>
+
+<Callout title="Treat local event history as sensitive data">
+The mandatory database is configured by `observability.local` (by default,
+`~/.defenseclaw/audit.db`) and retains 90 days on a fresh configuration. Set
+`observability.local.retention_days` to the reviewed retention period and limit
+host access to the DefenseClaw data directory. A global
+`observability.defaults.redaction_profile` or a bucket
+`redaction_profile` also governs SQLite; a destination or route profile governs
+only that export trust boundary. Verify the effective result with
+`defenseclaw config show --effective --section observability` and
+`defenseclaw observability plan`. See [Redaction](/docs/reference/redaction) for
+the resolution order and [Observability](/docs/observability#local-history-and-retention)
+for retention behavior.
+</Callout>
 
 #### Decision aids — should I turn this on?
 

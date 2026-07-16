@@ -37,6 +37,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _crash_bundle_rollback_result,
     _create_backup,
     _detect_platform,
+    _download_bootstrap_cosign,
     _download_checksums,
     _download_file,
     _download_gateway,
@@ -66,6 +67,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _poll_installed_health,
     _preflight_check,
     _preflight_installed_source_coherence,
+    _preflight_staged_target_controller_source,
     _preflight_target_wheel_migrations,
     _preflight_wheel_install,
     _prepare_hard_cut_rollback_plan,
@@ -75,12 +77,14 @@ from defenseclaw.commands.cmd_upgrade import (
     _release_download_base,
     _require_bridge_checksums_provenance,
     _require_hard_cut_dependency_contract,
+    _require_hard_cut_preexisting_jsonschema,
     _require_hard_cut_manifest_contract,
     _require_release_owned_hard_cut_handoff,
     _require_target_phase_two_mutator_wrapper,
     _restore_hard_cut_backup_root_contract,
     _restore_rollback_file,
     _restore_windows_rollback_file,
+    _resolve_upgrade_source_version,
     _RollbackFileSnapshot,
     _run_installed_local_observability_operation,
     _run_installed_migrations,
@@ -311,6 +315,126 @@ class TestUpgradeVersionValidation(unittest.TestCase):
             _normalize_target_version("../9.9.9")
         self.assertEqual(ctx.exception.code, 1)
 
+    def test_target_controller_source_override_requires_complete_exact_handoff(self):
+        legacy_environment = {
+            "DEFENSECLAW_STAGED_UPGRADE": "1",
+            "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
+            "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": "/private/custody",
+        }
+        with patch.dict(os.environ, legacy_environment, clear=True):
+            self.assertEqual(
+                _resolve_upgrade_source_version(
+                    "0.8.5",
+                    "0.8.5",
+                    target_was_explicit=True,
+                ),
+                "0.8.5",
+            )
+
+        exact_environment = {
+            **legacy_environment,
+            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
+        }
+        with patch.dict(os.environ, exact_environment, clear=True):
+            self.assertEqual(
+                _resolve_upgrade_source_version(
+                    "0.8.5",
+                    "0.8.5",
+                    target_was_explicit=True,
+                ),
+                "0.8.4",
+            )
+
+        invalid_cases = (
+            ({**exact_environment, "DEFENSECLAW_STAGED_UPGRADE": "0"}, True, "0.8.5"),
+            (
+                {
+                    **exact_environment,
+                    "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.6",
+                },
+                True,
+                "0.8.5",
+            ),
+            (
+                {
+                    **exact_environment,
+                    "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.3",
+                },
+                True,
+                "0.8.5",
+            ),
+            (
+                {
+                    **exact_environment,
+                    "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": "relative/custody",
+                },
+                True,
+                "0.8.5",
+            ),
+            (exact_environment, False, "0.8.5"),
+            (exact_environment, True, "0.8.6"),
+        )
+        for environment, target_was_explicit, target_version in invalid_cases:
+            with self.subTest(environment=environment, target=target_version), patch.dict(
+                os.environ, environment, clear=True
+            ):
+                with self.assertRaises(SystemExit):
+                    _resolve_upgrade_source_version(
+                        "0.8.5",
+                        target_version,
+                        target_was_explicit=target_was_explicit,
+                    )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX target-controller custody")
+    def test_target_controller_source_preflight_proves_private_controller_and_bridge(self):
+        with TemporaryDirectory() as root:
+            root_path = Path(root)
+            home = root_path / "home"
+            recovery_home = home / ".defenseclaw-recovery"
+            installed_venv = recovery_home / ".venv"
+            installed_cli = installed_venv / "bin" / "defenseclaw"
+            launcher = home / ".local" / "bin" / "defenseclaw"
+            target_venv = root_path / "target-controller-venv"
+            staged = root_path / "bridge-handoff"
+            installed_cli.parent.mkdir(parents=True)
+            launcher.parent.mkdir(parents=True)
+            target_venv.mkdir(mode=0o700)
+            staged.mkdir(mode=0o700)
+            installed_cli.write_text(
+                "#!/bin/sh\necho 'DefenseClaw 0.8.4'\n",
+                encoding="utf-8",
+            )
+            installed_cli.chmod(0o755)
+            launcher.symlink_to(installed_cli)
+            environment = {
+                "HOME": str(home),
+                "DEFENSECLAW_STAGED_UPGRADE": "1",
+                "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
+                "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": str(staged),
+                "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
+            }
+
+            with patch.dict(os.environ, environment, clear=True), patch.object(
+                cmd_upgrade_module.sys, "prefix", str(target_venv)
+            ):
+                _preflight_staged_target_controller_source(
+                    source_version="0.8.4",
+                    controller_version="0.8.5",
+                    target_version="0.8.5",
+                    recovery_home=str(recovery_home),
+                )
+
+            with patch.dict(os.environ, environment, clear=True), patch.object(
+                cmd_upgrade_module.sys, "prefix", str(installed_venv)
+            ):
+                with self.assertRaises(SystemExit):
+                    _preflight_staged_target_controller_source(
+                        source_version="0.8.4",
+                        controller_version="0.8.5",
+                        target_version="0.8.5",
+                        recovery_home=str(recovery_home),
+                    )
+
     def test_hard_cut_accepts_coherent_bridge_self_custody_or_complete_resolver_handoff(self):
         provenance = Mock(release_version="0.8.5", bridge_version="0.8.4")
         with patch.dict(os.environ, {}, clear=True):
@@ -326,6 +450,7 @@ class TestUpgradeVersionValidation(unittest.TestCase):
                 "DEFENSECLAW_STAGED_UPGRADE": "1",
                 "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
                 "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": "/private/custody",
+                "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
             },
             clear=True,
         ):
@@ -419,7 +544,7 @@ class TestGatewayQuiescence(unittest.TestCase):
             ["/trusted/defenseclaw-gateway", "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=20,
             check=False,
             env={**os.environ, "DEFENSECLAW_HOME": os.path.abspath(data_dir)},
         )
@@ -467,7 +592,7 @@ class TestGatewayQuiescence(unittest.TestCase):
                 patch(
                     "defenseclaw.commands.cmd_upgrade.subprocess.run",
                     return_value=Mock(returncode=0),
-                ),
+                ) as run,
                 patch(
                     "defenseclaw.process_liveness.read_pid_file",
                     return_value=1234,
@@ -481,6 +606,7 @@ class TestGatewayQuiescence(unittest.TestCase):
                         data_dir,
                     )
                 )
+                self.assertEqual(run.call_args.kwargs["timeout"], 20)
 
 
 class TestUpgradeBackup(unittest.TestCase):
@@ -1137,15 +1263,41 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             ):
                 _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
 
-    def test_staged_modern_bridge_requires_cosign_and_exact_workflow_identity(self):
+    def test_staged_modern_bridge_bootstraps_cosign_and_uses_exact_workflow_identity(self):
         with TemporaryDirectory() as root:
             self._prepare_plan(root)
             staged = os.path.join(root, "staged-handoff")
             with (
                 patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
-                self.assertRaisesRegex(OSError, "requires cosign"),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    return_value="/tmp/authenticated-cosign",
+                ) as bootstrap,
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                    return_value=Mock(returncode=0),
+                ) as bootstrap_run,
             ):
-                _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
+                _validate_staged_bridge_artifact_set(
+                    staged, "0.8.4", "linux", "amd64"
+                )
+
+            bootstrap.assert_called_once()
+            self.assertEqual(
+                bootstrap_run.call_args.args[0][0], "/tmp/authenticated-cosign"
+            )
+
+            with (
+                patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    side_effect=OSError("digest mismatch"),
+                ),
+                self.assertRaisesRegex(OSError, "signature verification failed"),
+            ):
+                _validate_staged_bridge_artifact_set(
+                    staged, "0.8.4", "linux", "amd64"
+                )
 
             with (
                 patch(
@@ -2696,18 +2848,24 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(args[-1], "/tmp/defenseclaw-0.8.5.whl")
 
     def test_hard_cut_requires_exact_authenticated_dependency_contract(self):
-        def write_wheel(path: Path, version: str, requirement: str) -> None:
+        def write_wheel(path: Path, version: str, requirements: list[str]) -> None:
+            metadata = f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n"
+            metadata += "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements)
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr(
                     f"defenseclaw-{version}.dist-info/METADATA",
-                    f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\nRequires-Dist: {requirement}\n",
+                    metadata,
                 )
 
         with TemporaryDirectory() as root:
             source = Path(root, "source.whl")
             target = Path(root, "target.whl")
-            write_wheel(source, "0.8.4", "requests>=2.32")
-            write_wheel(target, "0.8.5", "requests>=2.32")
+            write_wheel(source, "0.8.4", ["requests>=2.32"])
+            write_wheel(
+                target,
+                "0.8.5",
+                ["requests>=2.32", "jsonschema<5,>=4.23.0"],
+            )
             _require_hard_cut_dependency_contract(
                 str(source),
                 str(target),
@@ -2715,7 +2873,11 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                 target_version="0.8.5",
             )
 
-            write_wheel(target, "0.8.5", "requests>=2.33")
+            write_wheel(
+                target,
+                "0.8.5",
+                ["requests>=2.33", "jsonschema<5,>=4.23.0"],
+            )
             with self.assertRaisesRegex(ValueError, "Requires-Dist differs"):
                 _require_hard_cut_dependency_contract(
                     str(source),
@@ -2723,6 +2885,16 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                     source_version="0.8.4",
                     target_version="0.8.5",
                 )
+
+    def test_hard_cut_requires_preexisting_jsonschema_in_bridge_venv(self):
+        with patch("subprocess.run", return_value=Mock(returncode=0)) as run_mock:
+            _require_hard_cut_preexisting_jsonschema("/managed/bridge/bin/python")
+
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[:3], ["/managed/bridge/bin/python", "-I", "-c"])
+        self.assertIn("Draft202012Validator", args[3])
+        self.assertTrue(run_mock.call_args.kwargs["check"])
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 10)
 
     def test_restored_bridge_verifies_exact_package_metadata(self):
         with TemporaryDirectory() as root:
@@ -4149,6 +4321,78 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
         self.assertIn("Run manually: openclaw gateway restart", result.output)
 
 
+class TestCosignBootstrap(unittest.TestCase):
+    def test_downloads_pinned_verifier_into_private_temporary_custody(self):
+        payload = b"authenticated temporary cosign"
+        response = Mock(
+            status_code=200,
+            headers={"content-length": str(len(payload))},
+        )
+        response.iter_content.return_value = [payload]
+        expected = hashlib.sha256(payload).hexdigest()
+
+        with (
+            TemporaryDirectory() as root,
+            patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("linux", "amd64"),
+            ),
+            patch.dict(
+                cmd_upgrade_module._COSIGN_BOOTSTRAP_SHA256,
+                {("linux", "amd64"): expected},
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.requests.get",
+                return_value=response,
+            ) as get_mock,
+        ):
+            os.chmod(root, 0o700)
+            real_chmod = os.chmod
+
+            def linux_compatible_chmod(path, mode):
+                # Linux rejects chmod(..., follow_symlinks=False).  Keep the
+                # bootstrap test portable even when it runs on Darwin.
+                return real_chmod(path, mode)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.chmod",
+                side_effect=linux_compatible_chmod,
+            ) as chmod_mock:
+                verifier = _download_bootstrap_cosign(root)
+            info = os.lstat(verifier)
+            self.assertEqual(Path(verifier).read_bytes(), payload)
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+            self.assertEqual(info.st_uid, os.getuid())
+            self.assertEqual(info.st_nlink, 1)
+            self.assertEqual(chmod_mock.call_args.kwargs, {})
+
+        get_mock.assert_called_once()
+        self.assertFalse(get_mock.call_args.kwargs["allow_redirects"])
+
+    def test_rejects_redirect_outside_pinned_github_host_set_before_following(self):
+        response = Mock(
+            status_code=302,
+            headers={"location": "https://attacker.invalid/cosign"},
+        )
+        with (
+            TemporaryDirectory() as root,
+            patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("linux", "amd64"),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.requests.get",
+                return_value=response,
+            ) as get_mock,
+            self.assertRaisesRegex(OSError, "pinned HTTPS host set"),
+        ):
+            os.chmod(root, 0o700)
+            _download_bootstrap_cosign(root)
+
+        get_mock.assert_called_once()
+
+
 class TestChecksumVerification(unittest.TestCase):
     """Supply-chain: every artifact must match a published checksum or be
     refused. A successful checksum is silent; a mismatch aborts; an
@@ -4411,7 +4655,7 @@ class TestChecksumVerification(unittest.TestCase):
 
         run_mock.assert_not_called()
 
-    def test_modern_checksums_require_cosign_even_with_unsafe_override(self):
+    def test_modern_checksums_bootstrap_failure_is_fatal_even_with_unsafe_override(self):
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -4426,6 +4670,10 @@ class TestChecksumVerification(unittest.TestCase):
                     side_effect=[sig, cert],
                 ),
                 patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_bootstrap_cosign",
+                    side_effect=OSError("digest mismatch"),
+                ),
                 patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run_mock,
                 self.assertRaises(SystemExit) as raised,
             ):
@@ -4676,7 +4924,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "0.6.6",
                 "0.4.0",
             ],
-            "platform_tested_source_versions": {"windows": ["0.8.4", "0.8.3", "0.8.2", "0.8.0"]},
+            "platform_tested_source_versions": {"windows": []},
             "release_artifacts": _expected_release_artifacts("0.8.5"),
         }
         payload.update(overrides)
@@ -4690,6 +4938,7 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertEqual(manifest["auto_bridge_from"], ["0.8.3", "0.8.2", "0.7.2"])
         self.assertEqual(manifest["min_upgrade_protocol"], 2)
         self.assertEqual(manifest["controller_upgrade_protocol"], 2)
+        self.assertEqual(manifest["platform_tested_source_versions"], {"windows": []})
         _require_hard_cut_manifest_contract(manifest, target_version="0.8.5", required=True)
 
     def test_hard_cut_contract_is_mandatory_even_with_unsafe_override(self):
@@ -4823,6 +5072,9 @@ class TestUpgradeManifest(unittest.TestCase):
             self._hard_cut_manifest(auto_bridge_from=["0.8.3", "0.8.3"]),
             self._hard_cut_manifest(auto_bridge_from=["0.8.4"]),
             self._hard_cut_manifest(minimum_source_version="0.9.0", required_bridge_version="0.9.0"),
+            self._hard_cut_manifest(
+                platform_tested_source_versions={"windows": ["0.8.3"]}
+            ),
         ]
         partial = self._hard_cut_manifest()
         del partial["required_bridge_version"]
@@ -4833,6 +5085,27 @@ class TestUpgradeManifest(unittest.TestCase):
                 _validate_upgrade_manifest(payload, "0.8.5")
             self.assertEqual(raised.exception.code, 1)
 
+    def test_validate_rejects_protocol_one_schema_two_manifest_without_bridge(self):
+        runner = CliRunner()
+        payload = self._hard_cut_manifest(min_upgrade_protocol=1)
+        for key in (
+            "minimum_source_version",
+            "required_bridge_version",
+            "auto_bridge_from",
+        ):
+            payload.pop(key)
+
+        with runner.isolation() as (out, _err, _):
+            with self.assertRaises(SystemExit) as raised:
+                _validate_upgrade_manifest(payload, "0.8.5")
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(
+            "hard-cut releases require upgrade protocol 2 and a complete bridge contract",
+            output,
+        )
+
     def test_bridge_source_can_proceed(self):
         _enforce_upgrade_source_contract(
             _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5"),
@@ -4840,6 +5113,26 @@ class TestUpgradeManifest(unittest.TestCase):
             target_version="0.8.5",
             explicit_target=True,
         )
+
+    def test_windows_hard_cut_without_published_bridge_fails_closed(self):
+        runner = CliRunner()
+        manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
+
+        with runner.isolation() as (out, _err, _):
+            with self.assertRaises(SystemExit) as raised:
+                _enforce_upgrade_source_contract(
+                    manifest,
+                    source_version="0.8.3",
+                    target_version="0.8.5",
+                    explicit_target=False,
+                    os_name="windows",
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Windows upgrades to 0.8.5 are unsupported", output)
+        self.assertIn("Required bridge 0.8.4 was not published for Windows", output)
+        self.assertIn("No changes were made", output)
 
     def test_explicit_hard_cut_from_supported_old_source_has_exact_bridge_guidance(self):
         runner = CliRunner()
@@ -5217,9 +5510,13 @@ class TestUpgradeManifest(unittest.TestCase):
             "schema_version": 2,
             "runtime_config_version": 8,
             "release_version": "9.9.9",
-            "min_upgrade_protocol": 1,
+            "min_upgrade_protocol": 2,
+            "controller_upgrade_protocol": 2,
             "migration_failure_policy": "fail",
             "required_cli_migrations": ["9.9.9"],
+            "minimum_source_version": "0.8.4",
+            "required_bridge_version": "0.8.4",
+            "auto_bridge_from": [],
             "tested_source_versions": ["0.8.4"],
             "platform_tested_source_versions": {"windows": ["0.8.4"]},
             "release_artifacts": _expected_release_artifacts("9.9.9"),

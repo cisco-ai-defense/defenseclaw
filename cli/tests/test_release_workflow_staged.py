@@ -156,6 +156,7 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
         "macos-upgrade",
         "historical-baseline-canary",
         "windows-upgrade",
+        "windows-unpublished-refusal",
         "live-continuity",
     }
     assert publish["environment"] == "release"
@@ -179,6 +180,7 @@ def test_windows_release_binaries_are_disabled_and_omitted() -> None:
         "linux-upgrade",
         "macos-upgrade",
         "historical-baseline-canary",
+        "windows-unpublished-refusal",
         "live-continuity",
     ):
         assert f"needs.{required}.result == 'success'" in publish_condition
@@ -225,6 +227,7 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         "macos-upgrade",
         "historical-baseline-canary",
         "windows-upgrade",
+        "windows-unpublished-refusal",
         "posix-fresh-install",
         "windows-fresh-install",
         "live-continuity",
@@ -233,6 +236,27 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         rendered = str(jobs[name])
         assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
         assert "scripts/release_candidate.py verify" in rendered
+
+
+def test_unpublished_windows_runtime_requires_sealed_native_refusal() -> None:
+    jobs = _workflow()["jobs"]
+    job = jobs["windows-unpublished-refusal"]
+    rendered = str(job)
+
+    assert job["runs-on"] == "windows-latest"
+    assert job["if"] == (
+        "${{ needs.assemble-release-candidate.outputs."
+        "windows_prebridge_baselines == '[]' }}"
+    )
+    assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
+    assert "scripts/release_candidate.py verify" in rendered
+    assert "cosign verify-blob" in rendered
+    assert "scripts/test-upgrade-release-windows.ps1" in rendered
+    assert "-UnpublishedWindowsRefusalOnly" in rendered
+    assert (
+        "needs.windows-unpublished-refusal.result == 'success'"
+        in jobs["publish-release"]["if"]
+    )
 
 
 def test_release_certificate_is_canonicalized_and_authenticated_before_seal() -> None:
@@ -285,6 +309,30 @@ def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal(
     for rendered in (posix, windows):
         assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
         assert "scripts/release_candidate.py verify" in rendered
+
+
+def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None:
+    text = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
+    installer = POSIX_INSTALLER.read_text(encoding="utf-8")
+
+    # The primary install must not inherit the Cosign installed on the runner.
+    assert 'EXTERNAL_COSIGN="$(command -v cosign)"' in text
+    assert 'readonly BOOTSTRAP_PATH="${BOOTSTRAP_HOME}/.local/bin:${BASE_TOOL_PATH}"' in text
+    assert 'PATH="${BOOTSTRAP_PATH}" command -v cosign' in text
+    assert '$(dirname "$(command -v cosign)")' not in text
+    assert 'Cosign was not found; authenticating temporary Cosign 2.6.3' in text
+    assert 'mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy.XXXXXX"' in installer
+    assert "assert_bootstrap_retired_privately" in text
+    assert 'not retired into bounded custody' in text
+    assert 'BOOTSTRAP_HOME}/.local/bin/cosign' in text
+
+    # A second isolated installation must still exercise an explicit external
+    # verifier and prove the installer did not mutate or replace that binary.
+    assert 'EXTERNAL_TOOL_BIN}/cosign' in text
+    assert 'external Cosign wrapper was not invoked' in text
+    assert 'external-Cosign case unexpectedly used the bootstrap verifier' in text
+    assert '$(sha256_file "${EXTERNAL_COSIGN}")' in text
+    assert 'the ambient Cosign binary changed during fresh-install testing' in text
 
 
 def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
@@ -378,8 +426,11 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "runtime_config_version does not attest the expected bridge/hard-cut runtime" in text
     assert "required bridge is absent from the signed Windows matrix" in text
     assert "signed Windows matrix has no pre-bridge source" in text
+    assert "unpublished Windows bridge requires an empty signed Windows matrix" in text
     assert "windows_prebridge_baselines" in text
     assert "CurrentConfigVersion" in text
+    assert "ObservabilityV8ConfigVersion" in text
+    assert "compatibility ceiling" in text
     for name in ("linux-upgrade", "macos-upgrade"):
         assert jobs[name]["strategy"]["matrix"]["baseline"] == (
             "${{ fromJSON(needs.release-preflight.outputs.baselines) }}"
@@ -393,9 +444,17 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "required_bridge_version" in text
     assert "min_upgrade_protocol" in text
     assert "auto_bridge_from does not match the reviewed pre-bridge matrix" in text
-    assert "Require immutable published bridge" in text
-    assert 'release.get("isImmutable") is not True' in text
-    assert "published_asset_names(expected, status)" in text
+    assert "Resolve immutable published bridge provenance" in text
+    assert '"isImmutable": True' in text
+    assert "omit_windows_binaries = expected not in windows_baselines" in text
+    assert "omit_windows_binaries=omit_windows_binaries" in text
+    assert "payload_asset_names(expected, status)" in text
+    assert "set(windows_release_binary_names(expected))" in text
+    assert "if name in omitted_windows" in text
+    assert "if name in assets" in text
+    assert "cosign verify-blob" in text
+    assert '--source-tree "$SOURCE_TREE"' in text
+    assert '--bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"' in text
     assert not re.search(r"\b0\.8\.[45]\b", text)
 
 
@@ -652,11 +711,12 @@ def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() ->
     assert completed.stdout.strip() == "0.8.3|seed|1"
 
 
-def test_posix_fresh_release_uses_physical_temp_home_and_surfaces_installer_log() -> None:
+def test_posix_fresh_release_uses_physical_temp_homes_and_surfaces_installer_logs() -> None:
     source = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
 
     workdir = source.index('WORKDIR="$(mktemp -d')
     canonical = source.index('WORKDIR="$(cd "${WORKDIR}" && pwd -P)"')
-    home = source.index('export HOME="${WORKDIR}/home"')
+    home = source.index('BOOTSTRAP_HOME="${WORKDIR}/bootstrap/home"')
     assert workdir < canonical < home
-    assert 'cat "${WORKDIR}/install.log" >&2' in source
+    assert 'cat "${WORKDIR}/bootstrap-install.log" >&2' in source
+    assert 'cat "${WORKDIR}/external-install.log" >&2' in source

@@ -106,7 +106,11 @@ func processStartIdentity(pid int) (string, error) {
 	return strconv.FormatInt(creation.Nanoseconds(), 10), nil
 }
 
-// killStaleProcesses is a no-op on Windows. pgrep is not available and
-// process group semantics differ; stale process cleanup relies on the
-// PID file only.
-func (d *Daemon) killStaleProcesses() {}
+// killStaleProcesses cannot discover untracked processes on Windows because
+// pgrep and Unix process identity metadata are unavailable. It still performs
+// the same identity-file preflight as Unix so malformed or unreadable state
+// cannot authorize launching another child.
+func (d *Daemon) killStaleProcesses() error {
+	_, _, err := d.protectedDaemonPIDs()
+	return err
+}

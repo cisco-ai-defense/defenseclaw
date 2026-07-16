@@ -498,19 +498,182 @@ jobs:
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
+      - name: Resolve immutable published bridge provenance
+        id: bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRIDGE_VERSION="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("candidate-input/runtime/upgrade-manifest.json").read_text(encoding="utf-8")
+          )
+          bridge = manifest.get("required_bridge_version", "")
+          if not isinstance(bridge, str):
+              raise SystemExit("required_bridge_version must be a string")
+          print(bridge)
+          PY
+          )"
+          echo "version=$BRIDGE_VERSION" >> "$GITHUB_OUTPUT"
+          if [[ -z "$BRIDGE_VERSION" ]]; then
+            echo "Candidate does not require a published bridge."
+            exit 0
+          fi
+
+          git fetch --force --no-tags origin \
+            "refs/tags/$BRIDGE_VERSION:refs/tags/$BRIDGE_VERSION"
+          BRIDGE_COMMIT="$(git rev-parse "refs/tags/$BRIDGE_VERSION^{commit}")"
+          BRIDGE_TREE="$(git show -s --format=%T "$BRIDGE_COMMIT")"
+          gh release view "$BRIDGE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,isImmutable,assets \
+            > published-bridge.json
+          mkdir -p candidate-input/bridge
+          gh release download "$BRIDGE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir candidate-input/bridge \
+            --pattern checksums.txt \
+            --pattern checksums.txt.pem \
+            --pattern checksums.txt.sig
+
+          python3 - "$BRIDGE_VERSION" published-bridge.json candidate-input/bridge \
+            release/upgrade-baselines.json <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          from scripts.release_candidate import (
+              MACOS_VERIFICATION_STATUSES,
+              _parse_checksums,
+              payload_asset_names,
+              published_asset_names,
+              windows_release_binary_names,
+          )
+
+          expected, release_path, assets_path, baseline_policy_path = sys.argv[1:]
+          release = json.loads(Path(release_path).read_text(encoding="utf-8"))
+          baseline_policy = json.loads(
+              Path(baseline_policy_path).read_text(encoding="utf-8")
+          )
+          platform_baselines = baseline_policy.get("platform_published_baselines")
+          if not isinstance(platform_baselines, dict) or set(platform_baselines) != {"windows"}:
+              raise SystemExit("bridge platform baseline policy must contain exactly windows")
+          windows_baselines = platform_baselines["windows"]
+          if (
+              not isinstance(windows_baselines, list)
+              or any(not isinstance(item, str) for item in windows_baselines)
+              or len(windows_baselines) != len(set(windows_baselines))
+          ):
+              raise SystemExit("bridge Windows baseline policy is invalid")
+          omit_windows_binaries = expected not in windows_baselines
+          expected_state = {
+              "tagName": expected,
+              "isDraft": False,
+              "isPrerelease": False,
+              "isImmutable": True,
+          }
+          for name, value in expected_state.items():
+              if release.get(name) != value or type(release.get(name)) is not type(value):
+                  raise SystemExit(f"required bridge release state mismatch: {name}")
+          rows = release.get("assets")
+          if not isinstance(rows, list):
+              raise SystemExit("required bridge assets must be a list")
+          assets = {}
+          for row in rows:
+              if not isinstance(row, dict):
+                  raise SystemExit("required bridge contains an invalid asset row")
+              name = row.get("name")
+              digest = row.get("digest")
+              if not isinstance(name, str) or name in assets:
+                  raise SystemExit("required bridge contains an invalid or duplicate asset name")
+              if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                  raise SystemExit(f"required bridge lacks a SHA-256 digest for {name!r}")
+              assets[name] = digest.removeprefix("sha256:")
+          names = set(assets)
+          variants = {
+              status: set(
+                  published_asset_names(
+                      expected,
+                      status,
+                      omit_windows_binaries=omit_windows_binaries,
+                  )
+              )
+              for status in MACOS_VERIFICATION_STATUSES
+          }
+          matches = [status for status, required in variants.items() if names == required]
+          if len(matches) != 1:
+              raise SystemExit("required bridge does not match one complete reviewed asset set")
+          status = matches[0]
+          root = Path(assets_path)
+          checksums = _parse_checksums(root / "checksums.txt")
+          if tuple(sorted(checksums)) != payload_asset_names(expected, status):
+              raise SystemExit("required bridge checksums do not cover the exact payload")
+          omitted_windows = (
+              set(windows_release_binary_names(expected))
+              if omit_windows_binaries
+              else set()
+          )
+          for name, digest in checksums.items():
+              if name in omitted_windows:
+                  if name in assets:
+                      raise SystemExit(f"required bridge unexpectedly published {name}")
+                  continue
+              if assets.get(name) != digest:
+                  raise SystemExit(f"required bridge GitHub digest differs for {name}")
+          for name in ("checksums.txt", "checksums.txt.pem", "checksums.txt.sig"):
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if assets.get(name) != actual:
+                  raise SystemExit(f"downloaded required bridge digest differs for {name}")
+          publication = "POSIX-only" if omit_windows_binaries else "all-platform"
+          print(f"immutable published bridge verified: {expected} ({status}, {publication})")
+          PY
+
+          cosign verify-blob \
+            --certificate candidate-input/bridge/checksums.txt.pem \
+            --signature candidate-input/bridge/checksums.txt.sig \
+            --certificate-identity \
+              "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            candidate-input/bridge/checksums.txt
+          BRIDGE_CHECKSUMS_SHA256="$(sha256sum candidate-input/bridge/checksums.txt | awk '{print $1}')"
+          echo "commit=$BRIDGE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tree=$BRIDGE_TREE" >> "$GITHUB_OUTPUT"
+          echo "checksums_sha256=$BRIDGE_CHECKSUMS_SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Assemble checksummed candidate
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
           MACOS_STATUS: ${{ needs.macos-app.outputs.verification_status }}
+          BRIDGE_VERSION: ${{ steps.bridge.outputs.version }}
+          BRIDGE_COMMIT: ${{ steps.bridge.outputs.commit }}
+          BRIDGE_TREE: ${{ steps.bridge.outputs.tree }}
+          BRIDGE_CHECKSUMS_SHA256: ${{ steps.bridge.outputs.checksums_sha256 }}
         run: |
+          set -euo pipefail
+          provenance_args=()
+          if [[ -n "$BRIDGE_VERSION" ]]; then
+            SOURCE_TREE="$(git show -s --format=%T "$RELEASE_COMMIT")"
+            provenance_args=(
+              --source-tree "$SOURCE_TREE"
+              --bridge-commit "$BRIDGE_COMMIT"
+              --bridge-tree "$BRIDGE_TREE"
+              --bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"
+            )
+          fi
           python3 scripts/release_candidate.py assemble \
             --runtime-dir candidate-input/runtime \
             --macos-dir candidate-input/macos \
             --root release-candidate \
             --version "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
-            --macos-verification-status "$MACOS_STATUS"
+            --macos-verification-status "$MACOS_STATUS" \
+            "${provenance_args[@]}"
 
       - name: Sign and authenticate public checksum manifest
         run: |
@@ -579,20 +742,40 @@ jobs:
               raise SystemExit("tested_source_versions does not match the reviewed release matrix")
           if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
               raise SystemExit("signed platform tested-source policy must contain exactly windows")
-          if platform_tested["windows"] != reviewed_windows:
+          if not isinstance(platform_tested["windows"], list):
+              raise SystemExit("platform_tested_source_versions.windows must be a list")
+          windows_bridge_available = not bridge or bridge in reviewed_windows
+          expected_windows = reviewed_windows if windows_bridge_available else []
+          if platform_tested["windows"] != expected_windows:
               raise SystemExit(
                   "platform_tested_source_versions.windows does not match the reviewed Windows matrix"
               )
-          with open("internal/config/config.go", encoding="utf-8") as handle:
-              runtime_source = handle.read()
-          runtime_matches = re.findall(
-              r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
-              runtime_source,
-              re.MULTILINE,
+          def config_literal(path, name):
+              with open(path, encoding="utf-8") as handle:
+                  source = handle.read()
+              matches = re.findall(
+                  rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+                  source,
+                  re.MULTILINE,
+              )
+              if len(matches) != 1:
+                  raise SystemExit(f"gateway source must declare one literal {name}")
+              return int(matches[0])
+
+          compatibility_runtime = config_literal(
+              "internal/config/config.go",
+              "CurrentConfigVersion",
           )
-          if len(runtime_matches) != 1:
-              raise SystemExit("gateway source must declare one literal CurrentConfigVersion")
-          source_runtime = int(runtime_matches[0])
+          if compatibility_runtime != 7:
+              raise SystemExit(
+                  "schema-2 source must retain CurrentConfigVersion=7 as its compatibility ceiling"
+              )
+          source_runtime = compatibility_runtime
+          if bridge:
+              source_runtime = config_literal(
+                  "internal/config/observability_v8_types.go",
+                  "ObservabilityV8ConfigVersion",
+              )
           expected_runtime = 8 if bridge else 7
           if source_runtime != expected_runtime or runtime_config != expected_runtime:
               raise SystemExit(
@@ -613,10 +796,10 @@ jobs:
               raise SystemExit(
                   "release_artifacts does not bind the exact protected candidate payload"
               )
-          if bridge and bridge not in platform_tested["windows"]:
-              raise SystemExit("required bridge is absent from the signed Windows matrix")
           windows_prebridge = list(platform_tested["windows"])
-          if bridge:
+          if bridge and windows_bridge_available:
+              if bridge not in platform_tested["windows"]:
+                  raise SystemExit("required bridge is absent from the signed Windows matrix")
               bridge_key = tuple(map(int, bridge.split(".")))
               windows_prebridge = [
                   item
@@ -625,6 +808,12 @@ jobs:
               ]
               if not windows_prebridge:
                   raise SystemExit("signed Windows matrix has no pre-bridge source")
+          elif bridge:
+              if platform_tested["windows"]:
+                  raise SystemExit(
+                      "unpublished Windows bridge requires an empty signed Windows matrix"
+                  )
+              windows_prebridge = []
           if automatic is not None:
               if not isinstance(automatic, list) or not automatic:
                   raise SystemExit("hard-cut auto_bridge_from must be a non-empty list")
@@ -651,53 +840,6 @@ jobs:
                   + json.dumps(windows_prebridge, separators=(",", ":"))
                   + "\n"
               )
-          PY
-
-      - name: Require immutable published bridge
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REQUIRED_BRIDGE_VERSION: ${{ steps.policy.outputs.required_bridge_version }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$REQUIRED_BRIDGE_VERSION" ]]; then
-            echo "Candidate does not require a published bridge."
-            exit 0
-          fi
-          gh release view "$REQUIRED_BRIDGE_VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json tagName,isDraft,isImmutable,assets > published-bridge.json
-          python3 - "$REQUIRED_BRIDGE_VERSION" published-bridge.json <<'PY'
-          import json
-          import sys
-
-          from scripts.release_candidate import (
-              MACOS_VERIFICATION_STATUSES,
-              published_asset_names,
-          )
-
-          expected, path = sys.argv[1:]
-          with open(path, encoding="utf-8") as handle:
-              release = json.load(handle)
-          if release.get("tagName") != expected or release.get("isDraft") is not False:
-              raise SystemExit("required bridge release is missing, draft, or tag-mismatched")
-          if release.get("isImmutable") is not True:
-              raise SystemExit("required bridge release is not immutable")
-          names = {item.get("name") for item in release.get("assets", []) if isinstance(item, dict)}
-          variants = {
-              status: set(published_asset_names(expected, status))
-              for status in MACOS_VERIFICATION_STATUSES
-          }
-          matches = [status for status, required in variants.items() if names == required]
-          if len(matches) != 1:
-              missing = {
-                  status: sorted(required - names)
-                  for status, required in variants.items()
-              }
-              raise SystemExit(
-                  "required bridge release does not match one complete reviewed asset set: "
-                  f"missing={missing} unexpected={sorted(names - set().union(*variants.values()))}"
-              )
-          print(f"immutable published bridge verified: {expected} ({matches[0]})")
           PY
 
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -1039,6 +1181,56 @@ jobs:
             -SourceVersion "$env:BASELINE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  windows-unpublished-refusal:
+    name: Windows unpublished-runtime refusal
+    needs: [release-preflight, assemble-release-candidate]
+    if: ${{ needs.assemble-release-candidate.outputs.windows_prebridge_baselines == '[]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify sealed candidate and Sigstore identity
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          python scripts/release_candidate.py verify `
+            --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cosign verify-blob `
+            --certificate release-candidate/dist/checksums.txt.pem `
+            --signature release-candidate/dist/checksums.txt.sig `
+            --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
+            release-candidate/dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prove the sealed Windows resolver refuses before mutation
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          pwsh -NoProfile -File scripts/test-upgrade-release-windows.ps1 `
+            -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
+            -TargetVersion "$env:RELEASE_TAG" `
+            -UnpublishedWindowsRefusalOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   live-continuity:
     name: Live bridge-to-target history continuity
     needs: [release-preflight, assemble-release-candidate]
@@ -1115,6 +1307,7 @@ jobs:
       - macos-upgrade
       - historical-baseline-canary
       - windows-upgrade
+      - windows-unpublished-refusal
       - live-continuity
     if: >-
       ${{
@@ -1125,6 +1318,7 @@ jobs:
         needs.linux-upgrade.result == 'success' &&
         needs.macos-upgrade.result == 'success' &&
         needs.historical-baseline-canary.result == 'success' &&
+        needs.windows-unpublished-refusal.result == 'success' &&
         needs.live-continuity.result == 'success' &&
         needs.windows-fresh-install.result == 'skipped' &&
         needs.windows-upgrade.result == 'skipped'

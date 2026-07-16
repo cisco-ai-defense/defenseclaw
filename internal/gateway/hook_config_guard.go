@@ -17,7 +17,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 const (
@@ -61,9 +60,9 @@ const (
 // The GuardrailProxy owns one guard and calls Repoint when it hot-swaps
 // connectors so the watcher follows the active connector.
 type HookConfigGuard struct {
-	logger   *audit.Logger
-	otel     *telemetry.Provider
-	debounce time.Duration
+	logger        *audit.Logger
+	observability hookLifecycleMetricV8Runtime
+	debounce      time.Duration
 
 	// onHealed is an optional fan-out hook (webhook / desktop
 	// notification) invoked after a successful re-install. nil is safe.
@@ -84,18 +83,22 @@ type HookConfigGuard struct {
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
-// default. logger and otel may be nil (observability becomes a no-op).
-func NewHookConfigGuard(logger *audit.Logger, otel *telemetry.Provider, debounce time.Duration) *HookConfigGuard {
+// default. logger and observability may be nil (those surfaces become no-ops).
+func NewHookConfigGuard(
+	logger *audit.Logger,
+	observability hookLifecycleMetricV8Runtime,
+	debounce time.Duration,
+) *HookConfigGuard {
 	if debounce <= 0 {
 		debounce = defaultHookGuardDebounce
 	}
 	return &HookConfigGuard{
-		logger:      logger,
-		otel:        otel,
-		debounce:    debounce,
-		targets:     map[string]struct{}{},
-		watchedDirs: map[string]struct{}{},
-		pending:     map[string]time.Time{},
+		logger:        logger,
+		observability: observability,
+		debounce:      debounce,
+		targets:       map[string]struct{}{},
+		watchedDirs:   map[string]struct{}{},
+		pending:       map[string]time.Time{},
 	}
 }
 
@@ -111,13 +114,22 @@ func (g *HookConfigGuard) SetHealNotifier(fn func(connectorName string, paths []
 	g.mu.Unlock()
 }
 
-func (g *HookConfigGuard) SetOTelProvider(p *telemetry.Provider) {
+func (g *HookConfigGuard) bindObservabilityV8(runtime hookLifecycleMetricV8Runtime) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
-	g.otel = p
+	g.observability = runtime
 	g.mu.Unlock()
+}
+
+func (g *HookConfigGuard) observabilityV8Runtime() hookLifecycleMetricV8Runtime {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.observability
 }
 
 // Start begins watching the given connector's config files. It launches a
@@ -297,9 +309,7 @@ func (g *HookConfigGuard) run() {
 			if !ok {
 				return
 			}
-			if g.otel != nil {
-				g.otel.RecordWatcherError(g.ctx)
-			}
+			recordWatcherErrorV8(g.ctx, g.observabilityV8Runtime())
 			fmt.Fprintf(os.Stderr, "[hook-guard] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
@@ -330,6 +340,13 @@ func (g *HookConfigGuard) processPending() {
 	if suppressed || len(ready) == 0 || conn == nil {
 		return
 	}
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
+		// A low-level connector teardown writes an explicit runtime-state
+		// exclusion before editing the agent config. Honor it so this
+		// still-running guard cannot race the intentional removal and
+		// reinstall hooks a moment later.
+		return
+	}
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil {
@@ -351,6 +368,9 @@ func (g *HookConfigGuard) processPending() {
 func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpts, changed []string) {
 	connName := conn.Name()
 	detail := strings.Join(changed, ", ")
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, connName) {
+		return
+	}
 
 	g.mu.Lock()
 	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
@@ -378,6 +398,7 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
+		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
 				fmt.Sprintf("hook self-heal Setup failed: %v", err), "", connName)
@@ -392,9 +413,7 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 	g.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
-	if g.otel != nil {
-		g.otel.RecordWatcherEvent(baseCtx, "hook-heal", connName, connName)
-	}
+	recordWatcherEventV8(baseCtx, g.observabilityV8Runtime(), "hook-heal", connName, connName)
 	if g.logger != nil {
 		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookRepaired), connName,
 			fmt.Sprintf("re-installed hook entries removed from: %s", detail), "", connName)

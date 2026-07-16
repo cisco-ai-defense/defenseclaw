@@ -30,7 +30,7 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
   frames={[
     { type: 'cmd', text: 'defenseclaw setup guardrail', pauseMs: 700 },
     { type: 'spacer' },
-    { type: 'warn', text: '⚠ privacy.disable_redaction=true — sinks will receive UNREDACTED prompts.' },
+    { type: 'warn', text: '⚠ Redaction is per destination; fresh v8 defaults are unredacted.' },
     { type: 'spacer' },
     { type: 'dim', text: '  LLM Guardrail Setup' },
     { type: 'dim', text: '  ───────────────────' },
@@ -89,7 +89,7 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'ok', text: '  ✓ Gateway restarted on 127.0.0.1:18970' },
     { type: 'ok', text: '  ✓ Guardrail engaged: claudecode | observe | local | no-judge' },
     { type: 'spacer' },
-    { type: 'dim', text: '  Watch live:      defenseclaw tui    (or tail -f ~/.defenseclaw/gateway.jsonl)' },
+    { type: 'dim', text: '  Watch live:      defenseclaw tui' },
     { type: 'dim', text: '  Health check:    defenseclaw doctor' },
   ]}
 />
@@ -135,10 +135,19 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Who consumes the unified LLM key?** *(proxy connectors only)* | `--llm-role judge_only\|judge_and_agent` | Defaults to `judge_only` for hook-based connectors (Claude Code, Codex, ...) and `judge_and_agent` for proxy connectors (OpenClaw, ZeptoClaw). See [Unified LLM key → Hook-based vs proxy-based connectors](/docs/setup/unified-llm-key#hook-based-vs-proxy-based-connectors). |
 | **Judge provider / region / instance** *(judge on, advanced)* | `--judge-provider`, `--judge-region`, `--judge-instance-name` | Use `--judge-provider bedrock\|vertex_ai\|azure\|anthropic\|openai\|...` and the matching regional flags below to point the judge at a different backend than the agent LLM. `--judge-instance-name` binds to a `~/.defenseclaw/custom-providers.json` overlay entry. |
 | **Configure judge fallback models?** *(default: N)* | **interactive-only** | Edit `guardrail.judge.fallback_models` in `~/.defenseclaw/config.yaml` to script. |
-| **Configure advanced options?** *(default: N)* | — | Gates the next three prompts. |
+| **Configure advanced options?** *(default: N)* | — | Gates the next two prompts. |
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
 | **Custom block message?** *(action mode only)* | `--block-message` | — |
-| **Disable redaction?** *(default: current)* | `--disable-redaction` / `--enable-redaction` | Only disable inside trusted, single-tenant environments. |
+
+<Callout title="Redaction is v8 policy, not a guardrail setup flag">
+Edit `observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles` in `config.yaml`. Then run
+`defenseclaw config validate`,
+`defenseclaw config show --effective --section observability`, and
+`defenseclaw observability plan`; apply the reviewed policy with
+`defenseclaw-gateway restart`. See [Redaction](/docs/reference/redaction) for
+resolution order and profile examples.
+</Callout>
 
 On a multi-connector install, `--connector <name>` scopes this setup run to that connector. When `--block-message` is supplied without `--connector`, setup treats it as broad operator intent: it updates the shared block message and reconciles active connector overrides so one connector does not keep stale block text.
 
@@ -178,7 +187,10 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The audit DB fills up with every prompt and tool call. Nothing blocks. Open `defenseclaw tui` for the live audit panel, or `tail -f ~/.defenseclaw/gateway.jsonl | jq` for a scripted view.
+Mandatory SQLite history fills with every collected prompt and tool call.
+Nothing blocks. Open `defenseclaw tui` for the live audit panel. For a scripted
+stream, configure an explicit v8 `kind: jsonl` destination with the buckets and
+redaction profile you intend to expose.
 
 </Tab>
 
@@ -384,10 +396,6 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
       type: "high|medium|low|critical",
       description: "Minimum severity that asks for human approval. Case-insensitive (Click renders lowercase in --help).",
     },
-    "--disable-redaction / --enable-redaction": {
-      type: "flag",
-      description: "Disable or enable PII / prompt redaction. Disable only inside trusted environments.",
-    },
     "--restart / --no-restart": {
       type: "flag",
       description: "Restart the gateway and reconcile the selected connector wiring after setup.",
@@ -434,7 +442,14 @@ defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--connector <name>` to filter by connector attribution and `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows enforcement flags plus a
+per-connector block for every active connector (it has no flags of its own — it
+always reports the full Agents roster from config and `/health`, identical layout
+whether one or N connectors are wired). `alerts` lists recent decisions as a
+table; pass `--connector <name>` to filter by connector attribution and `--show
+<n>` to expand a specific row. For a live stream, open `defenseclaw tui`. For a
+scripted stream, configure an explicit v8 `kind: jsonl` destination with a
+reviewed bucket selector and redaction profile.
 
 ## Interactive vs non-interactive — every command
 
@@ -462,13 +477,13 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw policy ...` | ✗ no prompts | ✓ flags only | Pure CLI for repeatable policy authoring. |
 | `defenseclaw tui` | ✓ full TUI | — | Interactive only — Textual dashboard with audit, alerts, logs, inventory, and setup panels. |
 | `defenseclaw alerts` | ✗ no prompts | ✓ `--limit`, `--show <n>`, `acknowledge` / `dismiss` subcommands | Snapshot view of recent alerts; not a live tail. |
-| `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | JSONL export of `audit_events` from the SQLite DB. |
+| `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | Legacy v7 JSONL export of `audit_events` for compatibility and migration; not the canonical v8 projection stream. |
 | `defenseclaw-gateway` (sidecar daemon) | ✗ no prompts | ✓ flags only | Long-running gateway — `--config`, `--port`, `--log-level`. Started for you by `setup guardrail --restart`. |
 
 <Callout>
 The two **interactive-only** corners worth knowing about: the integration-mode submenu inside `setup guardrail` (Claude Code / Codex), and the judge fallback-models prompt. Everything else has a flag.
 
-The **non-interactive-only** group is `quickstart`, `setup local-observability`, `policy`, `agent discover`, `aibom scan`, `defenseclaw-gateway audit export`, and `gateway start` — all by design (CI-shaped, read-only, or daemon).
+The **non-interactive-only** group is `quickstart`, `setup local-observability`, `policy`, `agent discover`, `aibom scan`, the legacy-maintenance `defenseclaw-gateway audit export`, and `gateway start` — all by design (CI-shaped, read-only, or daemon).
 </Callout>
 
 ## Common follow-ups

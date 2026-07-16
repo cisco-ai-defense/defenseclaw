@@ -21,6 +21,7 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import http.client
 import json as _json
 import os
 import secrets
@@ -49,7 +50,6 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_MCP_SCANNER,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
-    ACTION_SETUP_REDACTION_TOGGLE,
     ACTION_SETUP_SKILL_SCANNER,
     ACTION_SETUP_SPLUNK,
 )
@@ -65,6 +65,8 @@ from defenseclaw.config import (
     HILTConfig,
     PerConnectorGuardrailConfig,
     config_path_for_data_dir,
+    locked_config_yaml,
+    locked_file_update,
 )
 from defenseclaw.config import (
     load as load_config,
@@ -78,6 +80,7 @@ from defenseclaw.connector_contracts import (
 )
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
@@ -95,6 +98,36 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # below honors this flag and becomes a no-op to avoid a double bounce.
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
+_GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+
+
+def _log_setup_action(
+    app: AppContext,
+    action: str,
+    details: str,
+    *,
+    allow_offline: bool,
+) -> None:
+    """Audit a setup mutation without breaking explicit offline staging.
+
+    Canonical admission and server responses remain fail-closed.  The only
+    exception is a setup command that explicitly selected ``--no-restart``
+    while the gateway runtime is absent or unreachable; that mode stages
+    configuration for the next gateway start.
+    """
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action(action, "config", details)
+    except CanonicalObservabilityUnavailableError:
+        if not allow_offline:
+            raise
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
+            "event was not recorded. Start defenseclaw-gateway before the next change.",
+            err=True,
+        )
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -181,7 +214,7 @@ def setup(
 ) -> None:
     """Configure DefenseClaw components.
 
-    \b
+    Legacy behavior:
     Multi-connector:
       One gateway enforces N agent-native connectors (codex, claudecode,
       hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
@@ -191,7 +224,7 @@ def setup(
       roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
       Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
 
-    \b
+    Legacy warning:
     Batch (no subcommand):
       'defenseclaw setup' with no subcommand launches an interactive
       active-connector picker (detected connectors pre-checked), then
@@ -231,7 +264,7 @@ def setup(
     )
 
 
-# Register `defenseclaw setup observability` (unified OTel + audit sinks).
+# Register canonical v8 destination setup.
 # Imported here rather than at module top so the subcommand surface can
 # grow without cluttering cmd_setup.py.
 from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
@@ -239,16 +272,15 @@ from defenseclaw.commands.cmd_setup_observability import observability  # noqa: 
 setup.add_command(observability)
 
 # Register the first-class Galileo cloud/self-hosted setup workflow. It writes
-# a named OTel destination through the shared observability writer, so Galileo
+# a named OTLP destination through the shared observability writer, so Galileo
 # can coexist with local-observability and every other OTLP backend.
 from defenseclaw.commands.cmd_setup_galileo import galileo  # noqa: E402
 
 setup.add_command(galileo)
 
 # Register `defenseclaw setup local-observability` (bundled
-# Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
-# --logs` pattern: preflights Docker, drives a docker-compose bridge,
-# and wires config.yaml to point the gateway at the local collector.
+# Prom/Loki/Tempo/Grafana stack driver). It preflights Docker, drives the
+# compose bridge, and wires a canonical local-observability destination.
 from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
     local_observability,
 )
@@ -1745,6 +1777,11 @@ def _restore_dotenv_snapshot(path: str, payload: bytes | None, mode: int | None)
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
+    with locked_file_update(path):
+        _write_dotenv_locked(path, entries)
+
+
+def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
     """Write entries to a .env file with mode 0600.
 
     Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
@@ -1785,7 +1822,12 @@ def _config_trusted_bin_prefixes(cfg) -> list[str]:
     return [str(p).strip() for p in (values or []) if str(p).strip()]
 
 
-def _set_config_trusted_bin_prefixes(cfg, prefixes: list[str]) -> None:
+def _set_config_trusted_bin_prefixes(
+    cfg,
+    prefixes: list[str],
+    *,
+    locked_path: str | None = None,
+) -> None:
     ai = getattr(cfg, "ai_discovery", None)
     if ai is None:
         return
@@ -1799,7 +1841,10 @@ def _set_config_trusted_bin_prefixes(cfg, prefixes: list[str]) -> None:
         seen.add(key)
         deduped.append(key)
     ai.trusted_binary_prefixes = deduped
-    cfg.save()
+    if locked_path is None:
+        cfg.save()
+    else:
+        cfg._save_locked(locked_path)
 
 
 def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
@@ -1904,7 +1949,7 @@ def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: st
 def trusted_paths() -> None:
     """Manage directories DefenseClaw trusts for connector-binary discovery.
 
-    \b
+    Legacy examples:
     Action-mode setup reads a connector's version by executing its binary, but
     only when that binary lives under a trusted prefix — a guard against a
     hostile binary planted on $PATH. Built-in defaults cover system and
@@ -1983,47 +2028,11 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
         )
         click.get_current_context().exit(1)
     data_dir = app.cfg.data_dir
-    config_entries = _config_trusted_bin_prefixes(app.cfg)
     target = (directory or "").strip()
-    kept_config = [
-        e for e in config_entries if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved
-    ]
     dotenv_path = os.path.join(data_dir, ".env")
-    dotenv_snapshot, dotenv_mode = _snapshot_dotenv(dotenv_path)
-    existing = _parse_dotenv_snapshot(dotenv_snapshot)
-    current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
-    entries = [p.strip() for p in current.split(os.pathsep) if p.strip()]
-    kept = [e for e in entries if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved]
-    config_changed = len(kept_config) != len(config_entries)
-    dotenv_changed = len(kept) != len(entries)
-    if dotenv_changed:
-        new_val = os.pathsep.join(kept)
-        if new_val:
-            existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
-        else:
-            existing.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
-
-    removed = config_changed or dotenv_changed
-    try:
-        if dotenv_changed:
-            _write_dotenv(dotenv_path, existing)
-        if config_changed:
-            _set_config_trusted_bin_prefixes(app.cfg, kept_config)
-    except BaseException:
-        rollback_error = None
-        if dotenv_changed:
-            try:
-                _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot, dotenv_mode)
-            except BaseException as exc:
-                if rollback_error is None:
-                    rollback_error = exc
-        if config_changed:
-            ai = getattr(app.cfg, "ai_discovery", None)
-            if ai is not None:
-                ai.trusted_binary_prefixes = config_entries
-        if rollback_error is not None:
-            raise rollback_error
-        raise
+    config_file = str(config_path_for_data_dir(data_dir))
+    with locked_config_yaml(config_file), locked_file_update(dotenv_path):
+        removed = _remove_trusted_path_files_locked(app, target, resolved, dotenv_path, config_file)
 
     process_entries = [
         value.strip()
@@ -2051,6 +2060,59 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
         )
         click.get_current_context().exit(1)
     _emit_trusted_path_result(as_json, ok=True, path=resolved, message="removed from trusted prefixes")
+
+
+def _remove_trusted_path_files_locked(
+    app: AppContext,
+    target: str,
+    resolved: str,
+    dotenv_path: str,
+    config_file: str,
+) -> bool:
+    """Update config and dotenv while both sibling locks remain held."""
+
+    config_entries = _config_trusted_bin_prefixes(app.cfg)
+    kept_config = [
+        entry
+        for entry in config_entries
+        if entry != target and agent_discovery.validate_trusted_prefix(entry)[0] != resolved
+    ]
+    dotenv_snapshot, dotenv_mode = _snapshot_dotenv(dotenv_path)
+    existing = _parse_dotenv_snapshot(dotenv_snapshot)
+    current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    entries = [p.strip() for p in current.split(os.pathsep) if p.strip()]
+    kept = [e for e in entries if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved]
+    config_changed = len(kept_config) != len(config_entries)
+    dotenv_changed = len(kept) != len(entries)
+    if dotenv_changed:
+        new_val = os.pathsep.join(kept)
+        if new_val:
+            existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+        else:
+            existing.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
+
+    removed = config_changed or dotenv_changed
+    try:
+        if dotenv_changed:
+            _write_dotenv_locked(dotenv_path, existing)
+        if config_changed:
+            _set_config_trusted_bin_prefixes(app.cfg, kept_config, locked_path=config_file)
+    except BaseException:
+        rollback_error = None
+        if dotenv_changed:
+            try:
+                _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot, dotenv_mode)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+        if config_changed:
+            ai = getattr(app.cfg, "ai_discovery", None)
+            if ai is not None:
+                ai.trusted_binary_prefixes = config_entries
+        if rollback_error is not None:
+            raise rollback_error
+        raise
+    return removed
 
 
 def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> None:
@@ -2270,6 +2332,11 @@ def _rotate_token_dotenv_path(app: AppContext) -> str:
 
 
 def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
+    with locked_file_update(dotenv_path):
+        _rotate_token_atomic_write_locked(dotenv_path, new_token)
+
+
+def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     """Rewrite the dotenv file with the new token, preserving every
     other line. Atomic via os.replace; mode 0o600.
 
@@ -2361,11 +2428,28 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     _rotate_token_atomic_write(dotenv_path, new_token)
     ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
 
+    restart_planned = bool(actives) and not no_restart
+    audit_details = (
+        f"action=rotate-token active_connectors={len(actives)} restart={str(restart_planned).lower()}"
+    )
+
     if not actives:
+        _log_setup_action(
+            app,
+            ACTION_SETUP_GATEWAY,
+            audit_details,
+            allow_offline=True,
+        )
         ux.subhead("(no active connector configured; nothing to refresh)")
         return
 
     if no_restart:
+        _log_setup_action(
+            app,
+            ACTION_SETUP_GATEWAY,
+            audit_details,
+            allow_offline=True,
+        )
         ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
         ux.subhead("The new token takes effect only once the gateway restarts and re-runs Setup for every connector:")
         ux.subhead("  defenseclaw-gateway restart")
@@ -2375,6 +2459,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     # connectors, which rewrites each connector's hook .token file from the
     # freshly-rotated .env. A full restart (not a per-connector teardown) is
     # what keeps every connector's shared token in lockstep.
+    os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = new_token
     click.echo(f"  {ux.dim('Refreshing hook scripts for')} {', '.join(actives)}…")
     _restart_services(
         app.cfg.data_dir,
@@ -2382,6 +2467,12 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         app.cfg.gateway.port,
         connector=connector or app.cfg.active_connector(),
         connectors=actives,
+    )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_GATEWAY,
+        audit_details,
+        allow_offline=False,
     )
     ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
     click.echo()
@@ -2746,7 +2837,7 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
         "~/.codex/config.toml otel / notify",
         "Optional CodeGuard native skill only when explicitly installed",
-        "~/.defenseclaw/hooks/ and notify bridge files",
+        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential) and notify bridge files",
     ),
     "hermes": (
         "~/.hermes/config.yaml hooks",
@@ -3326,36 +3417,6 @@ def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = Non
     ).upper()
 
 
-def _configure_redaction_interactive(app: AppContext) -> None:
-    """Prompt for the persistent redaction kill-switch from Advanced setup."""
-    click.echo()
-    click.echo("  Redaction")
-    click.echo("  ─────────")
-    current_disabled = bool(app.cfg.privacy.disable_redaction)
-    if current_disabled:
-        click.secho(
-            "  Redaction is currently OFF: raw prompts, responses, judge bodies, and verdict reasons may be persisted.",
-            fg="yellow",
-        )
-        keep_disabled = click.confirm("  Keep redaction disabled?", default=False)
-        app.cfg.privacy.disable_redaction = keep_disabled
-        if not keep_disabled:
-            click.echo("  ✓ Redaction will be re-enabled after restart.")
-        return
-
-    click.echo("  Redaction is ON by default and is recommended for normal operation.")
-    if not click.confirm("  Disable redaction for debugging?", default=False):
-        app.cfg.privacy.disable_redaction = False
-        return
-
-    click.secho(
-        "  Disabling redaction writes RAW content to audit DB, OTel logs, Splunk/webhook sinks, and local logs.",
-        fg="yellow",
-    )
-    click.confirm("  I understand; disable redaction?", default=False, abort=True)
-    app.cfg.privacy.disable_redaction = True
-
-
 def _resolve_rule_pack_dir(
     app: AppContext,
     *,
@@ -3437,7 +3498,6 @@ def _apply_guardrail_extra_options(
     connector: str | None = None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    disable_redaction: bool | None,
 ) -> None:
     """Apply guardrail options shared by the CLI and TUI non-interactive wizard.
 
@@ -3459,8 +3519,6 @@ def _apply_guardrail_extra_options(
     )
     if not per_connector and not gc.hilt.min_severity:
         gc.hilt.min_severity = "HIGH"
-    if disable_redaction is not None:
-        app.cfg.privacy.disable_redaction = bool(disable_redaction)
 
 
 def _resolve_judge_hook_gate(
@@ -3765,7 +3823,6 @@ def _resolve_judge_hook_gate(
     default=None,
     help="Minimum severity that asks for human approval",
 )
-@click.option("--disable-redaction/--enable-redaction", default=None, help="Disable or enable prompt/log redaction")
 @click.option(
     "--workspace",
     "--workspace-dir",
@@ -3834,7 +3891,6 @@ def setup_guardrail(
     judge_insecure_skip_verify: bool,
     human_approval,
     hilt_min_severity,
-    disable_redaction,
     workspace_dir: str | None,
     restart: bool,
     verify: bool,
@@ -3955,7 +4011,6 @@ def setup_guardrail(
             connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
-            disable_redaction=disable_redaction,
         )
         # Optional: inherit a sibling LLM block onto guardrail.judge.llm
         # before applying per-judge flags so non-empty operator overrides
@@ -4121,7 +4176,6 @@ def setup_guardrail(
             connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
-            disable_redaction=disable_redaction,
         )
 
     if not gc.enabled:
@@ -4206,7 +4260,6 @@ def setup_guardrail(
         rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
         rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
-    rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         rows.append(("guardrail.judge.model", gc.judge.model))
@@ -4264,14 +4317,13 @@ def setup_guardrail(
     click.echo("    defenseclaw setup guardrail --disable")
     click.echo()
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_GUARDRAIL,
-            "config",
-            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
-            f"model={gc.model} hilt={bool(gc.hilt.enabled)!s} "
-            f"disable_redaction={bool(app.cfg.privacy.disable_redaction)!s}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_GUARDRAIL,
+        f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
+        f"model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
+        allow_offline=not restart,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4636,6 +4688,7 @@ def _apply_hook_connector_setup(
     connector: str,
     mode: str = "observe",
     restart: bool,
+    allow_offline_audit: bool = False,
     workspace_dir: str | None = None,
     write_mode: str = "replace",
     rule_pack: str | None = None,
@@ -4865,12 +4918,12 @@ def _apply_hook_connector_setup(
         )
         click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_HOOK_CONNECTOR,
-            "config",
-            f"connector={connector} mode={desired_mode} surface=hook",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_HOOK_CONNECTOR,
+        f"connector={connector} mode={desired_mode} surface=hook",
+        allow_offline=allow_offline_audit,
+    )
 
     return True
 
@@ -4889,6 +4942,7 @@ def _apply_connector_observability_only(
         connector=connector,
         mode="observe",
         restart=restart,
+        allow_offline_audit=not restart,
         workspace_dir=None,
     )
 
@@ -4926,6 +4980,10 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         if connector == "omnigent":
             click.echo(
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
+            )
+        elif connector == "codex":
+            click.echo(
+                "    • Native OTel — logs, metrics, and traces → scoped loopback /otlp/codex/<token>/v1/<signal>"
             )
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
@@ -4999,7 +5057,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     click.echo("  Next steps:")
     click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    click.echo("    • Watch decisions live: defenseclaw tui  (or: tail -f ~/.defenseclaw/gateway.jsonl | jq)")
+    click.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
     click.echo(
         f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
         f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
@@ -5276,6 +5334,7 @@ def _setup_observability_alias(
         connector=connector,
         mode=normalized_mode,
         restart=restart,
+        allow_offline_audit=not restart,
         workspace_dir=workspace_dir,
         write_mode=write_mode,
         rule_pack=rule_pack,
@@ -5298,6 +5357,7 @@ def _setup_observability_alias(
             connector=connector,
             mode=normalized_mode,
             restart=restart,
+            allow_offline_audit=not restart,
             workspace_dir=workspace_dir,
             write_mode=write_mode,
             rule_pack=rule_pack,
@@ -5777,6 +5837,7 @@ def _apply_setup_batch(
             connector=c,
             mode=connector_mode,
             restart=False,
+            allow_offline_audit=not restart,
             write_mode="add",
             enable_judge=enable_judge,
             judge_hook_connectors=None,
@@ -5791,6 +5852,7 @@ def _apply_setup_batch(
                 connector=c,
                 mode="observe",
                 restart=False,
+                allow_offline_audit=not restart,
                 write_mode="add",
                 enable_judge=enable_judge,
                 judge_hook_connectors=None,
@@ -6098,8 +6160,8 @@ def setup_codex(
     \b
       • Hooks   — SessionStart / UserPromptSubmit / PreToolUse /
                   PostToolUse / PermissionRequest / Stop events
-      • OTel    — native Codex log + metric exporter pointing at the
-                  gateway's /v1/logs and /v1/metrics
+      • OTel    — native Codex logs, metrics, and traces using the
+                  scoped loopback /otlp/codex/<token>/v1/<signal> route
       • Notify  — agent-turn-complete webhooks via the bundled
                   notify-bridge.sh shim
 
@@ -6413,13 +6475,13 @@ def _remove_connector(
             "still installed until you restart defenseclaw-gateway."
         )
 
-    if app.logger:
-        remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
-        app.logger.log_action(
-            ACTION_SETUP_HOOK_CONNECTOR,
-            "config",
-            f"connector={match} action=remove remaining={remaining_label}",
-        )
+    remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
+    _log_setup_action(
+        app,
+        ACTION_SETUP_HOOK_CONNECTOR,
+        f"connector={match} action=remove remaining={remaining_label}",
+        allow_offline=not restart,
+    )
 
     return True
 
@@ -6759,7 +6821,6 @@ def _setup_guardrail_connector_alias(
     judge_api_key_env: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    disable_redaction: bool | None,
     restart: bool,
     verify: bool,
 ) -> None:
@@ -6830,7 +6891,6 @@ def _setup_guardrail_connector_alias(
         judge_insecure_skip_verify=False,
         human_approval=human_approval,
         hilt_min_severity=hilt_min_severity,
-        disable_redaction=disable_redaction,
         restart=restart,
         verify=verify,
         non_interactive=True,
@@ -6895,11 +6955,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         default=None,
         help="Minimum severity that asks for human approval.",
     )
-    @click.option(
-        "--disable-redaction/--enable-redaction",
-        default=None,
-        help="Disable or enable prompt/log redaction.",
-    )
     @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
     @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
     @pass_ctx
@@ -6922,7 +6977,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         judge_api_key_env: str | None,
         human_approval: bool | None,
         hilt_min_severity: str | None,
-        disable_redaction: bool | None,
         restart: bool,
         verify: bool,
     ) -> None:
@@ -6946,7 +7000,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             judge_api_key_env=judge_api_key_env,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
-            disable_redaction=disable_redaction,
             restart=restart,
             verify=verify,
         )
@@ -6957,137 +7010,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
 
 for _guardrail_connector in ("openclaw", "zeptoclaw"):
     setup.add_command(_make_guardrail_connector_setup_command(_guardrail_connector))
-
-
-@setup.command("redaction")
-@click.argument(
-    "action",
-    type=click.Choice(("on", "off", "status"), case_sensitive=False),
-)
-@click.option(
-    "--restart/--no-restart",
-    default=True,
-    show_default=True,
-    help=(
-        "Restart defenseclaw-gateway after toggling. The redaction "
-        "kill-switch is read at sidecar boot, so a flip without "
-        "restart leaves the previous state in effect for the running "
-        "process. Use --no-restart only when the sidecar is offline."
-    ),
-)
-@click.option(
-    "--yes",
-    "-y",
-    "yes",
-    is_flag=True,
-    help="Skip the interactive confirmation prompt when turning "
-    "redaction off. Required for non-TTY callers (TUI, scripts).",
-)
-@pass_ctx
-def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> None:
-    """Persistently enable or disable PII / prompt redaction.
-
-    \b
-    DefenseClaw redacts user prompts, judge bodies, evidence
-    windows, and verdict reasons by default before they reach any
-    sink (stderr, audit DB, OTel logs, Splunk HEC, webhooks). For
-    single-tenant lab installs that need to see raw content
-    end-to-end (prompt-engineering debugging, false-positive
-    triage), this command flips the persistent kill-switch
-    documented in OBSERVABILITY.md.
-
-    \b
-    WARNING: when redaction is OFF, the audit DB and every
-    downstream telemetry sink will store raw PII. Only use this in
-    deployments where every sink lives inside the same trust
-    boundary as the sidecar.
-
-    \b
-    Examples:
-      defenseclaw setup redaction status
-      defenseclaw setup redaction off --yes
-      defenseclaw setup redaction on
-    """
-    action = action.strip().lower()
-    cfg = app.cfg
-    current = bool(cfg.privacy.disable_redaction)
-
-    if action == "status":
-        env_override = os.environ.get("DEFENSECLAW_DISABLE_REDACTION", "").strip().lower()
-        env_on = env_override in {"1", "true", "yes", "on"}
-        ux.section("Redaction state")
-        click.echo(
-            f"    {ux.dim('config (privacy.disable_redaction):')} "
-            f"{'OFF (raw passthrough)' if current else 'ON (redacted)'}"
-        )
-        click.echo(
-            f"    {ux.dim('env (DEFENSECLAW_DISABLE_REDACTION):')} "
-            f"{'set (' + env_override + ')' if env_override else '(unset)'}"
-        )
-        effective = current or env_on
-        click.echo(
-            f"    {ux.dim('effective at sidecar boot:')} "
-            f"{'OFF — raw content will be persisted to ALL sinks' if effective else 'ON — placeholders only'}"
-        )
-        return
-
-    desired = action == "off"  # off = disable_redaction = True
-    if desired == current:
-        state = "OFF" if current else "ON"
-        click.echo(f"  • Redaction is already {state}; nothing to change.")
-        return
-
-    if desired and not yes:
-        # Loud, multi-line warning so the operator can't miss the
-        # privacy implications of the flip. Click.confirm reads
-        # from stdin; CI / TUI callers pass --yes to bypass.
-        click.echo()
-        ux.warn("TURNING REDACTION OFF")
-        click.echo()
-        ux.subhead("This will persistently disable PII redaction in the sidecar.")
-        ux.subhead("After restart, EVERY sink (audit DB, OTel logs, Splunk HEC,")
-        ux.subhead("webhooks, gateway.log) will receive UNREDACTED prompts,")
-        ux.subhead("judge bodies, evidence windows, and verdict reasons.")
-        click.echo()
-        ux.subhead("Only proceed if every downstream sink lives inside the")
-        ux.subhead("same trust boundary as this install.")
-        click.echo()
-        click.confirm("  Disable redaction?", abort=True)
-
-    cfg.privacy.disable_redaction = desired
-
-    try:
-        cfg.save()
-    except OSError as exc:
-        ux.err(f"Failed to save config: {exc}")
-        raise click.ClickException("config save failed") from exc
-
-    new_state = "OFF (raw passthrough)" if desired else "ON (redacted)"
-    ux.ok(f"privacy.disable_redaction set to {desired!s}")
-    ux.ok(f"Redaction state on next sidecar boot: {new_state}")
-
-    if restart:
-        ux.subhead("Restarting gateway so the redaction state takes effect...")
-        _restart_services(
-            cfg.data_dir,
-            cfg.gateway.host,
-            cfg.gateway.port,
-            connector=cfg.active_connector(),
-            connectors=cfg.active_connectors(),
-        )
-    else:
-        ux.warn(
-            "Skipped restart (--no-restart). The running sidecar still "
-            "enforces the previous redaction state. Restart manually:"
-        )
-        ux.subhead("   defenseclaw-gateway restart")
-
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_REDACTION_TOGGLE,
-            "config",
-            f"disable_redaction={desired!s}",
-        )
 
 
 @setup.command("notifications")
@@ -7230,12 +7152,12 @@ def setup_notifications(
         )
         ux.subhead("   defenseclaw-gateway restart")
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_NOTIFICATIONS_TOGGLE,
-            "config",
-            f"enabled={desired!s}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+        f"enabled={desired!s}",
+        allow_offline=not restart,
+    )
 
 
 # ``setup notifications`` is already a one-shot command (action is a
@@ -7365,12 +7287,12 @@ def setup_notifications_set(
             "Skipped restart (--no-restart). Run `defenseclaw-gateway restart` when ready.",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_NOTIFICATIONS_SET,
-            "config",
-            f"slot={slot} value={value.lower()}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_NOTIFICATIONS_SET,
+        f"slot={slot} value={value.lower()}",
+        allow_offline=not restart,
+    )
 
 
 # ``setup registry`` — discoverable shortcut that drops the operator
@@ -7978,7 +7900,6 @@ def _interactive_guardrail_setup(
         # advanced. Operators who want to revisit HILT specifically
         # can re-run ``defenseclaw setup guardrail`` (no flag
         # needed) and walk through to the action-mode block.
-        _configure_redaction_interactive(app)
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
@@ -8416,8 +8337,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            click.echo(" ✓")
-            return True
+            if _wait_for_defense_gateway_api(data_dir):
+                click.echo(" ✓")
+                return True
+            click.echo(" ✗ (API health timed out)")
+            click.echo("    The gateway process started but its sidecar API never became ready.")
+            return False
         click.echo(" ✗")
         err = (result.stderr or result.stdout or "").strip()
         if err:
@@ -8431,6 +8356,64 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     except subprocess.TimeoutExpired:
         click.echo(" ✗ (timed out)")
         return False
+
+
+def _wait_for_defense_gateway_api(
+    data_dir: str,
+    timeout: float = _GATEWAY_API_READY_TIMEOUT_SECONDS,
+) -> bool:
+    """Wait until the replacement gateway can admit canonical v8 facts.
+
+    The daemon start command returns after spawning its child, before that
+    child necessarily binds the sidecar API. Connector setup also observes an
+    ``active_connector.json`` marker written earlier in gateway startup, so
+    neither signal proves that the API is ready. Returning from setup during
+    that window makes the command's own mandatory v8 audit handoff fail with
+    ``connection refused``.
+
+    Require the replacement process's health document to report the API
+    subsystem as running. This also covers the platform socket-reclaim retry
+    in the Go API server, which may legitimately take up to 30 seconds.
+    """
+    try:
+        cfg = load_config(data_dir=data_dir)
+        gateway = cfg.gateway
+        from defenseclaw.logger import _gateway_api_host
+
+        host = _gateway_api_host(cfg)
+        port = int(getattr(gateway, "api_port", 18970) or 18970)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+    if not 1 <= port <= 65535:
+        return False
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        connection = http.client.HTTPConnection(
+            host,
+            port,
+            timeout=max(0.05, min(1.0, remaining)),
+        )
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            body = response.read(1 << 20)
+            if response.status == 200:
+                health = _json.loads(body)
+                api = health.get("api") if isinstance(health, dict) else None
+                state = api.get("state") if isinstance(api, dict) else None
+                if isinstance(state, str) and state.strip().lower() == "running":
+                    return True
+        except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+            pass
+        finally:
+            connection.close()
+        sleep_for = min(0.2, max(0.0, deadline - time.monotonic()))
+        if sleep_for:
+            time.sleep(sleep_for)
+    return False
 
 
 @setup.result_callback()
@@ -8853,8 +8836,7 @@ def setup_splunk(
     # from _apply_o11y_config / _apply_logs_config already persists to
     # config.yaml atomically. A second cfg.save() would be a no-op
     # round-trip now (Config.save deep-merges over the existing file
-    # and preserves unmodelled keys like audit_sinks /
-    # otel.resource.attributes), but it's still
+    # and preserves unmodelled keys), but it's still
     # wasteful so we skip it to keep this path single-writer.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -8938,10 +8920,8 @@ def _interactive_splunk_setup(
         click.echo("  No Splunk pipelines enabled. Run again to configure.")
         return
 
-    # observability.apply_preset() already persisted to config.yaml;
-    # see the matching note in setup_splunk() for why we deliberately
-    # skip a second cfg.save() here (single-writer hygiene, not
-    # correctness — Config.save is round-trip-safe).
+    # The canonical v8 destination writer already persisted config.yaml;
+    # avoid a second whole-document Config.save() after the surgical write.
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -9307,6 +9287,42 @@ def _ensure_splunk_license_acceptance(
 # ---------------------------------------------------------------------------
 
 
+def _apply_v8_observability_preset(
+    app: AppContext,
+    preset_id: str,
+    inputs: dict[str, str],
+    *,
+    name: str | None = None,
+    signals: tuple[str, ...] | None = None,
+    secret_value: str | None = None,
+) -> str:
+    """Write one setup alias through the canonical v8 destination writer."""
+
+    from defenseclaw.commands.cmd_setup_observability import (
+        _add_v8_destination,
+        _require_v8_operator_status,
+    )
+    from defenseclaw.observability import resolve_preset
+    from defenseclaw.observability.v8_presets import destination_name, resolve_inputs
+
+    _require_v8_operator_status(app.cfg.data_dir)
+    preset = resolve_preset(preset_id)
+    resolved = resolve_inputs(preset, inputs)
+    resolved_name = destination_name(preset, name, resolved)
+    _add_v8_destination(
+        app.cfg.data_dir,
+        preset,
+        resolved,
+        name=resolved_name,
+        enabled=True,
+        signals=signals,
+        token_value=secret_value,
+        target=None,
+        dry_run=False,
+    )
+    return resolved_name
+
+
 def _apply_o11y_config(
     app: AppContext,
     realm: str,
@@ -9317,12 +9333,7 @@ def _apply_o11y_config(
     enable_metrics: bool,
     enable_logs: bool,
 ) -> None:
-    """Thin alias over ``observability.apply_preset("splunk-o11y", ...)``.
-
-    Kept for flag-level back-compat with ``setup splunk --o11y``. The
-    single writer lives in ``defenseclaw.observability.writer``.
-    """
-    from defenseclaw.observability import apply_preset
+    """Keep ``setup splunk --o11y`` as a v8 destination preset alias."""
 
     signals = tuple(
         s
@@ -9333,15 +9344,11 @@ def _apply_o11y_config(
         )
         if on
     )
-    apply_preset(
+    _apply_v8_observability_preset(
+        app,
         "splunk-o11y",
         {"realm": realm},
-        app.cfg.data_dir,
-        # Use app_name for service.name in otel.resource.attributes so
-        # operators see the expected name in Splunk O11y UI. The writer
-        # also stamps preset_id / preset_name alongside.
         name=app_name,
-        enabled=True,
         signals=signals or ("traces",),
         secret_value=access_token or None,
     )
@@ -9349,8 +9356,8 @@ def _apply_o11y_config(
     # precedence over resource.attributes.service.name, so this keeps the
     # effective service name even if the user later edits the YAML.
     _save_secret_to_dotenv("OTEL_SERVICE_NAME", app_name, app.cfg.data_dir)
-    # Reload config so cfg.otel reflects the YAML we just wrote. Pin the
-    # reload to app.cfg.data_dir (not the default ~/.defenseclaw) so
+    # Reload the non-observability Config view after the canonical v8 write.
+    # Pin the reload to app.cfg.data_dir (not the default ~/.defenseclaw) so
     # unit tests that point at a temp dir see their own writes — the
     # CLI path always matches because production callers set
     # DEFENSECLAW_HOME to the same dir.
@@ -9370,14 +9377,7 @@ def _apply_logs_config(
     aws_region: str | None = None,
     refresh_bundle: bool = True,
 ) -> None:
-    """Thin alias over ``observability.apply_preset("splunk-hec", ...)``.
-
-    For local-Splunk the bridge is still launched here because it's a
-    *deploy* step (docker-compose up) not a config write. The returned
-    contract (HEC URL + token) is then funneled into the observability
-    writer so it lands in ``audit_sinks[]`` in the same shape as any
-    other HEC destination.
-    """
+    """Configure the local Splunk bridge as a canonical HEC destination."""
     contract: dict[str, str] | None = None
     if bootstrap_bridge:
         contract = _bootstrap_bridge(
@@ -9402,9 +9402,8 @@ def _apply_logs_config(
     host = parsed.hostname or "127.0.0.1"
     port = str(parsed.port or 8088)
 
-    from defenseclaw.observability import apply_preset
-
-    apply_preset(
+    _apply_v8_observability_preset(
+        app,
         "splunk-hec",
         {
             "host": host,
@@ -9418,8 +9417,6 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
-        app.cfg.data_dir,
-        enabled=True,
         secret_value=hec_token or None,
     )
     _reload_cfg_from_data_dir(app)
@@ -9439,10 +9436,9 @@ def _apply_enterprise_config(
     This is intentionally config-only: no Docker preflight, local bridge
     bootstrap, Splunk license prompt, or Splunk-side token/index creation.
     """
-    from defenseclaw.observability import apply_preset
-
     try:
-        result = apply_preset(
+        name = _apply_v8_observability_preset(
+            app,
             "splunk-enterprise",
             {
                 "endpoint": endpoint,
@@ -9450,15 +9446,13 @@ def _apply_enterprise_config(
                 "source": source,
                 "sourcetype": sourcetype,
             },
-            app.cfg.data_dir,
-            enabled=True,
             secret_value=token or None,
         )
     except ValueError as exc:
         click.echo(f"  error: {exc}", err=True)
         raise SystemExit(2) from exc
     _reload_cfg_from_data_dir(app)
-    return result.name
+    return name
 
 
 def _maybe_probe_enterprise_hec(
@@ -9471,17 +9465,13 @@ def _maybe_probe_enterprise_hec(
         click.echo("  Live HEC probe skipped.")
         return
 
-    from defenseclaw.commands.cmd_setup_observability import probe_splunk_hec
+    from defenseclaw.commands.cmd_setup_observability import _test_v8_destination
 
     click.echo("  Live HEC probe:")
     try:
-        ok, message = probe_splunk_hec(app.cfg.data_dir, sink_name, timeout=10.0)
-    except OSError as exc:
-        ok, message = False, str(exc)
-    if ok:
-        click.echo(f"    {message}")
-    else:
-        click.echo(f"    warning: {message}")
+        _test_v8_destination(app.cfg.data_dir, sink_name, 10.0, write_probe=False)
+    except click.ClickException as exc:
+        click.echo(f"    warning: {exc}")
 
 
 def _reload_cfg_from_data_dir(app: AppContext) -> None:
@@ -9849,9 +9839,20 @@ def _is_local_splunk_destination(dest) -> bool:
     return _is_local_hec_endpoint(str(getattr(dest, "endpoint", "") or ""))
 
 
-def _is_local_hec_endpoint(endpoint: str) -> bool:
-    from urllib.parse import urlparse
+def _splunk_o11y_realm(endpoint: str) -> str:
+    """Return the realm for a canonical Splunk O11y ingest endpoint."""
 
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = (parsed.hostname or "").lower()
+    prefix = "ingest."
+    suffix = ".observability.splunkcloud.com"
+    if not host.startswith(prefix) or not host.endswith(suffix):
+        return ""
+    realm = host[len(prefix) : -len(suffix)]
+    return realm if realm and "." not in realm else ""
+
+
+def _is_local_hec_endpoint(endpoint: str) -> bool:
     parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
     host = (parsed.hostname or "").lower()
     return host in ("localhost", "127.0.0.1", "::1")
@@ -9869,28 +9870,24 @@ def _disable_splunk(
     click.echo()
     click.echo("  Disabling Splunk integration...")
 
-    from defenseclaw.observability import list_destinations, set_destination_enabled
+    from defenseclaw.commands.cmd_setup_observability import (
+        _require_v8_operator_status,
+        _set_v8_destination_enabled,
+    )
 
-    dests = list_destinations(app.cfg.data_dir)
+    dests = _require_v8_operator_status(app.cfg.data_dir).destinations
 
     if disable_both or o11y_only:
-        # Disable only Splunk's named OTLP routes. The top-level otel.enabled
-        # flag is now a master switch shared with Galileo, local-observability,
-        # and other destinations, so toggling it here would cause collateral
-        # telemetry loss.
         for destination in dests:
-            if destination.target != "otel" or destination.preset_id != "splunk-o11y":
+            if destination.kind != "otlp" or not _splunk_o11y_realm(destination.endpoint):
                 continue
             try:
-                set_destination_enabled(destination.name, False, app.cfg.data_dir)
-            except ValueError:
+                _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+            except click.ClickException:
                 pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only or enterprise_only:
-        # Find splunk_hec audit sinks and flip enabled=false. The legacy
-        # Config.splunk dataclass hydrates from the first enabled one, so
-        # the gateway will see it as disabled on next load.
         disabled_local = False
         disabled_enterprise = False
         for d in dests:
@@ -9902,12 +9899,12 @@ def _disable_splunk(
                     if enterprise_only and is_local:
                         continue
                 try:
-                    set_destination_enabled(d.name, False, app.cfg.data_dir)
+                    _set_v8_destination_enabled(app.cfg.data_dir, d.name, False, "")
                     if is_local:
                         disabled_local = True
                     else:
                         disabled_enterprise = True
-                except ValueError:
+                except click.ClickException:
                     continue
         if disable_both or logs_only:
             suffix = "" if disabled_local else " (no active local sinks found)"
@@ -9967,9 +9964,10 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
     if not value:
         return
     dotenv_path = os.path.join(data_dir, ".env")
-    existing = _load_dotenv(dotenv_path)
-    existing[key] = value
-    _write_dotenv(dotenv_path, existing)
+    with locked_file_update(dotenv_path):
+        existing = _load_dotenv(dotenv_path)
+        existing[key] = value
+        _write_dotenv_locked(dotenv_path, existing)
     os.environ[key] = value
 
 
@@ -9979,64 +9977,56 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
 
 
 def _print_splunk_status(app: AppContext) -> None:
-    otel = app.cfg.otel
-    sc = app.cfg.splunk
+    """Print Splunk integrations from the canonical v8 effective plan."""
 
-    splunk_destinations = [item for item in otel.destinations if item.preset == "splunk-o11y"]
-    any_route_enabled = False
-    for destination in splunk_destinations:
-        route_enabled = otel.enabled and destination.enabled
-        any_route_enabled = any_route_enabled or route_enabled
-        traces = destination.traces
-        metrics = destination.metrics
-        logs = destination.logs
-        base_endpoint = destination.endpoint
+    from defenseclaw.commands.cmd_setup_observability import _require_v8_operator_status
 
-        def signal_endpoint(signal) -> str:
-            return signal.endpoint or base_endpoint
+    destinations = _require_v8_operator_status(app.cfg.data_dir).destinations
+    o11y_destinations = [
+        destination
+        for destination in destinations
+        if destination.kind == "otlp" and _splunk_o11y_realm(destination.endpoint)
+    ]
+    hec_destinations = [destination for destination in destinations if destination.kind == "splunk_hec"]
+    any_route_enabled = any(
+        destination.enabled for destination in (*o11y_destinations, *hec_destinations)
+    )
 
-        suffix = f" [{destination.name}]" if len(splunk_destinations) > 1 else ""
+    for destination in o11y_destinations:
+        suffix = f" [{destination.name}]" if len(o11y_destinations) > 1 else ""
         click.echo(f"  Splunk Observability Cloud (OTLP){suffix}:")
-        click.echo(f"    Status:      {'enabled' if route_enabled else 'disabled'}")
-        realm_endpoint = next(
-            (signal_endpoint(signal) for signal in (traces, metrics, logs) if signal_endpoint(signal)),
-            "",
-        )
-        if realm_endpoint:
-            parse_target = realm_endpoint if "://" in realm_endpoint else f"//{realm_endpoint}"
-            hostname = urlparse(parse_target).hostname or ""
-            realm = hostname.removeprefix("ingest.").removesuffix(".observability.splunkcloud.com")
-            if realm:
-                click.echo(f"    Realm:       {realm}")
-        if route_enabled and traces.enabled:
-            click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
-        else:
-            click.echo("    Traces:      disabled")
-        if route_enabled and metrics.enabled:
-            click.echo(f"    Metrics:     {signal_endpoint(metrics)}{metrics.url_path}")
-        else:
-            click.echo("    Metrics:     disabled")
-        if route_enabled and logs.enabled:
-            click.echo(f"    Logs:        {signal_endpoint(logs)}{logs.url_path}")
-        else:
-            click.echo("    Logs:        disabled")
+        click.echo(f"    Status:      {'enabled' if destination.enabled else 'disabled'}")
+        click.echo(f"    Destination: {destination.name}")
+        click.echo(f"    Realm:       {_splunk_o11y_realm(destination.endpoint)}")
+        click.echo(f"    Endpoint:    {destination.endpoint}")
+        signals = ", ".join(destination.selected_signals) or "none"
+        click.echo(f"    Signals:     {signals}")
+        buckets = ", ".join(destination.buckets) or "none"
+        click.echo(f"    Buckets:     {buckets}")
+        click.echo(f"    Redaction:   {destination.redaction_label}")
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
         dotenv = _load_dotenv(dotenv_path)
         svc = dotenv.get("OTEL_SERVICE_NAME", os.environ.get("OTEL_SERVICE_NAME", "defenseclaw"))
         click.echo(f"    Service:     {svc}")
         click.echo()
 
-    if sc.enabled:
-        hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(sc.hec_endpoint) else "Splunk Enterprise (HEC)"
-        click.echo(f"  {hec_label}:")
-        click.echo("    Status:      enabled")
-        click.echo(f"    HEC:         {sc.hec_endpoint}")
-        click.echo(f"    Index:       {sc.index}")
-        click.echo(f"    Source:      {sc.source}")
-        click.echo(f"    Sourcetype:  {sc.sourcetype}")
+    for destination in hec_destinations:
+        hec_label = (
+            "Local Splunk (HEC)"
+            if _is_local_hec_endpoint(destination.endpoint)
+            else "Splunk Enterprise (HEC)"
+        )
+        suffix = f" [{destination.name}]" if len(hec_destinations) > 1 else ""
+        click.echo(f"  {hec_label}{suffix}:")
+        click.echo(f"    Status:      {'enabled' if destination.enabled else 'disabled'}")
+        click.echo(f"    Destination: {destination.name}")
+        click.echo(f"    HEC:         {destination.endpoint}")
+        buckets = ", ".join(destination.buckets) or "none"
+        click.echo(f"    Buckets:     {buckets}")
+        click.echo(f"    Redaction:   {destination.redaction_label}")
         click.echo()
 
-    if not any_route_enabled and not sc.enabled:
+    if not any_route_enabled:
         click.echo("  No Splunk integrations are currently enabled.")
         click.echo()
 

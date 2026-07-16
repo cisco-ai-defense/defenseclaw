@@ -41,13 +41,7 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
 	reason = normalizeHookTelemetryLabel(reason, "unknown")
 	enrichConnectorHookTelemetrySpan(ctx, connectorName, eventType, "rejected", reason, "", "", false, "", 0)
-
-	if a.otel != nil {
-		a.otel.RecordConnectorHookInvocation(ctx, connectorName, eventType, "rejected", reason, 0)
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "rejected", 0, bodyBytes,
-			fmt.Sprintf("source=hook connector=%s event=%s result=rejected reason=%s bytes=%d",
-				connectorName, eventType, reason, bodyBytes))
-	}
+	a.recordHookRejectionMetricsV8(ctx, connectorName, eventType, reason)
 	if a.logger != nil {
 		a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 			Connector: connectorName,
@@ -98,9 +92,9 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // row's action column instead of the canonical
 // ActionConnectorHook. Sinks that want to keep "1 row per
 // codex.notify in" should filter on action=connector-hook only.
-func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) {
+func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
-		return
+		return fmt.Errorf("gateway: audit logger is unavailable")
 	}
 	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
 	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
@@ -115,7 +109,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
-	_ = a.logger.LogEventCtx(ctx, audit.Event{
+	return a.logger.LogEventCtx(ctx, audit.Event{
 		Action:     auditAction,
 		Target:     env.Event,
 		Actor:      "defenseclaw",
@@ -154,14 +148,11 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, 
 	})
 }
 
-// enrichConnectorHookIdentitySpan stamps the per-connector forensic
-// identity (step_idx / enforced / rule_pack_dir) onto the active span.
-// These mirror the dedicated SQLite columns and structured envelope so
-// the OTel sink reaches DN2 parity with the other two sinks — the schema
-// at schemas/otel/connector-telemetry-event.schema.json already declares
-// these attribute keys. A zero step_idx (non-turn events) and empty
-// rule_pack_dir are omitted to keep noise out of spans. Safe no-op when
-// no recording span is on the context.
+// enrichConnectorHookIdentitySpan stamps the per-connector forensic identity
+// (step_idx / enforced / rule_pack_dir) onto the active span. These mirror the
+// dedicated SQLite columns and structured envelope. A zero step_idx (non-turn
+// events) and empty rule_pack_dir are omitted to keep noise out of spans. Safe
+// no-op when no recording span is on the context.
 func enrichConnectorHookIdentitySpan(ctx context.Context, stepIdx int, enforced bool, rulePackDir string) {
 	span := trace.SpanFromContext(ctx)
 	if span == nil || !span.IsRecording() {

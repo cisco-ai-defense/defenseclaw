@@ -22,7 +22,7 @@ import struct
 from pathlib import Path
 
 import pytest
-from defenseclaw import windows_acl
+from defenseclaw import bundle_refresh, windows_acl
 from defenseclaw.commands import cmd_upgrade
 from defenseclaw.windows_acl import WindowsFileSecurity
 
@@ -124,6 +124,17 @@ def test_windows_hard_cut_security_round_trips_label_and_accepts_legacy(tmp_path
     partial["windows_security"] = partial_security
     with pytest.raises(OSError, match="Windows security is invalid"):
         cmd_upgrade._snapshot_from_recovery_json(partial)
+
+
+def test_windows_bundle_security_round_trips_mandatory_label() -> None:
+    encoded = bundle_refresh._serialize_windows_security(LABELED)
+
+    decoded = cmd_upgrade._parse_bundle_windows_security(
+        {"managed/member.yaml": encoded},
+        {"managed/member.yaml"},
+    )
+
+    assert decoded == {"managed/member.yaml": LABELED}
 
 
 @pytest.mark.parametrize("name", ["config.yaml", ".env", ".migration_state.json"])

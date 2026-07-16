@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -46,6 +47,7 @@ type Event struct {
 	Severity  string    `json:"severity"`
 	RunID     string    `json:"run_id,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
+	SpanID    string    `json:"span_id,omitempty"`
 	// RequestID is the per-request correlation key minted at the
 	// top of every proxy path. Populated in Phase 5 via the
 	// gateway context threading; older call sites may leave it
@@ -58,6 +60,14 @@ type Event struct {
 	// so downstream consumers can fold tool-call, approval,
 	// and verdict events into one row per session.
 	SessionID string `json:"session_id,omitempty"`
+
+	// EvaluationID / ScanID / FindingOccurrenceID are canonical v8 join keys.
+	// They remain optional on ordinary audit actions and are populated together
+	// for runtime inspection summaries/findings so logs, metrics, forensic rows,
+	// and traces can be joined without parsing the event body.
+	EvaluationID        string `json:"evaluation_id,omitempty"`
+	ScanID              string `json:"scan_id,omitempty"`
+	FindingOccurrenceID string `json:"finding_occurrence_id,omitempty"`
 
 	// TurnID identifies a single agent turn inside a session. It is
 	// currently sink-only for audit events; gatewaylog events persist it
@@ -192,7 +202,45 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
+
+	// lifecycleMu serializes initialization/close and lets mandatory v8
+	// event-history transactions pin a ready store until commit or rollback.
+	lifecycleMu sync.RWMutex
+	ready       atomic.Bool
+	closed      bool
+
+	sqliteBusyMu       sync.RWMutex
+	sqliteBusyObserver SQLiteBusyObservabilityV8
+}
+
+// SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
+// judge-body, and inventory SQLite retry loops. Stores never receive an OTel
+// provider or exporter; the observer selects the exact generated family and
+// the central runtime owns collection and destination routing.
+type SQLiteBusyObservabilityV8 interface {
+	RecordSQLiteBusyMetric(context.Context, string) error
+}
+
+// BindSQLiteBusyObservabilityV8 publishes or detaches the canonical observer.
+func (s *Store) BindSQLiteBusyObservabilityV8(observer SQLiteBusyObservabilityV8) {
+	if s == nil {
+		return
+	}
+	s.sqliteBusyMu.Lock()
+	s.sqliteBusyObserver = observer
+	s.sqliteBusyMu.Unlock()
+}
+
+func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	if s == nil {
+		return nil
+	}
+	s.sqliteBusyMu.RLock()
+	observer := s.sqliteBusyObserver
+	s.sqliteBusyMu.RUnlock()
+	return observer
 }
 
 // auditPragmas is the pragma set applied to every connection in the
@@ -226,13 +274,31 @@ type Store struct {
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
 //     silent correctness regression.
-const auditPragmas = "?_pragma=journal_mode(WAL)" +
-	"&_pragma=busy_timeout(5000)" +
-	"&_pragma=synchronous(NORMAL)" +
-	"&_pragma=cache_size(-20000)" +
-	"&_pragma=temp_store(MEMORY)" +
-	"&_pragma=mmap_size(268435456)" +
-	"&_pragma=foreign_keys(ON)"
+type auditIntegerPragma struct {
+	name     string
+	dsnValue string
+	want     int64
+}
+
+var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
+	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "synchronous", dsnValue: "NORMAL", want: 1},
+	{name: "cache_size", dsnValue: "-20000", want: -20000},
+	{name: "temp_store", dsnValue: "MEMORY", want: 2},
+	{name: "foreign_keys", dsnValue: "ON", want: 1},
+}
+
+var auditPragmas = buildAuditPragmas()
+
+func buildAuditPragmas() string {
+	var result strings.Builder
+	result.WriteString("?_pragma=journal_mode(WAL)")
+	for _, pragma := range auditMandatoryIntegerPragmas {
+		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
+	}
+	result.WriteString("&_pragma=mmap_size(268435456)")
+	return result.String()
+}
 
 // openSQLite opens a SQLite connection with the audit-tier hardening
 // applied (DSN pragmas + a single-connection pool). Sharing this
@@ -260,13 +326,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string) (*Store, error) {
-	db, err := openSQLite(dbPath)
+	db, identity, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	st := &Store{db: db}
-	telemetry.RegisterAuditDB(db)
-	return st, nil
+	return &Store{db: db, dbPath: identity}, nil
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -304,10 +368,24 @@ func isSQLiteBusy(err error) bool {
 			return true
 		}
 	}
-	s := err.Error()
-	return strings.Contains(s, "database is locked") ||
-		strings.Contains(s, "SQLITE_BUSY") ||
-		strings.Contains(s, "SQLITE_LOCKED")
+	// Sanitizing wrappers intentionally hide driver diagnostics from callers.
+	// Walk the bounded unwrap chain for message-only legacy drivers so privacy
+	// wrappers do not accidentally disable contention retries.
+	current := err
+	for depth := 0; current != nil && depth < 32; depth++ {
+		message := strings.ToLower(current.Error())
+		if strings.Contains(message, "database is locked") ||
+			strings.Contains(message, "sqlite_busy") ||
+			strings.Contains(message, "sqlite_locked") {
+			return true
+		}
+		next := errors.Unwrap(current)
+		if next == current {
+			break
+		}
+		current = next
+	}
+	return false
 }
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
@@ -329,6 +407,15 @@ const (
 // cancellation aborts the loop immediately, preserving cancellation
 // semantics for request-scoped writes.
 func retryBusy(ctx context.Context, op string, fn func() error) error {
+	return retryBusyObserved(ctx, op, nil, fn)
+}
+
+func retryBusyObserved(
+	ctx context.Context,
+	op string,
+	observer SQLiteBusyObservabilityV8,
+	fn func() error,
+) error {
 	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
 	var err error
 	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
@@ -336,7 +423,9 @@ func retryBusy(ctx context.Context, op string, fn func() error) error {
 		if !isSQLiteBusy(err) {
 			return err
 		}
-		telemetry.RecordSQLiteBusy(ctx, op)
+		if observer != nil {
+			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
 		if attempt == sqliteRetryAttempts-1 {
 			break
 		}
@@ -352,7 +441,7 @@ func retryBusy(ctx context.Context, op string, fn func() error) error {
 
 func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
 	var res sql.Result
-	err := retryBusy(ctx, op, func() error {
+	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
 		res, execErr = s.db.ExecContext(ctx, query, args...)
 		return execErr
@@ -362,7 +451,7 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 
 func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
 	var rows *sql.Rows
-	err := retryBusy(ctx, op, func() error {
+	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var qErr error
 		rows, qErr = s.db.QueryContext(ctx, query, args...)
 		return qErr
@@ -371,7 +460,7 @@ func (s *Store) queryDB(ctx context.Context, op string, query string, args ...an
 }
 
 func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
-	return retryBusy(ctx, op, func() error {
+	return retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		return row.Scan(dest...)
 	})
 }
@@ -381,10 +470,20 @@ func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...an
 // usually means the whole tx must be rolled back and reattempted by
 // the caller (otherwise we'd corrupt invariants halfway through). We
 // still record the metric so contention shows up in dashboards.
-func txExec(tx *sql.Tx, op string, query string, args ...any) (sql.Result, error) {
-	res, err := tx.Exec(query, args...)
-	if isSQLiteBusy(err) {
-		telemetry.RecordSQLiteBusy(context.Background(), op)
+func txExecContextObserved(
+	ctx context.Context,
+	tx *sql.Tx,
+	op string,
+	observer SQLiteBusyObservabilityV8,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
+	if isSQLiteBusy(err) && observer != nil {
+		_ = observer.RecordSQLiteBusyMetric(ctx, op)
 	}
 	return res, err
 }
@@ -584,8 +683,8 @@ var migrations = []migration{
 	{
 		// Phase 3 of the observability refactor: land correlation
 		// identifiers (request_id + trace_id) on audit_events so
-		// operators can pivot between gateway.jsonl, SQLite, Splunk,
-		// and OTel without a separate join table. request_id is
+		// operators can pivot across local history and canonical
+		// destinations without a separate join table. request_id is
 		// minted at the top of every proxy request in Phase 5;
 		// trace_id mirrors the OTel span id the audit.Logger
 		// already stamps onto emitted spans.
@@ -1363,6 +1462,228 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// Observability v8 keeps audit_events as the compatibility anchor. Every
+		// column here is additive and nullable so a v8-migrated database remains
+		// readable by the immediately previous binary and legacy rows retain their
+		// original meaning. The writer in event_history_v8.go is the only path that
+		// requires and populates the new canonical local-projection fields.
+		description: "observability v8: add canonical local event-history projection columns",
+		apply: func(ex dbExecer) error {
+			// Some legacy component-test and recovery databases intentionally
+			// contain only one projection table while sharing the global migration
+			// cursor. Preserve that historical migration behavior: a missing
+			// compatibility anchor is not created or mutated by this additive step.
+			present, err := tableExists(ex, "audit_events")
+			if err != nil || !present {
+				return err
+			}
+			for _, spec := range []struct {
+				column string
+				kind   string
+			}{
+				{"bucket", "TEXT"},
+				{"event_name", "TEXT"},
+				{"source", "TEXT"},
+				{"signal", "TEXT"},
+				{"bucket_catalog_version", "INTEGER"},
+				{"payload_json", "TEXT"},
+				{"projected_record_json", "TEXT"},
+				{"record_schema_version", "INTEGER"},
+				{"projection_hash", "TEXT"},
+				{"redaction_profile", "TEXT"},
+				{"mandatory", "INTEGER"},
+				{"turn_id", "TEXT"},
+				{"evaluation_id", "TEXT"},
+				{"scan_id", "TEXT"},
+				{"finding_id", "TEXT"},
+				{"enforcement_action_id", "TEXT"},
+				{"payload_hmac", "TEXT"},
+				{"integrity_algorithm", "TEXT"},
+				{"integrity_key_id", "TEXT"},
+			} {
+				exists, err := hasColumnDB(ex, "audit_events", spec.column)
+				if err != nil {
+					return err
+				}
+				if exists {
+					continue
+				}
+				if _, err := ex.Exec(fmt.Sprintf(
+					"ALTER TABLE audit_events ADD COLUMN %s %s", spec.column, spec.kind,
+				)); err != nil {
+					return fmt.Errorf("alter audit_events.%s: %w", spec.column, err)
+				}
+			}
+			for _, stmt := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_bucket_timestamp ON audit_events(bucket, timestamp)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_event_name_timestamp ON audit_events(event_name, timestamp)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_evaluation_id ON audit_events(evaluation_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_enforcement_action_id ON audit_events(enforcement_action_id)`,
+			} {
+				if _, err := ex.Exec(stmt); err != nil {
+					return fmt.Errorf("create observability v8 audit index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		description: "judge bodies: normalize timestamps for indexed retention",
+		apply: func(ex dbExecer) error {
+			return migrateJudgeBodyTimestampUnixNano(ex, legacyJudgeTimestampUnixNanoIndex)
+		},
+	},
+	{
+		// Alert disposition is mutable operator state, deliberately separate
+		// from immutable finding occurrences and v8 audit_events. Operation
+		// results and legacy baselines are protected state needed to make
+		// retries and reconciliation deterministic; they are not event-history
+		// retention targets.
+		description: "alert acknowledgements: add CAS projection and reconciliation state",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS alert_acknowledgement_projection (
+				alert_id TEXT PRIMARY KEY,
+				disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged','dismissed')),
+				actor TEXT NOT NULL,
+				disposition_at DATETIME NOT NULL,
+				projection_version INTEGER NOT NULL CHECK (projection_version > 0),
+				source TEXT NOT NULL CHECK (source IN ('modern','legacy_ack')),
+				source_event_id TEXT NOT NULL,
+				updated_at DATETIME NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS alert_acknowledgement_operations (
+				operation_id TEXT PRIMARY KEY,
+				command_fingerprint TEXT NOT NULL,
+				alert_id TEXT NOT NULL,
+				requested_disposition TEXT NOT NULL CHECK (requested_disposition IN ('acknowledged','dismissed')),
+				actor TEXT NOT NULL,
+				expected_projection_version INTEGER NOT NULL CHECK (expected_projection_version >= 0),
+				outcome TEXT NOT NULL CHECK (outcome IN ('applied','no_change','rejected')),
+				rejection_reason TEXT,
+				observed_projection_version INTEGER NOT NULL CHECK (observed_projection_version >= 0),
+				projection_version_before INTEGER NOT NULL CHECK (projection_version_before >= 0),
+				projection_version_after INTEGER NOT NULL CHECK (projection_version_after >= 0),
+				event_id TEXT NOT NULL UNIQUE,
+				created_at DATETIME NOT NULL,
+				CHECK (observed_projection_version = projection_version_before),
+				CHECK (
+					(outcome = 'applied' AND rejection_reason IS NULL AND
+					 projection_version_after = projection_version_before + 1) OR
+					(outcome = 'no_change' AND rejection_reason IS NULL AND
+					 projection_version_after = projection_version_before) OR
+					(outcome = 'rejected' AND rejection_reason IN
+					 ('stale_projection_version','idempotency_conflict') AND
+					 projection_version_after = projection_version_before)
+				)
+			);
+			CREATE INDEX IF NOT EXISTS idx_alert_ack_operations_alert
+				ON alert_acknowledgement_operations(alert_id, created_at);
+			CREATE INDEX IF NOT EXISTS idx_alert_ack_operations_replay
+				ON alert_acknowledgement_operations(
+					alert_id, outcome, projection_version_after, event_id
+				);
+			CREATE TABLE IF NOT EXISTS alert_acknowledgement_baselines (
+				alert_id TEXT PRIMARY KEY,
+				baseline_version INTEGER NOT NULL CHECK (baseline_version = 1),
+				disposition TEXT NOT NULL CHECK (disposition = 'acknowledged'),
+				actor TEXT NOT NULL,
+				disposition_at DATETIME NOT NULL,
+				legacy_event_id TEXT NOT NULL UNIQUE,
+				raw_legacy_severity TEXT NOT NULL CHECK (raw_legacy_severity = 'ACK'),
+				legacy_original_severity TEXT NOT NULL CHECK (legacy_original_severity = 'unknown'),
+				timestamp_provenance TEXT NOT NULL,
+				created_at DATETIME NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS alert_acknowledgement_health (
+				alert_id TEXT PRIMARY KEY,
+				code TEXT NOT NULL,
+				health_event_id TEXT NOT NULL UNIQUE,
+				detected_at DATETIME NOT NULL
+			);
+			CREATE TRIGGER IF NOT EXISTS alert_ack_operations_no_update
+				BEFORE UPDATE ON alert_acknowledgement_operations
+				BEGIN SELECT RAISE(ABORT, 'alert acknowledgement operation history is immutable'); END;
+			CREATE TRIGGER IF NOT EXISTS alert_ack_operations_no_delete
+				BEFORE DELETE ON alert_acknowledgement_operations
+				BEGIN SELECT RAISE(ABORT, 'alert acknowledgement operation history is immutable'); END;
+			CREATE TRIGGER IF NOT EXISTS alert_ack_baselines_no_update
+				BEFORE UPDATE ON alert_acknowledgement_baselines
+				BEGIN SELECT RAISE(ABORT, 'alert acknowledgement baseline history is immutable'); END;
+			CREATE TRIGGER IF NOT EXISTS alert_ack_baselines_no_delete
+				BEFORE DELETE ON alert_acknowledgement_baselines
+				BEGIN SELECT RAISE(ABORT, 'alert acknowledgement baseline history is immutable'); END;
+			`)
+			if err != nil {
+				return fmt.Errorf("create alert acknowledgement projection tables: %w", err)
+			}
+			return materializeLegacyAlertAcknowledgementBaselines(ex)
+		},
+	},
+	{
+		// This singleton is protected current state, not event history. Init
+		// commits an update before publishing readiness so a read-only,
+		// quota-full, or otherwise unwritable database cannot serve traffic.
+		description: "observability v8: add mandatory SQLite readiness state",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS observability_store_readiness (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				verification_generation INTEGER NOT NULL CHECK (verification_generation >= 0),
+				last_verified_at DATETIME NOT NULL
+			);
+			INSERT OR IGNORE INTO observability_store_readiness (
+				id, verification_generation, last_verified_at
+			) VALUES (1, 0, '1970-01-01T00:00:00Z');
+			`)
+			if err != nil {
+				return fmt.Errorf("create observability store readiness state: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		description: "observability v8: add exact indexed retention instants and scan integrity guards",
+		apply: func(ex dbExecer) error {
+			if err := migrateRetentionTimestampUnixNano(ex); err != nil {
+				return err
+			}
+			return installRetentionScanIntegrityTriggers(ex)
+		},
+	},
+	{
+		description: "observability v8: retain source-backed finding evidence summaries",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil || !present {
+				return err
+			}
+			exists, err := hasColumnDB(ex, "scan_findings", "evidence_summary")
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			if _, err := ex.Exec(`ALTER TABLE scan_findings ADD COLUMN evidence_summary TEXT`); err != nil {
+				return fmt.Errorf("alter scan_findings.evidence_summary: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		// Correlation state is additive protected/index state in audit.db. The
+		// migration creates no trigger over audit_events and performs no data
+		// scan or backfill, keeping rollback readers compatible with the same
+		// database file.
+		description: "observability v8: add durable focused correlation ledger",
+		apply:       migrateCorrelationStateV8,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1380,6 +1701,22 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 }
 
 func (s *Store) Init() error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("audit: store is not initialized")
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed {
+		return fmt.Errorf("audit: store is closed")
+	}
+	if s.ready.Load() {
+		return nil
+	}
+	// Readiness is published only after every check below succeeds. Keeping the
+	// flag false on retry also prevents a partially migrated store from being
+	// captured by a new event-history writer.
+	s.ready.Store(false)
+
 	// Ensure the schema_version tracking table exists.
 	if _, err := s.execDB(context.Background(), "audit", `CREATE TABLE IF NOT EXISTS schema_version (
 		version INTEGER PRIMARY KEY,
@@ -1402,7 +1739,175 @@ func (s *Store) Init() error {
 			return err
 		}
 	}
+	if err := ensureJudgeBodyTimestampUnixNano(s.db, legacyJudgeTimestampUnixNanoIndex); err != nil {
+		return fmt.Errorf("audit: verify judge timestamp retention index: %w", err)
+	}
+	// The previous supported binary may have written another legacy ACK row
+	// after an operator rolled back. Re-scan idempotently on every current
+	// startup before retention or alert mutation can proceed.
+	if err := materializeLegacyAlertAcknowledgementBaselines(s.db); err != nil {
+		return fmt.Errorf("audit: refresh legacy alert acknowledgement baselines: %w", err)
+	}
+	// The v8 local event-history anchor is mandatory. Some migration unit
+	// fixtures intentionally exercise table-scoped migrations against partial
+	// schemas, so individual migration functions remain replayable there; a
+	// production Store.Init must nevertheless fail readiness rather than advance
+	// successfully with no usable audit_events projection.
+	present, err := tableExists(s.db, "audit_events")
+	if err != nil {
+		return fmt.Errorf("audit: verify mandatory event-history table: %w", err)
+	}
+	if !present {
+		return fmt.Errorf("audit: mandatory event-history table is missing")
+	}
+	for _, column := range []string{
+		"bucket", "event_name", "source", "signal", "payload_json", "projected_record_json",
+		"record_schema_version", "projection_hash", "redaction_profile", "mandatory",
+	} {
+		exists, err := s.hasColumn("audit_events", column)
+		if err != nil {
+			return fmt.Errorf("audit: verify mandatory event-history column %s: %w", column, err)
+		}
+		if !exists {
+			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
+		}
+	}
+	if err := ensureRetentionTimestampInfrastructure(s.db); err != nil {
+		return fmt.Errorf("audit: verify event timestamp retention infrastructure: %w", err)
+	}
+	for _, table := range []string{
+		"alert_acknowledgement_projection",
+		"alert_acknowledgement_operations",
+		"alert_acknowledgement_baselines",
+		"alert_acknowledgement_health",
+		"observability_store_readiness",
+		"correlation_connector_instances",
+		"correlation_events",
+		"correlation_identifiers",
+		"correlation_observations",
+		"correlation_relationships",
+		"correlation_relationship_evidence",
+		"correlation_cursors",
+		"correlation_pending_operations",
+		"correlation_receipts",
+		"correlation_identity_claims",
+	} {
+		present, err := tableExists(s.db, table)
+		if err != nil {
+			return fmt.Errorf("audit: verify mandatory SQLite table %s: %w", table, err)
+		}
+		if !present {
+			return fmt.Errorf("audit: mandatory SQLite table %s is missing", table)
+		}
+	}
+	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
+		return err
+	}
+	if err := s.proveDurableWrite(context.Background()); err != nil {
+		return err
+	}
+	if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
+		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
+	}
 
+	s.ready.Store(true)
+	return nil
+}
+
+// Ready reports whether migrations, mandatory schema/pragmas, a committed
+// write, and post-migration path checks all succeeded and the store remains
+// open. It is intentionally safe for health/readiness polling.
+func (s *Store) Ready() bool {
+	return s != nil && s.db != nil && s.ready.Load()
+}
+
+// DatabasePath returns the immutable constructor path identity for internal
+// runtime binding checks. Callers must not include it in telemetry or errors;
+// it exists so an already-open process-stable Store cannot be paired with an
+// observability plan that names a different SQLite database.
+func (s *Store) DatabasePath() string {
+	if s == nil {
+		return ""
+	}
+	return s.dbPath
+}
+
+// acquireReady pins the store against Close for one mandatory v8 transaction.
+// The returned release function must be called on every successful acquire.
+func (s *Store) acquireReady() (func(), error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("audit: mandatory SQLite event history is unavailable")
+	}
+	s.lifecycleMu.RLock()
+	if s.closed || !s.ready.Load() {
+		s.lifecycleMu.RUnlock()
+		return nil, fmt.Errorf("audit: mandatory SQLite event history is not ready")
+	}
+	return s.lifecycleMu.RUnlock, nil
+}
+
+func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("audit: SQLite pragma verification context is required")
+	}
+	for _, pragma := range auditMandatoryIntegerPragmas {
+		var got int64
+		row := s.db.QueryRowContext(ctx, "PRAGMA "+pragma.name)
+		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
+			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
+		}
+		if got != pragma.want {
+			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)
+		}
+	}
+	var journalMode string
+	if err := s.scanRow(ctx, "audit_pragma_journal_mode",
+		s.db.QueryRowContext(ctx, "PRAGMA journal_mode"), &journalMode); err != nil {
+		return fmt.Errorf("audit: verify SQLite journal_mode pragma: %w", err)
+	}
+	wantJournalMode := "wal"
+	if s.dbPath == ":memory:" {
+		wantJournalMode = "memory"
+	}
+	if !strings.EqualFold(journalMode, wantJournalMode) {
+		return fmt.Errorf("audit: SQLite journal_mode is %q, want %q", journalMode, wantJournalMode)
+	}
+	return nil
+}
+
+func (s *Store) proveDurableWrite(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("audit: SQLite readiness write context is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("audit: begin mandatory SQLite readiness write: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	result, err := txExecContextObserved(ctx, tx, "audit_readiness_write", s.sqliteBusyObservabilityV8(), `
+		UPDATE observability_store_readiness
+		SET verification_generation = verification_generation + 1,
+			last_verified_at = ?
+		WHERE id = 1`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("audit: mandatory SQLite readiness write failed: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return fmt.Errorf("audit: mandatory SQLite readiness state is invalid")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit: commit mandatory SQLite readiness write: %w", err)
+	}
+	var generation int64
+	if err := s.scanRow(ctx, "audit_readiness_readback",
+		s.db.QueryRowContext(ctx, `SELECT verification_generation
+			FROM observability_store_readiness WHERE id = 1`), &generation); err != nil {
+		return fmt.Errorf("audit: verify mandatory SQLite readiness write: %w", err)
+	}
+	if generation <= 0 {
+		return fmt.Errorf("audit: mandatory SQLite readiness write was not durable")
+	}
 	return nil
 }
 
@@ -1419,7 +1924,7 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	if err := m.apply(tx); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
-	if _, err := txExec(tx, "migration_version_insert", `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		ver, time.Now().UTC()); err != nil {
 		return fmt.Errorf("audit: record migration %d: %w", ver, err)
 	}
@@ -1481,6 +1986,24 @@ var knownTables = map[string]bool{
 	"scan_findings":   true,
 	"activity_events": true,
 	"sink_health":     true,
+	// Observability v8 alert acknowledgement protected state.
+	"alert_acknowledgement_projection": true,
+	"alert_acknowledgement_operations": true,
+	"alert_acknowledgement_baselines":  true,
+	"alert_acknowledgement_health":     true,
+	"observability_store_readiness":    true,
+	// Observability v8 durable correlation state. These are all additive
+	// tables in the existing audit database.
+	"correlation_connector_instances":   true,
+	"correlation_events":                true,
+	"correlation_identifiers":           true,
+	"correlation_observations":          true,
+	"correlation_relationships":         true,
+	"correlation_relationship_evidence": true,
+	"correlation_cursors":               true,
+	"correlation_pending_operations":    true,
+	"correlation_receipts":              true,
+	"correlation_identity_claims":       true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {
@@ -1528,11 +2051,10 @@ func (s *Store) LogEvent(e Event) error {
 		e.RunID = currentRunID()
 	}
 
-	// v7: stamp the provenance quartet + the per-process sidecar UUID
-	// at the one true choke point for audit_events. This is the
-	// analogue of gatewaylog.Writer.Emit's StampProvenance — callers
-	// that forgot (or never knew about) the envelope still produce a
-	// fully-populated SQLite row. The snapshot is always taken from
+	// Stamp the provenance quartet and per-process sidecar UUID for historical
+	// direct inserts and migration/replay tooling. Runtime producers use the
+	// generated v8 writer, but pre-existing databases still need this store API
+	// to preserve fully populated rows. The snapshot is always taken from
 	// version.Current() so a single wire run shows consistent
 	// schema/content/generation across every event; pre-stamped
 	// callers keep their values so historical replays stay stable.
@@ -1562,13 +2084,13 @@ func (s *Store) LogEvent(e Event) error {
 	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity,
 			run_id, trace_id, request_id,
-			session_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
+			session_id, turn_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
 			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
 			connector, step_idx, enforced, rule_pack_dir)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
-		nullStr(e.SessionID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
+		nullStr(e.SessionID), nullStr(e.TurnID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
 		nullStr(e.PolicyID), nullStr(e.DestinationApp), nullStr(e.ToolName), nullStr(e.ToolID),
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
@@ -1579,6 +2101,43 @@ func (s *Store) LogEvent(e Event) error {
 		return fmt.Errorf("audit: log event: %w", err)
 	}
 	return nil
+}
+
+// UpgradeReceiptEventRecorded reports whether receiptID already owns the
+// canonical upgrade compliance row. A row with the same ID but a different
+// identity is an integrity conflict, not an idempotent replay.
+func (s *Store) UpgradeReceiptEventRecorded(receiptID string) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("audit: store is unavailable")
+	}
+	if parsed, err := uuid.Parse(receiptID); err != nil || parsed.String() != receiptID {
+		return false, fmt.Errorf("audit: invalid upgrade receipt ID")
+	}
+	rows, err := s.queryDB(context.Background(), "audit", `
+		SELECT action, bucket, signal, event_name
+		FROM audit_events WHERE id = ?`, receiptID)
+	if err != nil {
+		return false, fmt.Errorf("audit: query upgrade receipt: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return false, rows.Err()
+	}
+	var action, bucket, signal, eventName string
+	if err := rows.Scan(&action, &bucket, &signal, &eventName); err != nil {
+		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
+	}
+	if rows.Next() {
+		return false, fmt.Errorf("audit: duplicate upgrade receipt identity")
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
+	}
+	if action != string(ActionUpgrade) || bucket != "compliance.activity" ||
+		signal != "logs" || eventName != "legacy.audit.upgrade" {
+		return false, fmt.Errorf("audit: upgrade receipt identity conflict")
+	}
+	return true, nil
 }
 
 // ActivityEventRow is the SQLite shape for migration #8 activity_events.
@@ -1801,8 +2360,18 @@ const MaxJudgeRawBytes = 64 * 1024
 // callers cannot accidentally mix in random queries that defeat
 // the per-batch fsync-amortization guarantee.
 type JudgeBatch struct {
-	tx        *sql.Tx
-	committed bool
+	tx                 *sql.Tx
+	ctx                context.Context
+	sqliteBusyObserver SQLiteBusyObservabilityV8
+	// lifecycleMu serializes Commit and Rollback. Callers may retry either
+	// finalizer concurrently, and the dedicated JudgeBodyStore attaches an
+	// RWMutex release callback that must run exactly once.
+	lifecycleMu sync.Mutex
+	committed   bool
+	// release is non-nil only for the dedicated JudgeBodyStore. It holds a
+	// runtime read lock for the complete transaction so a cutover cannot race
+	// a batch that passed the readiness gate.
+	release func()
 }
 
 // InsertJudgeResponse writes one row inside the transaction. The
@@ -1826,22 +2395,27 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 	if e.RunID == "" {
 		e.RunID = currentRunID()
 	}
+	timestampUnixNano, err := judgeBodyUnixNano(e.Timestamp)
+	if err != nil {
+		return fmt.Errorf("audit: normalize judge batch timestamp: %w", err)
+	}
 	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
 	failClosed := 0
 	if e.FailClosedApplied {
 		failClosed = 1
 	}
-	if _, err := txExec(b.tx, "audit_batch_insert",
+	if _, err := txExecContextObserved(b.ctx, b.tx, "audit_batch_insert", b.sqliteBusyObserver,
 		`INSERT INTO judge_responses
-			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			(id, timestamp, timestamp_unix_nano, kind, direction, model, action, severity, latency_ms,
 			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
 			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
 			 schema_version, content_hash, generation, binary_version,
 			 agent_id, agent_instance_id, sidecar_instance_id,
 			 policy_id, destination_app, tool_name, tool_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID,
 		e.Timestamp.Format(time.RFC3339Nano),
+		timestampUnixNano,
 		e.Kind,
 		nullStr(e.Direction),
 		nullStr(e.Model),
@@ -1887,7 +2461,12 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 // on this handle is a no-op so a buggy caller cannot accidentally
 // double-commit.
 func (b *JudgeBatch) Commit() error {
-	if b == nil || b.tx == nil {
+	if b == nil {
+		return fmt.Errorf("audit: judge batch handle is nil")
+	}
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+	if b.tx == nil {
 		return fmt.Errorf("audit: judge batch handle is nil")
 	}
 	if b.committed {
@@ -1897,6 +2476,7 @@ func (b *JudgeBatch) Commit() error {
 		return err
 	}
 	b.committed = true
+	b.releaseRuntime()
 	return nil
 }
 
@@ -1907,7 +2487,12 @@ func (b *JudgeBatch) Commit() error {
 // genuinely drive tx.Rollback() — which is the bug-fix that keeps
 // the SQLite connection from being pinned mid-tx.
 func (b *JudgeBatch) Rollback() error {
-	if b == nil || b.tx == nil {
+	if b == nil {
+		return nil
+	}
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+	if b.tx == nil {
 		return nil
 	}
 	if b.committed {
@@ -1918,7 +2503,17 @@ func (b *JudgeBatch) Rollback() error {
 	// on the same handle, which would surface as
 	// "sql: transaction has already been committed or rolled back".
 	b.committed = true
-	return b.tx.Rollback()
+	err := b.tx.Rollback()
+	b.releaseRuntime()
+	return err
+}
+
+func (b *JudgeBatch) releaseRuntime() {
+	if b == nil || b.release == nil {
+		return
+	}
+	b.release()
+	b.release = nil
 }
 
 // BeginJudgeBatch opens a transaction dedicated to a single batch of
@@ -1933,7 +2528,7 @@ func (s *Store) BeginJudgeBatch(ctx context.Context) (*JudgeBatch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: begin judge batch: %w", err)
 	}
-	return &JudgeBatch{tx: tx}, nil
+	return &JudgeBatch{tx: tx, ctx: ctx, sqliteBusyObserver: s.sqliteBusyObservabilityV8()}, nil
 }
 
 // InsertJudgeResponse persists a single judge body. The caller is
@@ -1958,22 +2553,27 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 	if e.RunID == "" {
 		e.RunID = currentRunID()
 	}
+	timestampUnixNano, err := judgeBodyUnixNano(e.Timestamp)
+	if err != nil {
+		return fmt.Errorf("audit: normalize judge timestamp: %w", err)
+	}
 	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
 	failClosed := 0
 	if e.FailClosedApplied {
 		failClosed = 1
 	}
-	_, err := s.execDB(context.Background(), "audit",
+	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO judge_responses
-			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			(id, timestamp, timestamp_unix_nano, kind, direction, model, action, severity, latency_ms,
 			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
 			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
 			 schema_version, content_hash, generation, binary_version,
 			 agent_id, agent_instance_id, sidecar_instance_id,
 			 policy_id, destination_app, tool_name, tool_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID,
 		e.Timestamp.Format(time.RFC3339Nano),
+		timestampUnixNano,
 		e.Kind,
 		nullStr(e.Direction),
 		nullStr(e.Model),
@@ -2031,11 +2631,14 @@ func truncateJudgeRaw(raw string, maxBytes int) string {
 // newest first. Intended for operator review via the CLI / TUI once
 // retention is turned on during an incident.
 func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
+	if err := verifyJudgeBodyTimestampUnixNanoReady(s.db); err != nil {
+		return nil, fmt.Errorf("audit: judge timestamp readiness: %w", err)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+		SELECT id, timestamp, timestamp_unix_nano, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
@@ -2045,7 +2648,9 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0), COALESCE(binary_version,''),
 			COALESCE(agent_id,''), COALESCE(agent_instance_id,''), COALESCE(sidecar_instance_id,''),
 			COALESCE(policy_id,''), COALESCE(destination_app,''), COALESCE(tool_name,''), COALESCE(tool_id,'')
-		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM judge_responses
+		ORDER BY timestamp_unix_nano DESC, id DESC
+		LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list judge responses: %w", err)
 	}
@@ -2055,9 +2660,10 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 	for rows.Next() {
 		var r JudgeResponse
 		var ts string
+		var timestampUnixNano int64
 		var failClosed int
 		var gen int64
-		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+		if err := rows.Scan(&r.ID, &ts, &timestampUnixNano, &r.Kind, &r.Direction, &r.Model,
 			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
 			&r.RequestID, &r.TraceID, &r.RunID, &r.SessionID, &r.InputHash, &r.Confidence,
 			&failClosed, &r.InspectedModel, &r.PromptTemplateID,
@@ -2068,8 +2674,8 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 		}
 		r.Generation = uint64(gen)
 		r.FailClosedApplied = failClosed != 0
-		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-			r.Timestamp = t
+		if err := assignJudgeResponseTimestamp(&r, ts, timestampUnixNano, "audit: list judge responses"); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
@@ -2087,8 +2693,11 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 	if requestID == "" {
 		return nil, nil
 	}
+	if err := verifyJudgeBodyTimestampUnixNanoReady(s.db); err != nil {
+		return nil, fmt.Errorf("audit: judge timestamp readiness: %w", err)
+	}
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+		SELECT id, timestamp, timestamp_unix_nano, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
@@ -2098,7 +2707,8 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0), COALESCE(binary_version,''),
 			COALESCE(agent_id,''), COALESCE(agent_instance_id,''), COALESCE(sidecar_instance_id,''),
 			COALESCE(policy_id,''), COALESCE(destination_app,''), COALESCE(tool_name,''), COALESCE(tool_id,'')
-		FROM judge_responses WHERE request_id = ? ORDER BY timestamp DESC`, requestID)
+		FROM judge_responses WHERE request_id = ?
+		ORDER BY timestamp_unix_nano DESC, id DESC`, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("audit: judge by request_id: %w", err)
 	}
@@ -2108,9 +2718,10 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 	for rows.Next() {
 		var r JudgeResponse
 		var ts string
+		var timestampUnixNano int64
 		var failClosed int
 		var gen int64
-		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+		if err := rows.Scan(&r.ID, &ts, &timestampUnixNano, &r.Kind, &r.Direction, &r.Model,
 			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
 			&r.RequestID, &r.TraceID, &r.RunID, &r.SessionID, &r.InputHash, &r.Confidence,
 			&failClosed, &r.InspectedModel, &r.PromptTemplateID,
@@ -2121,8 +2732,8 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 		}
 		r.Generation = uint64(gen)
 		r.FailClosedApplied = failClosed != 0
-		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-			r.Timestamp = t
+		if err := assignJudgeResponseTimestamp(&r, ts, timestampUnixNano, "audit: judge by request_id"); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
@@ -2162,7 +2773,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
-		        session_id, agent_name, agent_instance_id, policy_id,
+		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
 		        agent_id, sidecar_instance_id,
@@ -2187,27 +2798,27 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 
 // scanAuditEventRow centralises the column-scan logic for ListEvents
 // and ListEventsByTarget so the Observability Phase 6 columns
-// (session_id, agent_name, agent_instance_id, policy_id,
+// (session_id, turn_id, agent_name, agent_instance_id, policy_id,
 // destination_app, tool_name, tool_id) only have to be threaded
 // through the struct in a single place.
 func scanAuditEventRow(rows rowScanner) (Event, error) {
 	var e Event
 	var (
-		target, details, structuredJSON, severity       sql.NullString
-		runID, traceID, requestID                       sql.NullString
-		sessionID, agentName, agentInstanceID, policyID sql.NullString
-		destinationApp, toolName, toolID                sql.NullString
-		schemaVerI                                      sql.NullInt64
-		contentHashStr, binaryVerStr                    sql.NullString
-		generation                                      sql.NullInt64
-		agentID, sidecarInst                            sql.NullString
-		connector, rulePackDir                          sql.NullString
-		stepIdx, enforced                               sql.NullInt64
+		target, details, structuredJSON, severity               sql.NullString
+		runID, traceID, requestID                               sql.NullString
+		sessionID, turnID, agentName, agentInstanceID, policyID sql.NullString
+		destinationApp, toolName, toolID                        sql.NullString
+		schemaVerI                                              sql.NullInt64
+		contentHashStr, binaryVerStr                            sql.NullString
+		generation                                              sql.NullInt64
+		agentID, sidecarInst                                    sql.NullString
+		connector, rulePackDir                                  sql.NullString
+		stepIdx, enforced                                       sql.NullInt64
 	)
 	if err := rows.Scan(
 		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity,
 		&runID, &traceID, &requestID,
-		&sessionID, &agentName, &agentInstanceID, &policyID,
+		&sessionID, &turnID, &agentName, &agentInstanceID, &policyID,
 		&destinationApp, &toolName, &toolID,
 		&schemaVerI, &contentHashStr, &generation, &binaryVerStr,
 		&agentID, &sidecarInst,
@@ -2227,6 +2838,7 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	e.TraceID = traceID.String
 	e.RequestID = requestID.String
 	e.SessionID = sessionID.String
+	e.TurnID = turnID.String
 	e.AgentName = agentName.String
 	e.AgentInstanceID = agentInstanceID.String
 	e.PolicyID = policyID.String
@@ -2657,17 +3269,86 @@ type FindingRow struct {
 	Scanner     string `json:"scanner"`
 }
 
+type AlertAcknowledgementTarget struct {
+	AlertID           string
+	ProjectionVersion int64
+}
+
+// ListAlertAcknowledgementTargets returns immutable alert occurrences which
+// remain unreviewed. Mutations must be performed by AlertAcknowledgementWriter;
+// this query never rewrites event severity.
+func (s *Store) ListAlertAcknowledgementTargets(
+	ctx context.Context,
+	severityFilter string,
+) ([]AlertAcknowledgementTarget, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("audit: alert acknowledgement context is required")
+	}
+	query := `SELECT event.id, COALESCE(projection.projection_version, 0)
+		FROM audit_events AS event
+		LEFT JOIN alert_acknowledgement_projection AS projection ON projection.alert_id = event.id
+		WHERE projection.alert_id IS NULL
+		  AND (
+		      (event.bucket = ? AND event.event_name = 'finding.observed')
+		      OR (event.bucket IS NULL AND event.action IN (`
+	legacyActions := legacyAlertEligibleActions()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	query += placeholders + `) AND UPPER(COALESCE(event.severity,'')) IN
+		          ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
+		  )`
+	args := []any{string(observability.BucketSecurityFinding)}
+	for _, action := range legacyActions {
+		args = append(args, action)
+	}
+	if severityFilter == "" || severityFilter == "all" {
+		query += ` AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`
+	} else {
+		query += ` AND UPPER(COALESCE(event.severity,'')) = ?`
+		args = append(args, severityFilter)
+	}
+	query += ` ORDER BY event.timestamp DESC, event.id`
+	rows, err := s.queryDB(ctx, "audit", query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list alert acknowledgement targets: %w", err)
+	}
+	defer rows.Close()
+	var targets []AlertAcknowledgementTarget
+	for rows.Next() {
+		var target AlertAcknowledgementTarget
+		if err := rows.Scan(&target.AlertID, &target.ProjectionVersion); err != nil {
+			return nil, fmt.Errorf("audit: scan alert acknowledgement target: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	return targets, rows.Err()
+}
+
 func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id, trace_id, request_id
-		 FROM audit_events
-		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-		   AND action NOT LIKE 'dismiss%'
-		 ORDER BY timestamp DESC LIMIT ?`, limit,
-	)
+	legacyActions := legacyAlertEligibleActions()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
+			event.details, event.structured_json, event.severity, event.run_id,
+			event.trace_id, event.request_id
+		 FROM audit_events AS event
+		 WHERE (
+			(event.bucket = ? AND event.event_name = 'finding.observed')
+			OR (event.bucket IS NULL AND event.action IN (` + placeholders + `))
+		 )
+		 AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+		 AND NOT EXISTS (
+			 SELECT 1 FROM alert_acknowledgement_projection AS projection
+			 WHERE projection.alert_id = event.id
+		 )
+		 ORDER BY event.timestamp DESC LIMIT ?`
+	args := []any{string(observability.BucketSecurityFinding)}
+	for _, action := range legacyActions {
+		args = append(args, action)
+	}
+	args = append(args, limit)
+	rows, err := s.queryDB(context.Background(), "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list alerts: %w", err)
 	}
@@ -2696,64 +3377,6 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
-// AcknowledgeAlerts clears alerts by downgrading their severity to ACK.
-// Returns the number of alerts acknowledged.
-func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
-	var res sql.Result
-	var err error
-	if severityFilter == "" || severityFilter == "all" {
-		res, err = s.execDB(context.Background(), "audit",
-			`UPDATE audit_events SET severity = 'ACK'
-			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`)
-	} else {
-		res, err = s.execDB(context.Background(), "audit",
-			`UPDATE audit_events SET severity = 'ACK'
-			 WHERE severity = ?`, severityFilter)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("audit: acknowledge alerts: %w", err)
-	}
-	n, _ := res.RowsAffected()
-
-	_ = s.LogEvent(Event{
-		Action:   string(ActionAckAlerts),
-		Target:   severityFilter,
-		Details:  fmt.Sprintf("acknowledged %d alerts", n),
-		Severity: "ACK",
-	})
-
-	return n, nil
-}
-
-// AcknowledgeByIDs clears specific alerts by their event IDs.
-func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	query := fmt.Sprintf(
-		`UPDATE audit_events SET severity = 'ACK' WHERE id IN (%s) AND severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`,
-		strings.Join(placeholders, ","))
-	res, err := s.execDB(context.Background(), "audit", query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("audit: acknowledge by IDs: %w", err)
-	}
-	n, _ := res.RowsAffected()
-
-	_ = s.LogEvent(Event{
-		Action:   string(ActionAckAlerts),
-		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
-		Severity: "ACK",
-	})
-
-	return n, nil
-}
-
 // ListEventsByTarget returns recent audit events for a given target path.
 func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 	if limit <= 0 {
@@ -2762,7 +3385,7 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
-		        session_id, agent_name, agent_instance_id, policy_id,
+		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
 		        agent_id, sidecar_instance_id,
@@ -3241,7 +3864,18 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 }
 
 func (s *Store) Close() error {
-	telemetry.RegisterAuditDB(nil)
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	// Prevent new mandatory writes before waiting for already-pinned v8
+	// transactions to release the lifecycle read lock.
+	s.ready.Store(false)
+	s.closed = true
 	return s.db.Close()
 }
 

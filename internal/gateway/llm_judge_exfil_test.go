@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -30,11 +29,8 @@ import (
 // — the kind of phrasing the injection judge tends to shrug at and
 // the PII judge can't fire on (no literal PII has been emitted yet).
 // With a recorded LLM response that correctly classifies it, the
-// exfil judge MUST return action=block and emit an audit row with
-// kind=exfil so future jsonl shows the correct provenance.
+// exfil judge MUST return action=block with the expected severity and finding.
 func TestExfilJudge_PoliteEtcPasswdBlocks(t *testing.T) {
-	capture := withCapturedEvents(t)
-
 	// The recorded LLM response: a competent classifier asked the
 	// exfil-judge question on a polite "/etc/passwd please" prompt
 	// returns Sensitive File Access = true. Modeled after the
@@ -91,24 +87,6 @@ func TestExfilJudge_PoliteEtcPasswdBlocks(t *testing.T) {
 	if !sawFileFinding {
 		t.Fatalf("findings=%v, want JUDGE-EXFIL-FILE", verdict.Findings)
 	}
-
-	// The audit-row contract: kind=exfil so future jsonl shows
-	// kind=exfil action=block. Without this, the judge sweep would
-	// register the call but operators couldn't filter on the
-	// dedicated exfil judge.
-	var sawExfilEvent bool
-	for _, e := range *capture {
-		if e.EventType == gatewaylog.EventJudge && e.Judge != nil &&
-			e.Judge.Kind == "exfil" && e.Judge.Action == "block" {
-			sawExfilEvent = true
-			if e.Judge.Severity != gatewaylog.SeverityHigh {
-				t.Errorf("audit severity=%q, want HIGH", e.Judge.Severity)
-			}
-		}
-	}
-	if !sawExfilEvent {
-		t.Fatalf("no EventJudge with kind=exfil action=block in %d events", len(*capture))
-	}
 }
 
 // TestExfilJudge_AllFalseAllows confirms the symmetric path: a clean
@@ -116,8 +94,6 @@ func TestExfilJudge_PoliteEtcPasswdBlocks(t *testing.T) {
 // is the tripwire that keeps the exfil judge from becoming a stamp
 // that just blocks every prompt mentioning a file.
 func TestExfilJudge_AllFalseAllows(t *testing.T) {
-	_ = withCapturedEvents(t)
-
 	mock := &mockLLMProvider{
 		response: &ChatResponse{
 			Model: "test-model",
@@ -193,8 +169,6 @@ func TestExfilJudge_RepoArchiveExfiltrationBlocks(t *testing.T) {
 // the structurally unambiguous case where downgrading would be
 // indefensible.
 func TestExfilJudge_BothCategoriesEscalateToCritical(t *testing.T) {
-	_ = withCapturedEvents(t)
-
 	const bothJSON = `{
   "Sensitive File Access": {"reasoning": "Reads /etc/shadow.", "label": true},
   "Exfiltration Channel": {"reasoning": "POSTs to attacker host.", "label": true}
@@ -298,8 +272,6 @@ func TestExfilRegexFloor_CatchesTypoEvasionWithoutLLM(t *testing.T) {
 // the LLM (no captured request, no audit row). Mirrors the same
 // guarantee the existing PII / Injection toggles already provide.
 func TestExfilJudge_DisabledByConfigSkipsLLM(t *testing.T) {
-	capture := withCapturedEvents(t)
-
 	mock := &mockLLMProvider{
 		response: &ChatResponse{
 			Model: "test-model",
@@ -335,10 +307,5 @@ func TestExfilJudge_DisabledByConfigSkipsLLM(t *testing.T) {
 	}
 	if len(mock.captured) != 0 {
 		t.Fatalf("provider called %d times when all judges disabled", len(mock.captured))
-	}
-	for _, e := range *capture {
-		if e.EventType == gatewaylog.EventJudge && e.Judge != nil && e.Judge.Kind == "exfil" {
-			t.Fatalf("emitted exfil event with judge disabled: %+v", e.Judge)
-		}
 	}
 }

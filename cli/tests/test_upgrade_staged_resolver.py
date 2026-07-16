@@ -56,7 +56,7 @@ def _manifest(version: str) -> dict[str, object]:
     windows_sources = ["0.8.3", "0.8.2", "0.8.1", "0.8.0"]
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
-        windows_sources.insert(0, "0.8.4")
+        windows_sources = []
     gateways = {
         platform_name: {
             arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
@@ -146,9 +146,31 @@ def resolver_env(tmp_path: Path):
         for version in ("0.8.4", "0.8.5"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
-            manifest = json.dumps(_manifest(version), sort_keys=True).encode()
+            manifest_payload = _manifest(version)
+            manifest = json.dumps(manifest_payload, sort_keys=True).encode()
             (release_dir / "upgrade-manifest.json").write_bytes(manifest)
             checksum_rows = [f"{hashlib.sha256(manifest).hexdigest()}  upgrade-manifest.json"]
+            release_artifacts = manifest_payload["release_artifacts"]
+            assert isinstance(release_artifacts, dict)
+            wheel_name = release_artifacts["wheel"]
+            assert isinstance(wheel_name, str)
+            wheel = release_dir / wheel_name
+            wheel.write_bytes(
+                b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+                + bytes(value ^ 0xA5 for value in b"resolver target wheel fixture")
+            )
+            checksum_rows.append(f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}")
+            gateways = release_artifacts["gateways"]
+            assert isinstance(gateways, dict)
+            for platform_gateways in gateways.values():
+                assert isinstance(platform_gateways, dict)
+                for gateway_name in platform_gateways.values():
+                    assert isinstance(gateway_name, str)
+                    gateway = release_dir / gateway_name
+                    gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
+                    checksum_rows.append(
+                        f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}"
+                    )
             if version == "0.8.5":
                 provenance = (
                     json.dumps(
@@ -188,6 +210,27 @@ def resolver_env(tmp_path: Path):
             '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${COSIGN_LOG}"\nexit 0\n',
         )
         _write_executable(
+            fake_bin / "sha256sum",
+            """#!/usr/bin/env bash
+set -euo pipefail
+case "${1##*/}" in
+    cosign-darwin-amd64) sha='5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be' ;;
+    cosign-darwin-arm64) sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
+    cosign-linux-amd64) sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
+    cosign-linux-arm64) sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;
+    *)
+        sha="$(python3 - "$1" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+        ;;
+esac
+printf '%s  %s\n' "${sha}" "$1"
+""",
+        )
+        _write_executable(
             fake_bin / "curl",
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -205,7 +248,7 @@ for arg in "$@"; do
         want_out=0
         continue
     fi
-    if [[ "${arg}" == '-o' ]]; then
+    if [[ "${arg}" == '-o' || "${arg}" == '--output' ]]; then
         want_out=1
     elif [[ "${arg}" == http* ]]; then
         url="${arg}"
@@ -213,6 +256,15 @@ for arg in "$@"; do
 done
 if [[ "${url}" == */releases/latest ]]; then
     printf '{"tag_name":"0.8.5"}\n'
+    exit 0
+fi
+if [[ "${url}" == https://github.com/sigstore/cosign/releases/download/* ]]; then
+    [[ -n "${out}" ]] || exit 95
+    cat > "${out}" <<'COSIGN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${COSIGN_LOG}"
+exit 0
+COSIGN
     exit 0
 fi
 version=''
@@ -527,16 +579,16 @@ def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
     assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
 
 
-def test_modern_resolver_requires_cosign_before_mutation(resolver_env) -> None:
+def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
     env, mutation_log, _curl_log = resolver_env("0.8.3")
     (Path(env["PATH"].split(os.pathsep, 1)[0]) / "cosign").unlink()
 
     result = _run(env, "--plan")
 
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "requires Sigstore provenance verification" in output
-    assert "No changes were made" in output
+    assert result.returncode == 0, output
+    assert "Cosign was not found; authenticating temporary Cosign 2.6.3" in output
+    assert "Temporary Cosign verifier authenticated" in output
     assert not mutation_log.exists()
 
 

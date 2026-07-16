@@ -57,6 +57,7 @@ _DOCTOR_MARKERS: dict[str, tuple[str, str]] = {
     "warn": ("⚠", "yellow"),
     "skip": ("-", "bright_black"),
 }
+_DOCTOR_GALILEO_CANARY_LIMIT = 4
 
 
 def _doctor_subsection(title: str) -> None:
@@ -617,9 +618,11 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     restart (most commonly after ``defenseclaw setup …``).
     """
     if sub == "telemetry":
-        return bool(getattr(getattr(cfg, "otel", None), "enabled", False))
-    if sub == "splunk":
-        return bool(getattr(getattr(cfg, "splunk", None), "enabled", False))
+        # Exact-v8 startup always binds the unified observability runtime: its
+        # mandatory local SQLite destination exists even when no remote export
+        # is configured. The retired OTel master-switch DTO cannot describe
+        # this subsystem and made doctor accept a stale disabled runtime.
+        return getattr(cfg, "_source_config_version", 0) == 8
     if sub == "guardrail":
         return bool(getattr(getattr(cfg, "guardrail", None), "enabled", False))
     if sub == "sandbox":
@@ -633,7 +636,7 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     return None
 
 
-def _check_sidecar(cfg, r: _DoctorResult) -> None:
+def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     bind = "127.0.0.1"
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
         bind = getattr(cfg.guardrail, "host", None) or bind
@@ -644,7 +647,9 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
 
         try:
             health = json.loads(body)
-            subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
+            if not isinstance(health, dict):
+                raise TypeError("health response is not an object")
+            subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "sandbox"]
             stale_hint_printed = False
             for sub in subsystems:
                 info = health.get(sub, {})
@@ -702,10 +707,12 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
+            return health
         except (json.JSONDecodeError, TypeError):
             _emit("warn", "Sidecar health JSON", "could not parse /health response", r=r)
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
+    return None
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
@@ -2505,377 +2512,301 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit_aid_hint(f"endpoint: {endpoint}")
 
 
-def _check_observability(cfg, r: _DoctorResult) -> None:
-    """Walk every observability destination (gateway OTel + audit_sinks)
-    and probe each one according to its kind.
+def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
+    """Inspect v8 status and exercise each enabled Galileo runtime route."""
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.custody_status import inspect_connector_custody
+    from defenseclaw.observability.v8_config import V8ConfigError
+    from defenseclaw.observability.v8_status import inspect_v8_operator_status
 
-    This replaces the old Splunk-only check. Destinations are discovered
-    via the observability writer so any preset wired up through
-    ``setup observability add`` is exercised here without extra
-    branching. Disabled destinations are skipped, not failed — users
-    often keep e.g. a dev Datadog sink disabled in prod configs.
-    """
-    from defenseclaw.observability import list_destinations
-    from defenseclaw.observability.presets import PRESETS
-
+    config_path = config_path_for_data_dir(cfg.data_dir)
     try:
-        destinations = list_destinations(cfg.data_dir)
-    except Exception as exc:
-        _emit("warn", "Observability", f"could not enumerate destinations: {exc}", r=r)
+        status = inspect_v8_operator_status(config_path)
+    except (ConfigInspectError, V8ConfigError, ValueError) as exc:
+        _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return
-
-    if not destinations:
-        _emit("skip", "Observability", "no destinations configured", r=r)
-        return
-
-    for d in destinations:
-        label_kind = _destination_label_kind(d, PRESETS)
-        label = f"{d.name} ({label_kind})"
-
-        if not d.enabled:
-            _emit("skip", label, "disabled", r=r)
-            continue
-
-        # Route the probe by destination target/kind. The keys here are
-        # the same ones used by `observability.presets.Preset.kind` and
-        # `internal/config/sinks.go`, so adding a new preset means
-        # adding one branch here, at most.
-        if d.target == "otel":
-            _probe_otel_destination(cfg, d, r)
-        elif d.kind == "splunk_hec":
-            _probe_splunk_hec(cfg, d, r)
-        elif d.kind == "otlp_logs":
-            _probe_otlp_logs(cfg, d, r)
-        elif d.kind == "http_jsonl":
-            _probe_http_jsonl(cfg, d, r)
-        else:
-            _emit("warn", label, f"no probe for kind '{d.kind}'", r=r)
-
-
-def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
-    """Lightweight reachability check for the gateway OTel exporter.
-
-    Probing OTLP properly (gRPC health + TLS + auth) is non-trivial, so
-    we do a best-effort TCP/HTTP check against the endpoint. A full
-    semantic probe lives in `setup observability test` — doctor is for
-    connectivity smoke checks only.
-    """
-    import socket
-    from urllib.parse import urlparse
-
-    label = f"{d.name} (OTLP)"
-    endpoint = d.endpoint
-    if not endpoint:
-        _emit("fail", label, "no endpoint configured", r=r)
-        return
-
-    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
-    host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if not host:
-        _emit("fail", label, f"unparseable endpoint: {endpoint}", r=r)
-        return
-
-    try:
-        with socket.create_connection((host, port), timeout=5.0):
-            _emit("pass", label, f"{host}:{port} reachable", r=r)
-    except (TimeoutError, OSError) as exc:
-        _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
-
-
-# HEC internal reply codes from Splunk docs — used to surface
-# actionable diagnostics instead of the raw HTTP status code.
-# Source: https://help.splunk.com/en/splunk-enterprise/get-started/get-data-in/10.2/get-data-with-http-event-collector/troubleshoot-http-event-collector
-_HEC_CODES = {
-    0: "success",
-    1: "token is disabled — enable it in Splunk HEC settings",
-    2: "no authorization — token is required",
-    3: "invalid authorization header format",
-    4: "invalid token — check the token value in your config",
-    5: "no data in request",
-    6: "invalid data format",
-    7: "incorrect index — the index does not exist in Splunk",
-    9: "server busy — Splunk HEC is overloaded",
-    10: "data channel missing",
-    11: "invalid data channel",
-    12: "event field is required",
-    13: "event field cannot be blank",
-    17: "HEC is healthy",
-    18: "HEC unhealthy — queues are full",
-}
-
-
-def _parse_hec_response(body: str) -> tuple[int | None, str]:
-    """Parse a Splunk HEC JSON response body.
-
-    Returns (hec_code, human_readable_message). hec_code is None when
-    the body is not valid HEC JSON (e.g. a load balancer error page).
-    """
-    try:
-        obj = json.loads(body)
-    except (ValueError, TypeError):
-        return None, body[:120] if body else ""
-    hec_code = obj.get("code")
-    text = obj.get("text", "")
-    if hec_code is None:
-        return None, text or body[:120]
-    human = _HEC_CODES.get(hec_code)
-    if human:
-        return hec_code, human
-    return hec_code, text or f"HEC code {hec_code}"
-
-
-def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
-    """HEC probe: POST a minimal test event and surface actionable diagnostics.
-
-    Interprets both the HTTP status code and the Splunk HEC JSON reply
-    code in the response body so operators see specific failure reasons
-    (wrong index, disabled token, server busy, etc.) rather than a
-    generic HTTP status.
-    """
-    label = f"{d.name} ({_splunk_hec_label_kind(d)})"
-    endpoint, token = _resolve_audit_sink_endpoint_and_token(cfg, d)
-    if not endpoint or not token:
-        _emit("fail", label, "endpoint or token missing — set splunk_hec.token_env in config", r=r)
-        return
-
-    # Warn if the token is stored inline rather than via token_env.
-    _check_splunk_token_posture(cfg, d, label, r)
-
-    verify_tls = _splunk_hec_tls_verify_enabled(cfg, d)
-    http_code, body = _http_probe(
-        endpoint,
-        method="POST",
-        headers={
-            "Authorization": f"Splunk {token}",
-            "Content-Type": "application/json",
-        },
-        body=json.dumps({"event": "defenseclaw-doctor-probe", "sourcetype": "_json"}).encode(),
-        timeout=10.0,
-        verify_tls=verify_tls,
+    _check_observability_v8_status(status, r, live_health=live_health)
+    _check_connector_export_custody(
+        inspect_connector_custody(
+            status.local_path
+            or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
+            cfg.data_dir,
+        ),
+        r,
+    )
+    _check_galileo_trace_canaries(
+        status,
+        r,
+        config_path=str(config_path),
+        data_dir=cfg.data_dir,
     )
 
-    if http_code == 200:
-        hec_code, msg = _parse_hec_response(body)
-        if hec_code is not None and hec_code not in (0, 17):
-            _emit("warn", label, f"unexpected HEC response on 200: {msg}", r=r)
-        else:
-            _emit("pass", label, endpoint, r=r)
+
+def _check_connector_export_custody(report, r: _DoctorResult) -> None:
+    """Render per-instance custody and bounded native-ingest evidence.
+
+    This is intentionally diagnostic only. In particular, doctor never edits
+    a connector exporter, and an ``external`` row is the expected result for
+    a migrated connector until the operator runs explicit managed setup.
+    """
+
+    if report.state != "available":
+        _emit(
+            "skip",
+            "Connector export custody",
+            f"unavailable ({report.reason}); correlation remains active for received telemetry",
+            r=r,
+        )
         return
+    if not report.instances:
+        _emit(
+            "skip",
+            "Connector export custody",
+            "no connector instance has emitted correlation evidence yet",
+            r=r,
+        )
+    for item in report.instances:
+        suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
+        label = f"Connector OTLP: {item.connector}{suffix}"
+        if item.custody == "external":
+            tag = "warn"
+            conditions = [
+                "native exporter bypasses DefenseClaw",
+                "migration left its endpoint and credentials untouched",
+                "run explicit managed connector setup to opt in",
+            ]
+            if item.credential_state == "invalid":
+                tag = "fail"
+                conditions.append(
+                    f"invalid credentials observed ({item.authentication_failures} recent failures)"
+                )
+            elif item.credential_state == "recovered":
+                conditions.append(
+                    f"credentials recovered after {item.authentication_failures} recent failures"
+                )
+            if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
+                tag = "fail"
+                conditions.append(
+                    f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
+                )
+            elif item.drop_only_batches:
+                conditions.append(
+                    f"partial drop-only evidence ({item.drop_only_batches}/{item.normalized_batches} batches)"
+                )
+            _emit(
+                tag,
+                label,
+                "custody=external; " + "; ".join(conditions),
+                r=r,
+            )
+            continue
+        if item.custody == "hook_only":
+            _emit(
+                "pass",
+                label,
+                "custody=hook_only; no native exporter is expected; correlation remains active on hook telemetry",
+                r=r,
+            )
+            continue
 
-    hec_code, hec_msg = _parse_hec_response(body)
-
-    if http_code in (401, 403):
-        if hec_code == 1:
-            _emit("fail", label, "token is disabled — enable the HEC token in Splunk", r=r)
-        elif hec_code == 4:
-            _emit("fail", label, "invalid token — verify splunk_hec.token_env points to the correct value", r=r)
-        elif hec_code in (2, 3):
-            _emit("fail", label, f"authorization error: {hec_msg}", r=r)
+        tag = "pass"
+        conditions: list[str] = []
+        if item.managed_config_state == "drifted":
+            tag = "fail"
+            conditions.append("managed-exporter drift detected")
+        elif item.managed_config_state == "unverifiable":
+            tag = "warn"
+            conditions.append("managed-exporter state is unverifiable")
+        elif item.managed_config_state == "verified":
+            conditions.append(f"managed-exporter verified ({item.managed_config_files} files)")
         else:
-            _emit("fail", label, f"authentication failed (HTTP {http_code}): {hec_msg}", r=r)
-        return
+            conditions.append(f"managed-exporter={item.managed_config_state}")
 
-    if http_code == 400:
-        if hec_code == 7:
-            index_hint = f" (configured index: {d.index!r})" if getattr(d, "index", None) else ""
-            msg = f"incorrect index{index_hint} — create the index in Splunk or update splunk_hec.index"
-            _emit("fail", label, msg, r=r)
+        if item.credential_state == "invalid":
+            tag = "fail"
+            conditions.append(
+                f"invalid credentials observed ({item.authentication_failures} recent failures)"
+            )
+        elif item.credential_state == "recovered":
+            if tag == "pass":
+                tag = "warn"
+            conditions.append(
+                f"credentials recovered after {item.authentication_failures} recent failures"
+            )
         else:
-            _emit("fail", label, f"bad request: {hec_msg}", r=r)
-        return
+            conditions.append("credentials=no recent failure")
 
-    if http_code in (503, 429):
-        if hec_code == 18:
-            _emit("warn", label, "Splunk HEC queues are full — indexer may be overloaded", r=r)
-        elif hec_code == 9:
-            _emit("warn", label, "Splunk HEC server busy — consider reducing flush frequency", r=r)
+        if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
+            tag = "fail"
+            conditions.append(
+                f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
+            )
+        elif item.drop_only_batches:
+            if tag == "pass":
+                tag = "warn"
+            conditions.append(
+                f"partial drop-only evidence ({item.drop_only_batches}/{item.normalized_batches} batches)"
+            )
         else:
-            _emit("warn", label, f"HEC temporarily unavailable (HTTP {http_code}): {hec_msg}", r=r)
-        return
+            conditions.append(f"normalized_batches={item.normalized_batches}")
+        _emit(
+            tag,
+            label,
+            f"custody=defenseclaw; profile={item.profile_version}; " + "; ".join(conditions),
+            r=r,
+        )
 
-    if http_code == 0:
-        if any(kw in body.lower() for kw in ("ssl", "certificate", "tls")):
+    if report.unattributed_authentication_failures:
+        _emit(
+            "warn",
+            "Native OTLP credentials",
+            f"invalid credential attempts could not be attributed to a trusted connector; "
+            f"count={report.unattributed_authentication_failures}; "
+            f"last={report.last_unattributed_authentication_failure or 'unknown'}",
+            r=r,
+        )
+    if report.event_rows_truncated:
+        _emit(
+            "warn",
+            "Connector OTLP evidence",
+            "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
+            r=r,
+        )
+
+
+def _check_galileo_trace_canaries(
+    status,
+    r: _DoctorResult,
+    *,
+    config_path: str,
+    data_dir: str,
+) -> None:
+    """Emit real canaries up to the automatic enabled-Galileo limit."""
+
+    from defenseclaw.observability.trace_canary import TraceCanaryError, run_trace_canary
+
+    destinations = [
+        destination
+        for destination in status.destinations
+        if destination.enabled and getattr(destination, "preset", "") == "galileo"
+    ]
+    for destination in destinations[:_DOCTOR_GALILEO_CANARY_LIMIT]:
+        label = f"Galileo canary: {destination.name}"
+        try:
+            result = run_trace_canary(
+                destination=destination.name,
+                config_path=config_path,
+                data_dir=data_dir,
+                timeout=15.0,
+            )
+        except TraceCanaryError as exc:
             _emit(
                 "fail",
                 label,
-                f"TLS error — check insecure_skip_verify setting and endpoint certificate: {body[:120]}",
+                f"{exc.failure_class}: {exc.message}",
                 r=r,
             )
-        else:
-            _emit("warn", label, f"unreachable: {body[:120]}", r=r)
-        return
-
-    _emit("warn", label, f"HTTP {http_code}: {hec_msg or body[:120]}", r=r)
-
-
-def _truthy_config_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
-
-
-def _splunk_hec_tls_verify_enabled(cfg, d) -> bool:
-    """Resolve effective TLS verification for a Splunk HEC doctor probe."""
-    from defenseclaw.config import config_path_for_data_dir
-    from defenseclaw.observability.writer import _load_yaml
-
-    try:
-        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
-    except Exception:
-        doc = {}
-
-    for sink in doc.get("audit_sinks") or []:
-        if not isinstance(sink, dict) or sink.get("name") != d.name:
             continue
-        sub = sink.get("splunk_hec") or {}
-        if isinstance(sub, dict):
-            return not _truthy_config_bool(sub.get("insecure_skip_verify", False))
-        break
-
-    splunk_cfg = getattr(cfg, "splunk", None)
-    if hasattr(splunk_cfg, "tls_verify_enabled"):
-        return bool(splunk_cfg.tls_verify_enabled())
-    return True
-
-
-def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
-    """Warn if the HEC token is stored inline in config rather than via token_env.
-
-    Splunk's own best practices recommend against storing HEC tokens in
-    configuration files. This check surfaces that posture issue during
-    doctor so operators are nudged toward token_env before it becomes a
-    security finding.
-    """
-    from defenseclaw.config import config_path_for_data_dir
-    from defenseclaw.observability.writer import _load_yaml
-
-    try:
-        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
-    except Exception:
-        return
-    sinks = doc.get("audit_sinks") or []
-    for sink in sinks:
-        if not isinstance(sink, dict) or sink.get("name") != d.name:
-            continue
-        sub = sink.get("splunk_hec") or {}
-        if isinstance(sub, dict) and sub.get("token") and not sub.get("token_env"):
-            _emit(
-                "warn",
-                label,
-                "HEC token is stored inline in config — use token_env to reference an "
-                "environment variable instead (see Splunk HEC security best practices)",
-                r=r,
-            )
-        return
+        _emit(
+            "pass",
+            label,
+            f"acknowledged; trace_id={result.trace_id}; generation={result.generation}",
+            r=r,
+        )
+    remaining = len(destinations) - _DOCTOR_GALILEO_CANARY_LIMIT
+    if remaining > 0:
+        _emit(
+            "warn",
+            "Galileo canary coverage",
+            f"untested={remaining}; automatic_limit={_DOCTOR_GALILEO_CANARY_LIMIT}; "
+            "remaining enabled routes retain bounded runtime-health checks",
+            r=r,
+        )
 
 
-def _destination_label_kind(d, presets) -> str:
-    if d.kind == "splunk_hec":
-        return _splunk_hec_label_kind(d)
-    if d.preset_id in presets:
-        return presets[d.preset_id].display_name
-    return d.kind
+def _check_observability_v8_status(
+    status,
+    r: _DoctorResult,
+    *,
+    live_health: dict | None = None,
+) -> None:
+    """Render one canonical v8 operator snapshot into doctor checks."""
 
+    from defenseclaw.observability.v8_status import (
+        destination_health_from_gateway,
+        retention_health_from_gateway,
+    )
 
-def _splunk_hec_label_kind(d) -> str:
-    if d.preset_id == "splunk-enterprise":
-        return "Splunk Enterprise (HEC)"
-    return "Splunk HEC"
+    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    local_path = status.local_path or "built-in data directory"
+    _emit(
+        "warn" if status.unbounded_retention else "pass",
+        "Local SQLite",
+        f"retention={retention}; path={local_path}",
+        r=r,
+    )
+    if status.judge_bodies_path:
+        _emit(
+            "pass",
+            "Judge-body store",
+            f"capture={'enabled' if status.judge_bodies_enabled else 'disabled'}; "
+            f"retention={retention}; path={status.judge_bodies_path}",
+            r=r,
+        )
 
+    destination_health = destination_health_from_gateway(live_health)
+    for destination in status.destinations:
+        signals = ",".join(destination.selected_signals) or "none"
+        detail = (
+            f"kind={destination.kind}; signals={signals}; policy={destination.policy_form}; "
+            f"buckets={len(destination.buckets)}; redaction={destination.redaction_label}; "
+            f"limits={destination.delivery_limits_label}"
+        )
+        if destination.endpoint:
+            detail += f"; target={destination.endpoint}"
+        live = destination_health.get(destination.name)
+        tag = "pass" if destination.enabled else "skip"
+        if destination.enabled and live is not None:
+            live_state = live.state or "unavailable"
+            detail += f"; health={live_state}"
+            if live.reason:
+                detail += f"/{live.reason}"
+            detail += f"; queue={live.queue_label}; last={live.activity_label}"
+            if live_state in {"degraded", "initializing", "draining"}:
+                tag = "warn"
+            elif live_state in {"failing", "stopped", "disabled"}:
+                tag = "fail"
+        elif destination.enabled and destination.kind != "sqlite":
+            detail += "; health=unavailable; queue=unavailable; last=unavailable"
+        _emit(
+            tag,
+            f"Destination: {destination.name}",
+            detail if destination.enabled else f"disabled; {detail}",
+            r=r,
+        )
 
-def _probe_otlp_logs(cfg, d, r: _DoctorResult) -> None:
-    """OTLP-logs sink: connectivity check only (no valid empty payload)."""
-    import socket
-    from urllib.parse import urlparse
+    retention_state, retention_failure = retention_health_from_gateway(live_health)
+    if retention_state:
+        detail = retention_state
+        if retention_failure:
+            detail += f"; failure={retention_failure}"
+        _emit(
+            "warn" if retention_state in {"degraded", "stopped"} else "pass",
+            "Retention controller",
+            detail,
+            r=r,
+        )
 
-    label = f"{d.name} (OTLP logs)"
-    endpoint = d.endpoint
-    if not endpoint:
-        _emit("fail", label, "no endpoint configured", r=r)
-        return
-    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
-    host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if not host:
-        _emit("fail", label, f"unparseable endpoint: {endpoint}", r=r)
-        return
-    try:
-        with socket.create_connection((host, port), timeout=5.0):
-            _emit("pass", label, f"{host}:{port} reachable", r=r)
-    except (TimeoutError, OSError) as exc:
-        _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
-
-
-def _probe_http_jsonl(cfg, d, r: _DoctorResult) -> None:
-    """Generic HTTP JSONL audit sink: do a HEAD/OPTIONS request —
-    probing an unknown endpoint with POST could fire real events.
-    (Distinct from notifier webhooks[]; see _check_webhooks below.)"""
-    label = f"{d.name} (http_jsonl)"
-    endpoint = d.endpoint
-    if not endpoint:
-        _emit("fail", label, "no URL configured", r=r)
-        return
-    # OPTIONS is the safest — many webhooks reject HEAD.
-    code, body = _http_probe(endpoint, method="OPTIONS", timeout=5.0)
-    # 200-499 all count as "reachable" for a webhook; only 5xx / 0
-    # indicate a real connectivity problem.
-    if code == 0:
-        _emit("warn", label, f"unreachable: {body[:100]}", r=r)
-    elif 500 <= code < 600:
-        _emit("warn", label, f"server error (HTTP {code})", r=r)
-    else:
-        _emit("pass", label, f"{endpoint} reachable (HTTP {code})", r=r)
-
-
-def _resolve_audit_sink_endpoint_and_token(cfg, d) -> tuple[str, str]:
-    """Read the raw audit_sinks entry for ``d.name`` to recover the
-    endpoint and resolve its token env var. ``Destination.endpoint``
-    already exposes the endpoint for display, but tokens live in
-    preset-specific fields (``token_env``, ``bearer_env``, etc.), so we
-    go back to the YAML here.
-    """
-    import os
-
-    # Late import: this module is loaded on every CLI invocation, but
-    # the YAML read only matters for operators who have audit sinks.
-    # _load_yaml takes a full file path, not a data_dir — mirror the
-    # writer's layout, respecting explicit managed config overrides.
-    from defenseclaw.config import config_path_for_data_dir
-    from defenseclaw.observability.writer import _load_yaml
-
-    try:
-        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
-    except Exception:
-        return d.endpoint, ""
-
-    # The token_env key lives inside the kind-specific sub-block (e.g.
-    # `splunk_hec.token_env`, `http_jsonl.bearer_env`). Walk both
-    # levels so we don't care which convention a given sink uses.
-    sinks = doc.get("audit_sinks") or []
-    token_env = ""
-    for sink in sinks:
-        if not isinstance(sink, dict) or sink.get("name") != d.name:
-            continue
-        token_env = str(sink.get("token_env", "") or "")
-        if not token_env:
-            # Nested: splunk_hec.token_env / otlp_logs.token_env / http_jsonl.bearer_env
-            for sub_key in ("splunk_hec", "otlp_logs", "http_jsonl"):
-                sub = sink.get(sub_key) or {}
-                if isinstance(sub, dict):
-                    token_env = str(sub.get("token_env") or sub.get("bearer_env") or "")
-                    if token_env:
-                        break
-        break
-
-    if not token_env:
-        return d.endpoint, ""
-
-    dotenv_path = os.path.join(cfg.data_dir, ".env")
-    token = _resolve_api_key(token_env, dotenv_path)
-    return d.endpoint, token
+    collected = sum(bool(bucket.collected_signals) for bucket in status.buckets)
+    _emit(
+        "pass",
+        "Bucket catalog",
+        f"version={status.bucket_catalog_version}; collected={collected}/{len(status.buckets)}",
+        r=r,
+    )
+    for code, path, summary in status.warnings:
+        _emit("warn", f"Observability warning: {code}", f"{path}: {summary}", r=r)
 
 
 def _check_webhooks(cfg, r: _DoctorResult) -> None:
@@ -2994,7 +2925,7 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
     ("none active") — typical for production deployments.
 
     Why this matters: the codebase has ~70 ``DEFENSECLAW_*`` env vars
-    and several of them (``DEFENSECLAW_DISABLE_REDACTION``,
+    and several of them (legacy privacy overrides,
     ``DEFENSECLAW_CODEX_LOOPBACK_TRUST``,
     ...) materially weaken security defaults. Without this check an
     operator has no way to spot a forgotten override left over from a
@@ -3110,6 +3041,9 @@ def doctor(
     to catch problems before they surface at runtime. On multi-connector
     installs it inventories and runs hook/health checks for every active
     connector (each row tagged ``[<connector>]``), not just the primary.
+    For up to four enabled Galileo destinations it emits a content-free
+    generated trace and requires an acknowledgement from that exact runtime
+    route; additional enabled routes receive a bounded coverage warning.
 
     Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
     gateway token-env drift, dotenv permissions, pristine config backups).
@@ -3201,7 +3135,7 @@ def doctor(
 
     if not json_out:
         _doctor_subsection("Services")
-    _check_sidecar(cfg, r)
+    sidecar_health = _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     _check_gateway_token_drift(cfg, r)
     _check_gateway_home_mismatch(cfg, r)
@@ -3253,7 +3187,7 @@ def doctor(
     _check_registry_credentials(cfg, r)
     if not json_out:
         _doctor_subsection("Observability")
-    _check_observability(cfg, r)
+    _check_observability(cfg, r, live_health=sidecar_health)
     if not json_out:
         _doctor_subsection("Webhooks")
     _check_webhooks(cfg, r)

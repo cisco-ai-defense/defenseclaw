@@ -24,12 +24,9 @@ import (
 	"testing"
 	"time"
 
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger *audit.Logger, skillDir string) {
@@ -52,6 +49,7 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 	t.Cleanup(func() { store.Close() })
 
 	logger = audit.NewLogger(store)
+	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
 
 	cfg = &config.Config{
 		DataDir:       tmpDir,
@@ -79,7 +77,7 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 func TestClassifyEvent_SkillDir(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := w.classifyEvent(filepath.Join(skillDir, "my-skill"))
 	if evt.Type != InstallSkill {
@@ -98,7 +96,7 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "evil-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -121,7 +119,7 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "trusted-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -139,7 +137,7 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 func TestAdmission_ScanError_NoScanner(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "unknown-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -165,7 +163,7 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	var mu sync.Mutex
 	var results []AdmissionResult
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, func(r AdmissionResult) {
 		mu.Lock()
 		results = append(results, r)
 		mu.Unlock()
@@ -232,7 +230,7 @@ func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "conflict-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -296,7 +294,7 @@ func TestFullQuarantineFlow_Skill(t *testing.T) {
 	}
 
 	var result AdmissionResult
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, func(r AdmissionResult) {
 		result = r
 	})
 
@@ -363,7 +361,7 @@ func TestFullQuarantineFlow_Plugin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallPlugin, Name: "malicious-plugin", Path: pluginPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -416,7 +414,7 @@ func TestFullQuarantineFlow_SQLiteState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallSkill, Name: "tracked-skill", Path: skillPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -468,7 +466,7 @@ func TestAdmission_AllowedSkip_NoQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallSkill, Name: "safe-skill", Path: skillPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -512,7 +510,7 @@ func TestActionState_InstallOverwrite(t *testing.T) {
 	}
 }
 
-func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
+func TestAdmission_BlockedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
 
@@ -520,14 +518,7 @@ func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, otelProvider, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "evil-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -541,11 +532,9 @@ func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
 		t.Fatalf("expected verdict %q, got %q", VerdictBlocked, result.Verdict)
 	}
 
-	// The built-in Go fallback path doesn't call otel (only OPA path does).
-	// Verify that the watcher doesn't panic with otel wired in.
 }
 
-func TestAdmission_OTelMetrics_AllowedVerdict(t *testing.T) {
+func TestAdmission_AllowedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
 
@@ -553,14 +542,7 @@ func TestAdmission_OTelMetrics_AllowedVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, otelProvider, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "trusted-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {

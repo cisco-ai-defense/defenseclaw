@@ -86,7 +86,9 @@ Calls Connector.Teardown(opts) which is responsible for:
 
 This subcommand does NOT touch the sidecar's own systemd unit, the
 gateway token, or the audit DB. It is the idempotent inverse of
-Connector.Setup() for a single connector.`,
+Connector.Setup() for a single connector. It marks that connector inactive in
+the runtime state before removing files so a still-running hook guard cannot
+immediately reinstall the configuration being deliberately torn down.`,
 	RunE: runConnectorTeardown,
 }
 
@@ -256,7 +258,15 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
+	restoreState, err := connector.MarkConnectorInactive(dataDir, name)
+	if err != nil {
+		return fmt.Errorf("connector %s teardown: mark connector inactive: %w", name, err)
+	}
+
 	if err := conn.Teardown(ctx, opts); err != nil {
+		if restoreErr := restoreState(); restoreErr != nil {
+			err = fmt.Errorf("%w; restore active connector state: %v", err, restoreErr)
+		}
 		if connectorFlagJSON {
 			payload := map[string]any{
 				"connector": name,

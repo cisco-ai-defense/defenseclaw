@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Track 9 — v7 CLI contracts (schemas, settings, alerts subcommands).
+"""Track 9 — CLI contracts for schemas, settings, and alert review.
 
 Pure-``unittest`` (no pytest dependency) so that ``make test`` works
 against the production venv created by ``make install`` / ``make pycli``
@@ -26,36 +26,45 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestAlertsSubcommands(unittest.TestCase):
-    """`defenseclaw alerts {acknowledge,dismiss}` should route through LogActivity."""
+    """Alert review must use the canonical v8 protected-state API."""
 
     CASES = [
-        (["acknowledge", "--severity", "all"], "Acknowledged"),
-        (["dismiss", "--severity", "HIGH"], "Dismissed"),
+        (["acknowledge", "--severity", "all"], "acknowledged", "Acknowledged"),
+        (["dismiss", "--severity", "HIGH"], "dismissed", "Dismissed"),
     ]
 
-    def test_subcommands_route_through_log_activity(self) -> None:
+    def test_subcommands_route_through_protected_state_api(self) -> None:
         from defenseclaw.commands.cmd_alerts import alerts
-        from defenseclaw.config import default_config
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
         from defenseclaw.context import AppContext
 
-        for args, substr in self.CASES:
-            with self.subTest(args=args, substr=substr):
+        for args, disposition, substr in self.CASES:
+            with self.subTest(args=args, disposition=disposition, substr=substr):
                 app = AppContext()
-                app.cfg = default_config()
-                app.cfg.data_dir = tempfile.mkdtemp(prefix="dc9-")
-                store = MagicMock()
-                store.acknowledge_alerts.return_value = 2
-                store.dismiss_alerts_visible.return_value = 1
-                app.store = store
-                app.logger = MagicMock()
+                app.cfg = prepare_fresh_v8_config(default_config())
+                app.cfg.gateway.token = "test-alert-review-token"
+                client = MagicMock()
+                client.set_alert_disposition.return_value = {
+                    "applied": 2,
+                    "no_change": 1,
+                }
 
                 runner = CliRunner()
-                result = runner.invoke(
-                    alerts, args, obj=app, catch_exceptions=False
-                )
+                with unittest.mock.patch(
+                    "defenseclaw.gateway.OrchestratorClient",
+                    return_value=client,
+                ):
+                    result = runner.invoke(
+                        alerts, args, obj=app, catch_exceptions=False
+                    )
                 self.assertEqual(result.exit_code, 0, msg=result.output)
                 self.assertIn(substr, result.output)
-                self.assertTrue(app.logger.log_activity.called)
+                client.set_alert_disposition.assert_called_once()
+                self.assertEqual(
+                    client.set_alert_disposition.call_args.kwargs["disposition"],
+                    disposition,
+                )
+                client.close.assert_called_once_with()
 
 
 class TestSettingsSave(unittest.TestCase):
@@ -153,7 +162,15 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
         go_cache = json.loads(go_paths.stdout)
         with tempfile.TemporaryDirectory() as tmp:
             isolated_home = Path(tmp) / "home"
-            (isolated_home / ".defenseclaw").mkdir(parents=True)
+            data_dir = isolated_home / ".defenseclaw"
+            data_dir.mkdir(parents=True)
+            config_path = data_dir / "config.yaml"
+            config_path.write_text(
+                "config_version: 8\n"
+                f"data_dir: {json.dumps(str(data_dir))}\n"
+                "observability: {}\n",
+                encoding="utf-8",
+            )
             p = Path(tmp) / "x.go"
             p.write_text('package x\nvar _ = "x"\n', encoding="utf-8")
             proc = subprocess.run(
@@ -173,6 +190,8 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
                 env={
                     **os.environ,
                     "HOME": str(isolated_home),
+                    "DEFENSECLAW_HOME": str(data_dir),
+                    "DEFENSECLAW_CONFIG": str(config_path),
                     "GOCACHE": go_cache["GOCACHE"],
                     "GOMODCACHE": go_cache["GOMODCACHE"],
                 },

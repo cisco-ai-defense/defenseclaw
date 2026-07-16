@@ -146,6 +146,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_PHASE_TWO_MUTATOR_CHILD",
+      "category": "upgrade_internal",
+      "purpose": "Marks the trusted phase-two mutation child so upgrade recovery can distinguish the lease-holding subprocess from its controller.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/phase_two_mutator.py", "description": "Marks the private mutation subprocess while it inherits the authenticated upgrade lease"}
+      ],
+      "since": "0.8.5"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_MUTATION_TOKEN",
       "category": "upgrade_internal",
       "purpose": "Carries the authenticated 32-character lowercase-hex upgrade attempt identifier into migration writers so attempt-owned temporary files can be named and cleaned without touching unrelated files.",
@@ -303,6 +316,20 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION",
+      "category": "upgrade_internal",
+      "purpose": "Binds a staged hard-cut handoff to the authenticated target-controller version that the resolver installed out of place.",
+      "default": "unset",
+      "accepted_values": ["canonical X.Y.Z version", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Requires the fresh target controller to match the resolver-authenticated target version before accepting bridge rollback custody"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver supplies the authenticated target version to the fresh out-of-place controller"}
+      ],
+      "since": "0.8.5"
+    },
+    {
       "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
       "category": "security_opt_out",
       "purpose": "E2E test toggle ONLY. When set, scripts/test-e2e-full-stack.sh prints raw secrets to its diagnostic logs. Never set in production.",
@@ -318,17 +345,18 @@
     {
       "name": "DEFENSECLAW_DISABLE_REDACTION",
       "category": "security_opt_out",
-      "purpose": "Disable all PII / credential redaction across every sink (audit DB, JSONL, OTel, Splunk, webhooks). Strongest opt-out — raw values appear everywhere.",
-      "default": "unset (redaction enabled)",
+      "purpose": "Upgrade-only v7 migration input. When truthy during defenseclaw upgrade, the converter preserves the legacy unredacted posture with explicit v8 profile none. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["1", "true", "unset"],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/redaction/redaction.go:111", "description": "DisableAll() reads this env var"},
-        {"location": "cli/defenseclaw/commands/redaction_status.py:42", "description": "Python status reporter"},
-        {"location": "cli/defenseclaw/commands/cmd_setup.py:3158", "description": "Setup flow surfaces this in onboarding"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:503", "description": "Reads the captured v7 upgrade environment and materializes the equivalent v8 redaction profile"}
       ],
-      "since": "0.3.0"
+      "since": "0.3.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.defaults, bucket, or destination redaction_profile in config v8."
     },
     {
       "name": "DEFENSECLAW_REVEAL_PII",
@@ -359,31 +387,20 @@
       "since": "0.3.0"
     },
     {
-      "name": "DEFENSECLAW_SCHEMA_VALIDATION",
-      "category": "security_opt_out",
-      "purpose": "Disable the runtime JSON-schema gate that validates event payloads before they hit sinks. Set to 'off' to disable. Intended only for triaging schema-drift incidents.",
-      "default": "on",
-      "accepted_values": ["off", "unset"],
-      "security_impact": "medium",
-      "surface_in_doctor": true,
-      "consumers": [
-        {"location": "internal/gateway/sidecar.go:243", "description": "Gateway boot reads and toggles the schema gate"}
-      ],
-      "since": "0.4.0"
-    },
-    {
       "name": "DEFENSECLAW_JSONL_DISABLE",
       "category": "security_opt_out",
-      "purpose": "Disable the gateway.jsonl audit tier. Other sinks (audit DB, OTel, Splunk) continue. Useful when local disk is constrained; downgrades forensic coverage.",
-      "default": "unset (JSONL enabled)",
+      "purpose": "Upgrade-only v7 migration input. When truthy during defenseclaw upgrade, the converter omits the legacy implicit JSONL destination. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["1", "true", "unset"],
       "security_impact": "low",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/sidecar.go:226", "description": "Gateway boot reads this kill switch"},
-        {"location": "internal/gateway/jsonl_kill_switch.go", "description": "Definition site"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1197", "description": "Reads the captured v7 upgrade environment when converting implicit JSONL behavior"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Add, disable, or remove an explicit kind: jsonl destination in config v8."
     },
     {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
@@ -589,140 +606,173 @@
     {
       "name": "DEFENSECLAW_OTEL_ENABLED",
       "category": "telemetry",
-      "purpose": "Master toggle for the OTel exporter. Overrides otel.enabled in config.yaml.",
-      "default": "(value from otel.enabled in config.yaml)",
+      "purpose": "Upgrade-only v7 migration input for the former otel.enabled master toggle. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["true", "false", "1", "0", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2297", "description": "viper.BindEnv otel.enabled"}],
-      "since": "0.4.0"
+      "consumers": [
+        {"location": "cli/defenseclaw/observability/v8_migration.py:2689", "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"},
+        {"location": "internal/config/config.go:3453", "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"}
+      ],
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Enable or disable named observability.destinations entries in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy flat OTLP exporter endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP exporter endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2684", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:634", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1483", "description": "Converts the captured v7 endpoint into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2875", "description": "Reads the endpoint only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].endpoint in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy flat OTLP exporter protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP exporter protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2695", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:699", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1538", "description": "Converts the captured v7 protocol into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2891", "description": "Reads the protocol only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].protocol in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
       "category": "security_opt_out",
-      "purpose": "Legacy flat OTLP TLS toggle consumed only for upgrade compatibility. New setups should configure otel.destinations[].tls.insecure.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP TLS-insecure toggle. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["true", "false", "1", "0", "unset"],
       "security_impact": "high",
       "security_note": "Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2769", "description": "Migrates legacy env-backed flat OTel TLS policy into a named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:742", "description": "Preserves legacy env-backed TLS policy when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1580", "description": "Converts the captured v7 TLS policy into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2937", "description": "Reads the TLS decision only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].tls in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy trace-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.endpoint or destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former trace-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2683", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:633", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.traces.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy trace-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.protocol or destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former trace-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2694", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:698", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy log-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.endpoint or the destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former log-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2724", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.logs.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy log-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.protocol or the destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former log-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2740", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy metric-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.endpoint or the destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former metric-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2723", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.metrics.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy metric-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.protocol or the destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former metric-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2739", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_TELEMETRY_ENABLED",
@@ -837,7 +887,7 @@
     {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server. Test rigs and out-of-tree clients use this to point at a scratch socket without editing config.yaml.",
+      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable; use administrator-owned managed.socket_path instead.",
       "default": "unset (resolver picks per-mode default: <dirname(data_dir)>/ipc/defenseclaw_ipc.sock for managed_enterprise, otherwise <data_dir>/ipc/defenseclaw_ipc.sock)",
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "low",
@@ -846,7 +896,7 @@
         {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"}
       ],
       "since": "0.8.4",
-      "security_note": "Local-only socket path override — the resolved path is created with mode 0666 (managed_enterprise) or 0600 (unmanaged); managed_enterprise refuses to boot when the resolved mode is world-writable and managed.allowed_uids is empty."
+      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists."
     },
     {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",

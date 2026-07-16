@@ -36,6 +36,14 @@ DERIVED_DATA="${DERIVED_DATA:-/private/tmp/DefenseClawMac-codex-run-DerivedData}
 APP_BUNDLE="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
+# A macOS host can have full Xcode installed while xcode-select still points at
+# CommandLineTools. In that state xcodebuild exists but refuses Xcode projects.
+# Prefer an explicit caller override; otherwise use the standard Xcode install.
+if ! xcodebuild -version >/dev/null 2>&1 && \
+   [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+
 cd "$ROOT_DIR"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true

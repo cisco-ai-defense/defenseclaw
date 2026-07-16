@@ -38,40 +38,10 @@
 // enforced by routing those sinks through ForSink* helpers below
 // rather than the raw Reveal-respecting variants.
 //
-// # Disable-all flag
-//
-// For deployments that explicitly opt out of redaction (single-tenant
-// installs used only for prompt-engineering debugging, lab
-// environments where every downstream sink lives inside the same
-// trust boundary), two stronger toggles bypass redaction across
-// EVERY sink — including the persistent ones the Reveal flag
-// deliberately leaves alone:
-//
-//   - DEFENSECLAW_DISABLE_REDACTION=1 (env var, ephemeral)
-//   - SetDisableAll(true) (process-wide override, set from
-//     Privacy.DisableRedaction at sidecar startup so the choice
-//     survives restarts without env-var ceremony)
-//
-// Either path makes ForSinkString / ForSinkEntity /
-// ForSinkMessageContent / ForSinkReason / ForSinkEvidence return
-// their raw inputs untouched. This is the strongest opt-out we
-// offer; the unconditional-redaction contract documented in
-// OBSERVABILITY.md is explicitly violated when this flag is on.
-// The CLI emits a warning on flip, and config loaders emit a
-// once-per-process warning when they observe the setting so the
-// runtime state stays auditable without spamming reload loops.
-//
-// # Agent-reason carve-out
-//
-// managed_enterprise deployments need a much narrower exception: the
-// operator running the local coding agent (codex/cursor/claude) must
-// always see the full, non-redacted block/allow reason in the agent's
-// own UI, even with redaction otherwise on. SetAgentReasonRedactionDisabled
-// enables this and ReasonForAgent is the single entry point that honors
-// it. Unlike the disable-all flag it affects ONLY the reason handed back
-// to the agent — every persistent and enterprise sink (SQLite, Splunk,
-// OTel, webhooks, OS toasts) still redacts because those routes call the
-// ForSink* helpers directly.
+// These helpers are the immutable v7 compatibility projection. They do not
+// consult v8 configuration and they have no process-global bypass. The v8
+// runtime retains raw source facts until routing, then applies the selected
+// redaction profile independently for each destination.
 //
 // # Output format
 //
@@ -102,86 +72,10 @@ import (
 // flags that defeat the audit story.
 const revealEnvVar = "DEFENSECLAW_REVEAL_PII"
 
-// disableEnvVar fully disables redaction for ALL sinks (operator-facing
-// AND persistent — SQLite, OTel, webhooks, Splunk). Distinct from
-// revealEnvVar because the threat models diverge:
-//
-//   - revealEnvVar is a short-lived display-only opt-in for incident
-//     triage on a workstation; persistent sinks still redact so the
-//     audit trail keeps its compliance contract.
-//   - disableEnvVar is a deliberate, permanent operator decision —
-//     used by deployments where every downstream sink already lives
-//     inside the same trust boundary (e.g. a single-tenant local
-//     install used purely for prompt-engineering debugging) and
-//     redacted placeholders would only obstruct the work.
-//
-// The unconditional-redaction contract documented in OBSERVABILITY.md
-// is therefore explicitly violated when either disableEnvVar=1 or
-// the runtime override (SetDisableAll) is true. The CLI surfaces a
-// loud warning every time disable is flipped on, and configuration
-// loaders also log once per process so an operator cannot quietly
-// inherit a redaction-off install.
-const disableEnvVar = "DEFENSECLAW_DISABLE_REDACTION"
-
-// disableOverride mirrors the persisted Privacy.DisableRedaction
-// config flag at the redaction-package level, which is intentionally
-// dependency-free (importing internal/config would create a cycle).
-// The sidecar startup path calls SetDisableAll(cfg.Privacy.
-// DisableRedaction) so a config-only toggle survives restarts
-// without operators having to remember the env-var name.
-//
-// Reads use atomic.Bool so the redaction hot path stays lock-free
-// and the test suite can flip the override per-test without races.
-var disableOverride atomic.Bool
-
-// SetDisableAll flips the global redaction kill-switch. Intended
-// for a single call from the sidecar's Load()-result wiring; tests
-// may toggle it under t.Cleanup. When true, EVERY ForSink* and
-// Reveal-respecting helper short-circuits to the raw value — the
-// strongest opt-out we offer.
-//
-// Always pair config-driven activation with a clearly logged warning
-// in the load / flip path so the runtime state is auditable.
-func SetDisableAll(v bool) { disableOverride.Store(v) }
-
-// DisableAll reports the current state of the global override. Read
-// path is hot (consulted by every ForSink* call) so it stays
-// inlined and lock-free.
-func DisableAll() bool {
-	if disableOverride.Load() {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(disableEnvVar))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
-// agentReasonRedactionDisabled is a narrower, agent-scoped carve-out
-// from the unconditional-redaction contract, distinct from the
-// process-wide DisableAll kill-switch above.
-//
-// In managed_enterprise the operator running the local coding agent
-// (codex/cursor/claude) must always see the full, non-redacted verdict
-// reason in the agent's own UI — otherwise a redacted "<redacted len=N
-// sha=...>" placeholder makes the block/allow explanation useless to
-// the person who triggered it. Unlike DisableAll this affects ONLY the
-// reason handed back to the agent via ReasonForAgent; every persistent
-// or enterprise sink (SQLite audit, gateway.jsonl, OTel/AI Defense
-// telemetry, webhooks, OS toasts) keeps redacting because those routes
-// call ForSink* directly and never consult this flag.
-//
-// Wired from Privacy + deployment_mode at sidecar startup and hot
-// reload (see internal/cli/root.go applyPrivacyConfig and
-// internal/gateway/sidecar.go applyConfigReload). Reads use atomic.Bool
-// so the hook hot path stays lock-free.
+// agentReasonRedactionDisabled is the managed-enterprise, local-agent-only
+// carve-out. It never changes canonical persistence or destination routing.
 var agentReasonRedactionDisabled atomic.Bool
 
-// SetAgentReasonRedactionDisabled flips the agent-scoped reason
-// carve-out documented on agentReasonRedactionDisabled. Intended to be
-// set once from the deployment_mode wiring (true in managed_enterprise);
-// tests may toggle it under t.Cleanup. Idempotent and atomic.
 func SetAgentReasonRedactionDisabled(v bool) { agentReasonRedactionDisabled.Store(v) }
 
 // hashPrefixHex is the number of leading hex characters of SHA-256
@@ -238,28 +132,26 @@ func String(s string) string {
 	return ForSinkString(s)
 }
 
-// ForSinkString is the Reveal-bypassing variant of String. Returns
-// the redacted placeholder regardless of the reveal flag, UNLESS
-// the global “DisableAll“ override is on — in which case the raw
-// value is returned. Use for anything destined for SQLite / Splunk
-// / OTel / webhooks / HTTP responses to remote callers.
+// ForSinkString is the Reveal-bypassing legacy-v7 projection. It always returns
+// the redacted form and has no global mutable bypass. New v8 producers must
+// retain the raw fact and let the central destination projection apply policy.
 //
 // Idempotent: a value already shaped like a redaction placeholder is
 // returned unchanged so layered helpers don't lose the original hash
 // or length on a second pass.
 func ForSinkString(s string) string {
-	if DisableAll() {
-		return s
-	}
-	return redactString(s)
+	return LegacyV7String(s)
 }
 
-// redactString is the unconditional redaction core for ForSinkString.
-// It never consults DisableAll, so callers that must force redaction
-// even under the global opt-out (the cloud-authoritative
-// SinkPolicyRedact directive) route here directly. ForSinkString wraps
-// it with the DisableAll short-circuit to preserve today's behavior.
-func redactString(s string) string {
+// redactString is the unconditional compatibility core used when a
+// per-inspection Cisco AI Defense directive forces redaction.
+func redactString(s string) string { return LegacyV7String(s) }
+
+// LegacyV7String applies the exact v7 arbitrary-string projection without
+// consulting environment variables or mutable package state. It exists only
+// for the immutable observability-v8 legacy-v7 migration profile; new policy
+// code should use the central v8 projection engine instead.
+func LegacyV7String(s string) string {
 	if s == "" {
 		return "<empty>"
 	}
@@ -354,10 +246,8 @@ func Entity(value string) string {
 	return ForSinkEntity(value)
 }
 
-// ForSinkEntity is the Reveal-bypassing variant of Entity. Idempotent
-// over its own placeholder shape. The global DisableAll override
-// short-circuits before any masking decision so the raw value is
-// emitted unchanged.
+// ForSinkEntity is the Reveal-bypassing legacy-v7 projection. It is
+// idempotent over its own placeholder shape and has no global bypass.
 //
 // The first-rune preview is only included for values long enough
 // that a single character cannot be a meaningful fraction of the
@@ -366,15 +256,15 @@ func Entity(value string) string {
 // leading `A` of a 6-byte value like `AB4FGH` narrows the search
 // space for an attacker who controls adjacent log rows.
 func ForSinkEntity(value string) string {
-	if DisableAll() {
-		return value
-	}
-	return redactEntity(value)
+	return LegacyV7Entity(value)
 }
 
-// redactEntity is the unconditional redaction core for ForSinkEntity;
-// see redactString for why the DisableAll check is hoisted out.
-func redactEntity(value string) string {
+func redactEntity(value string) string { return LegacyV7Entity(value) }
+
+// LegacyV7Entity applies the exact v7 entity projection without consulting
+// environment variables or mutable package state. The reviewed byte-length
+// threshold and first-rune preview are preserved for migration compatibility.
+func LegacyV7Entity(value string) string {
 	if value == "" {
 		return "<empty>"
 	}
@@ -406,20 +296,17 @@ func MessageContent(content string) string {
 	return ForSinkMessageContent(content)
 }
 
-// ForSinkMessageContent is the Reveal-bypassing variant of
-// MessageContent. Idempotent. Honours the global DisableAll
-// override so deployments that opt out of redaction see full
-// user-prompt / model-response payloads end-to-end.
+// ForSinkMessageContent is the Reveal-bypassing legacy-v7 projection.
+// It is idempotent and always redacts, even when Reveal() is set.
 func ForSinkMessageContent(content string) string {
-	if DisableAll() {
-		return content
-	}
-	return redactMessageContent(content)
+	return LegacyV7MessageContent(content)
 }
 
-// redactMessageContent is the unconditional redaction core for
-// ForSinkMessageContent; see redactString for the split rationale.
-func redactMessageContent(content string) string {
+func redactMessageContent(content string) string { return LegacyV7MessageContent(content) }
+
+// LegacyV7MessageContent applies the exact v7 model/tool-content projection
+// without consulting environment variables or mutable package state.
+func LegacyV7MessageContent(content string) string {
 	if content == "" {
 		return "<empty>"
 	}
@@ -443,25 +330,12 @@ func Reason(reason string) string {
 	return ForSinkReason(reason)
 }
 
-// ForSinkReason is the Reveal-bypassing variant of Reason. The
-// global DisableAll override returns the raw verdict reason
-// untouched — useful when an operator needs to see exactly what
-// literal a guardrail rule matched on.
+// ForSinkReason is the Reveal-bypassing legacy-v7 projection. It always
+// redacts free-form values regardless of the display-only Reveal flag.
 //
 // Idempotent: if the input has already been through redaction (i.e.
 // contains "<redacted" markers and no other content), it is returned
 // unchanged.
-// ReasonForAgent renders a verdict reason for the LOCAL coding agent's
-// own UI (the codex/cursor/claude hook-response reason and its nested
-// output message fields). In managed_enterprise the operator running the
-// agent must see the full reason regardless of privacy.disable_redaction,
-// so this bypasses redaction when the agent-reason carve-out is set (see
-// SetAgentReasonRedactionDisabled). Otherwise it falls through to
-// ForSinkReason, so non-managed deployments keep redacting per the flag.
-//
-// This is intentionally the ONLY redaction entry point that honors the
-// carve-out: persistent and enterprise sinks call ForSink* directly and
-// remain redacted.
 func ReasonForAgent(reason string) string {
 	if agentReasonRedactionDisabled.Load() {
 		return reason
@@ -470,17 +344,14 @@ func ReasonForAgent(reason string) string {
 }
 
 func ForSinkReason(reason string) string {
-	if DisableAll() {
-		return reason
-	}
-	return redactReason(reason)
+	return LegacyV7Reason(reason)
 }
 
-// redactReason is the unconditional redaction core for ForSinkReason;
-// see redactString for the split rationale. It retains the trusted
-// passthrough / already-redacted fast paths because those are part of
-// the redaction contract, not the DisableAll opt-out.
-func redactReason(reason string) string {
+func redactReason(reason string) string { return LegacyV7Reason(reason) }
+
+// LegacyV7Reason applies the exact v7 bounded token-aware reason projection
+// without consulting environment variables or mutable package state.
+func LegacyV7Reason(reason string) string {
 	if reason == "" {
 		return ""
 	}
@@ -649,13 +520,7 @@ func redactReasonTokenDepth(t string, depth int) string {
 		if isSafeReasonToken(t) {
 			return t
 		}
-		// redactString (not ForSinkString) so this core stays
-		// unconditional: ForSinkReason already short-circuited
-		// DisableAll before reaching here, and the
-		// cloud-authoritative SinkPolicyRedact path enters via
-		// redactReason expecting a real redaction even when the
-		// local DisableAll opt-out is on.
-		return redactString(t)
+		return LegacyV7String(t)
 	}
 	if idx := strings.Index(t, ": "); idx > 0 {
 		prefix := t[:idx]
@@ -689,7 +554,7 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(rest) {
 				return prefix + ":" + rest
 			}
-			return prefix + ":" + redactString(rest)
+			return prefix + ":" + LegacyV7String(rest)
 		}
 	}
 	if isSafeReasonToken(t) {
@@ -708,10 +573,10 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(val) {
 				return key + "=" + val
 			}
-			return key + "=" + redactString(val)
+			return key + "=" + LegacyV7String(val)
 		}
 	}
-	return redactString(t)
+	return LegacyV7String(t)
 }
 
 // redactWhitespaceTokens handles "key=value [key=value …]" audit
@@ -727,7 +592,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		if i == 0 && start > 0 {
 			leading := strings.TrimSpace(clause[:start])
 			if leading != "" {
-				b.WriteString(redactString(leading))
+				b.WriteString(LegacyV7String(leading))
 				b.WriteByte(' ')
 			}
 		}
@@ -739,7 +604,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		segment = strings.TrimRight(segment, " \t")
 		eq := strings.IndexByte(segment, '=')
 		if eq < 0 {
-			b.WriteString(redactString(segment))
+			b.WriteString(LegacyV7String(segment))
 		} else {
 			key := segment[:eq]
 			value := segment[eq+1:]
@@ -752,7 +617,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 			case isSafeKVValue(value):
 				b.WriteString(value)
 			default:
-				b.WriteString(redactString(value))
+				b.WriteString(LegacyV7String(value))
 			}
 		}
 		if i+1 < len(boundaries) {
@@ -850,21 +715,21 @@ func Evidence(content string, matchStart, matchEnd int) string {
 	return ForSinkEvidence(content, matchStart, matchEnd)
 }
 
-// ForSinkEvidence is the Reveal-bypassing variant of Evidence.
-// Idempotent over its own placeholder shape. When the global
-// DisableAll override is on, the raw evidence window is returned
-// unchanged so operators can see exactly what payload the engine
-// matched against.
+// ForSinkEvidence is the Reveal-bypassing legacy-v7 projection. It is
+// idempotent over its own placeholder shape and has no global bypass.
 func ForSinkEvidence(content string, matchStart, matchEnd int) string {
-	if DisableAll() {
-		return content
-	}
-	return redactEvidence(content, matchStart, matchEnd)
+	return LegacyV7Evidence(content, matchStart, matchEnd)
 }
 
-// redactEvidence is the unconditional redaction core for
-// ForSinkEvidence; see redactString for the split rationale.
 func redactEvidence(content string, matchStart, matchEnd int) string {
+	return LegacyV7Evidence(content, matchStart, matchEnd)
+}
+
+// LegacyV7Evidence applies the exact v7 evidence projection without
+// consulting environment variables or mutable package state. Coordinates are
+// included only when supplied as a valid non-empty range; the helper never
+// derives or invents them.
+func LegacyV7Evidence(content string, matchStart, matchEnd int) string {
 	if content == "" {
 		return "<empty>"
 	}

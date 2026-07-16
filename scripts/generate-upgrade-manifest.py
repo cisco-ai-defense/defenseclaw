@@ -45,6 +45,9 @@ OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
 UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
+OBSERVABILITY_V8_CONFIG_PATH = (
+    ROOT / "internal" / "config" / "observability_v8_types.go"
+)
 
 
 def _ver_tuple(value: str) -> tuple[int, int, int]:
@@ -179,23 +182,46 @@ def controller_upgrade_protocol() -> int:
     raise RuntimeError("_UPGRADE_PROTOCOL_VERSION not found")
 
 
-def runtime_config_version() -> int:
-    """Read the gateway runtime schema from its one Go literal declaration."""
+def _go_config_version_literal(path: Path, name: str) -> int:
+    """Read one positive Go configuration-version literal."""
 
-    text = RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     matches = re.findall(
-        r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+        rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
         text,
         re.MULTILINE,
     )
     if len(matches) != 1:
-        raise RuntimeError(
-            "internal/config/config.go must declare exactly one literal CurrentConfigVersion"
-        )
+        raise RuntimeError(f"{path} must declare exactly one literal {name}")
     value = int(matches[0])
     if value < 1:
-        raise RuntimeError("CurrentConfigVersion must be a positive integer literal")
+        raise RuntimeError(f"{name} must be a positive integer literal")
     return value
+
+
+def compatibility_config_version() -> int:
+    """Read the legacy compatibility-decoder ceiling."""
+
+    return _go_config_version_literal(RUNTIME_CONFIG_PATH, "CurrentConfigVersion")
+
+
+def observability_v8_config_version() -> int:
+    """Read the strict observability-v8 runtime schema."""
+
+    return _go_config_version_literal(
+        OBSERVABILITY_V8_CONFIG_PATH,
+        "ObservabilityV8ConfigVersion",
+    )
+
+
+def runtime_config_version(version: str | None = None) -> int:
+    """Select the literal that attests the requested release runtime."""
+
+    if version is None:
+        version = current_version()
+    if _ver_tuple(version) >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
+        return observability_v8_config_version()
+    return compatibility_config_version()
 
 
 def expected_runtime_config_version(version: str) -> int:
@@ -314,7 +340,7 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         platform: [baseline for baseline in baselines if _ver_tuple(baseline) < version_t]
         for platform, baselines in platform_published_upgrade_baselines().items()
     }
-    if not tested_sources or any(not values for values in platform_tested_sources.values()):
+    if not tested_sources:
         raise RuntimeError(f"release {version} has an empty tested-source matrix")
     policy: dict[str, Any] = {
         "min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION,
@@ -322,6 +348,8 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         "platform_tested_source_versions": platform_tested_sources,
     }
     if version_t < _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
+        if any(not values for values in platform_tested_sources.values()):
+            raise RuntimeError(f"release {version} has an empty tested-source matrix")
         return policy
 
     auto_bridge_from = [
@@ -336,12 +364,13 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
             f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
             "global tested-source matrix"
         )
-    for platform, sources in platform_tested_sources.items():
+    for platform, sources in tuple(platform_tested_sources.items()):
         if OBSERVABILITY_V8_BRIDGE_VERSION not in sources:
-            raise RuntimeError(
-                f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
-                f"{platform} tested-source matrix"
-            )
+            # A platform cannot traverse the hard cut when the immutable
+            # bridge was not published for it. Encode that platform as
+            # unsupported instead of claiming its older releases were tested
+            # through a bridge that users cannot install.
+            platform_tested_sources[platform] = []
     policy.update(
         {
             "min_upgrade_protocol": HARD_CUT_UPGRADE_PROTOCOL_VERSION,
@@ -376,11 +405,22 @@ def build_manifest() -> dict[str, Any]:
     }
     manifest.update(release_upgrade_policy(version))
     if manifest["schema_version"] == 2:
-        runtime_version = runtime_config_version()
+        compatibility_version = compatibility_config_version()
+        if compatibility_version != 7:
+            raise RuntimeError(
+                "schema-2 source must retain CurrentConfigVersion=7 as its "
+                f"compatibility ceiling, got {compatibility_version}"
+            )
+        runtime_version = runtime_config_version(version)
         expected_runtime_version = expected_runtime_config_version(version)
         if runtime_version != expected_runtime_version:
+            literal = (
+                "ObservabilityV8ConfigVersion"
+                if current_t >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION)
+                else "CurrentConfigVersion"
+            )
             raise RuntimeError(
-                f"release {version} requires CurrentConfigVersion={expected_runtime_version}, "
+                f"release {version} requires {literal}={expected_runtime_version}, "
                 f"got {runtime_version}"
             )
         manifest["runtime_config_version"] = runtime_version

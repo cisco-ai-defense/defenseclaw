@@ -139,7 +139,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "claudecode-hooks-v1",
 		MinAgentVersion:         "2.1.144",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.claude/settings.json"},
 		ResponseFieldName:       "claude_code_output",
 		Events: []string{
@@ -727,6 +727,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.CompatibilityStatus = resolution.Status
 	profile.CompatibilityReason = resolution.Reason
 	if resolution.Contract.ContractID == "" {
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
 		return profile
 	}
 	contract := resolution.Contract
@@ -738,6 +739,13 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
+		profile.Correlation = spec
+	} else {
+		// Unknown/mismatched contracts fail closed for identity mapping. The
+		// hook can still be inspected, but only exact canonical IDs are read.
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
+	}
 
 	contractCaps := contract.Capabilities
 	if profile.Capabilities.ConfigPath != "" && contractCaps.ConfigPath == "" {

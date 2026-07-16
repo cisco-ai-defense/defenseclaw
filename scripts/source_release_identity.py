@@ -29,6 +29,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 IDENTITY_RELATIVE_PATH = Path("release/source-install-identity.json")
+COMPATIBILITY_CONFIG_RELATIVE_PATH = Path("internal/config/config.go")
+OBSERVABILITY_V8_CONFIG_RELATIVE_PATH = Path(
+    "internal/config/observability_v8_types.go"
+)
 IDENTITY_SCHEMA_VERSION = 1
 MARKER_SCHEMA_VERSION = 2
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
@@ -155,18 +159,64 @@ def checked_in_version_sources(root: Path = ROOT) -> dict[str, str]:
     return versions
 
 
-def runtime_config_version(root: Path = ROOT) -> int:
+def _go_config_version_literal(root: Path, relative_path: Path, name: str) -> int:
     matches = re.findall(
-        r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
-        _read_text(root / "internal/config/config.go", "gateway config source"),
+        rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+        _read_text(root / relative_path, f"gateway {name} source"),
         re.MULTILINE,
     )
     if len(matches) != 1:
-        raise SourceIdentityError("gateway source must declare exactly one literal CurrentConfigVersion")
+        raise SourceIdentityError(
+            f"gateway source must declare exactly one literal {name}"
+        )
     value = int(matches[0])
     if value < 1:
-        raise SourceIdentityError("gateway CurrentConfigVersion must be positive")
+        raise SourceIdentityError(f"gateway {name} must be positive")
     return value
+
+
+def compatibility_config_version(root: Path = ROOT) -> int:
+    """Read the legacy compatibility-decoder ceiling."""
+
+    return _go_config_version_literal(
+        root,
+        COMPATIBILITY_CONFIG_RELATIVE_PATH,
+        "CurrentConfigVersion",
+    )
+
+
+def observability_v8_config_version(root: Path = ROOT) -> int:
+    """Read the strict observability-v8 runtime schema literal."""
+
+    return _go_config_version_literal(
+        root,
+        OBSERVABILITY_V8_CONFIG_RELATIVE_PATH,
+        "ObservabilityV8ConfigVersion",
+    )
+
+
+def runtime_config_version(
+    root: Path = ROOT,
+    *,
+    source_release: str | None = None,
+) -> int:
+    """Select the release-owned runtime attestation literal."""
+
+    if source_release is None:
+        payload = _read_json_object(
+            root / IDENTITY_RELATIVE_PATH,
+            "source-install identity",
+        )
+        candidate = payload.get("source_release")
+        if not isinstance(candidate, str):
+            raise SourceIdentityError(
+                "source-install identity source_release must be a string"
+            )
+        source_release = candidate
+    release_key = _version_tuple(source_release)
+    if release_key >= (0, 8, 5):
+        return observability_v8_config_version(root)
+    return compatibility_config_version(root)
 
 
 def _validate_identity_payload(payload: dict[str, Any]) -> dict[str, int | str]:
@@ -189,7 +239,11 @@ def _validate_identity_payload(payload: dict[str, Any]) -> dict[str, int | str]:
         raise SourceIdentityError("source-install identity runtime_config_version must be a positive integer")
     if release_key == (0, 8, 4) and (epoch != 1 or runtime != 7):
         raise SourceIdentityError("release 0.8.4 must use source-install compatibility epoch 1 and runtime config 7")
-    if release_key >= (0, 8, 5) and (epoch < 2 or runtime < 8):
+    if release_key == (0, 8, 5) and (epoch != 2 or runtime != 8):
+        raise SourceIdentityError(
+            "release 0.8.5 must use source-install compatibility epoch 2 and runtime config 8"
+        )
+    if release_key > (0, 8, 5) and (epoch < 2 or runtime < 8):
         raise SourceIdentityError("release 0.8.5+ cannot reuse the 0.8.4 bridge source-install identity")
     return {
         "schema_version": IDENTITY_SCHEMA_VERSION,
@@ -220,7 +274,13 @@ def validate_source_tree(
             raise SourceIdentityError(
                 f"requested release {expected_release} does not match reviewed source_release {release}"
             )
-    source_runtime = runtime_config_version(root)
+    compatibility_runtime = compatibility_config_version(root)
+    if _version_tuple(release) >= (0, 8, 5) and compatibility_runtime != 7:
+        raise SourceIdentityError(
+            "hard-cut source must retain CurrentConfigVersion=7 as its compatibility ceiling: "
+            f"got {compatibility_runtime}"
+        )
+    source_runtime = runtime_config_version(root, source_release=release)
     if identity["runtime_config_version"] != source_runtime:
         raise SourceIdentityError(
             "source-install identity runtime_config_version does not match gateway source: "
@@ -282,6 +342,7 @@ def validate_marker(
     source_release: str,
     compatibility_epoch: int,
     runtime_version: int,
+    allow_source_transition: bool = False,
 ) -> tuple[str, str]:
     """Return exact marker and gateway digests after v2 identity checks."""
 
@@ -317,16 +378,29 @@ def validate_marker(
         or marker_root != expected_root
     ):
         raise SourceIdentityError(f"source-install marker belongs to a different checkout ({marker_root!r})")
-    expected_scalars = {
-        "source_release": source_release,
-        "source_install_compatibility_epoch": compatibility_epoch,
-        "runtime_config_version": runtime_version,
-    }
-    for key, expected in expected_scalars.items():
-        if payload.get(key) != expected:
+    if allow_source_transition:
+        future_fields: list[str] = []
+        if _version_tuple(marker_release) > _version_tuple(source_release):
+            future_fields.append(f"source_release={marker_release!r}")
+        if marker_epoch > compatibility_epoch:
+            future_fields.append(f"source_install_compatibility_epoch={marker_epoch!r}")
+        if marker_runtime > runtime_version:
+            future_fields.append(f"runtime_config_version={marker_runtime!r}")
+        if future_fields:
             raise SourceIdentityError(
-                f"source-install marker {key}={payload.get(key)!r} does not match checkout {expected!r}"
+                "source-install marker is newer than this checkout (" + ", ".join(future_fields) + ")"
             )
+    else:
+        expected_scalars = {
+            "source_release": source_release,
+            "source_install_compatibility_epoch": compatibility_epoch,
+            "runtime_config_version": runtime_version,
+        }
+        for key, expected in expected_scalars.items():
+            if payload.get(key) != expected:
+                raise SourceIdentityError(
+                    f"source-install marker {key}={payload.get(key)!r} does not match checkout {expected!r}"
+                )
     gateway_digest = payload.get("gateway_sha256")
     if not isinstance(gateway_digest, str) or SHA256_RE.fullmatch(gateway_digest) is None:
         raise SourceIdentityError("source-install marker gateway_sha256 is invalid")
@@ -382,6 +456,7 @@ def _parser() -> argparse.ArgumentParser:
     marker.add_argument("--source-release", required=True)
     marker.add_argument("--compatibility-epoch", type=int, required=True)
     marker.add_argument("--runtime-config-version", type=int, required=True)
+    marker.add_argument("--allow-source-transition", action="store_true")
 
     render = subparsers.add_parser("render-marker")
     render.add_argument("--checkout-root", type=Path, required=True)
@@ -417,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_release=args.source_release,
                 compatibility_epoch=args.compatibility_epoch,
                 runtime_version=args.runtime_config_version,
+                allow_source_transition=args.allow_source_transition,
             )
             print(f"{marker_digest}\t{gateway_digest}")
         elif args.command == "render-marker":

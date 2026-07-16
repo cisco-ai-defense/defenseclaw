@@ -220,12 +220,12 @@ dc_block_prompt() {
 
 # dc_run_probe <label> <prompt> — run the agent (via the driver's agent_run
 # callback, which is responsible for bounding itself with dc_timeout) and
-# return the gateway.jsonl line count captured immediately before the run so
+# return the canonical SQLite row cursor captured immediately before the run so
 # callers can scope "fired during this probe" assertions. Echoes the
 # before-count. agent_run's stdout/stderr is tee'd to a per-probe log.
 dc_run_probe() {
   local label="$1" prompt="$2" before code log_dir log_file status_file probe_id
-  before="$(dc_gateway_jsonl_count)"
+  before="$(dc_event_cursor)"
   dc_log "probe[${label}]: running agent"
   log_dir="${DC_E2E_PROBE_LOG_DIR:-${TMPDIR:-/tmp}}"
   mkdir -p "${log_dir}"
@@ -239,7 +239,7 @@ dc_run_probe() {
     dc_warn "probe[${label}]: agent run exited ${code} or timed out (see ${log_file})"
   fi
   printf '%s\n' "${code}" > "${status_file}"
-  sleep 2  # let the gateway flush JSONL/audit rows
+  dc_wait_for_connector_event "${DC_E2E_CONNECTOR}" "${before}" || true
   printf '%s' "${before}"
 }
 
@@ -411,10 +411,21 @@ dc_driver_main() {
 
   # 2. DefenseClaw init + connector setup.
   dc_init_defenseclaw
+  local cfg cfg_baseline cfg_baseline_state
+  cfg="$(dc_connector_config_file "${connector}")"
+  cfg_baseline="${TMPDIR:-/tmp}/dc-e2e-${connector}-config-$$.baseline"
+  cfg_baseline_state="missing"
+  if [ -f "${cfg}" ]; then
+    cp "${cfg}" "${cfg_baseline}"
+    cfg_baseline_state="present"
+  else
+    rm -f "${cfg_baseline}"
+  fi
   if dc_setup_connector "${connector}" "${DC_DRIVER_MODE}"; then
     dc_record_result "setup" pass "mode=${DC_DRIVER_MODE}"
   else
     dc_record_result "setup" fail "defenseclaw setup ${connector} failed"
+    rm -f "${cfg_baseline}"
     return 1
   fi
 
@@ -422,13 +433,13 @@ dc_driver_main() {
   dc_driver_run_probes "${connector}" || rc=1
 
   # 8. Teardown + clean-state.
-  local cfg; cfg="$(dc_connector_config_file "${connector}")"
-  if dc_teardown_connector "${connector}" && dc_assert_teardown "${connector}" "${cfg}"; then
+  if dc_teardown_connector "${connector}" && dc_assert_teardown "${connector}" "${cfg}" "${cfg_baseline}" "${cfg_baseline_state}"; then
     dc_record_result "teardown" pass ""
   else
     dc_record_result "teardown" fail "residual state after teardown"
     rc=1
   fi
+  rm -f "${cfg_baseline}"
 
   return "${rc}"
 }

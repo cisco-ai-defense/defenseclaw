@@ -22,7 +22,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -81,6 +80,9 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
 
 	if running, pid := d.IsRunning(); running {
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
@@ -106,10 +108,9 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
-	printSplunkLocalHint()
 
 	// Auto-start watchdog if enabled in config.
-	cfg, cfgErr := config.Load()
+	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
 			fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
@@ -149,6 +150,9 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return fmt.Errorf("restart daemon: %w", err)
+	}
 
 	// Stop the watchdog first so it doesn't fire false alarms during restart.
 	_ = runWatchdogStop(nil, nil)
@@ -176,10 +180,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
 	printCompactHealthSummary(cfg)
-	printSplunkLocalHint()
 
 	// Re-start watchdog if enabled in config.
-	cfg, cfgErr := config.Load()
+	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
 			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
@@ -187,62 +190,6 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
-}
-
-// printSplunkLocalHint prints Splunk Web credentials when the local bridge
-// is configured, so the user knows how to access the dashboards.
-func printSplunkLocalHint() {
-	dataDir := config.DefaultDataPath()
-
-	// Check bridge env first (written by Python setup splunk --logs)
-	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
-	bridgeEnv := readDotEnv(bridgeEnvPath)
-	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
-		Section("Splunk Local Mode")
-		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
-		return
-	}
-
-	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
-	dotenvPath := filepath.Join(dataDir, ".env")
-	env := readDotEnv(dotenvPath)
-	user := env["DEFENSECLAW_LOCAL_USERNAME"]
-	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
-	if user == "" || pass == "" {
-		return
-	}
-	Section("Splunk Local Mode")
-	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
-	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
-}
-
-// readDotEnv reads KEY=VALUE pairs from a .env file.
-func readDotEnv(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	env := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-			v = v[1 : len(v)-1]
-		}
-		env[k] = v
-	}
-	return env
 }
 
 // printCompactHealthSummary polls /health and prints a one-line status.
@@ -278,7 +225,7 @@ func summarizeHealth(body []byte) string {
 	if err := json.Unmarshal(body, &health); err != nil {
 		return "ok"
 	}
-	subsystems := []string{"gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"}
+	subsystems := []string{"gateway", "watcher", "guardrail", "api", "telemetry", "sandbox"}
 	var parts []string
 	for _, sub := range subsystems {
 		raw, ok := health[sub]

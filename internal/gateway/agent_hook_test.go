@@ -17,22 +17,13 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
@@ -232,111 +223,6 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 				t.Errorf("Content=%q want %q", req.Content, tc.wantContent)
 			}
 		})
-	}
-}
-
-func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(prev)
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
-	api := &APIServer{}
-	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleAgentHook("copilot")))
-	body, err := json.Marshal(map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"session_id":      "session-generic",
-		"turn_id":         "turn-generic",
-		"agent_id":        "github-copilot-cli",
-		"agent_name":      "GitHub Copilot CLI",
-		"agent_type":      "copilot-cli",
-		"tool_name":       "shell",
-		"tool_input": map[string]interface{}{
-			"command": "echo ok",
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal hook body: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
-	}
-
-	spans := exp.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("got %d spans want 1", len(spans))
-	}
-	for key, want := range map[string]string{
-		"gen_ai.conversation.id": "session-generic",
-		"gen_ai.operation.id":    "turn-generic",
-		"gen_ai.agent.name":      "GitHub Copilot CLI",
-		"gen_ai.agent.type":      "copilot-cli",
-		"gen_ai.agent.id":        "github-copilot-cli",
-		"defenseclaw.connector":  "copilot",
-		"defenseclaw.hook.event": "tool_call",
-	} {
-		got, ok := attrByKey(spans[0].Attributes, key)
-		if !ok || got.AsString() != want {
-			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
-		}
-	}
-}
-
-func TestFinalizeAgentHook_EmitsFinalCorrelatedDecision(t *testing.T) {
-	events := withCapturedEvents(t)
-	api := &APIServer{}
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		AgentID:       "agent-root",
-		AgentName:     "Codex",
-		AgentType:     "codex",
-		HookEventName: "PreToolUse",
-		SessionID:     "session-1",
-		TurnID:        "turn-1",
-		ToolName:      "Bash",
-		Payload:       map[string]interface{}{"model": "gpt-5"},
-	}
-	ctx := enrichAgentHookContext(t.Context(), req)
-	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
-		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		Reason: "policy denied command", EvaluationID: "eval-1", RuleIDs: []string{"TOOL.BLOCK"},
-	}, nil, []byte(`{"hook":"payload"}`), 17*time.Millisecond, false, nil)
-
-	var got *gatewaylog.Event
-	for i := range *events {
-		if (*events)[i].EventType == gatewaylog.EventHookDecision {
-			got = &(*events)[i]
-			break
-		}
-	}
-	if got == nil || got.HookDecision == nil {
-		t.Fatalf("hook decision was not emitted: %+v", *events)
-	}
-	if got.AgentID != "agent-root" || got.RootAgentID != "agent-root" {
-		t.Fatalf("agent correlation = (%q,%q), want root agent", got.AgentID, got.RootAgentID)
-	}
-	if got.AgentLifecycleEvent != "tool_start" || got.AgentPhase != "tool" {
-		t.Fatalf("lifecycle correlation = (%q,%q), want tool_start/tool", got.AgentLifecycleEvent, got.AgentPhase)
-	}
-	if got.AgentLifecycleID == "" || got.AgentExecutionID == "" {
-		t.Fatalf("missing lifecycle/execution identity: %+v", got)
-	}
-	hook := got.HookDecision
-	if hook.Action != "block" || hook.RawAction != "block" || !hook.Enforced || hook.WouldBlock {
-		t.Fatalf("incorrect enforcement semantics: %+v", hook)
-	}
-	if hook.StepIdx != 1 || hook.EvaluationID != "eval-1" || len(hook.RuleIDs) != 1 {
-		t.Fatalf("missing decision correlation: %+v", hook)
 	}
 }
 
@@ -818,14 +704,14 @@ func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
 	}
 }
 
-func TestHookAgentIdentityFromContext_PropagatesConnector(t *testing.T) {
+func TestScanCorrelationFromContextPropagatesConnector(t *testing.T) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
 		Connector: "codex",
 		RunID:     "run-1",
 		SessionID: "session-1",
 	})
 
-	got := hookAgentIdentityFromContext(ctx)
+	got := ScanCorrelationFromContext(ctx)
 	if got.Connector != "codex" {
 		t.Fatalf("Connector = %q, want codex", got.Connector)
 	}

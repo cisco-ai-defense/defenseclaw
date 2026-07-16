@@ -38,9 +38,7 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
-from defenseclaw.config import AIDiscoveryConfig
-from defenseclaw.config import ApplicationProtectionConfig
-from defenseclaw.config import GuardrailConfig
+from defenseclaw.config import AIDiscoveryConfig, ApplicationProtectionConfig, GuardrailConfig
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -323,7 +321,7 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Enforcement", result.output)
         self.assertIn("Blocked skills", result.output)
-        self.assertNotIn("unavailable", result.output)
+        self.assertNotIn("disk I/O error", result.output)
 
 
 class TestStatusJson(unittest.TestCase):

@@ -27,6 +27,7 @@ VERSION_PATHS = (
 )
 SOURCE_FIXTURE_PATHS = VERSION_PATHS + (
     "internal/config/config.go",
+    "internal/config/observability_v8_types.go",
     "cli/defenseclaw/install_publish.py",
     "scripts/source-install-publish.py",
     "scripts/source_release_identity.py",
@@ -67,24 +68,28 @@ def _preflight(
     repo: Path,
     install_dir: Path,
     mode: str,
+    *,
+    dev_reclaim: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+        "PATH": "/usr/bin:/bin",
+    }
+    requested_mode = f"dev-{mode}" if dev_reclaim else mode
     return subprocess.run(
         [
             "/bin/bash",
             str(ROOT / "scripts/source-install-preflight.sh"),
-            mode,
+            requested_mode,
             str(repo),
             str(install_dir),
             ".venv/bin",
             "defenseclaw",
             "defenseclaw-gateway",
         ],
-        env={
-            **os.environ,
-            "HOME": str(tmp_path / "home"),
-            "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
-            "PATH": "/usr/bin:/bin",
-        },
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -96,9 +101,9 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
     return {
         "schema_version": 2,
         "checkout_root": str(repo.resolve()),
-        "source_release": "0.8.4",
-        "source_install_compatibility_epoch": 1,
-        "runtime_config_version": 7,
+        "source_release": "0.8.5",
+        "source_install_compatibility_epoch": 2,
+        "runtime_config_version": 8,
         "gateway_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
     }
 
@@ -106,29 +111,33 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.4",
+        expected_release="0.8.5",
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.4",
-        "source_install_compatibility_epoch": 1,
-        "runtime_config_version": 7,
+        "source_release": "0.8.5",
+        "source_install_compatibility_epoch": 2,
+        "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.4"}
-    assert release_candidate._reviewed_source_install_identity("0.8.4") == identity
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.5"}
+    assert source_release_identity.compatibility_config_version(ROOT) == 7
+    assert source_release_identity.observability_v8_config_version(ROOT) == 8
+    assert source_release_identity.runtime_config_version(ROOT) == 8
+    assert release_candidate._reviewed_source_install_identity("0.8.5") == identity
 
 
 def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
     identity_path = repo / "release/source-install-identity.json"
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
-    identity["source_release"] = "0.8.5"
+    identity["source_install_compatibility_epoch"] = 1
+    identity["runtime_config_version"] = 7
     identity_path.write_text(json.dumps(identity), encoding="utf-8")
 
     with pytest.raises(
         source_release_identity.SourceIdentityError,
-        match="cannot reuse the 0.8.4 bridge source-install identity",
+        match="release 0.8.5 must use source-install compatibility epoch 2",
     ):
         source_release_identity.validate_source_tree(repo)
 
@@ -140,7 +149,7 @@ def test_release_stamp_is_provably_noop_for_reviewed_source(tmp_path: Path) -> N
     before = {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "0.8.4"],
+        ["/bin/bash", str(stamp), "0.8.5"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -152,13 +161,13 @@ def test_release_stamp_is_provably_noop_for_reviewed_source(tmp_path: Path) -> N
     assert {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS} == before
 
 
-def test_legacy_windows_smoke_stamp_remains_a_coherent_schema1_source(tmp_path: Path) -> None:
+def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
     stamp = repo / "scripts/stamp-version.sh"
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "0.8.3"],
+        ["/bin/bash", str(stamp), "0.8.4"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -166,10 +175,44 @@ def test_legacy_windows_smoke_stamp_remains_a_coherent_schema1_source(tmp_path: 
         timeout=15,
     )
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    identity = source_release_identity.validate_source_tree(repo, expected_release="0.8.3")
-    assert identity["source_release"] == "0.8.3"
-    assert identity["runtime_config_version"] == 7
+    assert completed.returncode != 0
+    assert "release 0.8.4 must use source-install compatibility epoch 1" in (
+        completed.stdout + completed.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative", "old", "new", "message"),
+    (
+        (
+            "internal/config/config.go",
+            "const CurrentConfigVersion = 7",
+            "const CurrentConfigVersion = 8",
+            "compatibility ceiling",
+        ),
+        (
+            "internal/config/observability_v8_types.go",
+            "ObservabilityV8ConfigVersion        = 8",
+            "ObservabilityV8ConfigVersion        = 9",
+            "runtime_config_version does not match gateway source",
+        ),
+    ),
+)
+def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
+    tmp_path: Path,
+    relative: str,
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    path = repo / relative
+    source = path.read_text(encoding="utf-8")
+    assert source.count(old) == 1
+    path.write_text(source.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(source_release_identity.SourceIdentityError, match=message):
+        source_release_identity.validate_source_tree(repo, expected_release="0.8.5")
 
 
 def test_release_workflow_rejects_unstamped_source_before_publish_and_tags_reviewed_commit() -> None:
@@ -223,13 +266,167 @@ def test_markerless_source_with_managed_state_refuses_before_gateway_mutation(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_admits_exact_markerless_source_checkout(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "check",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "source install refused" not in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    source_gateway.write_bytes(b"gateway-v2\n")
+    prior_marker = _marker_payload(repo, installed_gateway)
+    prior_marker.update(
+        {
+            "source_release": "0.8.4",
+            "source_install_compatibility_epoch": 1,
+            "runtime_config_version": 7,
+        }
+    )
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(prior_marker, sort_keys=True) + "\n", encoding="utf-8")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    published = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_gateway.read_bytes() == b"gateway-v2\n"
+
+    claimed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "claim",
+        dev_reclaim=True,
+    )
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    validated = source_release_identity.validate_marker(
+        marker,
+        checkout_root=repo,
+        source_release="0.8.5",
+        compatibility_epoch=2,
+        runtime_version=8,
+    )
+    assert validated[1] == hashlib.sha256(b"gateway-v2\n").hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_rejects_foreign_checkout_marker(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original_gateway = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    foreign_marker = _marker_payload(repo, installed_gateway)
+    foreign_marker["checkout_root"] = str(tmp_path / "different-checkout")
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(foreign_marker, sort_keys=True) + "\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "belongs to a different checkout" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original_gateway
+    assert marker.read_bytes() == original_marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_rejects_newer_source_marker(
+    tmp_path: Path,
+) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original_gateway = installed_gateway.read_bytes()
+    source_gateway.write_bytes(b"gateway-v2\n")
+    future_marker = _marker_payload(repo, installed_gateway)
+    future_marker.update(
+        {
+            "source_release": "0.8.6",
+            "source_install_compatibility_epoch": 3,
+            "runtime_config_version": 9,
+        }
+    )
+    marker = install_dir / ".defenseclaw-source-root"
+    marker.write_text(json.dumps(future_marker, sort_keys=True) + "\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-gateway",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "newer than this checkout" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original_gateway
+    assert marker.read_bytes() == original_marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_direct_install_ignores_developer_reclaim_environment_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    original = installed_gateway.read_bytes()
+    (tmp_path / "home/.defenseclaw").mkdir()
+    # This deliberately unsupported name must never become part of the public
+    # environment-variable registry merely because the negative test exercises
+    # it. Construct it at runtime so the static inventory continues to report
+    # only variables that production code actually supports.
+    unsupported_reclaim_env = "_".join(
+        ("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM")
+    )
+    monkeypatch.setenv(unsupported_reclaim_env, "1")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-gateway")
+
+    assert completed.returncode != 0
+    assert "original release identity is unknowable" in completed.stdout + completed.stderr
+    assert installed_gateway.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 @pytest.mark.parametrize(
     ("field", "mismatched"),
     (
-        ("source_release", "0.8.3"),
-        ("source_install_compatibility_epoch", 2),
+        ("source_release", "0.8.4"),
+        ("source_install_compatibility_epoch", 1),
         ("source_install_compatibility_epoch", True),
-        ("runtime_config_version", 8),
+        ("runtime_config_version", 7),
     ),
 )
 def test_mismatched_source_identity_refuses_before_gateway_mutation(
@@ -466,8 +663,12 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
 
     assert main.index("source_install_ownership check") < main.index("check_os")
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
-    for target in ("all: _source-install-preflight", "install: _source-install-preflight"):
-        assert target in makefile
+    assert "all: _source-install-dev-preflight" in makefile
+    assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
+    assert "source-install-preflight.sh dev-check" in makefile
+    assert "source-install-preflight.sh dev-publish-gateway" in makefile
+    assert "source-install-preflight.sh dev-claim" in makefile
+    assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
     gateway_start = makefile.index("\ngateway-install:", cli_start) + 1
     plugin_start = makefile.index("\nplugin-install:", gateway_start) + 1

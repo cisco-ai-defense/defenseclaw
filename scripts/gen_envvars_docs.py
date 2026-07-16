@@ -18,6 +18,10 @@ Run with no arguments to regenerate both files in place. Pass
 what the CI gate runs.
 """
 
+# Generated Markdown templates intentionally keep link destinations and
+# frontmatter prose on single lines for stable rendered output.
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import argparse
@@ -197,7 +201,7 @@ def _render_table(category: str, *, mdx: bool) -> str:
     reg = load_registry()
     entries = sorted(reg.by_category(category), key=lambda e: e.name)
     if not entries:
-        return f"\n*(no entries in this category)*\n"
+        return "\n*(no entries in this category)*\n"
 
     br = "<br/>" if mdx else "<br>"
 
@@ -319,8 +323,6 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
       - DefenseClaw env vars
       - DEFENSECLAW_LLM_KEY
       - DEFENSECLAW_HOME
-      - DEFENSECLAW_DISABLE_REDACTION
-      - DEFENSECLAW_OTEL_ENABLED
       - DefenseClaw configuration
     ---
 
@@ -349,7 +351,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     - [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
     - [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
     - [Reference → Keys](/docs/reference/keys) — credential resolution order.
-    - [Reference → Redaction](/docs/reference/redaction) — `DEFENSECLAW_DISABLE_REDACTION` / `DEFENSECLAW_REVEAL_PII`.
+    - [Reference → Redaction](/docs/reference/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
     - [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
     """
 )

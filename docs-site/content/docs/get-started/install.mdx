@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install DefenseClaw with curl on macOS/Linux, PowerShell on Windows, or build it from source. Pins Python 3.10+ and Go 1.26.4+ for source builds.
+description: Install DefenseClaw with curl on macOS/Linux or build it from source. Windows release binaries are temporarily unavailable.
 keywords:
   - install DefenseClaw
   - defenseclaw curl install
@@ -9,7 +9,14 @@ keywords:
   - defenseclaw make all
 ---
 
-DefenseClaw ships pre-built binaries for macOS, Linux, and Windows. The macOS/Linux installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`. The Windows installer uses the same per-user layout under `%USERPROFILE%`: `defenseclaw-gateway.exe` plus a `defenseclaw.cmd` CLI shim in `%USERPROFILE%\.local\bin`, with the virtualenv under `%USERPROFILE%\.defenseclaw\.venv`.
+DefenseClaw currently ships pre-built release binaries for macOS and Linux. The installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`.
+
+<Callout title="Windows release temporarily unavailable">
+The current release publishes no Windows gateway, rollback, or SBOM binaries.
+Do not run the PowerShell installer or copy POSIX artifacts onto Windows. The
+signed PowerShell upgrade resolver remains only as a fail-closed preflight
+surface for existing installations; it cannot cross the `0.8.5` hard cut.
+</Callout>
 
 <Callout title="Installers are for fresh hosts only">
 Both release installers stop without changing the host when they detect an
@@ -27,11 +34,16 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 
 | Requirement | Version |
 | --- | --- |
-| Python | 3.10+ for source builds; Windows installer manages Python 3.12 through `uv` |
+| Python | 3.10+ for source builds |
 | Go | 1.26.4+ (only for source builds) |
 | Node.js | 18+ (only for the OpenClaw plugin, source builds) |
-| PowerShell | Windows PowerShell 5.1+ or PowerShell 7+ for the Windows installer |
 | Docker | Optional, for local observability and Splunk bundles |
+
+Cosign is not a macOS/Linux prerequisite for the `0.8.5+` release installer.
+If no compatible `cosign` exists on `PATH`, the installer downloads pinned
+Cosign `2.6.3` into its owner-only staging directory, validates a hard-coded
+platform SHA-256 before executing it, verifies the DefenseClaw release, and
+retires the temporary verifier. Nothing is installed globally.
 
 ## What's bundled (LLM backends)
 
@@ -47,7 +59,7 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 
 ## Pick an install path
 
-<Tabs items={['macOS/Linux curl', 'Windows PowerShell', 'From source']}>
+<Tabs items={['macOS/Linux curl', 'Windows unavailable', 'From source']}>
 
 <Tab value="macOS/Linux curl">
 
@@ -75,28 +87,23 @@ defenseclaw quickstart --connector codex
 
 </Tab>
 
-<Tab value="Windows PowerShell">
+<Tab value="Windows unavailable">
 
-```powershell
-$Version = "0.8.4"
-$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
-defenseclaw init
-```
-
-The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv. If an installation already exists, it exits before dependency or artifact changes and directs you to the authenticated target-release `defenseclaw-upgrade.ps1` asset in latest mode, without `-Version`.
-
-For non-interactive demos or CI, download the script and pass flags directly:
-
-```powershell
-$Version = "0.8.4"
-$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version -Connector codex -Quickstart -Yes
-```
+No supported Windows release installation is published for this cut. Keep an
+existing Windows installation unchanged. Source builds remain developer
+tooling and are not a substitute for the missing release, upgrade, or rollback
+contract.
 
 </Tab>
 
 <Tab value="From source">
+
+| Goal | Command |
+|------|---------|
+| Normal same-checkout development | `make all` |
+| Build artifacts without installing | `make build` |
+| Show developer workflow help | `make help` |
+| Upgrade a packaged release | `defenseclaw upgrade` |
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
@@ -105,16 +112,22 @@ make all
 defenseclaw init
 ```
 
-`make all` runs the Python install, builds the Go gateway, builds the OpenClaw plugin, and runs a quick smoke test. The artifacts land in `bin/` and on your `PATH`. Then `defenseclaw init` walks you through the first-run setup (or run `defenseclaw quickstart --connector <x>` for the zero-prompt path).
+`make all` installs the editable Python CLI, builds and installs the Go gateway,
+updates your PATH, and runs quickstart. The OpenClaw plugin is installed when
+`CONNECTOR=openclaw` is selected. Then `defenseclaw init` walks you through
+first-run setup (or run `defenseclaw quickstart --connector <x>` for the
+zero-prompt path).
 
-Source builds are development tooling, not an upgrade path. A repeat install is
-accepted only for the same checkout and the same reviewed release,
-source-install compatibility epoch, and runtime schema. Source-owned version
-transitions have no tested in-place path and cannot use the release resolver's
-managed-venv rollback flow. Keep the existing source checkout/state unchanged,
-use an isolated fresh developer `HOME` and install directory, or contact
-support. Do not aim a raw `pip`, `uv`, or editable install at a
-release-managed host or its managed virtual environment.
+Source builds are development tooling, not a packaged upgrade path. `make all`
+is the explicit developer reinstall workflow: it may reclaim markerless or
+older source state only when the installed CLI belongs to this exact checkout.
+It validates marker ownership, rejects foreign and newer source identities,
+and records the current strict marker after a successful rebuild. Direct
+`make install`, `scripts/install-dev.sh`, and release-managed hosts remain
+fail-closed. Release installations must use `defenseclaw upgrade`; do not aim a
+raw `pip`, `uv`, or editable install at a release-managed virtual environment.
+The lower-level install targets are for fresh or isolated development homes,
+not the normal repeated-development path.
 
 </Tab>
 

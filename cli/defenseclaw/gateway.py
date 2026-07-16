@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
@@ -40,8 +41,14 @@ PLUGIN_MUTATION_TIMEOUT = 90
 
 
 class OrchestratorClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
-                 token: str = "", plugin_timeout: int | None = None) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 18970,
+        timeout: int = 5,
+        token: str = "",
+        plugin_timeout: int | None = None,
+    ) -> None:
         self.base_url = f"http://{host}:{port}"
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
@@ -59,6 +66,48 @@ class OrchestratorClient:
         resp = self._session.get(f"{self.base_url}/status", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
+        """Hand one raw Python-CLI fact to the canonical v8 runtime.
+
+        Destination selection, redaction, SQLite persistence, and fanout all
+        happen in the gateway. A non-204 response means admission was not
+        confirmed and is intentionally surfaced to the caller.
+        """
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/observability/cli",
+            json=dict(payload),
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        if resp.status_code != 204:
+            raise requests.HTTPError("canonical observability admission was not acknowledged")
+
+    def set_alert_disposition(
+        self,
+        *,
+        operation_id: str,
+        disposition: str,
+        severity: str,
+    ) -> dict[str, Any]:
+        """Apply protected alert-review state through the canonical CAS API."""
+
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/alerts/disposition",
+            json={
+                "operation_id": operation_id,
+                "disposition": disposition,
+                "severity": severity,
+            },
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def close(self) -> None:
+        self._session.close()
 
     def disable_skill(self, skill_key: str) -> dict[str, Any]:
         resp = self._session.post(
@@ -163,9 +212,7 @@ class OrchestratorClient:
         a true "what SDKs and versions are on this fleet" table without
         re-implementing the join.
         """
-        resp = self._session.get(
-            f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout
-        )
+        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -174,9 +221,8 @@ class OrchestratorClient:
         from ``ai_signals`` for the latest scan).
 
         Powered by ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/locations``;
-        when ``privacy.disable_redaction`` and
-        ``ai_discovery.store_raw_local_paths`` are both set on the
-        sidecar, each row may include a ``raw_path`` field, otherwise
+        when ``ai_discovery.store_raw_local_paths`` is set on the sidecar,
+        each row may include a ``raw_path`` field, otherwise
         only basenames + path hashes are returned.
 
         ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
@@ -187,10 +233,7 @@ class OrchestratorClient:
         slash inside a scoped npm name like ``@anthropic-ai/sdk``
         survives the split and the lookup hits the right row.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
@@ -203,10 +246,7 @@ class OrchestratorClient:
         ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
         for the same reason as ``ai_usage_component_locations``.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()

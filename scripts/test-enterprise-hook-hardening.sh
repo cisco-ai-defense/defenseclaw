@@ -302,13 +302,15 @@ sudo -n install -o root -g "$admin_group" -m 0755 "$source_binary" "$root_binary
 
 config_tmp="${target_home}/config.yaml"
 cat >"$config_tmp" <<EOF
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: ${service_data}
-audit_db: ${service_data}/audit.db
-judge_bodies_db: ${service_data}/judge_bodies.db
 plugin_dir: ${service_data}/plugins
 policy_dir: ${service_data}/policies
+observability:
+  local:
+    path: ${service_data}/audit.db
+    judge_bodies_path: ${service_data}/judge_bodies.db
 gateway:
   api_bind: 127.0.0.1
   api_port: ${api_port}

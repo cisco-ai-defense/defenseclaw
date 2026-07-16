@@ -8,21 +8,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package-internal OTLP-HTTP receiver. Hosts /v1/logs, /v1/metrics,
-// and /v1/traces — the three signal endpoints the OTel HTTP exporter
-// fans out to. Codex (via [otel.exporter.otlp-http]) and Claude Code
-// (via OTEL_EXPORTER_OTLP_ENDPOINT) post structured telemetry here
-// with a baked-in x-defenseclaw-token header so the gateway can
-// authenticate the originating CLI process the same way the hook
-// scripts do.
+// Package-internal OTLP-HTTP receiver. It serves both the shared
+// /v1/{logs,metrics,traces} routes used by header-capable exporters and the
+// connector-scoped /otlp/<source>/<token>/v1/<signal> loopback routes. Codex
+// uses a dedicated path token; Claude Code uses authenticated exporter
+// headers. Neither credential is inferred from payload content.
 //
-// This receiver is intentionally summary-oriented: we accept the body,
-// attach the connector source and gateway tokens (already validated by
-// tokenAuth middleware), normalize OTLP JSON/protobuf into the same
-// summary shape, promote known GenAI session/token/duration fields,
-// and persist via persistAuditEvent. Operators who want full raw OTel
-// pipelines still run the gateway's downstream OTLP forwarder
-// (separate, see internal/audit/sinks/otlp_logs.go).
+// The receiver is a strict v8 ingress adapter. It decodes JSON or protobuf into
+// the official OTLP request types, classifies every leaf through the generated
+// inbound catalog, constructs canonical DefenseClaw records, and hands them to
+// the central router. It never stores or forwards the raw request envelope and
+// has no legacy audit/provider fallback.
 //
 // Threat model:
 //   - All three endpoints are gated by tokenAuth + apiCSRFProtect
@@ -31,12 +27,13 @@
 //   - Body size is capped by maxBodyMiddleware (1 MiB). The OTLP
 //     spec recommends batching; one MiB covers roughly 50-100 log
 //     records or 500-1000 metric data points per batch.
-//   - Payload parsing failures are audited as malformed and still
-//     return OTLP success; retrying the same bad batch would only
+//   - Payload parsing failures emit content-free mandatory v8 health evidence
+//     and still return OTLP success; retrying the same bad batch would only
 //     create gateway load and noisier telemetry.
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -58,14 +55,14 @@ import (
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-// otelIngestStats is what summarizeOTLPPayload returns alongside
-// the human-readable summary. We keep it tiny on purpose — the
-// counters we expose are low-cardinality (signal × source) so a
+// otelIngestStats is the bounded batch accounting derived from the typed
+// protobuf request. The counters remain low-cardinality (signal × source) so a
 // noisy connector cannot explode the TSDB.
 type otelIngestStats struct {
 	// Records is the number of leaf records (logRecords / metrics
@@ -88,25 +85,16 @@ const (
 	otelSignalTraces  otelIngestSignal = "traces"
 )
 
-// otelIngestSource is the connector that originated the OTel POST.
-// We trust the x-defenseclaw-source header (which Setup() bakes in
-// to the codex [otel] block and the Claude Code env block) but
-// only AFTER tokenAuth has validated x-defenseclaw-token. The
-// header is therefore self-asserted but tied to a verified
-// credential — same trust model as Authorization-bearer flows.
+// otelIngestSource is the connector that originated the OTel POST. On shared
+// /v1/* routes the x-defenseclaw-source header is consumed only after header
+// authentication. On scoped routes handleOTLPPathToken overwrites the header
+// with the source authenticated by the URL namespace, so a caller cannot use
+// one connector's path token while claiming another connector identity.
 const otelSourceHeader = "x-defenseclaw-source"
-
-// otelIngestMaxBatchSummary caps the number of resource entries we
-// summarize in an audit Details string. OTLP batches can carry
-// hundreds of records; persisting all of them to SQLite Details
-// (text column) would balloon the audit DB. The OTel forwarder sink
-// keeps the full payload — this receiver intentionally summarizes.
-const otelIngestMaxBatchSummary = 5
 
 // handleOTLPLogs accepts OTLP-HTTP /v1/logs POSTs from CLI processes.
 // Body may be OTLP-JSON (application/json) or OTLP protobuf
-// (application/x-protobuf). Both forms are summarized structurally after
-// protobuf is normalized to the OTLP-JSON field shape.
+// (application/x-protobuf). Both forms enter the same typed importer.
 func (a *APIServer) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalLogs)
 }
@@ -116,11 +104,7 @@ func (a *APIServer) handleOTLPMetrics(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalMetrics)
 }
 
-// handleOTLPTraces accepts OTLP-HTTP /v1/traces POSTs. Currently
-// only Codex's native OTel exporter emits traces (Claude Code
-// emits logs + metrics by default). We register the route anyway
-// so a future Claude Code release that adds trace export Just
-// Works without a gateway change.
+// handleOTLPTraces accepts OTLP-HTTP /v1/traces POSTs.
 func (a *APIServer) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalTraces)
 }
@@ -155,9 +139,9 @@ func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleOTLPSignal is the shared body for all three signal types.
-// It validates the request shape, classifies the source, summarizes
-// the payload into an audit event, and returns 200 with the
-// canonical OTLP empty-success body so the exporter doesn't retry.
+// It fails closed until the process-owned v8 runtime is bound, validates the
+// typed request, imports each supported leaf through generated contracts, emits
+// bounded batch accounting, and returns the canonical OTLP success body.
 //
 // The OTLP spec defines the success response as an empty
 // ExportPartialSuccess message; "{}" is the JSON form. Returning a
@@ -167,9 +151,29 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.hasOTLPObservabilityRuntime() {
+		http.Error(w, "observability runtime unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	started := time.Now().UTC()
+	source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
+	ctx := r.Context()
+	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
+		ctx = ContextWithAgentIdentity(ctx, id)
+	}
+	ctx, ingestTrace := a.startOTLPIngestTraceV8(ctx, r, signal, source, started)
+	if ingestTrace != nil {
+		defer ingestTrace.abort()
+	}
 
 	contentType := r.Header.Get("Content-Type")
 	if !isOTLPContentType(contentType) {
+		a.emitOTLPBatchRejectedV8(ctx, signal, source, "unknown", "unsupported_content_type", 0, started)
+		ingestTrace.finishReceive(otlpIngestTraceResult{
+			outcome: observability.OutcomeRejected, statusCode: http.StatusUnsupportedMediaType,
+			payloadFormat: "unknown", reasonClass: "unsupported_content_type",
+			errorType: "unsupported_content_type",
+		})
 		// Be explicit about why we rejected so the exporter logs
 		// surface the right error.
 		w.Header().Set("Accept", "application/json, application/x-protobuf")
@@ -179,151 +183,113 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		return
 	}
 
+	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
+		reasonClass := "body_read_failed"
+		status := http.StatusBadRequest
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			reasonClass = "body_too_large"
+			status = http.StatusRequestEntityTooLarge
+		}
+		a.emitOTLPBatchRejectedV8(ctx, signal, source, "unknown", reasonClass, 0, started)
+		ingestTrace.finishReceive(otlpIngestTraceResult{
+			outcome: observability.OutcomeRejected, statusCode: int64(status),
+			payloadFormat: "unknown", reasonClass: reasonClass, errorType: reasonClass,
+			technical: reasonClass == "body_read_failed",
+		})
+		// MaxBytesReader writes no response until its read error reaches the
+		// handler. Exporters must not treat an oversized batch as malformed
+		// syntax that could succeed unchanged on retry.
+		http.Error(w, "read body", status)
 		return
 	}
-	defer r.Body.Close()
-
-	source := strings.ToLower(strings.TrimSpace(r.Header.Get(otelSourceHeader)))
-	if source == "" {
-		// Fall back to "unknown" rather than rejecting — older
-		// codex/claude releases that didn't bake the header still
-		// produce useful telemetry, and tokenAuth has already
-		// validated the credential.
-		source = "unknown"
-	}
-	source = normalizeConnectorTelemetrySource(source)
-	ctx := r.Context()
-	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
-		ctx = ContextWithAgentIdentity(ctx, id)
-	}
-
 	bodyBytes := int64(len(body))
-	summaryBody, payloadFormat, normalizeErr := normalizeOTLPIngestBody(body, signal, contentType)
+	ingestTrace.startNormalize(ctx, signal, source, time.Now().UTC())
+	decoded, normalizeErr := decodeOTLPIngestBody(body, signal, contentType)
+	summaryBody := decoded.normalized
+	payloadFormat := decoded.payloadFormat
 	if normalizeErr != nil {
-		details := fmt.Sprintf("malformed OTLP-%s payload: %v (size=%d bytes)", payloadFormat, normalizeErr, len(body))
-		details = a.appendRawOTLPDetails(details, source, signal, body)
-		ev := audit.Event{
-			Timestamp: time.Now().UTC(),
-			Action:    string(audit.ActionOTelIngestMalformed),
-			Target:    fmt.Sprintf("otlp:%s", signal),
-			Actor:     source,
-			Details:   details,
-			Severity:  "WARN",
-			AgentName: source,
-			Connector: source,
+		a.emitOTLPBatchRejectedV8(ctx, signal, source, payloadFormat, "invalid_"+payloadFormat, bodyBytes, started)
+		result := otlpIngestTraceResult{
+			outcome: observability.OutcomeRejected, statusCode: http.StatusOK,
+			payloadFormat: payloadFormat, reasonClass: "invalid_" + payloadFormat,
+			errorType: "invalid_" + payloadFormat, wireBytes: bodyBytes, hasWireBytes: true,
 		}
-		_ = persistAuditEvent(a.logger, a.store, ev)
-		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
-		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes, details)
+		ingestTrace.finishNormalize(result)
+		ingestTrace.finishReceive(result)
 		writeOTLPSuccess(w)
 		return
 	}
-
-	sessionID := extractOTLPSessionID(summaryBody, signal)
-	if sessionID != "" {
-		ctx = ContextWithSessionID(ctx, sessionID)
-		// follow-up: when session_id arrives in the OTLP body
-		// (after auth has already happened), the request envelope was
-		// promoted with no session_id. Re-promote now so persisted
-		// events carry both session_id AND a stable agent_instance_id
-		// — otherwise downstream joins on (session_id, instance_id)
-		// fail because instance_id is empty.
-		ctx = PromoteSessionIfAuthenticated(ctx)
-		enrichHTTPSpanFromContext(ctx)
-		enrichOTLPIngestSpan(ctx, sessionID)
-	}
-	summary, stats, parseErr := summarizeOTLPPayload(summaryBody, signal)
+	stats, parseErr := decodedOTLPIngestStats(decoded.message, signal)
 	if parseErr != nil {
-		// We log the parse failure but still 200 — the exporter
-		// already paid the network round-trip and retrying won't
-		// help (the body is malformed). Audit + meter + emit a
-		// WARN log so dashboards / alerts surface the drift
-		// without the exporter retrying.
-		details := fmt.Sprintf("malformed OTLP-%s normalized payload: %v (size=%d bytes)", payloadFormat, parseErr, len(body))
-		details = a.appendRawOTLPDetails(details, source, signal, body)
-		ev := audit.Event{
-			Timestamp: time.Now().UTC(),
-			Action:    string(audit.ActionOTelIngestMalformed),
-			Target:    fmt.Sprintf("otlp:%s", signal),
-			Actor:     source,
-			Details:   details,
-			Severity:  "WARN",
-			AgentName: source,
-			SessionID: sessionID,
-			Connector: source,
+		a.emitOTLPBatchRejectedV8(ctx, signal, source, payloadFormat, "invalid_envelope", bodyBytes, started)
+		result := otlpIngestTraceResult{
+			outcome: observability.OutcomeRejected, statusCode: http.StatusOK,
+			payloadFormat: payloadFormat, reasonClass: "invalid_envelope",
+			errorType: "invalid_envelope", wireBytes: bodyBytes, normalizedBytes: int64(len(summaryBody)),
+			hasWireBytes: true, hasNormalized: true,
 		}
-		_ = persistAuditEvent(a.logger, a.store, ev)
-		// Record metrics + emit OTel log for the malformed branch.
-		// We pass records=0 (we couldn't extract any) but keep
-		// bodyBytes so volume dashboards still see the request.
-		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
-		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes,
-			a.appendRawOTLPDetails(fmt.Sprintf("malformed OTLP-%s normalized payload: %v", payloadFormat, parseErr), source, signal, body))
+		ingestTrace.finishNormalize(result)
+		ingestTrace.finishReceive(result)
 		writeOTLPSuccess(w)
 		return
 	}
-	summary = decorateOTLPIngestSummary(summary, payloadFormat, len(body), len(summaryBody))
-	summary = a.appendRawOTLPDetails(summary, source, signal, body)
-
-	ev := audit.Event{
-		Timestamp: time.Now().UTC(),
-		Action:    otelIngestActionForSignal(signal),
-		Target:    fmt.Sprintf("otlp:%s", signal),
-		Actor:     source,
-		Details:   summary,
-		Severity:  "INFO",
-		AgentName: source,
-		SessionID: sessionID,
-		Connector: source,
+	accounting, importErr := a.importDecodedOTLPRequestV8(
+		ctx, decoded.message, signal, source, time.Now().UTC(),
+	)
+	if importErr != nil {
+		fmt.Fprintln(otelIngestLogSink(), "[otel-ingest] canonical accepted-record import incomplete")
 	}
-	if signal == otelSignalLogs {
-		if events := otlpLogRecordsForSplunkHEC(body, source, ev.Timestamp); len(events) > 0 {
-			ev.Structured = map[string]any{
-				"_splunk_hec_events": events,
+	if importErr == nil && accounting.allSelfSuppressed() {
+		// Per-leaf generated echo recognition proved every leaf returned to
+		// its local exporter. Abort the already-started health hierarchy and
+		// emit no recursive log, metric, or trace.
+		ingestTrace.abort()
+		writeOTLPSuccess(w)
+		return
+	}
+	ingestTrace.finishNormalize(otlpIngestTraceResult{
+		outcome: func() observability.Outcome {
+			if importErr != nil {
+				return observability.OutcomePartial
 			}
-		}
-	}
-	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
-		// Best-effort: failing to persist must NOT cause the
-		// exporter to retry — telemetry storms during DB outages
-		// are worse than the lost batch. Log to stderr in the
-		// usual gateway pattern and 200.
-		fmt.Fprintf(otelIngestLogSink(), "[otel-ingest] persist failed (signal=%s source=%s): %v\n", signal, source, err)
-	}
-
-	// Record metrics + emit OTel log on the happy path. The OTel
-	// log routes through the gateway's own logger provider so the
-	// local-observability-stack's Loki receives codex/claudecode
-	// telemetry directly — no extra audit OTLP sink needed.
-	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
-	for _, usage := range extractOTLPTokenUsage(summaryBody, signal, source) {
-		if usage.cumulative {
-			var ok bool
-			usage, ok = a.deltaOTLPCumulativeTokenUsage(usage)
-			if !ok {
-				continue
+			outcome, outcomeErr := accounting.outcome()
+			if outcomeErr != nil {
+				return observability.OutcomePartial
 			}
-		}
-		usageSessionID := firstNonEmpty(usage.sessionID, sessionID, SessionIDFromContext(ctx))
-		agentName := usage.agentName
-		agentID := SharedAgentRegistry().AgentID()
-		if snapshot, ok := a.hookLifecycleSnapshot(source, usageSessionID, ""); ok {
-			agentName = firstNonEmpty(snapshot.AgentName, agentName)
-			agentID = firstNonEmpty(snapshot.AgentID, agentID)
-		}
-		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, agentName, agentID, usageSessionID, usage.tokenType, usage.tokens)
-		if signal == otelSignalLogs {
-			a.rememberOTLPHookLLMTokenUsage(source, usageSessionID, usage)
-		}
+			return outcome
+		}(), statusCode: http.StatusOK,
+		payloadFormat: payloadFormat, records: stats.Records, resources: stats.Resources,
+		wireBytes: bodyBytes, normalizedBytes: int64(len(summaryBody)),
+		hasWireBytes: true, hasNormalized: true, hasSummary: true,
+	})
+	var emitErr error
+	if importErr == nil {
+		emitErr = a.emitOTLPBatchAccountingV8(
+			ctx, signal, source, payloadFormat, stats, bodyBytes,
+			int64(len(summaryBody)), started, accounting,
+		)
 	}
-	for _, duration := range extractOTLPOperationDurations(summaryBody, signal, source) {
-		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)
+	if emitErr != nil {
+		fmt.Fprintln(otelIngestLogSink(), "[otel-ingest] canonical normalized-batch persistence failed")
 	}
-	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
-
+	a.recordOTLPBatchMetricsV8(ctx, signal, source, "ok", stats.Records, bodyBytes)
+	receiveResult := otlpIngestTraceResult{
+		outcome: observability.OutcomeCompleted, statusCode: http.StatusOK,
+		payloadFormat: payloadFormat, records: stats.Records, resources: stats.Resources,
+		wireBytes: bodyBytes, normalizedBytes: int64(len(summaryBody)),
+		hasWireBytes: true, hasNormalized: true, hasSummary: true,
+	}
+	if importErr != nil || emitErr != nil {
+		receiveResult.outcome = observability.OutcomePartial
+		receiveResult.errorType = "accepted_record_import_incomplete"
+		receiveResult.technical = true
+	} else if outcome, outcomeErr := accounting.outcome(); outcomeErr == nil {
+		receiveResult.outcome = outcome
+	}
+	ingestTrace.finishReceive(receiveResult)
 	writeOTLPSuccess(w)
 }
 
@@ -359,10 +325,28 @@ func (a *APIServer) deltaOTLPCumulativeTokenUsage(usage otelTokenUsage) (otelTok
 }
 
 func normalizeOTLPIngestBody(body []byte, signal otelIngestSignal, contentType string) ([]byte, string, error) {
-	if !isOTLPProtobufContentType(contentType) {
-		return body, "json", nil
+	decoded, err := decodeOTLPIngestBody(body, signal, contentType)
+	if err != nil {
+		return nil, decoded.payloadFormat, err
 	}
+	return decoded.normalized, decoded.payloadFormat, nil
+}
 
+// decodedOTLPIngestBody retains the official OTLP protobuf model for v8 leaf
+// identification and mapping. Normalized JSON is used only for measured encoded
+// size and bounded diagnostic helpers; canonical importers read message directly
+// rather than round-tripping through a generic map.
+type decodedOTLPIngestBody struct {
+	message       proto.Message
+	normalized    []byte
+	payloadFormat string
+}
+
+func decodeOTLPIngestBody(
+	body []byte,
+	signal otelIngestSignal,
+	contentType string,
+) (decodedOTLPIngestBody, error) {
 	var msg proto.Message
 	switch signal {
 	case otelSignalLogs:
@@ -372,130 +356,157 @@ func normalizeOTLPIngestBody(body []byte, signal otelIngestSignal, contentType s
 	case otelSignalTraces:
 		msg = &collectortracepb.ExportTraceServiceRequest{}
 	default:
-		return nil, "protobuf", fmt.Errorf("unknown OTLP signal %q", signal)
+		return decodedOTLPIngestBody{payloadFormat: "unknown"}, fmt.Errorf("unknown OTLP signal")
 	}
-	if err := proto.Unmarshal(body, msg); err != nil {
-		return nil, "protobuf", err
+	payloadFormat := "json"
+	if isOTLPProtobufContentType(contentType) {
+		payloadFormat = "protobuf"
+		if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(body, msg); err != nil {
+			return decodedOTLPIngestBody{payloadFormat: payloadFormat}, err
+		}
+		if messageContainsUnknownOTLPFields(msg.ProtoReflect()) {
+			return decodedOTLPIngestBody{payloadFormat: payloadFormat}, errors.New("OTLP protobuf contains unsupported fields")
+		}
+	} else {
+		if err := validateUniqueOTLPJSONMembers(body); err != nil {
+			return decodedOTLPIngestBody{payloadFormat: payloadFormat}, err
+		}
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(body, msg); err != nil {
+			return decodedOTLPIngestBody{payloadFormat: payloadFormat}, err
+		}
 	}
 	normalized, err := protojson.MarshalOptions{
 		EmitUnpopulated: false,
 		UseProtoNames:   false,
 	}.Marshal(msg)
 	if err != nil {
-		return nil, "protobuf", err
+		return decodedOTLPIngestBody{payloadFormat: payloadFormat}, err
 	}
-	return normalized, "protobuf", nil
+	return decodedOTLPIngestBody{
+		message: msg, normalized: normalized, payloadFormat: payloadFormat,
+	}, nil
 }
 
-func decorateOTLPIngestSummary(summary, payloadFormat string, wireBytes, normalizedBytes int) string {
-	if payloadFormat != "protobuf" {
-		return summary
-	}
-	return fmt.Sprintf("format=protobuf wire_size=%d bytes normalized_json_size=%d bytes %s", wireBytes, normalizedBytes, summary)
+// decodedOTLPIngestStats counts protocol leaves from the typed request. A
+// metric leaf is one data point, not one instrument descriptor; this aligns
+// receiver accounting with the independently disposable unit used by inbound
+// binding, collection, and partial-batch dispositions.
+func decodedOTLPIngestStats(message proto.Message, signal otelIngestSignal) (otelIngestStats, error) {
+	return walkDecodedOTLPLeaves(message, signal, nil)
 }
 
-func otlpLogRecordsForSplunkHEC(body []byte, source string, receivedAt time.Time) []map[string]any {
-	var envelope struct {
-		ResourceLogs []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeLogs []struct {
-				LogRecords []struct {
-					TimeUnixNano         json.RawMessage `json:"timeUnixNano"`
-					ObservedTimeUnixNano json.RawMessage `json:"observedTimeUnixNano"`
-					SeverityNumber       int             `json:"severityNumber"`
-					SeverityText         string          `json:"severityText"`
-					Body                 json.RawMessage `json:"body"`
-					Attributes           []otlpAttribute `json:"attributes"`
-					TraceID              string          `json:"traceId"`
-					SpanID               string          `json:"spanId"`
-				} `json:"logRecords"`
-			} `json:"scopeLogs"`
-		} `json:"resourceLogs"`
+// validateUniqueOTLPJSONMembers rejects duplicate object members before the
+// protobuf JSON decoder can normalize them. Accepting the last value would let
+// two lexical JSON requests select different generated discriminators while
+// appearing identical after normalization. The scanner validates structure but
+// never materializes sender-controlled objects or values.
+func validateUniqueOTLPJSONMembers(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := scanUniqueOTLPJSONValue(decoder, 0); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("OTLP JSON contains trailing values")
+		}
+		return err
+	}
+	return nil
+}
+
+const maxOTLPJSONNestingDepth = 64
+
+func scanUniqueOTLPJSONValue(decoder *json.Decoder, depth int) error {
+	if decoder == nil || depth > maxOTLPJSONNestingDepth {
+		return errors.New("OTLP JSON nesting exceeds limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
 		return nil
 	}
-
-	events := []map[string]any{}
-	for _, resourceLog := range envelope.ResourceLogs {
-		resourceAttrs := otlpAttributesToMap(resourceLog.Resource.Attributes)
-		for _, scopeLog := range resourceLog.ScopeLogs {
-			for _, rec := range scopeLog.LogRecords {
-				recordAttrs := otlpAttributesToMap(rec.Attributes)
-				mergedAttrs := make(map[string]interface{}, len(resourceAttrs)+len(recordAttrs))
-				for k, v := range resourceAttrs {
-					mergedAttrs[k] = v
-				}
-				for k, v := range recordAttrs {
-					mergedAttrs[k] = v
-				}
-				eventTime := otlpLogRecordTime(rec.TimeUnixNano, rec.ObservedTimeUnixNano, receivedAt)
-				event := map[string]any{
-					"signal_family":      "log",
-					"timestamp":          eventTime.UTC().Format(time.RFC3339Nano),
-					"observed_timestamp": otlpNanosISO(rec.ObservedTimeUnixNano),
-					"severity":           firstNonEmpty(rec.SeverityText, "INFO"),
-					"severity_text":      rec.SeverityText,
-					"severity_number":    rec.SeverityNumber,
-					"body":               decodeOTLPAnyValue(rec.Body),
-					"trace_id":           rec.TraceID,
-					"span_id":            rec.SpanID,
-					"resource":           resourceAttrs,
-					"attributes":         recordAttrs,
-					"source":             "otel",
-					"source_system":      "defenseclaw",
-					"event_name":         otlpString(mergedAttrs, "event.name"),
-					"action":             firstNonEmpty(otlpString(mergedAttrs, "action"), otlpString(mergedAttrs, "event.name")),
-					"run_id":             otlpString(mergedAttrs, "run_id"),
-					"session_id":         otlpSessionID(mergedAttrs),
-					"request_id":         otlpString(mergedAttrs, "request_id"),
-					"agent_name":         firstNonEmpty(otlpString(mergedAttrs, "gen_ai.agent.name"), source),
-					"agent_type":         otlpString(mergedAttrs, "gen_ai.agent.type"),
-					"tool_name":          firstNonEmpty(otlpString(mergedAttrs, "tool_name"), otlpString(mergedAttrs, "gen_ai.tool.name")),
-					"destination_app":    firstNonEmpty(otlpString(mergedAttrs, "destination_app"), otlpString(mergedAttrs, "defenseclaw.destination_app")),
-					"provider_name":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.provider.name"), source),
-					"request_model":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.request.model"), otlpString(mergedAttrs, "model")),
-					"response_model":     otlpString(mergedAttrs, "gen_ai.response.model"),
-				}
-				events = append(events, map[string]any{
-					"time":       float64(eventTime.Unix()) + float64(eventTime.Nanosecond())/1e9,
-					"host":       firstNonEmpty(otlpString(resourceAttrs, "host.name"), "defenseclaw-local"),
-					"source":     "otel",
-					"sourcetype": "otel:log",
-					"event":      event,
-				})
+	switch delimiter {
+	case '{':
+		members := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, nameErr := decoder.Token()
+			if nameErr != nil {
+				return nameErr
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("OTLP JSON object member is not a string")
+			}
+			if _, duplicate := members[name]; duplicate {
+				return errors.New("OTLP JSON contains duplicate object member")
+			}
+			members[name] = struct{}{}
+			if err := scanUniqueOTLPJSONValue(decoder, depth+1); err != nil {
+				return err
 			}
 		}
+		closing, closeErr := decoder.Token()
+		if closeErr != nil || closing != json.Delim('}') {
+			if closeErr != nil {
+				return closeErr
+			}
+			return errors.New("OTLP JSON object is not closed")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanUniqueOTLPJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, closeErr := decoder.Token()
+		if closeErr != nil || closing != json.Delim(']') {
+			if closeErr != nil {
+				return closeErr
+			}
+			return errors.New("OTLP JSON array is not closed")
+		}
+	default:
+		return errors.New("OTLP JSON contains invalid delimiter")
 	}
-	return events
+	return nil
 }
 
-func otlpLogRecordTime(timeRaw, observedRaw json.RawMessage, fallback time.Time) time.Time {
-	if t, ok := otlpNanosTime(timeRaw); ok && !t.IsZero() {
-		return t
+// messageContainsUnknownOTLPFields rejects protobuf extension bytes at every
+// nesting level. Silently preserving or dropping such bytes would create an
+// opaque side channel around the canonical v8 schema and redaction pipeline.
+func messageContainsUnknownOTLPFields(message protoreflect.Message) bool {
+	if !message.IsValid() {
+		return false
 	}
-	if t, ok := otlpNanosTime(observedRaw); ok && !t.IsZero() {
-		return t
+	if len(message.GetUnknown()) != 0 {
+		return true
 	}
-	return fallback
-}
-
-func otlpNanosISO(raw json.RawMessage) string {
-	t, ok := otlpNanosTime(raw)
-	if !ok || t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-func otlpNanosTime(raw json.RawMessage) (time.Time, bool) {
-	nanos := parseOTLPNumber(raw)
-	if nanos <= 0 {
-		return time.Time{}, false
-	}
-	return time.Unix(0, nanos).UTC(), true
+	found := false
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		switch {
+		case field.IsMap() && field.MapValue().Kind() == protoreflect.MessageKind:
+			value.Map().Range(func(_ protoreflect.MapKey, child protoreflect.Value) bool {
+				if messageContainsUnknownOTLPFields(child.Message()) {
+					found = true
+					return false
+				}
+				return true
+			})
+		case field.IsList() && field.Kind() == protoreflect.MessageKind:
+			list := value.List()
+			for index := 0; index < list.Len() && !found; index++ {
+				found = messageContainsUnknownOTLPFields(list.Get(index).Message())
+			}
+		case field.Kind() == protoreflect.MessageKind:
+			found = messageContainsUnknownOTLPFields(value.Message())
+		}
+		return !found
+	})
+	return found
 }
 
 func agentIdentityForOTLPSource(source string) AgentIdentity {
@@ -531,77 +542,6 @@ func normalizeConnectorTelemetrySource(source string) string {
 	}
 }
 
-func enrichOTLPIngestSpan(ctx context.Context, sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	span := trace.SpanFromContext(ctx)
-	if span == nil || !span.IsRecording() {
-		return
-	}
-	span.SetAttributes(attribute.String("gen_ai.conversation.id", sessionID))
-}
-
-func extractOTLPSessionID(body []byte, signal otelIngestSignal) string {
-	if len(body) == 0 {
-		return ""
-	}
-	switch signal {
-	case otelSignalLogs:
-		return extractOTLPLogSessionID(body)
-	default:
-		return ""
-	}
-}
-
-func extractOTLPLogSessionID(body []byte) string {
-	var envelope struct {
-		ResourceLogs []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeLogs []struct {
-				LogRecords []struct {
-					Attributes []otlpAttribute `json:"attributes"`
-				} `json:"logRecords"`
-			} `json:"scopeLogs"`
-		} `json:"resourceLogs"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return ""
-	}
-
-	for _, resource := range envelope.ResourceLogs {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		if sessionID := otlpSessionID(resourceAttrs); sessionID != "" {
-			return sessionID
-		}
-		for _, scope := range resource.ScopeLogs {
-			for _, rec := range scope.LogRecords {
-				attrs := otlpAttributesToMap(rec.Attributes)
-				for k, v := range resourceAttrs {
-					if _, exists := attrs[k]; !exists {
-						attrs[k] = v
-					}
-				}
-				if sessionID := otlpSessionID(attrs); sessionID != "" {
-					return sessionID
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func otlpSessionID(attrs map[string]interface{}) string {
-	return firstNonEmpty(
-		otlpString(attrs, "session.id"),
-		otlpString(attrs, "session_id"),
-		otlpString(attrs, "gen_ai.conversation.id"),
-		otlpString(attrs, "conversation.id"),
-	)
-}
-
 type otelTokenUsage struct {
 	operationName string
 	providerName  string
@@ -618,401 +558,6 @@ type otelTokenUsage struct {
 type otlpCumulativePoint struct {
 	value int64
 	start string
-}
-
-type otelLLMDuration struct {
-	operationName   string
-	providerName    string
-	model           string
-	agentName       string
-	durationSeconds float64
-}
-
-// extractOTLPTokenUsage promotes connector-native OTLP log fields into
-// DefenseClaw's canonical GenAI token histogram. Codex emits token usage
-// on log records, and Claude Code emits its own claude_code.token.usage
-// counter instead of the GenAI semconv histogram:
-//
-//	event.name="codex.sse_event"
-//	event.kind="response.completed"
-//	input_token_count / output_token_count / cached_token_count / ...
-//	claude_code.token.usage{type=input|output|cacheRead|cacheCreation,model=...}
-//
-// The gateway still keeps the raw OTLP receiver small; this extraction
-// is deliberately narrow and low-cardinality so dashboards get token
-// spend without storing raw prompts or replaying arbitrary OTLP metrics.
-func extractOTLPTokenUsage(body []byte, signal otelIngestSignal, source string) []otelTokenUsage {
-	if len(body) == 0 {
-		return nil
-	}
-	switch signal {
-	case otelSignalLogs:
-		return extractOTLPLogTokenUsage(body, source)
-	case otelSignalMetrics:
-		return extractOTLPMetricTokenUsage(body, source)
-	default:
-		return nil
-	}
-}
-
-func extractOTLPLogTokenUsage(body []byte, source string) []otelTokenUsage {
-	var envelope struct {
-		ResourceLogs []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeLogs []struct {
-				LogRecords []struct {
-					Attributes []otlpAttribute `json:"attributes"`
-				} `json:"logRecords"`
-			} `json:"scopeLogs"`
-		} `json:"resourceLogs"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil
-	}
-
-	var out []otelTokenUsage
-	for _, resource := range envelope.ResourceLogs {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		serviceName := otlpString(resourceAttrs, "service.name")
-		for _, scope := range resource.ScopeLogs {
-			for _, rec := range scope.LogRecords {
-				attrs := otlpAttributesToMap(rec.Attributes)
-				eventName := otlpString(attrs, "event.name")
-				eventKind := otlpString(attrs, "event.kind")
-
-				inputTokens := otlpInt(attrs,
-					"input_token_count",
-					"input_tokens",
-					"prompt_token_count",
-					"prompt_tokens",
-					"gen_ai.usage.input_tokens",
-					"gen_ai.usage.prompt_tokens",
-					"gen_ai.usage.input",
-					"gen_ai.usage.prompt",
-					"codex.turn.token_usage.input_tokens",
-					"codex.turn.token_usage.prompt_tokens",
-					"usage.input_tokens",
-					"usage.prompt_tokens",
-					"llm.usage.input_tokens",
-					"llm.usage.prompt_tokens",
-				)
-				outputTokens := otlpInt(attrs,
-					"output_token_count",
-					"output_tokens",
-					"completion_token_count",
-					"completion_tokens",
-					"generated_token_count",
-					"generated_tokens",
-					"gen_ai.usage.output_tokens",
-					"gen_ai.usage.completion_tokens",
-					"gen_ai.usage.output",
-					"gen_ai.usage.completion",
-					"codex.turn.token_usage.output_tokens",
-					"codex.turn.token_usage.completion_tokens",
-					"usage.output_tokens",
-					"usage.completion_tokens",
-					"llm.usage.output_tokens",
-					"llm.usage.completion_tokens",
-					"response.output_tokens",
-					"response.completion_tokens",
-				)
-				if inputTokens <= 0 && outputTokens <= 0 {
-					continue
-				}
-
-				// For Codex, only response.completed carries complete
-				// per-response token counts. This avoids counting partial
-				// or diagnostic events that happen to include token-ish
-				// fields in future releases.
-				if eventName == "codex.sse_event" && eventKind != "response.completed" {
-					continue
-				}
-
-				agentName := source
-				if agentName == "" || agentName == "unknown" {
-					agentName = firstNonEmpty(
-						otlpString(attrs, "gen_ai.agent.name"),
-						serviceName,
-						"unknown",
-					)
-				}
-				out = append(out, otelTokenUsage{
-					operationName: firstNonEmpty(otlpString(attrs, "gen_ai.operation.name"), "chat"),
-					providerName:  firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
-					model: firstNonEmpty(
-						otlpString(attrs, "gen_ai.response.model"),
-						otlpString(attrs, "gen_ai.request.model"),
-						otlpString(attrs, "model"),
-						"unknown",
-					),
-					agentName: agentName,
-					sessionID: firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs)),
-					tokenType: "input",
-					tokens:    inputTokens,
-				})
-				out = append(out, otelTokenUsage{
-					operationName: firstNonEmpty(otlpString(attrs, "gen_ai.operation.name"), "chat"),
-					providerName:  firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
-					model: firstNonEmpty(
-						otlpString(attrs, "gen_ai.response.model"),
-						otlpString(attrs, "gen_ai.request.model"),
-						otlpString(attrs, "model"),
-						"unknown",
-					),
-					agentName: agentName,
-					sessionID: firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs)),
-					tokenType: "output",
-					tokens:    outputTokens,
-				})
-			}
-		}
-	}
-	return out
-}
-
-func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
-	var envelope struct {
-		ResourceMetrics []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeMetrics []struct {
-				Metrics []struct {
-					Name      string              `json:"name"`
-					Unit      string              `json:"unit"`
-					Sum       otlpMetricPoints    `json:"sum"`
-					Gauge     otlpMetricPoints    `json:"gauge"`
-					Histogram otlpHistogramPoints `json:"histogram"`
-				} `json:"metrics"`
-			} `json:"scopeMetrics"`
-		} `json:"resourceMetrics"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil
-	}
-
-	var out []otelTokenUsage
-	for _, resource := range envelope.ResourceMetrics {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		serviceName := otlpString(resourceAttrs, "service.name")
-		for _, scope := range resource.ScopeMetrics {
-			for _, metric := range scope.Metrics {
-				if metric.Name != "claude_code.token.usage" {
-					continue
-				}
-				cumulative := otlpAggregationIsCumulative(metric.Sum.AggregationTemporality)
-				points := metric.Sum.DataPoints
-				if len(points) == 0 {
-					points = metric.Gauge.DataPoints
-				}
-				for _, point := range points {
-					attrs := otlpAttributesToMap(point.Attributes)
-					tokenType := normalizeClaudeCodeTokenType(otlpString(attrs, "type"))
-					tokens := otlpDataPointInt(point.AsInt, point.AsDouble)
-					if tokenType == "" || tokens <= 0 {
-						continue
-					}
-					agentName := source
-					if agentName == "" || agentName == "unknown" {
-						agentName = firstNonEmpty(serviceName, "claudecode")
-					}
-					model := firstNonEmpty(otlpString(attrs, "model"), "unknown")
-					sessionID := firstNonEmpty(otlpSessionID(attrs), otlpSessionID(resourceAttrs))
-					out = append(out, otelTokenUsage{
-						operationName: "chat",
-						providerName:  firstNonEmpty(source, serviceName, "claudecode"),
-						model:         model,
-						agentName:     agentName,
-						sessionID:     sessionID,
-						tokenType:     tokenType,
-						tokens:        tokens,
-						cumulative:    cumulative,
-						seriesKey: stableLLMEventID("otlp-metric", source, serviceName,
-							otlpString(resourceAttrs, "service.instance.id"), metric.Name, model, tokenType, sessionID),
-						startTime: string(point.StartTimeUnixNano),
-					})
-				}
-			}
-		}
-	}
-	return out
-}
-
-func extractOTLPOperationDurations(body []byte, signal otelIngestSignal, source string) []otelLLMDuration {
-	if len(body) == 0 {
-		return nil
-	}
-	switch signal {
-	case otelSignalLogs:
-		return extractOTLPLogDurations(body, source)
-	case otelSignalMetrics:
-		return extractOTLPMetricDurations(body, source)
-	case otelSignalTraces:
-		return extractOTLPTraceDurations(body, source)
-	default:
-		return nil
-	}
-}
-
-func extractOTLPLogDurations(body []byte, source string) []otelLLMDuration {
-	var envelope struct {
-		ResourceLogs []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeLogs []struct {
-				LogRecords []struct {
-					Attributes []otlpAttribute `json:"attributes"`
-				} `json:"logRecords"`
-			} `json:"scopeLogs"`
-		} `json:"resourceLogs"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil
-	}
-	var out []otelLLMDuration
-	for _, resource := range envelope.ResourceLogs {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		for _, scope := range resource.ScopeLogs {
-			for _, rec := range scope.LogRecords {
-				attrs := otlpAttributesToMap(rec.Attributes)
-				seconds := otlpDurationSeconds(attrs)
-				if seconds <= 0 {
-					continue
-				}
-				out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
-			}
-		}
-	}
-	return out
-}
-
-func extractOTLPMetricDurations(body []byte, source string) []otelLLMDuration {
-	var envelope struct {
-		ResourceMetrics []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeMetrics []struct {
-				Metrics []struct {
-					Name      string              `json:"name"`
-					Unit      string              `json:"unit"`
-					Sum       otlpMetricPoints    `json:"sum"`
-					Gauge     otlpMetricPoints    `json:"gauge"`
-					Histogram otlpHistogramPoints `json:"histogram"`
-				} `json:"metrics"`
-			} `json:"scopeMetrics"`
-		} `json:"resourceMetrics"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil
-	}
-	var out []otelLLMDuration
-	for _, resource := range envelope.ResourceMetrics {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		for _, scope := range resource.ScopeMetrics {
-			for _, metric := range scope.Metrics {
-				if !isLLMDurationMetric(metric.Name) {
-					continue
-				}
-				for _, point := range metric.Histogram.DataPoints {
-					count := parseOTLPNumber(point.Count)
-					sum := parseOTLPNumberFloat(point.Sum)
-					if count <= 0 || sum <= 0 {
-						continue
-					}
-					attrs := otlpAttributesToMap(point.Attributes)
-					out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, normalizeDurationByUnit(sum/float64(count), metric.Unit), "chat"))
-				}
-				for _, point := range metric.Gauge.DataPoints {
-					attrs := otlpAttributesToMap(point.Attributes)
-					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
-					if seconds > 0 {
-						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
-					}
-				}
-				for _, point := range metric.Sum.DataPoints {
-					attrs := otlpAttributesToMap(point.Attributes)
-					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
-					if seconds > 0 {
-						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-func extractOTLPTraceDurations(body []byte, source string) []otelLLMDuration {
-	var envelope struct {
-		ResourceSpans []struct {
-			Resource struct {
-				Attributes []otlpAttribute `json:"attributes"`
-			} `json:"resource"`
-			ScopeSpans []struct {
-				Spans []struct {
-					Name              string          `json:"name"`
-					Attributes        []otlpAttribute `json:"attributes"`
-					StartTimeUnixNano json.RawMessage `json:"startTimeUnixNano"`
-					EndTimeUnixNano   json.RawMessage `json:"endTimeUnixNano"`
-				} `json:"spans"`
-			} `json:"scopeSpans"`
-		} `json:"resourceSpans"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil
-	}
-	var out []otelLLMDuration
-	for _, resource := range envelope.ResourceSpans {
-		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
-		for _, scope := range resource.ScopeSpans {
-			for _, span := range scope.Spans {
-				attrs := otlpAttributesToMap(span.Attributes)
-				if !spanLooksLikeLLMOperation(span.Name, attrs) {
-					continue
-				}
-				start := parseOTLPNumber(span.StartTimeUnixNano)
-				end := parseOTLPNumber(span.EndTimeUnixNano)
-				if start <= 0 || end <= start {
-					continue
-				}
-				out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, float64(end-start)/1e9, span.Name))
-			}
-		}
-	}
-	return out
-}
-
-type otlpMetricPoints struct {
-	DataPoints             []otlpMetricDataPoint `json:"dataPoints"`
-	AggregationTemporality json.RawMessage       `json:"aggregationTemporality"`
-	IsMonotonic            bool                  `json:"isMonotonic"`
-}
-
-type otlpMetricDataPoint struct {
-	Attributes        []otlpAttribute `json:"attributes"`
-	AsInt             json.RawMessage `json:"asInt"`
-	AsDouble          json.RawMessage `json:"asDouble"`
-	StartTimeUnixNano json.RawMessage `json:"startTimeUnixNano"`
-	TimeUnixNano      json.RawMessage `json:"timeUnixNano"`
-}
-
-func otlpAggregationIsCumulative(raw json.RawMessage) bool {
-	value := strings.Trim(strings.ToUpper(strings.TrimSpace(string(raw))), `"`)
-	return value == "2" || strings.Contains(value, "CUMULATIVE")
-}
-
-type otlpHistogramPoints struct {
-	DataPoints []otlpHistogramDataPoint `json:"dataPoints"`
-}
-
-type otlpHistogramDataPoint struct {
-	Attributes []otlpAttribute `json:"attributes"`
-	Sum        json.RawMessage `json:"sum"`
-	Count      json.RawMessage `json:"count"`
 }
 
 type otlpAttribute struct {
@@ -1106,53 +651,6 @@ func otlpString(attrs map[string]interface{}, key string) string {
 	}
 }
 
-func otlpInt(attrs map[string]interface{}, keys ...string) int64 {
-	for _, key := range keys {
-		v, ok := otlpLookup(attrs, key)
-		if !ok || v == nil {
-			continue
-		}
-		switch x := v.(type) {
-		case int64:
-			return x
-		case float64:
-			return int64(x)
-		case string:
-			if i, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil {
-				return i
-			}
-			if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
-				return int64(f)
-			}
-		}
-	}
-	return 0
-}
-
-func otlpFloat(attrs map[string]interface{}, keys ...string) float64 {
-	for _, key := range keys {
-		v, ok := otlpLookup(attrs, key)
-		if !ok || v == nil {
-			continue
-		}
-		switch x := v.(type) {
-		case int64:
-			return float64(x)
-		case float64:
-			return x
-		case json.Number:
-			if f, err := strconv.ParseFloat(x.String(), 64); err == nil {
-				return f
-			}
-		case string:
-			if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
-				return f
-			}
-		}
-	}
-	return 0
-}
-
 func otlpLookup(attrs map[string]interface{}, key string) (interface{}, bool) {
 	if attrs == nil || key == "" {
 		return nil, false
@@ -1189,191 +687,6 @@ func otlpTraverse(v interface{}, parts []string) (interface{}, bool) {
 	return cur, true
 }
 
-func otlpDataPointInt(rawInt, rawDouble json.RawMessage) int64 {
-	if len(rawInt) > 0 && string(rawInt) != "null" {
-		if n := parseOTLPNumber(rawInt); n > 0 {
-			return n
-		}
-	}
-	if len(rawDouble) > 0 && string(rawDouble) != "null" {
-		return parseOTLPNumber(rawDouble)
-	}
-	return 0
-}
-
-func parseOTLPNumber(raw json.RawMessage) int64 {
-	var asNumber json.Number
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&asNumber); err == nil {
-		if i, intErr := asNumber.Int64(); intErr == nil {
-			return i
-		}
-		if f, floatErr := strconv.ParseFloat(asNumber.String(), 64); floatErr == nil {
-			return int64(f)
-		}
-	}
-	var asString string
-	if err := json.Unmarshal(raw, &asString); err == nil {
-		asString = strings.TrimSpace(asString)
-		if i, intErr := strconv.ParseInt(asString, 10, 64); intErr == nil {
-			return i
-		}
-		if f, floatErr := strconv.ParseFloat(asString, 64); floatErr == nil {
-			return int64(f)
-		}
-	}
-	return 0
-}
-
-func parseOTLPNumberFloat(raw json.RawMessage) float64 {
-	if len(raw) == 0 || string(raw) == "null" {
-		return 0
-	}
-	var asNumber json.Number
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&asNumber); err == nil {
-		if f, err := strconv.ParseFloat(asNumber.String(), 64); err == nil {
-			return f
-		}
-	}
-	var asString string
-	if err := json.Unmarshal(raw, &asString); err == nil {
-		if f, err := strconv.ParseFloat(strings.TrimSpace(asString), 64); err == nil {
-			return f
-		}
-	}
-	return 0
-}
-
-func otlpDurationSeconds(attrs map[string]interface{}) float64 {
-	if seconds := otlpFloat(attrs,
-		"gen_ai.client.operation.duration",
-		"gen_ai.operation.duration",
-		"duration_seconds",
-		"duration_s",
-		"duration",
-		"elapsed_seconds",
-		"elapsed_s",
-		"elapsed",
-		"latency_seconds",
-		"latency_s",
-		"latency",
-		"response.duration",
-		"codex.turn.duration_seconds",
-	); seconds > 0 {
-		return seconds
-	}
-	if millis := otlpFloat(attrs,
-		"duration_ms",
-		"duration_milliseconds",
-		"elapsed_ms",
-		"latency_ms",
-		"response.duration_ms",
-		"codex.turn.duration_ms",
-		"gen_ai.client.operation.duration_ms",
-		"gen_ai.operation.duration_ms",
-	); millis > 0 {
-		return millis / 1000
-	}
-	if nanos := otlpFloat(attrs,
-		"duration_ns",
-		"duration_nanos",
-		"elapsed_ns",
-		"latency_ns",
-		"gen_ai.client.operation.duration_ns",
-		"gen_ai.operation.duration_ns",
-	); nanos > 0 {
-		return nanos / 1e9
-	}
-	return 0
-}
-
-func otlpMetricPointDurationSeconds(point otlpMetricDataPoint, unit string) float64 {
-	if len(point.AsDouble) > 0 && string(point.AsDouble) != "null" {
-		return normalizeDurationByUnit(parseOTLPNumberFloat(point.AsDouble), unit)
-	}
-	if len(point.AsInt) > 0 && string(point.AsInt) != "null" {
-		return normalizeDurationByUnit(parseOTLPNumberFloat(point.AsInt), unit)
-	}
-	return 0
-}
-
-func normalizeDurationByUnit(value float64, unit string) float64 {
-	if value <= 0 {
-		return 0
-	}
-	switch strings.ToLower(strings.TrimSpace(unit)) {
-	case "ms", "millisecond", "milliseconds":
-		return value / 1000
-	case "us", "microsecond", "microseconds":
-		return value / 1e6
-	case "ns", "nanosecond", "nanoseconds":
-		return value / 1e9
-	default:
-		return value
-	}
-}
-
-func isLLMDurationMetric(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	switch name {
-	case "gen_ai.client.operation.duration", "gen_ai.operation.duration", "llm.operation.duration", "claude_code.operation.duration", "codex.operation.duration":
-		return true
-	default:
-		return strings.Contains(name, "operation.duration") && (strings.Contains(name, "gen_ai") || strings.Contains(name, "llm") || strings.Contains(name, "codex") || strings.Contains(name, "claude"))
-	}
-}
-
-func spanLooksLikeLLMOperation(name string, attrs map[string]interface{}) bool {
-	if otlpString(attrs, "gen_ai.operation.name") != "" ||
-		otlpString(attrs, "gen_ai.request.model") != "" ||
-		otlpString(attrs, "gen_ai.response.model") != "" ||
-		otlpString(attrs, "model") != "" {
-		return true
-	}
-	name = strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(name, "gen_ai") ||
-		strings.Contains(name, "llm") ||
-		strings.Contains(name, "chat") ||
-		strings.Contains(name, "response") ||
-		strings.Contains(name, "codex.run")
-}
-
-func otelDurationFromAttrs(attrs, resourceAttrs map[string]interface{}, source string, seconds float64, fallbackOperation string) otelLLMDuration {
-	serviceName := otlpString(resourceAttrs, "service.name")
-	agentName := source
-	if agentName == "" || agentName == "unknown" {
-		agentName = firstNonEmpty(otlpString(attrs, "gen_ai.agent.name"), serviceName, "unknown")
-	}
-	return otelLLMDuration{
-		operationName: firstNonEmpty(
-			otlpString(attrs, "gen_ai.operation.name"),
-			fallbackOperation,
-			"chat",
-		),
-		providerName: firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
-		model: firstNonEmpty(
-			otlpString(attrs, "gen_ai.response.model"),
-			otlpString(attrs, "gen_ai.request.model"),
-			otlpString(attrs, "model"),
-			"unknown",
-		),
-		agentName:       agentName,
-		durationSeconds: seconds,
-	}
-}
-
-func normalizeClaudeCodeTokenType(tokenType string) string {
-	switch strings.TrimSpace(tokenType) {
-	case "input", "output", "cacheRead", "cacheCreation":
-		return strings.TrimSpace(tokenType)
-	default:
-		return ""
-	}
-}
-
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -1383,31 +696,6 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// otelIngestActionForSignal maps the inbound signal to the typed
-// audit action constant. Keeping the mapping tight here (rather
-// than fmt.Sprintf into the action column) makes the static check
-// in scripts/check_audit_actions.py fail loud when a new signal
-// gets added without a matching constant.
-func otelIngestActionForSignal(signal otelIngestSignal) string {
-	switch signal {
-	case otelSignalLogs:
-		return string(audit.ActionOTelIngestLogs)
-	case otelSignalMetrics:
-		return string(audit.ActionOTelIngestMetrics)
-	case otelSignalTraces:
-		return string(audit.ActionOTelIngestTraces)
-	default:
-		// Should be unreachable — handleOTLPSignal only ever calls
-		// us with one of the three constants above. Fall back to
-		// the malformed marker so an out-of-band caller can't
-		// smuggle a new action key into the audit DB.
-		return string(audit.ActionOTelIngestMalformed)
-	}
-}
-
-// isOTLPJSONContentType returns true if the request Content-Type
-// indicates OTLP-JSON. Accepts application/json with optional
-// charset / "; encoding=otlp-json" parameters.
 func isOTLPJSONContentType(ct string) bool {
 	return normalizedContentType(ct) == "application/json"
 }
@@ -1494,137 +782,6 @@ func writeOTLPSuccess(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
-}
-
-// summarizeOTLPPayload extracts a one-line summary from an OTLP-JSON
-// body for audit logging. Different signal types have different
-// envelope shapes:
-//
-//   - logs:    { "resourceLogs":    [{ scopeLogs: [{ logRecords: [...] }] }] }
-//   - metrics: { "resourceMetrics": [{ scopeMetrics: [{ metrics: [...] }] }] }
-//   - traces:  { "resourceSpans":   [{ scopeSpans: [{ spans: [...] }] }] }
-//
-// We count the leaf records (logRecords / metrics / spans) and the
-// number of distinct service.name resource attributes. That's enough
-// for the audit row to answer "how much telemetry from which service
-// in which batch" without forcing SQLite to grow per-record.
-func summarizeOTLPPayload(body []byte, signal otelIngestSignal) (string, otelIngestStats, error) {
-	if len(body) == 0 {
-		return "", otelIngestStats{}, errors.New("empty body")
-	}
-
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return "", otelIngestStats{}, fmt.Errorf("unmarshal envelope: %w", err)
-	}
-
-	var resourceKey, scopeKey, leafKey string
-	switch signal {
-	case otelSignalLogs:
-		resourceKey, scopeKey, leafKey = "resourceLogs", "scopeLogs", "logRecords"
-	case otelSignalMetrics:
-		resourceKey, scopeKey, leafKey = "resourceMetrics", "scopeMetrics", "metrics"
-	case otelSignalTraces:
-		resourceKey, scopeKey, leafKey = "resourceSpans", "scopeSpans", "spans"
-	default:
-		return "", otelIngestStats{}, fmt.Errorf("unknown signal: %s", signal)
-	}
-
-	resourceRaw, ok := envelope[resourceKey]
-	if !ok {
-		return fmt.Sprintf("size=%d bytes, no %s entries", len(body), resourceKey), otelIngestStats{}, nil
-	}
-
-	var resources []map[string]json.RawMessage
-	if err := json.Unmarshal(resourceRaw, &resources); err != nil {
-		return "", otelIngestStats{}, fmt.Errorf("unmarshal %s: %w", resourceKey, err)
-	}
-
-	var totalLeaf int
-	services := make(map[string]int)
-
-	for _, res := range resources {
-		// Pull the resource.attributes service.name for grouping.
-		if attrsRaw, ok := res["resource"]; ok {
-			if name := extractServiceName(attrsRaw); name != "" {
-				services[name]++
-			}
-		}
-		scopesRaw, ok := res[scopeKey]
-		if !ok {
-			continue
-		}
-		var scopes []map[string]json.RawMessage
-		if err := json.Unmarshal(scopesRaw, &scopes); err != nil {
-			continue
-		}
-		for _, sc := range scopes {
-			leafRaw, ok := sc[leafKey]
-			if !ok {
-				continue
-			}
-			var leaves []json.RawMessage
-			if err := json.Unmarshal(leafRaw, &leaves); err != nil {
-				continue
-			}
-			totalLeaf += len(leaves)
-		}
-	}
-
-	parts := []string{
-		fmt.Sprintf("signal=%s", signal),
-		fmt.Sprintf("size=%d bytes", len(body)),
-		fmt.Sprintf("resources=%d", len(resources)),
-		fmt.Sprintf("%s=%d", leafKey, totalLeaf),
-	}
-	if len(services) > 0 {
-		// Cap the number of services we surface so a noisy batch
-		// doesn't blow up the Details column. The OTLP spec allows
-		// arbitrary cardinality.
-		shown := 0
-		var svcParts []string
-		for name, count := range services {
-			if shown >= otelIngestMaxBatchSummary {
-				svcParts = append(svcParts, fmt.Sprintf("...+%d more", len(services)-shown))
-				break
-			}
-			svcParts = append(svcParts, fmt.Sprintf("%s=%d", name, count))
-			shown++
-		}
-		parts = append(parts, fmt.Sprintf("services=[%s]", strings.Join(svcParts, ",")))
-	}
-	stats := otelIngestStats{
-		Records:   int64(totalLeaf),
-		Resources: int64(len(resources)),
-	}
-	return strings.Join(parts, " "), stats, nil
-}
-
-// extractServiceName pulls service.name out of an OTLP resource block.
-// The OTLP-JSON shape is:
-//
-//	{ "attributes": [{ "key": "service.name", "value": { "stringValue": "codex" } }] }
-//
-// Returns empty if the attribute is absent or malformed; callers
-// treat that as "unknown service" and don't fail the whole batch.
-func extractServiceName(resourceRaw json.RawMessage) string {
-	var resource struct {
-		Attributes []struct {
-			Key   string `json:"key"`
-			Value struct {
-				StringValue string `json:"stringValue"`
-			} `json:"value"`
-		} `json:"attributes"`
-	}
-	if err := json.Unmarshal(resourceRaw, &resource); err != nil {
-		return ""
-	}
-	for _, a := range resource.Attributes {
-		if a.Key == "service.name" {
-			return a.Value.StringValue
-		}
-	}
-	return ""
 }
 
 const codexNotifyTurnCompleteSource = "codex.notify.agent-turn-complete"
@@ -1721,7 +878,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		SessionID: sessionID,
 		Connector: "codex",
 	}
-	if err := persistAuditEventCtx(r.Context(), a.logger, a.store, ev); err != nil {
+	if err := persistAuditEventCtx(r.Context(), a.logger, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
 	}
 	if parseErr == nil && kind == "agent-turn-complete" {
@@ -1738,10 +895,9 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// `codex_notify_status` series.
 	statusLabel := sanitizeNotifyType(p.Status)
 	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
-	enrichHTTPSpanFromContext(ctx)
 	enrichCodexNotifySpan(ctx, p, kind, result)
-	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
-	a.otel.EmitCodexNotifyLog(ctx, kind, statusLabel, result, p.TurnID, p.Model)
+	metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
+	recordCodexNotifyV8(ctx, metricRuntime, kind, statusLabel, result, p.TurnID)
 
 	// Fold the notify event into the unified hook collector as a
 	// synthetic Stop event. The native codex CLI emits
@@ -1877,7 +1033,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 	}
 
 	if prompt := codexNotifyPrompt(payload); prompt != "" {
-		emittedPromptID := emitLLMPromptEvent(ctx, meta, prompt, nil)
+		emittedPromptID := a.emitLLMPromptEventV8(ctx, meta, prompt, nil)
 		if emittedPromptID != "" {
 			meta.PromptID = emittedPromptID
 			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
@@ -1888,7 +1044,9 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 	}
 	if response := codexNotifyResponse(payload); response != "" {
 		meta.ResponseID = stableLLMEventID("response", "codex", sessionID, turnID)
-		emitLLMResponseEvent(ctx, meta, response, "", codexNotifyFinishReasons(payload))
+		finishReasons := codexNotifyFinishReasons(payload)
+		meta.FinishReasons = append([]string(nil), finishReasons...)
+		a.emitLLMResponseEventV8(ctx, meta, response, "", finishReasons)
 		spanMeta := meta
 		spanMeta.Source = "codex"
 		a.emitHookLLMSpan(ctx, spanMeta, response)
@@ -2062,21 +1220,21 @@ func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result str
 		"body_sha256_prefix=" + sumHex[:16],
 	}
 	if p.ThreadID != "" {
-		parts = append(parts, "thread_id="+redaction.ForSinkEntity(p.ThreadID))
+		parts = append(parts, "thread_id="+sanitizeCodexNotifySpanString(p.ThreadID, 256))
 	}
 	if p.TurnID != "" {
-		parts = append(parts, "turn_id="+redaction.ForSinkEntity(p.TurnID))
+		parts = append(parts, "turn_id="+sanitizeCodexNotifySpanString(p.TurnID, 256))
 	}
 	if p.Model != "" {
-		parts = append(parts, "model="+redaction.ForSinkEntity(p.Model))
+		parts = append(parts, "model="+sanitizeCodexNotifySpanString(p.Model, 256))
 	}
 	if p.Status != "" {
-		parts = append(parts, "status="+redaction.ForSinkEntity(p.Status))
+		parts = append(parts, "status="+sanitizeCodexNotifySpanString(p.Status, 256))
 	}
 	if parseErr != nil {
-		parts = append(parts, "parse_error="+redaction.ForSinkReason(parseErr.Error()))
+		parts = append(parts, "parse_error="+sanitizeCodexNotifySpanString(parseErr.Error(), 256))
 	}
-	return appendRawTelemetryDetails(strings.Join(parts, " "), "raw_body", body)
+	return strings.Join(parts, " ")
 }
 
 // sanitizeNotifyType strips characters unsafe for an audit Action

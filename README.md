@@ -44,7 +44,7 @@ DefenseClaw combines a Python operator CLI, a Go gateway sidecar, and an OpenCla
 - **CodeGuard** - built-in static checks for secrets, dangerous execution, unsafe deserialization, weak crypto, injection patterns, and risky file access.
 - **OpenShell sandbox support** - Linux sandbox setup with network, filesystem, syscall, and policy controls.
 - **Registries** - ingest external skill / MCP catalogs (corporate HTTPS YAML, [smithery.ai](https://smithery.ai/), [skills.sh](https://skills.sh/), git, ClawHub) with SSRF guards, scanner-driven verdicts, and auto-promotion into asset policy. See [docs/REGISTRIES.md](docs/REGISTRIES.md).
-- **Audit and observability** - SQLite audit store, JSONL gateway logs, OTLP export, Splunk HEC, webhooks, Splunk Observability and local Grafana/Splunk bundles.
+- **Audit and observability** - one config-v8 graph for bucket collection, mandatory SQLite history, centralized redaction, and independent JSONL, OTLP, Prometheus, Splunk HEC, Galileo, HTTP, console, and local Grafana/Splunk destinations.
 - **Operator UX** - a CLI and TUI for setup, health checks, alerts, block/allow lists, scanner results, and policy workflows.
 
 ---
@@ -69,7 +69,7 @@ High-risk deployments should pair DefenseClaw with human review, least-privilege
 | [Guardrail](docs/GUARDRAIL.md) | LLM and tool inspection architecture |
 | [Guardrail Rule Packs](docs/GUARDRAIL_RULE_PACKS.md) | Rule packs, suppressions, and tuning |
 | [Sandbox](docs/SANDBOX.md) | OpenShell sandbox setup, architecture, monitoring, and debugging |
-| [Observability](docs/OBSERVABILITY.md) | Audit sinks, OTLP, Splunk, Grafana, and webhook notifications |
+| [Observability](docs/OBSERVABILITY.md) | V8 buckets, local history, redaction, destination fan-out, OTLP, Splunk, and Grafana |
 | [Splunk App](docs/SPLUNK_APP.md) | Local Splunk app dashboards and investigation flow |
 | [Splunk O11y Dashboards](bundles/splunk_o11y_dashboards/README.md) | Splunk Observability Cloud dashboards and detectors for native OTel metrics |
 | [TUI](docs/TUI.md) | Terminal dashboard panels and navigation |
@@ -98,6 +98,15 @@ Project Markdown documentation is centralized under [docs/](docs/). Package-loca
 
 ### Build from source (developers only)
 
+Choose the command by intent:
+
+| Goal | Command | Changes installed state? |
+|------|---------|--------------------------|
+| Normal development from this checkout | `make all` | Yes; rebuilds and activates this exact checkout |
+| Compile/test artifacts only | `make build` | No |
+| See the supported developer paths | `make help` | No |
+| Upgrade a packaged release | `defenseclaw upgrade` | Yes; uses the signed release resolver |
+
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
@@ -105,14 +114,17 @@ make all
 ```
 
 The source targets and `scripts/install-dev.sh` are development tooling, not an
-upgrade path. They refuse to overwrite a release-managed installation or one
-owned by another checkout. Repeat builds are allowed only while the checkout's
-reviewed release, source-install compatibility epoch, and runtime schema still
-match its strict ownership marker. A source-owned version transition has no
-tested in-place path: keep that checkout and state unchanged, use an isolated
-fresh developer `HOME`/install directory, or contact support. Release-managed
-installations must use the release-owned `scripts/upgrade.sh` or
-`scripts/upgrade.ps1` resolver.
+upgrade path. Direct install targets refuse to overwrite a release-managed
+installation or one owned by another checkout. `make all` is the explicit
+developer-machine reinstall workflow: when the installed CLI already points
+exactly into the current checkout, it may reclaim markerless or prior-release
+source state and records a strict ownership marker after rebuilding. This can
+run the checkout's current migrations against developer state and must not be
+used as a release upgrade. Release-managed installations must use the
+release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver.
+`make install`, `make dev-install`, and `scripts/install-dev.sh` are lower-level
+strict plumbing for a fresh or isolated development home; they are not the
+normal repeated-development command.
 
 ### Install with the release script
 
@@ -211,12 +223,63 @@ DefenseClaw records enforcement and runtime evidence across several channels:
 | Channel | Use |
 |---------|-----|
 | SQLite audit store | Local durable event history |
-| Gateway JSONL | Correlated structured runtime events |
+| Optional JSONL | Correlated structured runtime events when a file destination is configured |
 | OTLP | Named, independent metrics/logs/traces destinations with native fan-out |
 | Splunk HEC | SIEM forwarding and local Splunk app workflows |
 | Splunk O11y dashboards | Native Splunk Observability Cloud dashboards and detectors for DefenseClaw metrics |
 | Webhooks | Slack, PagerDuty, Webex, and generic event notifications |
 | TUI | Operator-facing alerts, health, scans, tools, policy, and setup |
+
+Config v8 keeps the source concise while compiling omissions into a complete
+effective plan:
+
+```yaml
+config_version: 8
+observability: {}
+```
+
+That default collects every registered log, trace, and metric and retains every
+collected log unredacted in mandatory local SQLite. No remote export occurs until
+a destination is added. An enabled destination with no `send` or `routes` receives
+every bucket and every signal its kind supports, unredacted: general OTLP gets
+logs/traces/metrics, Splunk HEC gets logs, Prometheus gets metrics, and the Galileo
+preset gets traces. Multiple destinations receive independent copies.
+
+Review the expanded policy and unredacted legs with:
+
+```bash
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
+```
+
+Use centralized `none`, `sensitive`, `content`, `strict`, or custom field-aware
+redaction profiles per bucket or destination. Full-fidelity defaults can include
+prompts, outputs, tool arguments/results, evidence, paths, and identifiers, so
+configure a redacting profile before exporting across a trust boundary that must
+not receive that content.
+
+Edit bucket and redaction policy in the source file, validate it before the
+gateway sees it, and inspect the compiled result rather than copying the generated
+reference wholesale:
+
+```bash
+umask 077
+cp "$HOME/.defenseclaw/config.yaml" \
+  "$HOME/.defenseclaw/config.yaml.before-observability-edit"
+${EDITOR:-vi} "$HOME/.defenseclaw/config.yaml"
+
+defenseclaw config validate && \
+defenseclaw config show --effective --section observability && \
+defenseclaw observability plan && \
+defenseclaw-gateway restart && \
+defenseclaw doctor
+```
+
+Do not restart after a validation failure. Restore the private backup, correct the
+source, and validate again. A global or bucket redaction profile also applies to
+the generated local SQLite projection. To keep full-fidelity local history while
+redacting only a remote trust boundary, leave the global/bucket profile at `none`
+and set `send.redaction_profile` or a route profile on that remote destination.
 
 Start local observability with:
 
@@ -225,6 +288,60 @@ defenseclaw setup local-observability up
 defenseclaw-gateway start
 defenseclaw setup local-observability status
 ```
+
+Dashboard emptiness is not one state: **0** means the instrumented signal had zero
+matching events, **No data** means no matching series/log/trace exists for the
+selected range and filters, and **Not reported** means the connector/provider did
+not supply an optional value such as tokens or cost. Conditional panels such as
+HITL, failure-only views, and a trace waterfall before a Trace ID is selected are
+expected to show **No data**. A destination test checks connectivity only and does
+not create ordinary dashboard traffic; generate a fresh real agent turn, tool
+call, scan, or approval to validate the corresponding panels.
+
+Agent360's node graph is a Loki-backed lifecycle DAG: session creation is a
+separate anchor, one per-root **Prompt inputs** node counts distinct depth-zero
+`model.request` facts in the range, and parent-to-child delegation feeds per-agent
+model, tool, approval, update, turn-outcome, and terminal summaries. Prompt inputs
+deduplicate by turn, model-request, request, operation, then occurrence ID; the
+ordered/raw views retain the individual initial and follow-up records. Session and
+spawn anchors may be recovered from the prior 24 hours so boundary windows remain
+renderable; a recovered spawn is kept only when that child has graph-eligible
+activity in the selected range.
+Repeated model calls are grouped by
+owning agent, provider, and model. Repeated tool calls are grouped by owning agent
+into Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, or Task
+control; an unrecognized tool keeps its reported name. Exact
+`collaboration.send_message` requests are excluded from the generic Collaboration
+family so they appear only as message groups; other collaboration tools remain in
+that family. Request records are
+included even when no terminal counterpart arrived. Their grouped total is a
+request count, not a claim that every request is still pending; terminal status
+remains available in the linked raw records. Depth `0` is the root and recursive children may be
+reported through depth `64`; click detail identifies whether each lineage edge was
+reported by the connector or inferred by DefenseClaw. Node clicks expose exact
+counts and stable agent/root/parent identity, with filtered links to the raw OTEL
+events behind every group. Optional current/root/parent session fields remain on
+the lifecycle, session, ordered, and raw surfaces; they are not agent-node grouping
+keys, so missing or late session metadata cannot split one agent's total.
+
+Dashboards do not redact, mask, or hide fields again. DefenseClaw applies
+centralized v8 redaction before canonical OTEL export; Grafana shows or links every
+field actually present in that projection, including content when the producer
+exported it. A field removed or transformed before export cannot be recovered by
+the local stack. Update edges come only from actual
+`collaboration.send_message` tool records. For each sender, `/root` and
+`/root/*` targets collapse into one **Messages to root** node whose target agent
+ID resolves to the exported root. Exact root task paths and calls remain in the
+ordered/raw drill-downs. Non-root targets stay explicitly grouped by exact task
+path and are not invented as opaque agent-ID joins when the connector did not
+report that mapping. Generic compatibility events are never relabeled as updates.
+
+Optional destinations own independent bounded queues. Defaults are 2,048 records
+and 64 MiB per queue; push batches default to 512 records, 8 MiB, and 5 seconds
+(1 second for the omitted Galileo preset delay). Queue overflow drops the newest
+attempted enqueue without evicting older FIFO work or affecting mandatory SQLite
+and sibling destinations. Exact fields, bounds, and adapter differences are in
+[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 Add Galileo Cloud or self-hosted Galileo without replacing the local route:
 
@@ -239,16 +356,19 @@ See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), the
 [schema ownership map](schemas/README.md). Splunk-specific setup is in
 [docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
 
-An installed, coherent `0.8.4` bridge can migrate with the built-in
-`defenseclaw upgrade --yes`; it first acquires authenticated `0.8.4` rollback
-artifacts before backup or service stop. For `0.8.3` or older, do not execute
-any obsolete raw-network hint printed by the frozen built-in CLI. Authenticate
-the current release-owned resolver and run it in latest mode, without a version
-override. The migration backs up and atomically converts configuration,
-preserves narrower routing/redaction behavior and root/subagent Agent360
-compatibility, refreshes owned local dashboards without resetting volumes, and
-never requires a separate apply command. See [CLI Reference — upgrade](docs/CLI.md#upgrade)
-for the authenticated resolver bootstrap.
+Every supported existing POSIX installation, including one already on `0.8.4`,
+crosses the `0.8.5` hard cut with the authenticated target-release
+`defenseclaw-upgrade.sh` asset in latest mode, without a version override. The
+immutable `0.8.4` built-in parser cannot accept the truthful target manifest
+whose Windows bridge matrix is empty. Do not execute any obsolete raw-network
+hint printed by a frozen built-in CLI. The release-owned resolver performs
+`source → 0.8.4 bridge → fresh 0.8.4 controller → 0.8.5 hard cut` as one
+transaction. The migration
+backs up and atomically converts configuration, preserves narrower
+routing/redaction behavior and root/subagent Agent360 compatibility, refreshes
+owned local dashboards without resetting volumes, and never requires a separate
+apply command. See [CLI Reference — upgrade](docs/CLI.md#upgrade) for the
+authenticated resolver bootstrap.
 
 For Splunk Observability Cloud, use the dashboard bundle at
 [bundles/splunk_o11y_dashboards/README.md](bundles/splunk_o11y_dashboards/README.md):

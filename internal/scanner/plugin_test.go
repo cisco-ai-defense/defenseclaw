@@ -18,10 +18,16 @@ package scanner
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestParsePluginOutput_RealFormat verifies that parsePluginOutput correctly
@@ -189,6 +195,50 @@ func TestPluginScanner_Integration(t *testing.T) {
 		}
 	}
 
+	// The target CLI is v8-only and its scan occurrence must enter the
+	// process-owned runtime rather than a private Python SQLite writer. Give the
+	// integration a real HTTP acknowledgement boundary so it does not inherit a
+	// developer's machine config or silently bypass canonical admission.
+	emitted := make(chan []byte, 1)
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/observability/cli" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "body", http.StatusBadRequest)
+			return
+		}
+		emitted <- body
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(runtime.Close)
+	runtimeURL, err := url.Parse(runtime.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configSource := fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\ngateway:\n  api_bind: %s\n  api_port: %s\n  token: integration-token\nobservability: {}\n",
+		filepath.Dir(configPath), runtimeURL.Hostname(), runtimeURL.Port(),
+	)
+	if err := os.WriteFile(configPath, []byte(configSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayBinary := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	buildGateway := exec.Command("go", "build", "-o", gatewayBinary, "./cmd/defenseclaw")
+	buildGateway.Dir = repositoryRoot
+	if output, err := buildGateway.CombinedOutput(); err != nil {
+		t.Fatalf("build current gateway config helper: %v: %s", err, output)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	t.Setenv("DEFENSECLAW_GATEWAY_BIN", gatewayBinary)
+
 	scanner := NewPluginScanner(binary)
 
 	// Scan this repo's extensions/defenseclaw directory as a real target
@@ -207,6 +257,14 @@ func TestPluginScanner_Integration(t *testing.T) {
 	}
 	if result.Target != target {
 		t.Errorf("Target = %q, want %q", result.Target, target)
+	}
+	select {
+	case payload := <-emitted:
+		if len(payload) == 0 {
+			t.Fatal("canonical CLI scan admission payload was empty")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canonical CLI scan admission was not attempted")
 	}
 	// The extension has real findings (child_process import, localhost refs, etc.)
 	if len(result.Findings) == 0 {

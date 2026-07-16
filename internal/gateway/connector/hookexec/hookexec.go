@@ -128,15 +128,6 @@ func Run(ctx context.Context, opts Options) int {
 
 	failMode := normalizeFailMode(opts.FailMode)
 
-	// Missing-token branch: only taken when BOTH the env token is empty AND
-	// the resolved token sidecar is absent. (An empty token inside an existing
-	// file is intentionally NOT a missing token — it selects the loopback
-	// no-auth path, same as the .sh.)
-	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
-	if opts.Token == "" && !fileExists(tokenFile) {
-		return handleMissingToken(opts, sp, failMode)
-	}
-
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
 	if err != nil {
 		// stdin read error is treated like an oversized/unusable payload.
@@ -144,6 +135,26 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		return handleOversized(opts, sp, failMode)
+	}
+
+	// Cursor 2.4+ imports Claude Code hooks while also running its native
+	// Cursor hooks. The imported invocation is still a Cursor event and carries
+	// a top-level cursor_version marker. When DefenseClaw's live Cursor bridge
+	// is installed, let that bridge be the sole policy and telemetry owner so
+	// the same event is not also attributed to Claude Code. Keep this before the
+	// missing-token branch: a missing Claude token must not fail-closed an
+	// imported Cursor copy that the Cursor bridge is already handling.
+	if suppressCursorCompatibilityImport(opts, payload) {
+		return 0
+	}
+
+	// Missing-token branch: only taken when BOTH the env token is empty AND
+	// the resolved token sidecar is absent. (An empty token inside an existing
+	// file is intentionally NOT a missing token — it selects the loopback
+	// no-auth path, same as the .sh.)
+	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
+	if opts.Token == "" && !fileExists(tokenFile) {
+		return handleMissingToken(opts, sp, failMode)
 	}
 
 	token := opts.Token
@@ -395,6 +406,57 @@ func normalizeFailMode(m string) string {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// suppressCursorCompatibilityImport mirrors the early no-op in
+// claude-code-hook.sh for Cursor's Claude Code hook compatibility layer. The
+// payload marker alone is insufficient: a genuine Claude Code hook must keep
+// flowing when the Cursor connector is inactive. The scoped Cursor token plus
+// a live (v1+) managed Cursor script are the setup/teardown-owned proof that
+// DefenseClaw's native Cursor bridge is installed. Teardown writes a v0
+// tombstone and may leave the token behind, so v0 must never suppress.
+func suppressCursorCompatibilityImport(opts Options, payload []byte) bool {
+	if !strings.EqualFold(strings.TrimSpace(opts.Connector), "claudecode") {
+		return false
+	}
+
+	var origin struct {
+		CursorVersion string `json:"cursor_version"`
+	}
+	if err := json.Unmarshal(payload, &origin); err != nil || origin.CursorVersion == "" {
+		return false
+	}
+	if !fileExists(filepath.Join(opts.HookDir, ".hook-cursor.token")) {
+		return false
+	}
+	return liveManagedCursorHook(filepath.Join(opts.HookDir, "cursor-hook.sh"))
+}
+
+// liveManagedCursorHook reads only the bounded script header and accepts the
+// generated line-2 marker when its schema version begins at v1 or later. The
+// v0 marker is reserved for teardown's disabled tombstone.
+func liveManagedCursorHook(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	header, err := io.ReadAll(io.LimitReader(f, 512))
+	if err != nil {
+		return false
+	}
+	lines := bytes.SplitN(header, []byte{'\n'}, 3)
+	if len(lines) < 2 {
+		return false
+	}
+	const prefix = "# defenseclaw-managed-hook v"
+	marker := string(lines[1])
+	if !strings.HasPrefix(marker, prefix) {
+		return false
+	}
+	version := marker[len(prefix):]
+	return len(version) > 0 && version[0] >= '1' && version[0] <= '9'
 }
 
 func hookTokenFile(hookDir, connector string) (string, bool) {

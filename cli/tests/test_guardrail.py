@@ -52,6 +52,7 @@ from defenseclaw.guardrail import (
     restore_openclaw_config,
     uninstall_openclaw_plugin,
 )
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -113,7 +114,7 @@ class TestGuardrailConfig(unittest.TestCase):
             self.assertEqual(g["api_key_env"], "ANTHROPIC_API_KEY")
             self.assertEqual(g["block_message"], "Blocked by policy. Contact security@acme.com.")
             self.assertEqual(g["hilt"]["enabled"], True)
-            self.assertEqual(g["hilt"]["min_severity"], "HIGH")
+            self.assertEqual(g["hilt"].get("min_severity", "HIGH"), "HIGH")
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +908,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
         self.assertTrue(raw["guardrail"]["enabled"])
-        self.assertEqual(raw["guardrail"]["mode"], "observe")
+        self.assertEqual(raw["guardrail"].get("mode", "observe"), "observe")
 
     def test_setup_succeeds_without_openclaw_config(self):
         """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
@@ -1187,7 +1188,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             raw = yaml.safe_load(f)
         self.assertEqual(raw["guardrail"]["block_message"], custom_msg)
 
-    def test_non_interactive_advanced_hilt_and_redaction_flags(self):
+    def test_non_interactive_advanced_hilt_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
@@ -1203,21 +1204,19 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "--human-approval",
                 "--hilt-min-severity",
                 "MEDIUM",
-                "--disable-redaction",
                 "--no-restart",
             ],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("guardrail.hilt.enabled", result.output)
-        self.assertIn("privacy.disable_redaction", result.output)
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
-        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertNotIn("privacy", raw)
         self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
 
     def test_yes_alias_updates_rule_pack(self):
@@ -1360,7 +1359,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(doc["guardrail"]["block_message"], custom_msg)
         self.assertEqual(doc["guardrail"]["mode"], "action")
 
-    def test_block_message_empty_by_default_in_config_yaml(self):
+    def test_block_message_default_is_effective_without_yaml_noise(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1376,7 +1375,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             doc = yaml.safe_load(f)
-        self.assertEqual(doc["guardrail"]["block_message"], "")
+        self.assertNotIn("block_message", doc["guardrail"])
+        self.assertEqual(self.app.cfg.guardrail.block_message, "")
 
     def test_help_shows_block_message_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1440,42 +1440,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
 
-    def test_interactive_advanced_can_disable_redaction(self):
+    def test_guardrail_help_has_no_producer_level_redaction_bypass(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        self.app.cfg.claw.home_dir = self.tmp_dir
-        user_input = "\n".join([
-            "",       # enable guardrail
-            "2",      # action mode
-            "",       # hook fail-mode (default = open)
-            "n",      # human approval (inline) — declined
-            "",       # local scanner
-            "2",      # LLM role for proxy-backed connector: judge AND agent
-            "n",      # no LLM judge
-            "y",      # configure advanced options
-            "",       # default port
-            "",       # no custom block message
-            # HILT was previously here; now hoisted inline so there
-            # is one fewer prompt under advanced.
-            "y",      # disable redaction
-            "y",      # acknowledge raw-content warning
-            "",
-        ])
         result = self.runner.invoke(
-            setup,
-            ["guardrail", "--connector", "openclaw", "--no-restart"],
-            obj=self.app,
-            input=user_input,
+            setup, ["guardrail", "--help"], obj=self.app,
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Disabling redaction writes RAW content", result.output)
-
-        import yaml
-        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
-            raw = yaml.safe_load(f)
-        self.assertTrue(raw["privacy"]["disable_redaction"])
-        self.assertFalse(raw["guardrail"]["hilt"]["enabled"])
+        self.assertNotIn("--disable-redaction", result.output)
+        self.assertNotIn("--enable-redaction", result.output)
 
     def test_interactive_observe_mode_skips_hilt_entirely(self):
         """In observe mode the HILT prompt is skipped entirely.
@@ -1796,16 +1770,21 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
-    def test_starts_when_not_running(self, mock_run):
+    def test_starts_when_not_running(self, mock_run, mock_ready):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         mock_run.return_value = MagicMock(returncode=0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "start"])
+            mock_ready.assert_called_once_with(tmpdir)
 
     # F-0721: a live PID is only treated as the running gateway when its
     # identity verifies as the gateway binary. The legitimate "already
@@ -1814,8 +1793,12 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
         return_value=True,
     )
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
-    def test_restarts_when_running(self, mock_run, _mock_identity):
+    def test_restarts_when_running(self, mock_run, mock_ready, _mock_identity):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -1824,10 +1807,24 @@ class TestRestartDefenseGateway(unittest.TestCase):
             with open(pid_file, "w") as f:
                 f.write(str(os.getpid()))
 
-            _restart_defense_gateway(tmpdir)
+            self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "restart"])
+            mock_ready.assert_called_once_with(tmpdir)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=False,
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_fails_when_spawned_gateway_api_never_becomes_ready(self, mock_run, mock_ready):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+            mock_ready.assert_called_once_with(tmpdir)
 
     @patch(
         "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
@@ -1851,6 +1848,44 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_defense_gateway(tmpdir)
+
+
+class TestWaitForDefenseGatewayAPI(unittest.TestCase):
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_accepts_only_running_api_health(self, connection_cls, mock_load, _mock_host):
+        from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        connection = connection_cls.return_value
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"api":{"state":"running"}}'
+
+        self.assertTrue(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.1))
+        connection_cls.assert_called_once()
+        args, kwargs = connection_cls.call_args
+        self.assertEqual(args, ("127.0.0.1", 19001))
+        self.assertGreater(kwargs["timeout"], 0)
+        self.assertLessEqual(kwargs["timeout"], 0.1)
+        connection.request.assert_called_once_with("GET", "/health")
+        connection.close.assert_called_once()
+
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_rejects_health_while_api_is_still_starting(self, connection_cls, mock_load, _mock_host):
+        from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        connection = connection_cls.return_value
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"api":{"state":"starting"}}'
+
+        self.assertFalse(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.01))
+        self.assertGreaterEqual(connection.request.call_count, 1)
 
 
 class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
@@ -2042,6 +2077,19 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
+
+    def test_no_restart_allows_explicit_offline_audit_staging(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("canonical setup audit event was not recorded", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)

@@ -108,6 +108,10 @@ struct CommandPaletteView: View {
             titleVisibility: .visible
         ) {
             Button("Run Command", role: selected?.isDestructive == true ? .destructive : nil) { runSelected() }
+                .disabled(
+                    selected?.changesState == true
+                        && !appState.installationMutationsAllowed
+                )
             Button("Cancel", role: .cancel) { }
         } message: {
             Text(selected?.displayCommand(extraArguments: parsedExtraArguments ?? []) ?? "")
@@ -211,10 +215,16 @@ struct CommandPaletteView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(
                         running
+                            || (command.changesState && !appState.installationMutationsAllowed)
                             || (command.requiresInput && extraArguments.trimmingCharacters(in: .whitespaces).isEmpty)
                             || (command.requiresSecretStandardInput && secretInput.isEmpty)
                     )
                 }
+            }
+            if command.changesState, let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(18)
@@ -261,6 +271,7 @@ struct CommandPaletteView: View {
                 binary: command.binary,
                 arguments: plan.arguments,
                 standardInput: plan.standardInput,
+                mutation: command.changesState || command.isDestructive,
                 category: command.category,
                 origin: "Command Palette",
                 refreshOnSuccess: command.changesState

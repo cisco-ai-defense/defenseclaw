@@ -36,7 +36,6 @@ set -euo pipefail
 DEFAULT_MODE="observe"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
-DISABLE_REDACTION="false"
 DEFAULT_ENV="prod"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -233,10 +232,10 @@ Gateway options:
                             Use 'preview' only for internal validation against
                             the aiteam preview deployment.
   --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
-                            Defense host for adhoc testing. Takes precedence
-                            over --env. Must be a full http(s) URL, e.g.
+                            Defense HTTPS origin. Takes precedence over --env.
+                            Paths, credentials, query, and fragments are refused,
+                            e.g.
                             https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
-  --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
   --skip-build              Reuse an existing gateway binary (no rebuild)
@@ -267,7 +266,6 @@ while [[ $# -gt 0 ]]; do
     --port)             API_PORT="${2:?}"; shift 2;;
     --env)              AID_ENV="${2:?}"; shift 2;;
     --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
-    --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
@@ -291,16 +289,13 @@ esac
 _ep_rc=0
 AID_ENDPOINT="$(resolve_aid_endpoint "${AID_ENV}" "${OVERRIDE_ENDPOINT}")" || _ep_rc=$?
 if (( _ep_rc == 2 )); then
-  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
+  die "--override-endpoint must be an HTTPS bare origin (host with optional port; no credentials, path, query, fragment, whitespace, quotes, or backslash; got: ${OVERRIDE_ENDPOINT})"
 elif (( _ep_rc != 0 )); then
   die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
 fi
 unset _ep_rc
 if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
-  case "${OVERRIDE_ENDPOINT}" in
-    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
-  esac
-  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
+  log "AI Defense HTTPS endpoint overridden: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
 fi
 
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
@@ -549,11 +544,11 @@ CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
   || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive)"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
 ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
@@ -651,34 +646,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
 
     log "  [${c}] preparing userspace"
-    if ! prepare_userspace_for "${c}" "${TARGET_HOME}"; then
+    if ! prepare_userspace_for "${c}" "${TARGET_HOME}" "${TARGET_UID}" "${TARGET_GID}"; then
       warn "  [${c}] refused to prepare userspace (symlinked or non-dir path); skipping"
       continue
     fi
-    # Match ownership on JUST the files DefenseClaw just pre-created.
-    # A recursive chown over ~/.codex or ~/.cursor is wrong: those
-    # dirs may contain unrelated user state (Codex ships a signed
-    # `computer-use/*.app` bundle, Cursor stores signed extensions),
-    # and SIP-protected files in those trees will fail chown with
-    # "Operation not permitted" even as root.
-    #
-    # We only touch what prepare_userspace_for could have written:
-    # the connector's hook config file + its parent .<agent> dir.
-    case "${c}" in
-      claudecode) DC_AGENT_TARGETS=( "${TARGET_HOME}/.claude" "${TARGET_HOME}/.claude/settings.json" );;
-      codex)      DC_AGENT_TARGETS=( "${TARGET_HOME}/.codex"  "${TARGET_HOME}/.codex/config.toml" );;
-      cursor)     DC_AGENT_TARGETS=( "${TARGET_HOME}/.cursor" "${TARGET_HOME}/.cursor/hooks.json" );;
-      *)          DC_AGENT_TARGETS=();;
-    esac
-    for path in "${DC_AGENT_TARGETS[@]}"; do
-      # Skip symlinks (guarded upstream by ensure_safe_userspace_path)
-      # and missing paths. Any real chown failure aborts the connector.
-      if [[ -e "${path}" && ! -L "${path}" ]]; then
-        if ! chown -h "${TARGET_UID}:${TARGET_GID}" "${path}"; then
-          die "[${c}] failed to set ownership on ${path}"
-        fi
-      fi
-    done
 
     AGENT_VER="${AGENT_VERSION}"
     if [[ -z "${AGENT_VER}" ]]; then

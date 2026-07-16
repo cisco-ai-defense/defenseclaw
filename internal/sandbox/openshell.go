@@ -28,9 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 const openshellStderrTailMax = 4096
@@ -40,8 +37,18 @@ type OpenShell struct {
 	PolicyDir   string
 	FallbackDir string
 
-	tel    *telemetry.Provider
-	events *gatewaylog.Writer
+	observability ObservabilityV8
+}
+
+// ObservabilityV8 is the narrow canonical telemetry surface used by the
+// OpenShell process wrapper. Keeping the interface here prevents the sandbox
+// package from receiving an OTel provider, exporter, or free-form event
+// writer; the audit-owned implementation selects generated v8 families and
+// the central runtime owns routing and redaction.
+type ObservabilityV8 interface {
+	RecordOpenShellExitMetric(context.Context, string, int) error
+	LogAlertCtx(context.Context, string, string, string, map[string]any) error
+	LogActionCtx(context.Context, string, string, string) error
 }
 
 func New(binaryPath, policyDir string) *OpenShell {
@@ -52,13 +59,13 @@ func NewWithFallback(binaryPath, policyDir, fallbackDir string) *OpenShell {
 	return &OpenShell{BinaryPath: binaryPath, PolicyDir: policyDir, FallbackDir: fallbackDir}
 }
 
-// BindObservability attaches structured event + metric sinks (optional).
-func (o *OpenShell) BindObservability(p *telemetry.Provider, w *gatewaylog.Writer) {
+// BindObservabilityV8 attaches the canonical audit-owned producer surface.
+// Passing nil detaches it during shutdown or failed sidecar construction.
+func (o *OpenShell) BindObservabilityV8(observability ObservabilityV8) {
 	if o == nil {
 		return
 	}
-	o.tel = p
-	o.events = w
+	o.observability = observability
 }
 
 func (o *OpenShell) IsAvailable() bool {
@@ -114,21 +121,14 @@ func exitCode(err error) int {
 }
 
 func (o *OpenShell) emitOpenShellError(ctx context.Context, command string, exitCode int, stderrText string) {
-	if o.tel != nil {
-		o.tel.RecordOpenShellExit(ctx, command, exitCode)
-	}
-	if o.events == nil {
+	if o.observability == nil {
 		return
 	}
-	o.events.Emit(gatewaylog.Event{
-		EventType: gatewaylog.EventError,
-		Severity:  gatewaylog.SeverityHigh,
-		Error: &gatewaylog.ErrorPayload{
-			Subsystem: string(gatewaylog.SubsystemOpenShell),
-			Code:      string(gatewaylog.ErrCodeSubprocessExit),
-			Message:   fmt.Sprintf("openshell subprocess exited with code %d", exitCode),
-			Cause:     stderrText,
-		},
+	_ = o.observability.RecordOpenShellExitMetric(ctx, command, exitCode)
+	_ = o.observability.LogAlertCtx(ctx, "openshell", "HIGH", "subprocess_exit", map[string]any{
+		"command":   command,
+		"exit_code": exitCode,
+		"error":     stderrText,
 	})
 }
 
@@ -145,16 +145,10 @@ func (o *OpenShell) ReloadPolicy() error {
 		o.emitOpenShellError(ctx, "openshell policy reload", code, tail)
 		return fmt.Errorf("sandbox: reload policy: %s: %w", tail, err)
 	}
-	if o.events != nil {
-		o.events.Emit(gatewaylog.Event{
-			EventType: gatewaylog.EventLifecycle,
-			Severity:  gatewaylog.SeverityInfo,
-			Lifecycle: &gatewaylog.LifecyclePayload{
-				Subsystem:  string(gatewaylog.SubsystemOpenShell),
-				Transition: "policy-reloaded",
-				Details:    map[string]string{"command": "policy reload"},
-			},
-		})
+	if o.observability != nil {
+		_ = o.observability.LogActionCtx(
+			ctx, "policy-reload", o.PolicyPath(), "OpenShell sandbox policy reloaded",
+		)
 	}
 	return nil
 }

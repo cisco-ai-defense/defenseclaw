@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import click
 import requests
@@ -90,6 +90,7 @@ _UPGRADE_HANDOFF_ENV = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
 _STAGED_UPGRADE_ENV = "DEFENSECLAW_STAGED_UPGRADE"
 _STAGED_BRIDGE_VERSION_ENV = "DEFENSECLAW_STAGED_BRIDGE_VERSION"
 _STAGED_BRIDGE_ARTIFACT_DIR_ENV = "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"
+_STAGED_TARGET_CONTROLLER_VERSION_ENV = "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"
 _UPGRADE_TEST_MODE_ENV = "DEFENSECLAW_UPGRADE_TEST_MODE"
 _UPGRADE_TEST_RELEASE_BASE_URL_ENV = "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL"
 _UPGRADE_RECOVERY_DIRECTORY = ".upgrade-recovery"
@@ -102,12 +103,37 @@ _MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
 _BUNDLE_RESTART_INTENT_FILENAME = "restart-intent.json"
 _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
+# The gateway's human-facing status command performs two independently
+# bounded five-second HTTP probes.  Its process-level caller therefore needs
+# a budget comfortably above ten seconds, especially on launchd hosts where
+# scheduling can push the observed runtime just past that boundary.  Keep the
+# controller timeout bounded, but never equal to the child command's own
+# worst-case network budget.
+_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS = 20
 _STRICT_SIGSTORE_RELEASE_VERSION = "0.8.4"
 _RELEASE_WORKFLOW_IDENTITY = f"https://github.com/{GITHUB_REPO}/.github/workflows/release.yaml@refs/heads/main"
+_COSIGN_BOOTSTRAP_VERSION = "2.6.3"
+_COSIGN_BOOTSTRAP_MAX_BYTES = 200 * 1024 * 1024
+_COSIGN_BOOTSTRAP_ALLOWED_HOSTS = frozenset(
+    {
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
+_COSIGN_BOOTSTRAP_SHA256 = {
+    ("darwin", "amd64"): "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
+    ("darwin", "arm64"): "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
+    ("linux", "amd64"): "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4",
+    ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
+}
 _TARGET_CONFIG_VERSION = 8
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
+_HARD_CUT_PROMOTED_REQUIREMENTS = {
+    ("0.8.4", "0.8.5"): ("jsonschema<5,>=4.23.0",),
+}
 _MACOS_GATEWAY_CODESIGN_IDENTIFIER = "com.cisco.defenseclaw.gateway"
 _PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 _V8_RECOVERY_ENTRY_RE = re.compile(r"^observability-v8-[0-9a-f]{32}$")
@@ -313,7 +339,7 @@ def upgrade(
     before the gateway is stopped, so a failed download never disrupts a
     running gateway.
     """
-    from defenseclaw import __version__ as current_version
+    from defenseclaw import __version__ as controller_version
 
     ux.banner("DefenseClaw Upgrade")
 
@@ -328,6 +354,11 @@ def upgrade(
             raise SystemExit(1)
 
     target_version = _normalize_target_version(target_version)
+    current_version = _resolve_upgrade_source_version(
+        controller_version,
+        target_version,
+        target_was_explicit=target_was_explicit,
+    )
     if _version_key(target_version) < _version_key(current_version):
         ux.err(
             f"Refusing to downgrade DefenseClaw {current_version} to {target_version} through the upgrade path.",
@@ -367,6 +398,13 @@ def upgrade(
     recovery_home = _upgrade_recovery_home()
     data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
     active_config_path = _active_upgrade_config_path(recovery_home)
+    if current_version != controller_version:
+        _preflight_staged_target_controller_source(
+            source_version=current_version,
+            controller_version=controller_version,
+            target_version=target_version,
+            recovery_home=recovery_home,
+        )
     _preflight_installed_source_coherence(
         current_version,
         os_name,
@@ -1393,6 +1431,174 @@ def _installed_gateway_filename(os_name: str) -> str:
     return "defenseclaw-gateway.exe" if os_name == "windows" else "defenseclaw-gateway"
 
 
+def _fail_staged_target_controller_handoff(message: str) -> NoReturn:
+    ux.err(message, indent="  ")
+    ux.subhead(
+        "The release-owned target controller did not receive one complete, exact "
+        "bridge handoff. No target network preflight ran, no services were stopped, "
+        "and no installed artifacts were changed.",
+        indent="    ",
+    )
+    raise SystemExit(1)
+
+
+def _resolve_upgrade_source_version(
+    controller_version: str,
+    target_version: str,
+    *,
+    target_was_explicit: bool,
+) -> str:
+    """Resolve an exact bridge source for an out-of-place target controller.
+
+    Ordinary installed controllers remain versioned by their own package.  The
+    release-owned POSIX resolver may instead execute the already authenticated
+    target wheel from a private venv after a healthy 0.8.4 bridge is active.
+    Only the target-controller marker enables that override; the older three
+    staged variables remain valid for an installed bridge controller and never
+    silently change the running package's source identity.
+    """
+
+    staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+    if not staged_target:
+        return controller_version
+
+    staged_upgrade = os.environ.get(_STAGED_UPGRADE_ENV, "")
+    staged_source = os.environ.get(_STAGED_BRIDGE_VERSION_ENV, "")
+    staged_dir = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
+    if (
+        staged_upgrade != "1"
+        or not target_was_explicit
+        or staged_target != controller_version
+        or target_version != controller_version
+        or staged_source != _OBSERVABILITY_V8_BRIDGE_VERSION
+        or _CANONICAL_VERSION_RE.fullmatch(controller_version) is None
+        or _CANONICAL_VERSION_RE.fullmatch(staged_source) is None
+        or _version_key(controller_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION)
+        or _version_key(staged_source) >= _version_key(controller_version)
+        or not staged_dir
+        or not os.path.isabs(os.path.expanduser(staged_dir))
+        or any(character in staged_dir for character in ("\n", "\r", "\t"))
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged target-controller source override is incomplete or mismatched."
+        )
+    return staged_source
+
+
+def _preflight_staged_target_controller_source(
+    *,
+    source_version: str,
+    controller_version: str,
+    target_version: str,
+    recovery_home: str,
+) -> None:
+    """Prove the fresh target controller and canonical installed bridge CLI.
+
+    The authenticated bridge artifact set is verified later, after target
+    provenance is authenticated, and still before backup or service mutation.
+    This early gate prevents an arbitrary target-wheel invocation from using a
+    staged source override to bypass installed-component coherence.
+    """
+
+    if (
+        source_version != _OBSERVABILITY_V8_BRIDGE_VERSION
+        or controller_version != target_version
+        or os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV) != controller_version
+        or os.name != "posix"
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged target controller is not bound to the required POSIX bridge transition."
+        )
+
+    installed_venv = os.path.realpath(os.path.join(recovery_home, ".venv"))
+    running_prefix = os.path.realpath(sys.prefix)
+    try:
+        running_inside_installed = os.path.commonpath((running_prefix, installed_venv)) == installed_venv
+    except ValueError:
+        running_inside_installed = False
+    try:
+        prefix_info = os.lstat(running_prefix)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The staged target-controller environment is unavailable."
+        )
+    if (
+        running_inside_installed
+        or stat.S_ISLNK(prefix_info.st_mode)
+        or not stat.S_ISDIR(prefix_info.st_mode)
+        or prefix_info.st_uid != os.getuid()
+        or stat.S_IMODE(prefix_info.st_mode) & 0o077
+    ):
+        _fail_staged_target_controller_handoff(
+            "The target controller is not running from a private out-of-place environment."
+        )
+
+    staged_dir = os.path.abspath(
+        os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV])
+    )
+    try:
+        staged_info = os.lstat(staged_dir)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The staged bridge artifact directory is unavailable."
+        )
+    if (
+        stat.S_ISLNK(staged_info.st_mode)
+        or not stat.S_ISDIR(staged_info.st_mode)
+        or staged_info.st_uid != os.getuid()
+        or stat.S_IMODE(staged_info.st_mode) != 0o700
+    ):
+        _fail_staged_target_controller_handoff(
+            "The staged bridge artifact directory is not private and caller-owned."
+        )
+
+    installed_cli = os.path.join(installed_venv, "bin", "defenseclaw")
+    launcher = os.path.expanduser("~/.local/bin/defenseclaw")
+    try:
+        installed_info = os.lstat(installed_cli)
+        launcher_info = os.lstat(launcher)
+    except OSError:
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI is unavailable."
+        )
+    if (
+        stat.S_ISLNK(installed_info.st_mode)
+        or not stat.S_ISREG(installed_info.st_mode)
+        or installed_info.st_uid != os.getuid()
+        or installed_info.st_nlink != 1
+        or stat.S_IMODE(installed_info.st_mode) & 0o022
+        or not stat.S_IMODE(installed_info.st_mode) & stat.S_IXUSR
+        or not stat.S_ISLNK(launcher_info.st_mode)
+        or launcher_info.st_uid != os.getuid()
+        or os.path.realpath(launcher) != installed_cli
+    ):
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI lost release-managed custody."
+        )
+
+    child_env = dict(os.environ)
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        result = subprocess.run(
+            [launcher, "--version"],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _fail_staged_target_controller_handoff(
+            "The canonical installed bridge CLI version could not be verified."
+        )
+    output = (result.stdout or "") + (result.stderr or "")
+    reported = _VERSION_TOKEN_RE.findall(output)
+    if result.returncode != 0 or reported != [source_version]:
+        _fail_staged_target_controller_handoff(
+            "The canonical installed CLI does not match the staged bridge source."
+        )
+
+
 def _fail_installed_source_coherence(message: str) -> NoReturn:
     ux.err(message, indent="  ")
     ux.subhead(
@@ -1811,6 +2017,180 @@ def _fail_unsigned_checksums(
     raise SystemExit(1)
 
 
+def _validate_cosign_bootstrap_url(url: str) -> None:
+    """Constrain the pinned verifier download to Sigstore's GitHub assets."""
+
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("Cosign bootstrap URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _COSIGN_BOOTSTRAP_ALLOWED_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        raise OSError("Cosign bootstrap redirect left the pinned HTTPS host set")
+
+
+def _download_bootstrap_cosign(destination_dir: str) -> str:
+    """Download and authenticate the pinned POSIX Cosign verifier.
+
+    This deliberately does not install anything system-wide. The verifier is
+    staged in a private temporary directory, authenticated against a digest
+    compiled into this controller, used once, and retired with the staging
+    directory. The hard-coded digest is the trust anchor; release metadata is
+    never allowed to choose either the verifier version or its checksum.
+    """
+
+    os_name, arch = _detect_platform()
+    expected = _COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
+    if expected is None or os.name != "posix":
+        raise OSError(
+            f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}"
+        )
+
+    root_info = os.lstat(destination_dir)
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise OSError("Cosign bootstrap directory is not private and caller-owned")
+
+    filename = f"cosign-{os_name}-{arch}"
+    url = (
+        "https://github.com/sigstore/cosign/releases/download/"
+        f"v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
+    )
+    response = None
+    for _redirect in range(6):
+        _validate_cosign_bootstrap_url(url)
+        for attempt in range(1, 4):
+            try:
+                response = requests.get(
+                    url,
+                    stream=True,
+                    timeout=(15, 120),
+                    allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                if attempt < 3:
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise OSError(f"pinned Cosign verifier download failed: {exc}") from exc
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < 3:
+                response.close()
+                response = None
+                time.sleep(2 ** (attempt - 1))
+                continue
+            break
+        if response is None:
+            raise OSError("pinned Cosign verifier download returned no response")
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("location", "")
+            response.close()
+            response = None
+            if not location:
+                raise OSError("pinned Cosign verifier redirect had no location")
+            url = urljoin(url, location)
+            continue
+        break
+    else:
+        raise OSError("pinned Cosign verifier exceeded the redirect limit")
+
+    if response is None or response.status_code != 200:
+        status = "unavailable" if response is None else str(response.status_code)
+        if response is not None:
+            response.close()
+        raise OSError(f"pinned Cosign verifier download failed (HTTP {status})")
+
+    content_length = response.headers.get("content-length", "")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            response.close()
+            raise OSError("pinned Cosign verifier has an invalid content length") from exc
+        if not 0 < declared_size <= _COSIGN_BOOTSTRAP_MAX_BYTES:
+            response.close()
+            raise OSError("pinned Cosign verifier exceeds the download limit")
+
+    destination = os.path.join(destination_dir, filename)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            for chunk in response.iter_content(chunk_size=128 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > _COSIGN_BOOTSTRAP_MAX_BYTES:
+                    raise OSError("pinned Cosign verifier exceeds the download limit")
+                stream.write(chunk)
+                digest.update(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        response.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    if size == 0 or digest.hexdigest() != expected:
+        raise OSError("pinned Cosign verifier SHA-256 authentication failed")
+    # The file was created above with O_EXCL|O_NOFOLLOW inside a private
+    # temporary directory, so it cannot be a pre-existing symlink.  Linux
+    # does not implement chmod(..., follow_symlinks=False); using the normal
+    # chmod here keeps the verified bootstrap portable while retaining the
+    # same custody guarantees.
+    os.chmod(destination, 0o700)
+    info = os.lstat(destination)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or info.st_nlink != 1
+        or info.st_size != size
+    ):
+        raise OSError("authenticated Cosign verifier lost private file custody")
+    if _sha256_file(destination) != expected:
+        raise OSError("authenticated Cosign verifier changed before execution")
+    return destination
+
+
+@contextmanager
+def _cosign_verifier(*, strict: bool):
+    """Yield an existing Cosign or an authenticated ephemeral verifier."""
+
+    existing = shutil.which("cosign")
+    if existing:
+        yield existing
+        return
+    if not strict:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-cosign-") as directory:
+        if os.name == "posix":
+            os.chmod(directory, 0o700)
+        click.echo(
+            f"  {ux.dim('→')} Cosign was not found; authenticating temporary "
+            f"Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
+        )
+        verifier = _download_bootstrap_cosign(directory)
+        ux.ok("Temporary Cosign verifier authenticated")
+        yield verifier
+
+
 def _verify_checksums_sigstore(
     version: str,
     staging_dir: str,
@@ -1826,8 +2206,8 @@ def _verify_checksums_sigstore(
       one of them) is untrusted — a checksum match against an unsigned
       manifest proves nothing about provenance.
     * Bad Sigstore signatures or identities are untrusted.
-    * Missing local ``cosign`` is fatal for 0.8.4+, while older releases keep
-      their compatibility warning.
+    * Missing local ``cosign`` is bootstrapped from a pinned, hard-coded digest
+      for 0.8.4+, while older releases keep their compatibility warning.
     """
     strict_provenance = _version_key(version) >= _version_key(_STRICT_SIGSTORE_RELEASE_VERSION)
     legacy_allow_unverified = allow_unverified and not strict_provenance
@@ -1852,54 +2232,43 @@ def _verify_checksums_sigstore(
         )
         return
 
-    cosign = shutil.which("cosign")
-    if not cosign:
-        if strict_provenance:
-            ux.err(
-                f"DefenseClaw {version} requires cosign to authenticate release provenance.",
-                indent="  ",
-            )
-            ux.subhead(
-                "Install cosign and retry; no release artifacts were accepted.",
-                indent="    ",
-            )
-            raise SystemExit(1)
-        ux.warn(
-            "checksums.txt Sigstore signature is present, but cosign was "
-            "not found on PATH; continuing with checksum verification only. "
-            "Install cosign to verify release provenance.",
-            indent="  ",
-        )
-        return
-
-    identity_args = (
-        ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
-        if strict_provenance
-        else [
-            "--certificate-identity-regexp",
-            f"^https://github.com/{GITHUB_REPO}/.+",
-        ]
-    )
-    cmd = [
-        cosign,
-        "verify-blob",
-        "--certificate",
-        cert_path,
-        "--signature",
-        sig_path,
-        *identity_args,
-        "--certificate-oidc-issuer",
-        "https://token.actions.githubusercontent.com",
-        checksums_path,
-    ]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        with _cosign_verifier(strict=strict_provenance) as cosign:
+            if not cosign:
+                ux.warn(
+                    "checksums.txt Sigstore signature is present, but cosign was "
+                    "not found on PATH; continuing with checksum verification only. "
+                    "Install cosign to verify release provenance.",
+                    indent="  ",
+                )
+                return
+            identity_args = (
+                ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
+                if strict_provenance
+                else [
+                    "--certificate-identity-regexp",
+                    f"^https://github.com/{GITHUB_REPO}/.+",
+                ]
+            )
+            cmd = [
+                cosign,
+                "verify-blob",
+                "--certificate",
+                cert_path,
+                "--signature",
+                sig_path,
+                *identity_args,
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                checksums_path,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         ux.err(f"Could not verify checksums.txt Sigstore signature: {exc}", indent="  ")
         raise SystemExit(1) from exc
@@ -2306,6 +2675,7 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             platform_tested_raw.get("windows"),
             label="platform_tested_source_versions.windows",
             target_version=version,
+            allow_empty=True,
         )
         if any(item not in tested_source_versions for item in windows_sources):
             ux.err(
@@ -2371,6 +2741,15 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             indent="  ",
         )
         raise SystemExit(1)
+    if _version_key(version) >= _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION) and (
+        min_protocol != 2 or not all(bridge_fields_present)
+    ):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} 0.8.5+ hard-cut releases require "
+            "upgrade protocol 2 and a complete bridge contract.",
+            indent="  ",
+        )
+        raise SystemExit(1)
 
     minimum_source = payload.get("minimum_source_version")
     required_bridge = payload.get("required_bridge_version")
@@ -2431,7 +2810,7 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
                 indent="  ",
             )
             raise SystemExit(1)
-        if expected_schema == 2 and required_bridge not in windows_sources:
+        if expected_schema == 2 and windows_sources and required_bridge not in windows_sources:
             ux.err(
                 f"{_UPGRADE_MANIFEST_FILENAME} required bridge {required_bridge} is absent from "
                 "the signed Windows tested-source matrix.",
@@ -2472,8 +2851,9 @@ def _validate_manifest_source_versions(
     *,
     label: str,
     target_version: str,
+    allow_empty: bool = False,
 ) -> list[str]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or (not value and not allow_empty):
         ux.err(f"{_UPGRADE_MANIFEST_FILENAME} {label} must be a non-empty version list.", indent="  ")
         raise SystemExit(1)
     sources: list[str] = []
@@ -2554,13 +2934,19 @@ def _require_release_owned_hard_cut_handoff(
     staged_upgrade = os.environ.get(_STAGED_UPGRADE_ENV, "")
     staged_version = os.environ.get(_STAGED_BRIDGE_VERSION_ENV, "")
     staged_dir = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
-    supplied = any((staged_upgrade, staged_version, staged_dir))
+    staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+    supplied = any((staged_upgrade, staged_version, staged_dir, staged_target))
     if not supplied:
         # `_acquire_bridge_rollback_artifacts` downloads the exact installed
         # bridge release through mandatory Sigstore/checksum verification and
         # binds that set to the authenticated target provenance before backup.
         return
-    if staged_upgrade == "1" and staged_version == source_version and staged_dir:
+    if (
+        staged_upgrade == "1"
+        and staged_version == source_version
+        and staged_dir
+        and (not staged_target or staged_target == target_version)
+    ):
         return
     ux.err(
         f"DefenseClaw {target_version} received an incomplete or mismatched "
@@ -2649,6 +3035,22 @@ def _enforce_upgrade_source_contract(
             tested_sources = platform_tested_raw.get("windows") if isinstance(platform_tested_raw, dict) else None
         else:
             tested_sources = tested_raw
+        if os_name == "windows" and tested_sources == []:
+            required_bridge = manifest.get("required_bridge_version")
+            ux.err(
+                f"Windows upgrades to {target_version} are unsupported by the signed release policy.",
+                indent="  ",
+            )
+            if isinstance(required_bridge, str):
+                ux.subhead(
+                    f"Required bridge {required_bridge} was not published for Windows.",
+                    indent="    ",
+                )
+            ux.subhead(
+                "No changes were made: no services were stopped and no installed artifacts were changed.",
+                indent="    ",
+            )
+            raise SystemExit(1)
         if not isinstance(tested_sources, list) or not tested_sources:
             ux.err("Upgrade manifest tested-source policy is incomplete; refusing to change state.", indent="  ")
             raise SystemExit(1)
@@ -3840,11 +4242,42 @@ def _require_hard_cut_dependency_contract(
 ) -> None:
     source = _wheel_dependency_contract(source_wheel, source_version)
     target = _wheel_dependency_contract(target_wheel, target_version)
-    if target != source:
+    promoted = _HARD_CUT_PROMOTED_REQUIREMENTS.get((source_version, target_version), ())
+    expected = tuple(sorted((*source, *promoted)))
+    if target != expected:
         raise ValueError(
-            "hard-cut target Requires-Dist differs from the authenticated bridge; "
+            "hard-cut target Requires-Dist differs from the authenticated bridge plus "
+            "the reviewed pre-existing runtime promotion; "
             "publish an explicit dependency migration instead of mutating the bridge environment"
         )
+
+
+def _require_hard_cut_preexisting_jsonschema(python_path: str) -> None:
+    """Prove the bridge already satisfies v8 schema validation without mutation."""
+
+    script = r"""
+from importlib.metadata import version
+import re
+
+from jsonschema import Draft202012Validator
+
+value = version("jsonschema")
+match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:[.+-].*)?", value)
+if match is None:
+    raise SystemExit("installed jsonschema version is not canonical")
+major, minor = (int(match.group(1)), int(match.group(2)))
+if major != 4 or minor < 23:
+    raise SystemExit("installed jsonschema runtime is outside 4.23 <= version < 5")
+if Draft202012Validator.META_SCHEMA.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+    raise SystemExit("installed jsonschema lacks the Draft 2020-12 validator contract")
+"""
+    subprocess.run(
+        [python_path, "-I", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
 def _require_target_phase_two_mutator_wrapper(whl_path: str) -> None:
@@ -3979,6 +4412,7 @@ def _preflight_wheel_install(
                 source_version=source_version,
                 target_version=target_version,
             )
+            _require_hard_cut_preexisting_jsonschema(venv_python)
             subprocess.run(
                 [uv, "--no-config", "pip", "check", "--python", venv_python],
                 check=True,
@@ -4278,7 +4712,7 @@ def _assert_gateway_quiesced(data_dir: str, *, gateway_path: str | None = None) 
             [gateway_path, "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS,
             check=False,
             env=_gateway_process_environment(data_dir),
         )
@@ -4296,7 +4730,7 @@ def _capture_source_gateway_running_state(gateway_path: str, data_dir: str) -> b
             [gateway_path, "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS,
             check=False,
             env=_gateway_process_environment(data_dir),
         )
@@ -4468,6 +4902,7 @@ def _acquire_bridge_rollback_artifacts(
             _STAGED_UPGRADE_ENV,
             _STAGED_BRIDGE_VERSION_ENV,
             _STAGED_BRIDGE_ARTIFACT_DIR_ENV,
+            _STAGED_TARGET_CONTROLLER_VERSION_ENV,
         )
     )
     if supplied:
@@ -4475,6 +4910,14 @@ def _acquire_bridge_rollback_artifacts(
             raise OSError(f"{_STAGED_UPGRADE_ENV}=1 is required for staged handoff")
         if os.environ.get(_STAGED_BRIDGE_VERSION_ENV) != source_version:
             raise OSError(f"{_STAGED_BRIDGE_VERSION_ENV} does not match the installed bridge")
+        staged_target = os.environ.get(_STAGED_TARGET_CONTROLLER_VERSION_ENV, "")
+        if staged_target:
+            from defenseclaw import __version__ as controller_version
+
+            if staged_target != controller_version:
+                raise OSError(
+                    f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller"
+                )
         staged = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
         if not staged:
             raise OSError(f"{_STAGED_BRIDGE_ARTIFACT_DIR_ENV} is required for staged handoff")
@@ -5632,6 +6075,22 @@ def _private_file_snapshot_unchanged(before: os.stat_result, after: os.stat_resu
     )
 
 
+def _private_named_file_snapshot_unchanged(
+    opened: os.stat_result,
+    named: os.stat_result,
+) -> bool:
+    """Compare one file across descriptor/path views without Windows ctime drift."""
+
+    return (
+        os.path.samestat(opened, named)
+        and opened.st_mode == named.st_mode
+        and opened.st_size == named.st_size
+        and opened.st_mtime_ns == named.st_mtime_ns
+        and (os.name == "nt" or opened.st_ctime_ns == named.st_ctime_ns)
+        and getattr(opened, "st_uid", None) == getattr(named, "st_uid", None)
+    )
+
+
 def _read_bounded_bundle_rollback_json(path: Path) -> object:
     """Read exact private rollback authority from one no-follow descriptor."""
 
@@ -5649,7 +6108,12 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
     if os.name == "posix" and (named_before.st_uid != os.getuid() or stat.S_IMODE(named_before.st_mode) != 0o600):
         raise OSError("local observability rollback metadata must be owner-only")
 
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -5694,7 +6158,7 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
             or stat.S_ISLNK(named_after.st_mode)
             or getattr(named_after, "st_file_attributes", 0) & 0x00000400
             or not stat.S_ISREG(named_after.st_mode)
-            or not _private_file_snapshot_unchanged(opened_after, named_after)
+            or not _private_named_file_snapshot_unchanged(opened_after, named_after)
         ):
             raise OSError("local observability rollback metadata changed while reading")
         if os.name == "posix" and (opened_after.st_uid != os.getuid() or stat.S_IMODE(opened_after.st_mode) != 0o600):
@@ -6411,43 +6875,41 @@ def _verify_staged_checksums_signature(
     certificate_path: str,
 ) -> None:
     strict_provenance = _version_key(version) >= _version_key(_STRICT_SIGSTORE_RELEASE_VERSION)
-    cosign = shutil.which("cosign")
-    if not cosign:
-        if strict_provenance:
-            raise OSError(f"staged bridge {version} requires cosign provenance verification")
-        ux.warn(
-            "Staged bridge signature assets are present, but cosign is unavailable; "
-            "continuing with the resolver-verified private handoff and local SHA-256 checks.",
-            indent="  ",
-        )
-        return
-    identity_args = (
-        ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
-        if strict_provenance
-        else [
-            "--certificate-identity-regexp",
-            f"^https://github.com/{GITHUB_REPO}/.+",
-        ]
-    )
     try:
-        completed = subprocess.run(
-            [
-                cosign,
-                "verify-blob",
-                "--certificate",
-                certificate_path,
-                "--signature",
-                signature_path,
-                *identity_args,
-                "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                checksums_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        with _cosign_verifier(strict=strict_provenance) as cosign:
+            if not cosign:
+                ux.warn(
+                    "Staged bridge signature assets are present, but cosign is unavailable; "
+                    "continuing with the resolver-verified private handoff and local SHA-256 checks.",
+                    indent="  ",
+                )
+                return
+            identity_args = (
+                ["--certificate-identity", _RELEASE_WORKFLOW_IDENTITY]
+                if strict_provenance
+                else [
+                    "--certificate-identity-regexp",
+                    f"^https://github.com/{GITHUB_REPO}/.+",
+                ]
+            )
+            completed = subprocess.run(
+                [
+                    cosign,
+                    "verify-blob",
+                    "--certificate",
+                    certificate_path,
+                    "--signature",
+                    signature_path,
+                    *identity_args,
+                    "--certificate-oidc-issuer",
+                    "https://token.actions.githubusercontent.com",
+                    checksums_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise OSError("staged bridge checksum signature verification failed") from exc
     if completed.returncode != 0:

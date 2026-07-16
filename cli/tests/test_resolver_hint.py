@@ -36,6 +36,7 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "--version" not in output
 
     windows = output.split("Windows PowerShell:\n", 1)[1]
+    assert "Preflight refusal only" in windows
     create = windows.index("New-Item -ItemType Directory -Path $d")
     protect = windows.index("$directoryAcl.SetAccessRuleProtection($true, $false)")
     apply_acl = windows.index("Set-Acl -LiteralPath $d")

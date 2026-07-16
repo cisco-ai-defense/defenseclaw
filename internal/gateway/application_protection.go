@@ -373,7 +373,8 @@ func (c *applicationProtectionController) startGuardLocked(ctx context.Context, 
 		return
 	}
 	debounce := time.Duration(c.sidecar.cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
-	guard := NewHookConfigGuard(c.sidecar.logger, c.sidecar.otel, debounce)
+	metricRuntime, _ := c.sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	guard := NewHookConfigGuard(c.sidecar.logger, metricRuntime, debounce)
 	guard.SetHealNotifier(c.sidecar.notifyHookHealed)
 	opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
 	if err != nil {

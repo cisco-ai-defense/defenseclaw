@@ -38,7 +38,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -46,6 +46,7 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -606,6 +607,20 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(set(gc.connectors), {"hermes", "codex"})
         self.assertEqual(gc.connectors["hermes"].mode, "action")
 
+    def test_batch_no_restart_allows_explicit_offline_staging(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _stub_side_effects():
+            res = _invoke(["-c", "codex", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("canonical setup audit event was not recorded", res.output)
+
+    def test_batch_default_restart_does_not_inherit_internal_offline_mode(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _stub_side_effects(), self.assertRaises(CanonicalObservabilityUnavailableError):
+            _invoke(["-c", "codex"], self.app)
+
     def test_detected_filters_to_hook_connectors(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["hermes", "openclaw"]):
@@ -937,8 +952,11 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_flags_ignored_with_subcommand_warns(self):
-        with _stub_side_effects():
-            res = _invoke(["-c", "hermes", "redaction", "status"], self.app)
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(), retention_days=0, plan_digest="test"),
+        ):
+            res = _invoke(["-c", "hermes", "observability", "list"], self.app)
         self.assertIn("are ignored when a setup", res.output)
 
 

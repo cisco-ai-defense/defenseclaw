@@ -91,21 +91,40 @@ Scope guardrails for the local Splunk preset:
 For more details on the Free-tier behavior and limits, see
 [About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
+Cosign is not a POSIX release-install prerequisite from `0.8.5` onward. The
+release installer prefers an existing binary and otherwise authenticates a
+pinned, temporary Cosign `2.6.3` against a hard-coded platform SHA-256. The
+temporary verifier is never added to `PATH` or installed system-wide.
+
 ---
 
 ## Building from Source
 
 This section covers developer builds from the repository. Source targets and
-`scripts/install-dev.sh` are not an alternate upgrade mechanism: they refuse to
-overwrite a release-managed installation or one owned by another checkout
-before changing installed entry points or the gateway. Rebuilding from the same
-checkout is supported only while its reviewed release, source-install
-compatibility epoch, and runtime schema match the existing strict ownership
-marker. Legacy markers fail closed because an editable checkout may already
-have crossed a release boundary. A source-owned version transition has no
-tested in-place path: keep it in place, use an isolated fresh developer
-`HOME`/install directory, or contact support. The release-owned resolver is for
-release-managed layouts; it must not be presented as recovery for a source venv.
+`scripts/install-dev.sh` are not an alternate upgrade mechanism: direct install
+targets refuse to overwrite a release-managed installation or one owned by
+another checkout before changing installed entry points or the gateway.
+`make all` is the explicit developer-machine reinstall workflow. When the
+installed CLI already points exactly into the current checkout, it may reclaim
+markerless or prior-release source state and records a strict ownership marker
+after rebuilding. That workflow can run the checkout's current migrations
+against developer state and must not be used on a release-managed host. The
+release-owned resolver is for release-managed layouts; it must not be presented
+as recovery for a source venv.
+
+### Choose the right command
+
+| What you want | Use | State behavior |
+|---------------|-----|----------------|
+| Rebuild and run this checkout during normal development | `make all` | Activates only the exact checkout that already owns the source install; may migrate developer state |
+| Compile artifacts without installing them | `make build` | Leaves installed files and `~/.defenseclaw` unchanged |
+| Review the developer workflow and common options | `make help` | Read-only |
+| Upgrade an installed release | `defenseclaw upgrade` | Uses the signed release resolver and required bridge |
+| Exercise a fresh source install in isolation | `HOME=$(mktemp -d) make all` | Uses a disposable home instead of existing state |
+
+Do not follow `make build` with `make install` on an existing developer or
+release installation. For normal same-checkout development, run `make all`
+directly; it performs the guarded developer publication itself.
 
 ### Prerequisites
 
@@ -210,13 +229,16 @@ ssh spark 'sudo mv /tmp/defenseclaw-gateway /usr/local/bin/defenseclaw-gateway &
 
 ### Dev Install
 
-For contributors and development workflows:
+For normal repeated development in a checkout, use:
 
 ```bash
-make dev-install
+make all
 ```
 
-This runs `scripts/install-dev.sh`, which:
+`make dev-install` and `scripts/install-dev.sh` are strict lower-level plumbing
+for a fresh or isolated developer home. They intentionally refuse to reclaim
+existing managed state; use them only when testing that fresh-install path.
+The script:
 
 1. Creates a `.venv` with editable install + dev dependencies (ruff,
    pytest, pytest-cov)
@@ -354,8 +376,9 @@ binary + CLI wheel + plugin tarball, installs them, and prompts to run
 confirmations. The release installers are fresh-install-only. If the CLI,
 gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
-current release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver
-for an existing pre-bridge host. A `0.8.3`-or-older built-in
+current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
+pre-bridge host. The signed `scripts/upgrade.ps1` surface is refusal-only
+because this cut publishes no Windows runtime. A `0.8.3`-or-older built-in
 `defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
 required two-process bridge handoff retroactively.
 
@@ -600,6 +623,13 @@ defenseclaw setup gateway --remote --ssm-param /prod/openclaw/token --ssm-region
 
 Configure Splunk integration for audit export and observability.
 
+Under `config_version: 8`, each selected Splunk pipeline becomes an independent
+entry in `observability.destinations`: HEC is logs-only and Splunk O11y uses
+OTLP capabilities. An enabled destination with no explicit `send`/`routes`
+exports every bucket and signal that kind supports under the unredacted `none`
+profile. Use `defenseclaw observability plan` to review the effective route and
+select a redacting profile before exporting across a less-trusted boundary.
+
 ```bash
 defenseclaw setup splunk
 ```
@@ -699,10 +729,10 @@ path. The resolver fails closed before stopping services and prints the exact
 tested source versions.
 
 Support is platform-specific. POSIX release gates cover the reviewed global
-matrix through `0.4.0`; the native Windows matrix currently covers only
-`0.8.0` through `0.8.3`. A Windows source older than `0.8.0` therefore fails
-closed and prints those exact supported Windows sources—global POSIX coverage
-must not be treated as a Windows upgrade claim.
+matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or
+rollback binary, so this hard cut has no supported Windows source version; the
+PowerShell resolver fails closed before stopping services. Global POSIX
+coverage must not be treated as a Windows upgrade claim.
 
 If the installed version is not in that list, remain on the current version and
 contact support for a source-specific, state-aware recovery plan. Do not infer
@@ -715,14 +745,12 @@ Run the current release-owned resolver in latest mode. Do not add a version
 override when crossing the bridge boundary:
 
 For an installed release without a source checkout, use the authenticated
-POSIX or PowerShell resolver-asset bootstrap in [CLI Reference](CLI.md#upgrade).
+POSIX resolver-asset bootstrap in [CLI Reference](CLI.md#upgrade).
 The local paths below are only the equivalent entry points from a checkout of
 the current release:
 
 ```bash
 ./scripts/upgrade.sh --yes
-# Windows:
-.\scripts\upgrade.ps1 -Yes
 ```
 
 Release `0.8.4` is the config-v7/runtime-v7 protocol bridge for the subsequent
@@ -730,13 +758,21 @@ observability-v8 hard cut. Run the current release-owned updater without
 `--version` when crossing that boundary so its signed manifest can select and
 health-check the bridge before a fresh controller starts the target phase.
 Explicit targets that skip a required bridge fail before installed state is
-changed. Release `0.8.4` and later require `cosign`; `--allow-unverified` cannot
-override their provenance checks.
+changed. Release `0.8.4` and later require Cosign provenance verification;
+`--allow-unverified` cannot override it. The current POSIX resolver prefers an
+existing `cosign`, otherwise it downloads pinned Cosign `2.6.3` into an
+owner-only temporary directory and authenticates its hard-coded platform
+SHA-256 before execution. It does not install Cosign system-wide or modify
+`PATH`. The frozen `0.8.4` built-in controller also cannot parse the truthful
+hard-cut manifest because its Windows bridge matrix is empty. Every `0.8.4`
+host must therefore use the current target-release POSIX resolver, regardless
+of whether Cosign is already installed.
 
 The supported staged path is the authenticated current-release
-`defenseclaw-upgrade.sh` or `defenseclaw-upgrade.ps1` asset in latest mode (or
-the equivalent `scripts/upgrade.sh` / `scripts/upgrade.ps1` from a trusted
-current-release checkout). An already-published `0.8.3`-or-older
+`defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
+`scripts/upgrade.sh` from a trusted current-release checkout). The signed
+PowerShell resolver remains a preflight refusal surface only. An
+already-published `0.8.3`-or-older
 `defenseclaw upgrade` command cannot gain the new two-hop orchestration after
 installation, so its signed protocol check deliberately refuses the hard cut
 before stopping services. Some frozen versions then print an obsolete raw
@@ -761,23 +797,26 @@ validation is complete, and inspect them before manual cleanup.
 The bridge commits a private phase-two recovery journal and fixed mutator
 lease before stopping services. Wheel, migration, bundle, and service child
 processes inherit that lease, so an abrupt controller or host interruption
-cannot race rollback. Re-run the release-owned resolver: it waits for any
-surviving child, bootstraps the retained authenticated `0.8.4` wheel without
-trusting a partial target install, restores exact bridge state, proves bridge
-health, and only then retries.
+cannot race rollback.
+
+Re-run that same resolver in latest mode, without a version override.
+It waits for any surviving child, bootstraps the retained authenticated `0.8.4`
+wheel without trusting a partial target install, restores exact bridge state,
+proves bridge health, and only then retries.
 
 Once the bridge is installed, its fresh CLI controller performs the target
 phase: preflight artifact verification, config backup,
 stop-install-migrate-restart, rollback on failure, and version-bound health
-polling. The release-owned shell or PowerShell resolver coordinates the
-initial bridge selection. See the [CLI Reference](CLI.md#upgrade) for the
+polling. The release-owned POSIX shell resolver coordinates the initial bridge
+selection. See the [CLI Reference](CLI.md#upgrade) for the
 complete path and flag behavior.
 
-A coherent installed `0.8.4` bridge may start the hard-cut target phase with
-its built-in command after it authenticates and privately acquires the exact
-published `0.8.4` rollback artifacts. A `0.8.3`-or-older frozen controller must
-use the release-owned resolver described below and correctly refuses to skip
-the bridge.
+An installed `0.8.4` bridge must start the hard-cut target phase through the
+authenticated target-release POSIX resolver. Its frozen built-in parser
+requires a nonempty Windows bridge matrix and cannot parse the truthful target
+manifest whose Windows matrix is empty. A `0.8.3`-or-older frozen controller
+also must use the release-owned resolver described below and correctly refuses
+to skip the bridge.
 
 #### 0.3.0 migration: legacy model provider cleanup
 
@@ -807,43 +846,36 @@ If none of these legacy entries exist, the migration is a no-op.
 
 ### Upgrading artifact-backed releases
 
-An installed, coherent `0.8.4` bridge controller can cross the `0.8.5` hard cut
-with its built-in command. Before backup or service stop, it authenticates and
-privately acquires the exact published `0.8.4` wheel and gateway needed for
-rollback. A `0.8.3`-or-older controller cannot learn the two-process bridge
-handoff retroactively, so those hosts must use the authenticated current
-release-owned resolver in latest mode.
+Every supported POSIX source uses the authenticated target-release resolver in
+latest mode to cross the `0.8.5` hard cut. Before backup or service stop, it
+authenticates and privately acquires the exact published `0.8.4` wheel and
+gateway needed for rollback. A host already on `0.8.4` skips the first
+installation hop. A `0.8.3`-or-older host is carried through the required
+bridge and into the latest release as one transaction. Neither frozen built-in
+controller can learn the complete truthful path retroactively.
 
 ```bash
-# A coherent installed 0.8.4 bridge securely self-acquires rollback custody
-defenseclaw upgrade --yes
-
-# For `0.8.3` or older, run an authenticated target-release asset in latest mode
+# For `0.8.4` or any supported older POSIX source, run an authenticated
+# target-release asset in latest mode
 bash defenseclaw-upgrade.sh --yes
 
 # Equivalent resolver entry point from an authenticated current-release checkout
 ./scripts/upgrade.sh --yes
 ```
 
-```powershell
-# Run the already-authenticated Windows target-release asset in latest mode
-& .\defenseclaw-upgrade.ps1 -Yes
-```
-
-Do not add `--version` or `-Version` to the resolver commands. The complete
+Do not add `--version` to the resolver command. The complete
 Sigstore and SHA-256 bootstrap is in the [CLI Reference](CLI.md#upgrade). The
-coherent bridge controller performs the same authenticated rollback-artifact
-acquisition, backup, migration, restart, and health checks when invoked through
-its built-in command.
+target-release resolver performs authenticated rollback-artifact acquisition,
+backup, migration, restart, and health checks for both already-bridged and
+pre-bridge sources.
 
 Do not replace the managed CLI wheel through `pip`, `uv`, or another package
 manager, and do not copy the wheel or gateway archive over an existing
 installation. Those operations cannot provide bridge selection, durable
 rollback, or version-bound health verification. The local shell and PowerShell
 installers are fresh-install-only and refuse existing managed state before
-dependency setup or artifact replacement. Pre-bridge hosts must use the
-release-owned upgrade resolver; a coherent installed `0.8.4` bridge may use its
-built-in controller as described above.
+dependency setup or artifact replacement. Every supported existing POSIX host,
+including one already on `0.8.4`, must use the target-release upgrade resolver.
 
 For protocol-2 releases, the installable bytes are published only inside
 manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads
@@ -852,6 +884,26 @@ release-owned resolver materializes them privately. The conventional `.whl`,
 `.tar.gz`, and `.zip` asset names are signed refusal envelopes. Renaming,
 extracting, or package-installing either form is not a supported manual path;
 use the resolver so the bridge and rollback contract cannot be skipped.
+
+#### 0.8.5 hard cut and the 0.8.4 bridge
+
+An installed `0.8.3` or older controller must not install `0.8.5` directly.
+The normal one-command path uses the authenticated resolver asset owned by the
+target release. Follow the complete Sigstore and SHA-256 bootstrap in the
+[CLI Reference](CLI.md#upgrade), or run `./scripts/upgrade.sh --yes` from an
+authenticated checkout of that release. Do not stream an unauthenticated
+network response into a shell.
+
+Windows cannot cross this hard cut because the published `0.8.4` bridge has no
+Windows gateway or rollback binary. The signed `scripts/upgrade.ps1` resolver
+is retained only to refuse before stopping services and explain that no tested
+path exists. Keep the current Windows installation unchanged.
+
+An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
+service stop, or installed-file mutation. Fresh installers also refuse to
+overwrite an existing installation. No package-manager or manual artifact-copy
+path may replace an existing hard-cut installation unless it invokes this same
+resolver contract.
 
 ### What gets upgraded
 
@@ -863,14 +915,16 @@ use the resolver so the bridge and rollback contract cannot be skipped.
 | Config files | Preserved | Backed up before upgrade, migrations patch if needed |
 | Policies | Preserved | Backed up; not overwritten |
 
-### Rollback
+### Rollback and interrupted recovery
 
-The release-owned resolver restores the authenticated bridge automatically if
-the hard-cut phase fails. It preserves the pending recovery journal across a
-crash. Re-run that same resolver in latest mode, without a version override; it
-completes recovery before it detects a new target or continues.
+The staged resolver automatically restores the prior source if the bridge phase
+fails, or restores the authenticated `0.8.4` gateway, CLI, configuration,
+environment, migration cursor, and managed bundle if the hard-cut phase fails.
+Durable recovery journals make the same rollback resume before version/config
+detection after a crash or reboot. Success is emitted only after a fresh,
+version-bound health check.
 
-For operator inspection, timestamped backups remain under:
+Timestamped backups remain available for inspection and support escalation:
 
 ```bash
 # Backups are saved to ~/.defenseclaw/backups/upgrade-<timestamp>/

@@ -23,6 +23,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SMOKE_BASELINES = (
+    "0.8.4",
     "0.8.3",
     "0.8.2",
     "0.8.1",
@@ -118,6 +119,111 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
+def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+
+    assert 'installed_refusal_mode="artifact-provenance"' in protocol
+    assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
+    assert (
+        "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks"
+        in protocol
+    )
+    assert "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" in protocol
+    assert "Modern release provenance is mandatory; --allow-unverified cannot override it." in protocol
+
+
+def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() -> None:
+    continuity = (
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
+    ).read_text()
+
+    fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    fixture_end = continuity.index(
+        "\n}\n\nassert_local_candidate_provenance_verified()", fixture_start
+    )
+    fixture = continuity[fixture_start:fixture_end]
+    main = continuity[continuity.index("main_continuity() {") :]
+
+    assert '[[ "${LOCAL_CANDIDATE_PROVENANCE_FIXTURE}" == "1" ]]' in fixture
+    assert 'if [[ -z "${RELEASE_ROOT}" && -z "${RELEASE_DIR}" ]]' in main
+    assert 'LOCAL_CANDIDATE_PROVENANCE_FIXTURE="1"' in main
+    assert "--certificate-identity" in fixture
+    assert (
+        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/"
+        "release.yaml@refs/heads/main"
+    ) in fixture
+    assert "--certificate-oidc-issuer" in fixture
+    assert "https://token.actions.githubusercontent.com" in fixture
+    assert '[[ "$#" -eq 10 ]]' in fixture
+    assert "assert_local_candidate_provenance_verified" in main
+
+
+def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
+    continuity = (
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
+    ).read_text(encoding="utf-8")
+    start = continuity.index(
+        "assert_published_bridge_binary_sqlite_rollback_compatibility() {"
+    )
+    end = continuity.index("\n}\n\nresolve_continuity_upgrade_contract()", start)
+    compatibility = continuity[start:end]
+    main = continuity[continuity.index("main_continuity() {") :]
+
+    # The gate is specifically bound to the immutable POSIX 0.8.4 bridge and
+    # the material retained only after historical_release_auth.py succeeds.
+    assert '[[ "${FROM_VERSION}" == "0.8.4" ]]' in compatibility
+    assert 'darwin|linux) ;;' in compatibility
+    assert (
+        'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"'
+        in compatibility
+    )
+    assert (
+        'auth_marker="${WORKDIR}/published-release/${FROM_VERSION}/'
+        '.authenticated-${OS_NAME}-${ARCH_NAME}"'
+        in compatibility
+    )
+    assert '"${bridge_gateway}" --version | grep -F "${FROM_VERSION}"' in compatibility
+
+    # It restores the byte-preserved source config while keeping one exact DB
+    # path, then proves target-created correlation tables exist before boot.
+    assert 'v7_config="${SMOKE_HOME}/fixture-evidence/config.v7.source"' in compatibility
+    assert 'audit_db="${data_dir}/state/audit.db"' in compatibility
+    for table in (
+        "correlation_events",
+        "correlation_identifiers",
+        "correlation_identity_claims",
+        "correlation_observations",
+        "correlation_relationships",
+        "correlation_relationship_evidence",
+        "correlation_cursors",
+        "correlation_pending_operations",
+        "correlation_receipts",
+    ):
+        assert f'"{table}"' in compatibility
+    assert 'stop_smoke_gateway\n    cp -p "${v7_config}"' in compatibility
+
+    # Health is provenance-bound, and the old API itself performs both the
+    # authenticated write and read. SQLite then verifies exact old-binary
+    # provenance without putting the token in argv or evidence files.
+    assert 'provenance.get("binary_version") != sys.argv[2]' in compatibility
+    assert '"http://127.0.0.1:18970/audit/event"' in compatibility
+    assert '"http://127.0.0.1:18970/alerts?limit=500"' in compatibility
+    assert '"X-DefenseClaw-Client": "upgrade-continuity-gate"' in compatibility
+    assert 'event.get("binary_version") == "0.8.4"' in compatibility
+    assert "SELECT COUNT(*), COALESCE(MAX(binary_version), '')" in compatibility
+
+    # The target config and binary are restored and health-checked before the
+    # ordinary post-upgrade history/dashboard assertions continue.
+    assert 'cp -p "${v8_config}" "${data_dir}/config.yaml"' in compatibility
+    assert '"${target_gateway}" start' in compatibility
+    activation = main.index("verify_target_activation")
+    old_binary_probe = main.index(
+        "assert_published_bridge_binary_sqlite_rollback_compatibility"
+    )
+    post_emit = main.index("emit_continuity_phase post")
+    assert activation < old_binary_probe < post_emit
+
+
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
     start = smoke.index("seed_pre_v8_otel_fixture() {")
@@ -157,6 +263,14 @@ def _posix_protected_materializer_program() -> str:
     return resolver[start:end]
 
 
+def _posix_target_controller_handoff_verifier_program() -> str:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    function = resolver.index("verify_hard_cut_target_controller_handoff() {")
+    start = resolver.index("<<'PY'\n", function) + len("<<'PY'\n")
+    end = resolver.index("\nPY\n}", start)
+    return resolver[start:end]
+
+
 def test_posix_production_materializer_binds_opened_outer_bytes_to_signed_digest(
     tmp_path: Path,
 ) -> None:
@@ -188,6 +302,135 @@ def test_posix_production_materializer_binds_opened_outer_bytes_to_signed_digest
     assert refused.returncode != 0
     assert "changed after checksum authentication" in refused.stderr
     assert not mismatch_destination.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target-controller handoff")
+def test_posix_target_controller_handoff_verifier_executes_exact_custody_contract(
+    tmp_path: Path,
+) -> None:
+    program = _posix_target_controller_handoff_verifier_program()
+    target_venv = tmp_path / "target-controller-venv"
+    installed_venv = tmp_path / "installed-bridge-venv"
+    target_cli = target_venv / "bin" / "defenseclaw"
+    installed_cli = installed_venv / "bin" / "defenseclaw"
+    install_dir = tmp_path / "bin"
+    installed_launcher = install_dir / "defenseclaw"
+    installed_gateway = install_dir / "defenseclaw-gateway"
+    gateway_source = tmp_path / "gateway-source"
+    handoff_dir = tmp_path / "bridge-handoff"
+    protected_wheel = tmp_path / "defenseclaw-0.8.5-2-py3-none-any.dcwheel"
+    for directory in (target_cli.parent, installed_cli.parent, install_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    target_venv.chmod(0o700)
+    handoff_dir.mkdir(mode=0o700)
+    target_cli.write_text("#!/bin/sh\necho 'DefenseClaw 0.8.5'\n", encoding="utf-8")
+    installed_cli.write_text("#!/bin/sh\necho 'DefenseClaw 0.8.4'\n", encoding="utf-8")
+    gateway_source.write_text(
+        "#!/bin/sh\necho 'DefenseClaw gateway 0.8.4'\n",
+        encoding="utf-8",
+    )
+    for executable in (target_cli, installed_cli, gateway_source):
+        executable.chmod(0o755)
+    installed_launcher.symlink_to(installed_cli)
+    os.link(gateway_source, installed_gateway)
+    protected_wheel.write_bytes(b"authenticated target controller")
+    protected_wheel.chmod(0o600)
+    protected_sha256 = hashlib.sha256(protected_wheel.read_bytes()).hexdigest()
+    arguments = (
+        str(target_venv),
+        str(target_cli),
+        str(installed_venv),
+        str(installed_launcher),
+        str(installed_gateway),
+        str(handoff_dir),
+        str(protected_wheel),
+        protected_sha256,
+        "0.8.4",
+        "0.8.5",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program, *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert installed_gateway.stat().st_nlink == 2
+
+    protected_wheel.chmod(0o644)
+    exposed = subprocess.run(
+        [sys.executable, "-c", program, *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert exposed.returncode != 0
+    assert "authenticated target-controller wheel lost private custody" in exposed.stderr
+    protected_wheel.chmod(0o600)
+
+    refused = subprocess.run(
+        [sys.executable, "-c", program, *arguments[:-3], "0" * 64, *arguments[-2:]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "authenticated target-controller wheel changed before handoff" in refused.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target-controller handoff")
+def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    recovery_home = home / ".defenseclaw"
+    staged = tmp_path / "bridge-handoff"
+    recovery_home.mkdir(parents=True)
+    staged.mkdir(mode=0o700)
+    (recovery_home / "config.yaml").write_text(
+        f"config_version: 7\ndata_dir: {recovery_home}\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(recovery_home),
+            "DEFENSECLAW_STAGED_UPGRADE": "1",
+            "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
+            "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": str(staged),
+            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "NO_COLOR": "1",
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from defenseclaw.main import main; main()",
+            "upgrade",
+            "--yes",
+            "--version",
+            "0.8.5",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert "DefenseClaw Upgrade" in output
+    assert "Installed version" in output and "0.8.4" in output
+    assert "Target version" in output and "0.8.5" in output
+    assert "Failed to load config" not in output
+    assert "release-owned target controller did not receive one complete, exact bridge handoff" in output
 
 
 def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
@@ -256,6 +499,21 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
     marker = "# DefenseClaw upgrade resolver complete v1"
     assert posix_resolver.rstrip().endswith(marker)
     assert windows_resolver.rstrip().endswith(marker)
+
+
+def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_controller() -> None:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+
+    capture = resolver.index("capture_hard_cut_target_controller_contract")
+    bridge_switch = resolver.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture)
+    assert capture < bridge_switch
+    assert resolver.count('exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"') == 2
+    assert resolver.count(
+        'export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"'
+    ) == 2
+    assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
+    assert "verify_hard_cut_target_controller_handoff" in resolver
+    assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resolver terminal proof")

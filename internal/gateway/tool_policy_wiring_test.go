@@ -193,21 +193,21 @@ func TestEventRouter_ConnectorName(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 
 	// Guardrail connector wins.
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	r.SetGuardrailConfig(&config.GuardrailConfig{Connector: "Hermes"})
 	if got := r.connectorName(); got != "hermes" {
 		t.Errorf("connectorName = %q, want hermes (lowercased from guardrail connector)", got)
 	}
 
 	// Falls back to the Claw mode captured as defaultAgentName.
-	r = NewEventRouter(nil, store, logger, false, nil)
+	r = NewEventRouter(nil, store, logger, false)
 	r.SetDefaultAgentName("codex")
 	if got := r.connectorName(); got != "codex" {
 		t.Errorf("connectorName = %q, want codex (defaultAgentName fallback)", got)
 	}
 
 	// Nothing configured ⇒ empty (global tier only).
-	r = NewEventRouter(nil, store, logger, false, nil)
+	r = NewEventRouter(nil, store, logger, false)
 	if got := r.connectorName(); got != "" {
 		t.Errorf("connectorName = %q, want empty", got)
 	}
@@ -215,7 +215,7 @@ func TestEventRouter_ConnectorName(t *testing.T) {
 
 func TestHandleToolCall_HonorsAllow(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	if err := enforce.NewPolicyEngine(store).AllowToolForConnector("shell", "", "vetted"); err != nil {
 		t.Fatalf("AllowToolForConnector: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestHandleToolCall_ConnectorScopedBlock(t *testing.T) {
 	}
 
 	// Router configured for hermes → the connector-scoped block fires.
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	r.SetGuardrailConfig(&config.GuardrailConfig{Connector: "hermes"})
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "shell", Args: json.RawMessage(`{"command":"ls"}`), Status: "running"})
 	r.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
@@ -254,7 +254,7 @@ func TestHandleToolCall_ConnectorScopedBlock(t *testing.T) {
 
 func TestHandleToolCall_ToolPolicyLookupErrorFailsClosed(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
@@ -275,8 +275,8 @@ func TestHandleToolCall_ToolPolicyLookupErrorFailsClosed(t *testing.T) {
 	}
 }
 
-// scanToolActions reports whether the audit log holds an allowed / flagged
-// tool-call event.
+// scanToolActions reports whether the audit log holds an allow-list tool-call
+// occurrence or a flagged tool-call finding.
 func scanToolActions(t *testing.T, store *audit.Store) (allowed, flagged bool) {
 	t.Helper()
 	events, err := store.ListEvents(50)
@@ -284,10 +284,10 @@ func scanToolActions(t *testing.T, store *audit.Store) (allowed, flagged bool) {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, e := range events {
-		switch e.Action {
-		case "gateway-tool-call-allowed":
+		switch {
+		case e.Action == string(audit.ActionGatewayToolCall) && strings.Contains(e.Details, "reason=allow-list"):
 			allowed = true
-		case string(audit.ActionGatewayToolCallFlagged):
+		case e.Action == string(audit.ActionGatewayToolCallFlagged):
 			flagged = true
 		}
 	}

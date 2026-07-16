@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const guardTestDebounce = 40 * time.Millisecond
@@ -192,6 +193,32 @@ func TestHookConfigGuard_DisabledDoesNotHeal(t *testing.T) {
 	}
 }
 
+func TestHookConfigGuard_ExplicitTeardownStateDoesNotHeal(t *testing.T) {
+	conn, opts, cfgPath := installedCursorConnector(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+
+	if _, err := connector.MarkConnectorInactive(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("mark connector inactive: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip hook block: %v", err)
+	}
+	time.Sleep(20 * guardTestDebounce)
+
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if present {
+		t.Fatal("hook guard reinstalled an explicitly torn-down connector")
+	}
+}
+
 // TestHookConfigGuard_HealAuditRowsCarryConnectorAndSeverity locks in the
 // connector-attribution contract for the self-heal audit rows. Regression
 // guard for the gap where heal rows used the bare LogAction helper so the
@@ -202,20 +229,12 @@ func TestHookConfigGuard_DisabledDoesNotHeal(t *testing.T) {
 // these rows is not the multi-connector feature's to redesign.
 func TestHookConfigGuard_HealAuditRowsCarryConnector(t *testing.T) {
 	conn, opts, cfgPath := installedCursorConnector(t)
-
-	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
-	if err != nil {
-		t.Fatalf("audit.NewStore: %v", err)
-	}
-	if err := store.Init(); err != nil {
-		t.Fatalf("store.Init: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	logger := audit.NewLogger(store)
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	store, logger := testStoreAndLogger(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	guard := NewHookConfigGuard(logger, nil, guardTestDebounce)
+	guard := NewHookConfigGuard(logger, runtime, guardTestDebounce)
 	guard.Start(ctx, conn, opts)
 	defer guard.Stop()
 
@@ -265,6 +284,21 @@ func TestHookConfigGuard_HealAuditRowsCarryConnector(t *testing.T) {
 		if ev.Severity != "INFO" {
 			t.Errorf("%s row severity = %q, want INFO (default; not redesigned)", ev.Action, ev.Severity)
 		}
+	}
+	watcherEvents := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWatcherEvents,
+	)
+	if len(watcherEvents) != 1 {
+		t.Fatalf("generated watcher heal events=%d", len(watcherEvents))
+	}
+	attributes := watcherEvents[0].Attributes()
+	if watcherEvents[0].CanonicalRecord().Source() != observability.SourceWatcher ||
+		watcherEvents[0].CanonicalRecord().Connector() != conn.Name() ||
+		attributes["defenseclaw.connector.source"] != conn.Name() ||
+		attributes["defenseclaw.metric.event_type"] != "hook-heal" ||
+		attributes["defenseclaw.metric.target_type"] != conn.Name() {
+		t.Fatalf("generated watcher heal record=%s/%q attributes=%v",
+			watcherEvents[0].CanonicalRecord().Source(), watcherEvents[0].CanonicalRecord().Connector(), attributes)
 	}
 }
 

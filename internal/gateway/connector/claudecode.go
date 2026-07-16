@@ -24,8 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // ClaudeCodeConnector is the hook-only security surface for Claude
@@ -321,9 +319,10 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 		"OTEL_METRICS_EXPORTER": "otlp",
 		"OTEL_LOGS_EXPORTER":    "otlp",
 	}
-	if redaction.DisableAll() {
-		extra["OTEL_LOG_USER_PROMPTS"] = "1"
-	}
+	// Capture schema-supported prompt facts at the source. The unified v8
+	// router owns destination-specific redaction; a connector-local privacy
+	// switch would irreversibly discard content before routing.
+	extra["OTEL_LOG_USER_PROMPTS"] = "1"
 	profile := HookProfile{
 		Name:                "claudecode",
 		Capabilities:        c.HookCapabilities(opts),
@@ -337,7 +336,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
 			ExtraEnv:           extra,
-			LogUserPrompts:     redaction.DisableAll(),
+			LogUserPrompts:     true,
 		},
 		// Profile-driven callbacks are the canonical shape for
 		// claudecode hook decode / verdict mapping / response. The

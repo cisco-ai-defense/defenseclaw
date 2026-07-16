@@ -104,9 +104,10 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //   - ServiceName / ResourceAttributes: identify the source connector
 //     to downstream OTLP consumers. ResourceAttributes is a flat
 //     map[string]string serialized as "k=v,k=v" per the OTLP spec.
-//   - LogUserPrompts: when true (and DefenseClaw redaction is disabled)
-//     the installer flips the connector-specific prompt-capture switch
-//     (codex `log_user_prompt = true`, claudecode `OTEL_LOG_USER_PROMPTS=1`).
+//   - LogUserPrompts: when true the installer flips the connector-specific
+//     prompt-capture switch (codex `log_user_prompt = true`, claudecode
+//     `OTEL_LOG_USER_PROMPTS=1`). Observability v8 enables this at the source
+//     and applies redaction later, independently for each destination.
 type NativeOTLPSpec struct {
 	Kind               NativeOTLPKind
 	Endpoint           string

@@ -270,13 +270,16 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         assert contract in text
 
 
-def test_bridge_source_tree_does_not_ship_the_v8_runtime_or_migration() -> None:
+def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
     package = ROOT / "cli" / "defenseclaw"
-    assert not (package / "observability" / "v8_migration.py").exists()
-    assert not (package / "observability" / "v8_activation.py").exists()
-    assert "SUPPORTED_CONFIG_VERSIONS = (8,)" not in (package / "config.py").read_text(
-        encoding="utf-8"
-    )
+    assert (package / "observability" / "v8_migration.py").is_file()
+    assert (package / "observability" / "v8_activation.py").is_file()
+
+    migrations = (package / "migrations.py").read_text(encoding="utf-8")
+    assert "SUPPORTED_CONFIG_VERSIONS: tuple[int, ...] = (8,)" in migrations
+    migration_key = migrations.index('"0.8.5",')
+    migration_handler = migrations.index("_migrate_observability_v8,", migration_key)
+    assert migration_key < migration_handler
 
 
 def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
@@ -287,8 +290,9 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
     baselines = policy["published_baselines"]
 
     assert policy["schema_version"] == 2
-    assert baselines[0] == "0.8.3"
+    assert baselines[0] == "0.8.4"
     assert policy["published_baseline_config_versions"] == {
+        "0.8.4": 7,
         "0.8.3": 7,
         "0.8.2": 6,
         "0.8.1": 6,

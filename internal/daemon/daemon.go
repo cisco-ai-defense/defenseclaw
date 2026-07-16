@@ -30,9 +30,10 @@ import (
 )
 
 const (
-	PIDFileName = "gateway.pid"
-	LogFileName = "gateway.log"
-	EnvDaemon   = "DEFENSECLAW_DAEMON"
+	PIDFileName         = "gateway.pid"
+	WatchdogPIDFileName = "watchdog.pid"
+	LogFileName         = "gateway.log"
+	EnvDaemon           = "DEFENSECLAW_DAEMON"
 	// EnvDataDir is set by Daemon.Start in the spawned child's
 	// environment so killStaleProcesses can verify that a candidate
 	// process belongs to THIS data directory before signalling it.
@@ -50,9 +51,10 @@ var gatewayTokenEnvNames = []string{
 }
 
 var (
-	ErrAlreadyRunning = errors.New("daemon is already running")
-	ErrNotRunning     = errors.New("daemon is not running")
-	ErrStopTimeout    = errors.New("daemon did not stop within timeout")
+	ErrAlreadyRunning        = errors.New("daemon is already running")
+	ErrNotRunning            = errors.New("daemon is not running")
+	ErrStopTimeout           = errors.New("daemon did not stop within timeout")
+	ErrUnsafeProcessIdentity = errors.New("daemon process identity file is unsafe")
 )
 
 type Daemon struct {
@@ -257,12 +259,28 @@ func processExecutableDarwin(pid int) (string, error) {
 	return comm, nil
 }
 
+// ValidateStartIdentityFiles performs the identity-file portion of the start
+// preflight without signalling or launching a process. Callers that have an
+// "already running" fast path must invoke this first so a malformed watchdog
+// identity cannot be hidden by a valid gateway PID file.
+func (d *Daemon) ValidateStartIdentityFiles() error {
+	if _, _, err := d.protectedDaemonPIDs(); err != nil {
+		return fmt.Errorf("daemon: refusing to start: %w", err)
+	}
+	return nil
+}
+
 func (d *Daemon) Start(args []string) (int, error) {
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return 0, err
+	}
 	if running, pid := d.IsRunning(); running {
 		return pid, ErrAlreadyRunning
 	}
 
-	d.killStaleProcesses()
+	if err := d.killStaleProcesses(); err != nil {
+		return 0, fmt.Errorf("daemon: refusing to start: %w", err)
+	}
 
 	if err := os.MkdirAll(d.dataDir, 0700); err != nil {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
@@ -485,6 +503,9 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 }
 
 func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return 0, err
+	}
 	if running, _ := d.IsRunning(); running {
 		if err := d.Stop(timeout); err != nil && !errors.Is(err, ErrNotRunning) {
 			return 0, fmt.Errorf("daemon: stop for restart: %w", err)
@@ -508,6 +529,74 @@ func (d *Daemon) readPIDInfo() (pidInfo, error) {
 		return pidInfo{PID: pid}, nil
 	}
 	return info, nil
+}
+
+// protectedDaemonPIDs reads the identities that stale cleanup must never
+// signal. A missing file means there is no tracked process. A file that exists
+// but cannot be read or parsed is materially different: it may still identify
+// a live gateway or watchdog, so Start must fail before opening the log or
+// launching another child.
+func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err error) {
+	info, readErr := d.readPIDInfo()
+	if readErr == nil {
+		if info.PID <= 0 {
+			return 0, 0, fmt.Errorf(
+				"%w: gateway PID file %s contains an invalid PID",
+				ErrUnsafeProcessIdentity,
+				d.pidFile,
+			)
+		}
+		trackedPID = info.PID
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return 0, 0, fmt.Errorf(
+			"%w: gateway PID file %s cannot be trusted: %v",
+			ErrUnsafeProcessIdentity,
+			d.pidFile,
+			readErr,
+		)
+	}
+
+	watchdogPID, readErr = d.readWatchdogPID()
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return 0, 0, fmt.Errorf(
+			"%w: watchdog PID file %s cannot be trusted: %v",
+			ErrUnsafeProcessIdentity,
+			filepath.Join(d.dataDir, WatchdogPIDFileName),
+			readErr,
+		)
+	}
+	return trackedPID, watchdogPID, nil
+}
+
+// readWatchdogPID accepts both the current JSON watchdog fingerprint and the
+// legacy plain integer format. Stale cleanup only needs the PID for exclusion;
+// watchdog stop/status perform the stronger fingerprint verification.
+func (d *Daemon) readWatchdogPID() (int, error) {
+	path := filepath.Join(d.dataDir, WatchdogPIDFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return 0, fmt.Errorf("daemon: watchdog PID file is empty")
+	}
+
+	var record struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &record); err == nil {
+		if record.PID > 0 {
+			return record.PID, nil
+		}
+		return 0, fmt.Errorf("daemon: watchdog PID file contains an invalid PID")
+	}
+
+	pid, err := strconv.Atoi(trimmed)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("daemon: watchdog PID file is malformed")
+	}
+	return pid, nil
 }
 
 func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) error {

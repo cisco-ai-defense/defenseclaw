@@ -266,7 +266,12 @@ class HintBar(_Static):
         kwargs.setdefault("markup", False)
         super().__init__(classes="dc-hint-bar", **kwargs)
         self.engine = engine or HintEngine()
+        self._rendered_hint: str | None = None
         self.refresh_hint(HintState())
 
     def refresh_hint(self, state: HintState, status: StatusModel | None = None) -> None:
-        self.update(self.engine.hint_for(state, status))
+        hint = self.engine.hint_for(state, status)
+        if hint == self._rendered_hint:
+            return
+        self.update(hint)
+        self._rendered_hint = hint

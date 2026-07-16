@@ -42,7 +42,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
-    _probe_splunk_hec,
     _verify_bedrock,
 )
 from defenseclaw.config import (
@@ -248,6 +247,40 @@ class DoctorGuardrailTests(unittest.TestCase):
             gateway_rows[0]["detail"],
             "disabled (reported by sidecar)",
         )
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_check_treats_v8_telemetry_as_mandatory(self, mock_probe):
+        mock_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "gateway": {"state": "running"},
+                    "telemetry": {"state": "disabled"},
+                }
+            ),
+        )
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg._source_config_version = 8
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        telemetry = [
+            row
+            for row in result.checks
+            if row.get("label", "").strip().endswith("telemetry")
+        ]
+        self.assertEqual(len(telemetry), 1)
+        self.assertEqual(telemetry[0]["status"], "warn")
+        self.assertIn("sidecar is stale", telemetry[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_codex_observability_mode_skips_proxy_port_probe(self, mock_probe):
@@ -954,31 +987,6 @@ class AnthropicProbeModelTests(unittest.TestCase):
             os.environ.pop("DEFENSECLAW_ANTHROPIC_PROBE_MODEL", None)
             got = _anthropic_probe_model("")
         self.assertEqual(got, _ANTHROPIC_DEFAULT_PROBE_MODEL)
-
-
-class DoctorObservabilityLabelTests(unittest.TestCase):
-    @patch(
-        "defenseclaw.commands.cmd_doctor._resolve_audit_sink_endpoint_and_token",
-        return_value=("https://splunk.example.com:8088/services/collector/event", "hec-token"),
-    )
-    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_splunk_enterprise_probe_label(self, _mock_probe, _mock_resolve):
-        cfg = SimpleNamespace(data_dir="/tmp/defenseclaw")
-        dest = SimpleNamespace(
-            name="splunk-enterprise-splunk-example-com",
-            kind="splunk_hec",
-            preset_id="splunk-enterprise",
-            endpoint="https://splunk.example.com:8088/services/collector/event",
-        )
-        result = _DoctorResult()
-
-        _probe_splunk_hec(cfg, dest, result)
-
-        self.assertEqual(result.passed, 1)
-        self.assertEqual(
-            result.checks[0]["label"],
-            "splunk-enterprise-splunk-example-com (Splunk Enterprise (HEC))",
-        )
 
 
 class DoctorCacheWriteTests(unittest.TestCase):

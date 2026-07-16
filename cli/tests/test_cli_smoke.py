@@ -18,6 +18,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -28,6 +29,7 @@ from click.testing import CliRunner
 class CliSmokeTests(unittest.TestCase):
     def test_main_import_no_circular_dependency(self):
         import defenseclaw.main as main_mod
+
         self.assertTrue(hasattr(main_mod, "cli"))
 
     def test_top_level_help_works_without_init(self):
@@ -143,23 +145,42 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("No changes were made", result.output)
 
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
+        from defenseclaw.commands.cmd_config import ValidationResult
+        from defenseclaw.logger import Logger
         from defenseclaw.main import cli
 
         runner = CliRunner()
         with runner.isolated_filesystem():
             data_dir = Path(os.getcwd()) / ".defenseclaw"
-            with patch("defenseclaw.config.default_data_path", return_value=data_dir):
+            # The smoke test exercises CLI bootstrap/wiring, not the Go helper
+            # binary (CI builds that in separate contract tests). Keep both
+            # canonical validation seams successful and side-effect free.
+            with (
+                patch("defenseclaw.config.default_data_path", return_value=data_dir),
+                patch(
+                    "defenseclaw.commands.cmd_config.validate_config",
+                    return_value=ValidationResult(),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+                    return_value=SimpleNamespace(destinations=[]),
+                ),
+                patch.object(Logger, "from_config", return_value=Logger.no_runtime()),
+                patch("defenseclaw.observability.v8_writer._validate_candidate"),
+            ):
                 runner.invoke(cli, ["init", "--skip-install"])
                 result = runner.invoke(
                     cli,
-                    ["setup", "splunk", "--o11y", "--access-token", "test-tok",
-                     "--realm", "us1", "--non-interactive"],
+                    ["setup", "splunk", "--o11y", "--access-token", "test-tok", "--realm", "us1", "--non-interactive"],
                 )
             config_exists = (data_dir / "config.yaml").is_file()
+            config_text = (data_dir / "config.yaml").read_text() if config_exists else ""
             audit_db_exists = (data_dir / "audit.db").is_file()
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(config_exists)
+        self.assertIn("config_version: 8", config_text)
+        self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
         self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
 

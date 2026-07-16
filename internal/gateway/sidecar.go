@@ -21,6 +21,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -34,8 +35,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/audit/sinkconfig"
-	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -47,10 +46,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
@@ -62,6 +61,7 @@ var validateManagedGuardianAuthorization = managed.ValidateTrustedFilePath
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	startedAt     time.Time
 	cfg           *config.Config
 	cfgCurrent    atomic.Pointer[config.Config]
 	client        *Client
@@ -70,8 +70,6 @@ type Sidecar struct {
 	logger        *audit.Logger
 	health        *SidecarHealth
 	shell         *sandbox.OpenShell
-	otel          *telemetry.Provider
-	otelFanout    *runtimeOTelFanout
 	notify        *NotificationQueue
 	opa           *policy.Engine
 	hilt          *HILTApprovalManager
@@ -81,48 +79,52 @@ type Sidecar struct {
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
 
-	// ipcRunner is a lazily-injected runner for the local UDS gRPC
-	// server that serves the AVC contract. Started only when
-	// cfg.ManagedIPCEnabled() is true; the sidecar goroutine
-	// short-circuits when nil. Not embedded directly to avoid an
-	// import cycle (gateway ← ipc ← gateway); the CLI layer supplies
-	// a factory during construction.
+	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
+	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
 
-	otelMu             sync.RWMutex
-	webhooksMu         sync.RWMutex
-	aiDiscoveryMu      sync.RWMutex
-	apiMu              sync.RWMutex
-	apiServer          *APIServer
-	proxyMu            sync.RWMutex
-	guardrailProxy     *GuardrailProxy
-	apiRestartCh       chan struct{}
-	watcherRestartCh   chan struct{}
-	guardrailRestartCh chan struct{}
-	aiRestartCh        chan struct{}
-	runCancelMu        sync.Mutex
-	runCancel          context.CancelFunc
+	webhooksMu               sync.RWMutex
+	aiDiscoveryMu            sync.RWMutex
+	apiMu                    sync.RWMutex
+	apiServer                *APIServer
+	proxyMu                  sync.RWMutex
+	guardrailProxy           *GuardrailProxy
+	apiRestartCh             chan struct{}
+	watcherRestartCh         chan struct{}
+	guardrailRestartCh       chan struct{}
+	aiRestartCh              chan struct{}
+	runCancelMu              sync.Mutex
+	runCancel                context.CancelFunc
+	observabilityV8Mu        sync.Mutex
+	observabilityV8          sidecarRuntimeEmitter
+	observabilityV8Lifecycle lifecycleV8Runtime
+	// observabilityV8ConsumersDetached prevents a consumer constructed during
+	// shutdown from republishing capabilities for the retiring owned runtime.
+	observabilityV8ConsumersDetached bool
+	observabilityV8Run               bool
+	// exporterHealthMetric* retains only monotonic, content-free delivery
+	// counters for the active graph generation. It converts runtime health
+	// snapshots into delta exporter-error metrics without resurrecting a global
+	// OTel provider or double-counting the same failed delivery on every tick.
+	exporterHealthMetricMu         sync.Mutex
+	exporterHealthMetricGeneration uint64
+	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
 	alertWg     sync.WaitGroup
 
-	// events is the structured gatewaylog.Writer (gateway.jsonl +
-	// stderr pretty-print). Installed during NewSidecar so every
-	// verdict/judge/lifecycle emission lands here without plumbing
-	// the writer through every call site.
-	events *gatewaylog.Writer
-
 	// judge is the LLM judge instance shared between the proxy lane
 	// (EventRouter.SetJudge) and the hook lane (APIServer.SetHookJudge
 	// in runAPI) so both lanes use one Bifrost client cache and one
 	// verdict cache. nil when guardrail.judge.enabled is false.
-	judge *LLMJudge
+	judgeMu sync.RWMutex
+	judge   *LLMJudge
 
-	// judgeStore is the async judge-body persistence queue.
-	// Non-nil only when guardrail.retain_judge_bodies is on.
-	// Sidecar.Run drains it on shutdown so queued bodies survive
-	// SIGTERM.
+	// judgeStore is the async judge completion queue. It remains active when
+	// guardrail.retain_judge_bodies is off so canonical allow/block/error logs
+	// are policy-independent; its optional body inserter is enabled only when
+	// retention is on. Sidecar.Run drains it on shutdown.
 	judgeStore *JudgeStore
 
 	// judgeBodyStore is the Phase 4 split-out SQLite database
@@ -130,6 +132,14 @@ type Sidecar struct {
 	// close it after the queue drains; the audit.Store keeps
 	// audit_events / activity_events on its own file.
 	judgeBodyStore *audit.JudgeBodyStore
+
+	// Schema-v8 construction opens the forensic store before the canonical
+	// observability runtime can be bound. Retain the content-free readiness
+	// occurrence until the CLI completes that binding; v7 continues to emit it
+	// synchronously from NewSidecar.
+	judgeBodiesReadyMu      sync.Mutex
+	judgeBodiesReadyPending bool
+	judgeBodiesReadyDetails string
 
 	// cmidProviderMu guards cmidProviderInst. The provider is lazily
 	// constructed on first request via ensureCMIDProvider and reused
@@ -154,7 +164,10 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
-func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, otel *telemetry.Provider) (*Sidecar, error) {
+func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell) (*Sidecar, error) {
+	if cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion {
+		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
+	}
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
@@ -166,11 +179,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// events; this one is the process-lifetime fallback.
 	agentInstanceID := uuid.New().String()
 	audit.SetProcessAgentInstanceID(agentInstanceID)
-	// Mirror the same UUID to gatewaylog so the Writer choke point
-	// can stamp sidecar_instance_id on events that were constructed
-	// outside a request context (boot/shutdown/lifecycle). Kept in
-	// lockstep with audit.SetProcessAgentInstanceID — the two setters
-	// live in separate packages only to avoid an import cycle.
+	// Keep the compatibility identity registry aligned because correlation
+	// helpers and imported event adapters still read it; production delivery is
+	// owned by the v8 runtime rather than the compatibility identity registry.
 	gatewaylog.SetSidecarInstanceID(agentInstanceID)
 	gatewaylog.SetAgentWatchContext(gatewaylog.AgentWatchContext{
 		TenantID:        cfg.TenantID,
@@ -180,7 +191,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		DiscoverySource: cfg.DiscoverySource,
 	})
 
-	// Seed run_id so every audit row / gateway.jsonl event / OTel
+	// Seed run_id so every audit row and generated observability record
 	// record in this sidecar run carries a non-empty correlation
 	// key. Precedence:
 	//   1. DEFENSECLAW_RUN_ID from the env (set by the daemon
@@ -199,24 +210,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		_ = os.Setenv("DEFENSECLAW_RUN_ID", runID)
 	}
 	gatewaylog.SetProcessRunID(runID)
-	if otel != nil {
-		otel.SetAgentInstanceID(agentInstanceID)
-	}
-
 	// Persist the retention flag before any goroutines start so the
 	// very first judge invocation sees the operator-configured value
 	// (otherwise the default atomic would race with early traffic).
 	//
-	// Phase 3 flips the default to on. DEFENSECLAW_PERSIST_JUDGE is an
-	// operator-facing kill-switch for environments with strict storage
-	// or privacy constraints: setting it to 0/false/no forces retention
-	// off regardless of config.yaml. Any other value (or leaving it
-	// unset) respects the config/default.
+	// Upgrade has already materialized any legacy environment override. Runtime
+	// retention is controlled only by committed v8 policy.
 	retainJudge := cfg.Guardrail.RetainJudgeBodies
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_PERSIST_JUDGE"))) {
-	case "0", "false", "no", "off":
-		retainJudge = false
-	}
 	SetRetainJudgeBodies(retainJudge)
 
 	// In standalone sandbox mode the veth link is point-to-point;
@@ -255,10 +255,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// firing regardless — see osToastSenderFor.
 	osNotifier := notifier.NewWithSender(cfg.Notifications, osToastSenderFor(cfg))
 
-	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
+	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove)
 	router.notify = notify
 	router.SetGuardrailConfig(&cfg.Guardrail)
-	hilt := NewHILTApprovalManager(client, logger, otel)
+	hilt := NewHILTApprovalManager(client)
 	hilt.SetNotifier(osNotifier)
 	router.SetHILTApprovalManager(hilt)
 	// Seed defaults for the observability contract so every span /
@@ -299,86 +299,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		router.SetJudge(hookJudge)
 	}
 
+	previousClientOnEvent := client.OnEvent
 	client.OnEvent = router.Route
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
-
-	// DEFENSECLAW_JSONL_DISABLE lets operators opt the structured
-	// JSONL tier out at process start without editing config.yaml —
-	// useful for noisy dev loops, ephemeral CI debug shells, and
-	// privacy-sensitive environments where the pretty stderr stream
-	// is enough. An empty JSONLPath disables the file tier cleanly;
-	// pretty logging to stderr and OTel fan-out continue unchanged.
-	// See docs/OBSERVABILITY.md#kill-switch for runbook guidance.
-	jsonlPath := filepath.Join(cfg.DataDir, "gateway.jsonl")
-	if jsonlKillSwitchEnabled(os.Getenv("DEFENSECLAW_JSONL_DISABLE")) {
-		fmt.Fprintln(os.Stderr,
-			"[sidecar] DEFENSECLAW_JSONL_DISABLE set — gateway.jsonl tier disabled (pretty + OTel still active)")
-		jsonlPath = ""
-	}
-	// v7 strict schema validation: the validator runs inside
-	// gatewaylog.Writer.Emit and drops any event that fails the
-	// envelope schema, surfacing a single EventError per drop so
-	// operators are never blind to contract regressions. Operators
-	// can disable the gate with DEFENSECLAW_SCHEMA_VALIDATION=off
-	// (breakglass for when a stale binary emits a new field the
-	// shipped schema doesn't know about). A failure to load the
-	// embedded schemas is *not* fatal: we fall back to a no-op
-	// validator and log the error so the sidecar still serves
-	// traffic — the Prometheus counter stays at zero, which is a
-	// visible signal that validation is off.
-	var schemaValidator *gatewaylog.Validator
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SCHEMA_VALIDATION"))) {
-	case "off", "false", "0", "disabled":
-		fmt.Fprintln(os.Stderr,
-			"[sidecar] DEFENSECLAW_SCHEMA_VALIDATION=off — runtime schema gate disabled")
-	default:
-		sv, vErr := gatewaylog.NewDefaultValidator()
-		if vErr != nil {
-			fmt.Fprintf(os.Stderr,
-				"[sidecar] schema validator init failed (%v) — runtime schema gate disabled\n", vErr)
-		} else {
-			schemaValidator = sv
-		}
-	}
-
-	events, err := gatewaylog.New(gatewaylog.Config{
-		JSONLPath: jsonlPath,
-		Pretty:    os.Stderr,
-		Compress:  true,
-		Validator: schemaValidator,
-	})
-	if err != nil {
-		// Release the alertCtx we just acquired so we don't leak a
-		// goroutine-waiting context when boot fails before Run() picks
-		// up alertCancel.
-		alertCancel()
-		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
-	}
-	otelFanout := newRuntimeOTelFanout(otel)
-	// Mirror every structured event onto the OTel pipeline so
-	// operators with an OTLP collector already deployed pick up
-	// verdicts / judge latency / errors for free — no extra
-	// config required when telemetry.enabled is true.
-	events.WithFanoutContext(otelFanout.EmitGatewayEventWithContext)
-	// Route schema-violation drops into the Prometheus counter so operators can
-	// alert on the metric directly without scraping gateway.jsonl for EventError
-	// rows. The runtime fanout no-ops while telemetry is disabled and picks up
-	// provider swaps from config reload.
-	events.OnSchemaViolation(otelFanout.RecordSchemaViolation)
-	if logger != nil {
-		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
-	}
-	SetEventWriter(events)
-	// Endpoint-inventory device anchor: stamp discovery-inventory
-	// events (connector/mcp/agent) with the same device.id the
-	// telemetry resource carries so AI Defense can bind them to this
-	// endpoint whether it keys on the resource or the body.
-	SetEndpointInventoryAnchor(client.device.DeviceID)
-	// Layer 3 egress observability: wire the OTel provider so
-	// RecordEgress fires alongside every EventEgress emission.
-	// Resets to no-op on shutdown via the matching SetEventWriter(nil) path.
-	SetEgressTelemetry(otel)
 
 	var webhooks *WebhookDispatcher
 	// Construct when there are global webhooks OR any per-connector
@@ -387,158 +311,160 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
 		webhooks = NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 		if webhooks != nil {
-			webhooks.BindObservability(otel)
 			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d global endpoints, %d per-connector overrides)\n",
 				len(webhooks.endpoints), len(webhooks.connectorOverride))
 		}
 	}
-	if shell != nil {
-		shell.BindObservability(otel, events)
+	if shell != nil && logger != nil {
+		shell.BindObservabilityV8(logger)
 	}
 
-	// Phase 1: bridge audit.Logger events into gateway.jsonl so every
-	// scan result, watcher transition, and enforcement action lands
-	// in the single structured stream the TUI/SIEM consume. We install
-	// the bridge unconditionally — it is a cheap fanout and the
-	// writer itself is the single choke point for JSONL retention.
-	if logger != nil {
-		logger.SetStructuredEmitter(newAuditBridge(events))
-		logger.SetGatewayLogWriter(events)
-	}
-
-	// Phase 3: persist judge bodies to the local SQLite audit store
-	// AND emit a structured audit event so every configured sink
-	// (Splunk HEC, OTLP logs, webhook JSONL) sees a redacted summary.
-	//
-	// Retention defaults to on (see viper.SetDefault); operators who
-	// opt out via config or DEFENSECLAW_PERSIST_JUDGE=0 get neither the
-	// SQLite row nor the audit fan-out. The raw body is only touched
-	// inside this process — emitJudge redacts RawResponse before it
-	// flows into gateway.jsonl / sinks, and the InsertJudgeResponse
-	// body stays on disk under the same ACLs as the rest of the data
-	// directory.
 	var (
-		judgeStore     *JudgeStore
-		judgeBodyStore *audit.JudgeBodyStore
+		judgeStore              *JudgeStore
+		judgeBodyStore          *audit.JudgeBodyStore
+		judgeBodiesReadyPending bool
+		judgeBodiesReadyDetails string
 	)
-	if retainJudge && store != nil {
-		// Resolve the queue depth. Precedence: env override > config
-		// value > built-in default. The env override mirrors the
-		// DEFENSECLAW_PERSIST_JUDGE pattern so operators have a
-		// no-rebuild knob during incident response.
-		queueDepth := cfg.Guardrail.JudgePersistQueueDepth
-		if v := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE")); v != "" {
-			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-				queueDepth = parsed
-			}
+	cleanupFailedConstruction := func() {
+		alertCancel()
+		client.OnEvent = previousClientOnEvent
+		if shell != nil {
+			shell.BindObservabilityV8(nil)
 		}
-		// Phase 4 split: judge bodies live in a dedicated SQLite
-		// file (~/.defenseclaw/judge_bodies.db by default). Falling
-		// back to audit.db on open failure keeps the sidecar
-		// running — better to share the write lock than to drop
-		// judge rows entirely. The fallback is announced via the
-		// structured audit logger (`gateway.judge_bodies.fallback`)
-		// so operators see it in the same Splunk/OTLP stream that
-		// surfaces the `defenseclaw.sqlite.busy_retries` regression
-		// the fallback re-enables.
+		if webhooks != nil {
+			webhooks.Close()
+		}
+		SetJudgeResponseStore(nil)
+		if judgeStore != nil {
+			_ = shutdownJudgeStore(judgeStore)
+		}
+		if judgeBodyStore != nil {
+			_ = judgeBodyStore.Close()
+		}
+	}
+
+	// Phase 3: always enqueue structured judge completions so every configured
+	// sink sees the canonical summary. Raw body persistence is a separate,
+	// optional side effect controlled by retain_judge_bodies.
+	//
+	// Retention defaults to on (see viper.SetDefault); operators who opt out via
+	// config or DEFENSECLAW_PERSIST_JUDGE=0 get no judge_responses body row but
+	// retain the canonical completion. The raw body is only touched inside this
+	// process; route-specific central projection owns export redaction, and the
+	// InsertJudgeResponse body stays on disk under the data-directory ACLs.
+	queueDepth := cfg.Guardrail.JudgePersistQueueDepth
+	if v := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE")); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			queueDepth = parsed
+		}
+	}
+	legacyJudgeBodies := false
+	if store != nil {
+		var legacyErr error
+		legacyJudgeBodies, legacyErr = audit.HasLegacyJudgeBodies(context.Background(), store)
+		if legacyErr != nil {
+			cleanupFailedConstruction()
+			return nil, fmt.Errorf("inspect legacy judge-body cutover work: %w", legacyErr)
+		}
+	}
+	if (retainJudge || legacyJudgeBodies) && store != nil {
+		// V8 cutover: judge bodies live exclusively in the dedicated
+		// SQLite file. The cutover constructor blocks reads/writes until
+		// every legacy row has committed and verified by stable ID. Any
+		// open/copy/verification failure aborts startup; audit.db is never
+		// used as a raw-body fallback.
 		bodyDBPath := strings.TrimSpace(cfg.JudgeBodiesDB)
 		if bodyDBPath == "" {
 			bodyDBPath = filepath.Join(cfg.DataDir, config.DefaultJudgeBodiesDBName)
 		}
-		var inserter JudgeBodyInserter
-		if bs, openErr := audit.NewJudgeBodyStore(bodyDBPath); openErr == nil {
-			judgeBodyStore = bs
-			inserter = &judgeBodyStoreInserter{s: bs}
-			if logger != nil {
-				_ = logger.LogEvent(audit.Event{
-					Action:   string(audit.ActionGatewayJudgeBodiesReady),
-					Actor:    "defenseclaw-gateway",
-					Severity: "INFO",
-					Details:  "path=" + bodyDBPath,
-				})
-			}
-		} else {
-			if logger != nil {
-				_ = logger.LogEvent(audit.Event{
-					Action:   string(audit.ActionGatewayJudgeBodiesFallback),
-					Actor:    "defenseclaw-gateway",
-					Severity: "ERROR",
-					Details: fmt.Sprintf(
-						"path=%s error=%v fallback=audit.db",
-						bodyDBPath, openErr,
-					),
-				})
-			} else {
-				// Boot-time fallback: logger isn't wired yet. Stderr
-				// is the best we have until the sidecar is fully up.
-				fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db open failed, falling back to audit.db: %v\n", openErr)
-			}
-			inserter = &auditStoreInserter{s: store}
+		bs, openErr := openAuthoritativeJudgeBodyStore(context.Background(), bodyDBPath, store)
+		if openErr != nil {
+			cleanupFailedConstruction()
+			return nil, openErr
 		}
-		// Async judge persistence: rows queue on a buffered channel
-		// and flush in batched transactions on a dedicated worker.
-		// See internal/gateway/judge_store.go for the design notes;
-		// the legacy SetJudgePersistor synchronous closure that
-		// used to live here is gone — its dropped writes under
-		// burst load were the motivating bug for this fix.
-		judgeStore = NewJudgeStore(inserter, logger, queueDepth)
-		SetJudgeResponseStore(judgeStore)
+		judgeBodyStore = bs
+		judgeBodyStore.BindSQLiteBusyObservabilityV8(logger)
+		judgeBodiesReadyDetails = "path=" + bodyDBPath
+		judgeBodiesReadyPending = deferJudgeBodiesReady(logger)
 	}
+	var bodyInserter JudgeBodyInserter
+	if retainJudge && judgeBodyStore != nil {
+		bodyInserter = &judgeBodyStoreInserter{s: judgeBodyStore}
+	}
+	// One bounded queue owns completion ordering in both retention modes. With
+	// bodyInserter nil it emits canonical summaries only; with an inserter it
+	// attempts the body transaction first and then emits the same summary.
+	judgeStore = NewJudgeStore(bodyInserter, logger, queueDepth)
+	SetJudgeResponseStore(judgeStore)
 
-	// Boot path — no request context exists yet. Writer.Emit stamps
-	// sidecar_instance_id; run_id is inherited from the env var via
-	// stampEventCorrelation.
-	emitLifecycle(context.Background(), "gateway", "init", map[string]string{
-		"host":         cfg.Gateway.Host,
-		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
-		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
-	})
-
-	aiDiscovery, err := inventory.NewContinuousDiscoveryService(cfg, otel, events)
+	aiDiscovery, err := inventory.NewContinuousDiscoveryService(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] ai discovery init failed: %v\n", err)
-		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
 	}
-	// managed_enterprise: ship the connector / MCP endpoint inventory
-	// to AI Defense. Wire it onto the scan cadence (when the discovery
-	// service is running) and emit an initial snapshot at boot so the
-	// cloud sees the endpoint immediately, before the first scan tick.
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		inventoryEmit := makeEndpointInventoryEmitter(cfg)
-		if aiDiscovery != nil {
-			aiDiscovery.SetManagedInventoryEmitHook(inventoryEmit)
-		}
-		inventoryEmit(context.Background())
-	}
-
 	sidecar := &Sidecar{
-		cfg:                cfg,
-		client:             client,
-		router:             router,
-		store:              store,
-		logger:             logger,
-		health:             NewSidecarHealth(),
-		shell:              shell,
-		otel:               otel,
-		otelFanout:         otelFanout,
-		notify:             notify,
-		webhooks:           webhooks,
-		hilt:               hilt,
-		aiDiscovery:        aiDiscovery,
-		osNotifier:         osNotifier,
-		apiRestartCh:       make(chan struct{}, 1),
-		watcherRestartCh:   make(chan struct{}, 1),
-		guardrailRestartCh: make(chan struct{}, 1),
-		aiRestartCh:        make(chan struct{}, 1),
-		alertCtx:           alertCtx,
-		alertCancel:        alertCancel,
-		events:             events,
-		judge:              hookJudge,
-		judgeStore:         judgeStore,
-		judgeBodyStore:     judgeBodyStore,
+		startedAt:               time.Now(),
+		cfg:                     cfg,
+		client:                  client,
+		store:                   store,
+		logger:                  logger,
+		health:                  NewSidecarHealth(),
+		shell:                   shell,
+		notify:                  notify,
+		webhooks:                webhooks,
+		hilt:                    hilt,
+		aiDiscovery:             aiDiscovery,
+		osNotifier:              osNotifier,
+		apiRestartCh:            make(chan struct{}, 1),
+		watcherRestartCh:        make(chan struct{}, 1),
+		guardrailRestartCh:      make(chan struct{}, 1),
+		aiRestartCh:             make(chan struct{}, 1),
+		alertCtx:                alertCtx,
+		alertCancel:             alertCancel,
+		judge:                   hookJudge,
+		judgeStore:              judgeStore,
+		judgeBodyStore:          judgeBodyStore,
+		judgeBodiesReadyPending: judgeBodiesReadyPending,
+		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
 	}
+	sidecar.setEventRouter(router)
 	sidecar.publishConfig(cfg)
+	// Publish the process-global managed carve-out only after every fallible
+	// constructor has succeeded. A rejected Sidecar candidate must not change
+	// redaction behavior for an already-running embedder or a later retry.
+	setManagedEnterpriseRedactionPosture(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	return sidecar, nil
+}
+
+func deferJudgeBodiesReady(logger *audit.Logger) bool {
+	return logger != nil
+}
+
+// EmitPostBootstrapPlatformHealth publishes construction-time health facts
+// that schema v8 must not emit before its canonical runtime is authoritative.
+// It is idempotent and clears the pending occurrence only after persistence.
+func (s *Sidecar) EmitPostBootstrapPlatformHealth() error {
+	if s == nil {
+		return fmt.Errorf("sidecar: post-bootstrap platform health is unavailable")
+	}
+	s.judgeBodiesReadyMu.Lock()
+	defer s.judgeBodiesReadyMu.Unlock()
+	if !s.judgeBodiesReadyPending {
+		return nil
+	}
+	if s.logger == nil || s.observabilityV8Emitter() == nil {
+		return fmt.Errorf("sidecar: post-bootstrap platform health runtime is unavailable")
+	}
+	if err := s.logger.LogEvent(audit.Event{
+		Action:   string(audit.ActionGatewayJudgeBodiesReady),
+		Actor:    "defenseclaw-gateway",
+		Severity: "INFO",
+		Details:  s.judgeBodiesReadyDetails,
+	}); err != nil {
+		return err
+	}
+	s.judgeBodiesReadyPending = false
+	s.judgeBodiesReadyDetails = ""
+	return nil
 }
 
 func (s *Sidecar) currentConfig() *config.Config {
@@ -551,6 +477,24 @@ func (s *Sidecar) currentConfig() *config.Config {
 	return s.cfg
 }
 
+func (s *Sidecar) sharedJudge() *LLMJudge {
+	if s == nil {
+		return nil
+	}
+	s.judgeMu.RLock()
+	defer s.judgeMu.RUnlock()
+	return s.judge
+}
+
+func (s *Sidecar) setSharedJudge(judge *LLMJudge) {
+	if s == nil {
+		return
+	}
+	s.judgeMu.Lock()
+	s.judge = judge
+	s.judgeMu.Unlock()
+}
+
 func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 	if s == nil || cfg == nil {
 		return nil
@@ -558,26 +502,6 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 	snapshot := cloneConfig(cfg)
 	s.cfgCurrent.Store(snapshot)
 	return snapshot
-}
-
-func (s *Sidecar) otelSnapshot() *telemetry.Provider {
-	if s == nil {
-		return nil
-	}
-	s.otelMu.RLock()
-	defer s.otelMu.RUnlock()
-	return s.otel
-}
-
-func (s *Sidecar) swapOTel(next *telemetry.Provider) *telemetry.Provider {
-	if s == nil {
-		return nil
-	}
-	s.otelMu.Lock()
-	defer s.otelMu.Unlock()
-	previous := s.otel
-	s.otel = next
-	return previous
 }
 
 func (s *Sidecar) webhooksSnapshot() *WebhookDispatcher {
@@ -620,26 +544,61 @@ func (s *Sidecar) swapAIDiscovery(next *inventory.ContinuousDiscoveryService) *i
 	return previous
 }
 
+// claimAIDiscoveryRun snapshots and claims the current service under the same
+// lock used by swapAIDiscovery. A coalesced reload therefore cannot strand an
+// intermediate generation between the pointer snapshot and ClaimRun.
+func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, func(context.Context) error, bool) {
+	if s == nil {
+		return nil, nil, false
+	}
+	s.aiDiscoveryMu.Lock()
+	defer s.aiDiscoveryMu.Unlock()
+	service := s.aiDiscovery
+	if service == nil {
+		return nil, nil, false
+	}
+	runner, ok := service.ClaimRun()
+	return service, runner, ok
+}
+
 // Run starts all subsystems as independent goroutines. Each subsystem runs
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
-func (s *Sidecar) Run(ctx context.Context) error {
+func (s *Sidecar) Run(ctx context.Context) (runErr error) {
+	if err := s.beginObservabilityV8Run(); err != nil {
+		return err
+	}
+	// Bootstrap-owned workers must retire on every return path, including
+	// failures before the normal shutdown block is reached. The explicit normal
+	// close below preserves close-before-store ordering; this deferred call is
+	// idempotent and covers startup lifecycle/token/watcher failures.
+	defer func() {
+		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
+	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
+	// deliberately binds its generation-owned runtime afterward. Publish the
+	// first complete connector/MCP snapshot immediately after that binding, then
+	// retain the same callback for each managed discovery scan.
+	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
+		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+			discovery.SetManagedInventoryEmitHook(inventoryEmit)
+		}
+		inventoryEmit(runCtx)
+	}
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.currentConfig().Gateway.AutoApprove, s.currentConfig().Gateway.Watcher.Enabled, s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
-	emitLifecycle(runCtx, "sidecar", "start", map[string]string{
-		"run_id":       runID,
-		"auto_approve": fmt.Sprintf("%v", s.currentConfig().Gateway.AutoApprove),
-		"watcher":      fmt.Sprintf("%v", s.currentConfig().Gateway.Watcher.Enabled),
-		"api_port":     fmt.Sprintf("%d", s.currentConfig().Gateway.APIPort),
-		"guardrail":    fmt.Sprintf("%v", s.currentConfig().Guardrail.Enabled),
-	})
-	_ = s.logger.LogAction(string(audit.ActionSidecarStart), "", "starting all subsystems")
+	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
+		return err
+	}
 
 	if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.Model == "" &&
 		proxyShouldBindForConfiguredConnector(s.currentConfig()) {
@@ -667,14 +626,11 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.currentConfig().PolicyDir)
-				emitLifecycle(runCtx, "opa", "ready", map[string]string{"policy_dir": s.currentConfig().PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
-				emitError(runCtx, "opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
-			emitError(runCtx, "opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -701,7 +657,6 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	apiToken, tokErr := s.ensureGatewayTokenSynthesis()
 	if tokErr != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] FATAL: failed to synthesize gateway token: %v\n", tokErr)
-		emitError(runCtx, "sidecar", "token-synthesis-failed", "fatal", tokErr)
 		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
 	}
 	inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
@@ -715,14 +670,51 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	if strings.TrimSpace(configPath) == "" {
 		configPath = config.ConfigPath()
 	}
-	s.configMgr = NewConfigManager(configPath, s.currentConfig(), s.logger, s.health, s.applyConfigReload)
+	s.configMgr = newConfigManagerWithSnapshot(
+		configPath,
+		s.currentConfig(),
+		s.logger,
+		s.health,
+		s.observabilityV8ActivePlanDigest(),
+		s.applyConfigReloadSnapshot,
+	)
+	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
+	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	s.configMgr.bindObservabilityV8(metricRuntime)
+	configStartupReady := make(chan error, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.configMgr.Run(runCtx); err != nil && runCtx.Err() == nil {
+		err := s.configMgr.runWithStartupReconcile(runCtx, configStartupReady)
+		if err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] config manager exited with error: %v\n", err)
 			errCh <- err
 		}
+	}()
+	if err := <-configStartupReady; err != nil {
+		runCancel()
+		wg.Wait()
+		return fmt.Errorf("sidecar: reconcile observability v8 config: %w", err)
+	}
+
+	// The updater cannot instantiate the target release's logger. It leaves a
+	// private, terminal receipt after health verification; this worker waits for
+	// API/config/telemetry readiness and admits that receipt through the one
+	// canonical mandatory compliance pipeline. Pending receipts are never
+	// interpreted as success.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runUpgradeReceiptConsumer(runCtx)
+	}()
+
+	// Process and mandatory-SQLite capacity metrics are generated lazily under
+	// the active v8 graph. If every corresponding family is disabled, neither
+	// runtime.ReadMemStats nor SQLite PRAGMA work occurs.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
 	}()
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
@@ -794,16 +786,6 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			}
 		}()
 	}
-
-	// Report telemetry (OTel) health — not a goroutine, just state
-	s.reportTelemetryHealth()
-	if tel := s.otelSnapshot(); tel != nil {
-		tel.EmitStartupSpan(runCtx)
-	}
-
-	// Report aggregate audit-sink health — not a goroutine, just state
-	s.reportSinksHealth()
-
 	// Report sandbox health — only present when standalone mode is active
 	s.reportSandboxHealth(runCtx)
 
@@ -816,14 +798,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertWg.Wait()
 
 	// Shutdown — ctx is already Done, but still carries correlation values.
-	emitLifecycle(runCtx, "gateway", "stop", nil)
-	_ = s.logger.LogAction(string(audit.ActionSidecarStop), "", "all subsystems stopped")
+	stopObservabilityErr := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStop)
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		webhooks.Close()
 	}
-	// Drain the async judge-persistence queue BEFORE the audit DB
-	// handle is closed: any rows still buffered after a SIGTERM
-	// must land in SQLite or they are lost forever. Shutdown
+	// Drain the async judge completion queue BEFORE the audit DB handle is
+	// closed: canonical summaries and any enabled body rows still buffered after
+	// SIGTERM must be processed. Shutdown
 	// bounds the wait to judgePersistShutdownTimeout (5s) so a
 	// pathological DB doesn't wedge the process; drops still
 	// surface as defenseclaw.judge.persist.drops with
@@ -833,7 +814,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		// Detach from the global so any post-drain emit path sees a
 		// nil store instead of racing the worker.
 		SetJudgeResponseStore(nil)
-		if err := s.judgeStore.Shutdown(runCtx); err != nil {
+		if err := shutdownJudgeStore(s.judgeStore); err != nil {
 			if s.logger != nil {
 				_ = s.logger.LogEvent(audit.Event{
 					Action:   string(audit.ActionGatewayJudgeStoreDrainTimeout),
@@ -886,33 +867,35 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			}
 		}
 	}
+	// Keep the canonical runtime authoritative through judge-queue drain and
+	// forensic-store close so their terminal health failures can persist without
+	// a legacy fallback. Retire it immediately afterward, while audit.db is still
+	// open; the deferred close above remains the abnormal-return safety net.
+	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
+		return err
+	}
 	s.logger.Close()
 	_ = s.client.Close()
-	if s.events != nil {
-		// Detach the audit bridge BEFORE closing the writer so any
-		// final audit.Logger emission during shutdown either goes
-		// through cleanly or is dropped — never writes into a closed
-		// lumberjack handle.
-		if s.logger != nil {
-			s.logger.SetStructuredEmitter(nil)
-		}
-		_ = s.events.Close()
-		SetEventWriter(nil)
-		SetEgressTelemetry(nil)
-		SetJudgePersistor(nil)
-	}
-	if tel := s.otelSnapshot(); tel != nil {
-		_ = tel.Shutdown(context.Background())
-	}
-	telemetry.ActivateProvider(nil)
-
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
 	case err := <-errCh:
 		return err
 	default:
+		return stopObservabilityErr
+	}
+}
+
+// shutdownJudgeStore gives the persistence worker its own bounded drain
+// budget. Sidecar.Run reaches this point only after runCtx has been cancelled;
+// passing that lifecycle context to Shutdown would therefore abort the drain
+// immediately and could lose queued raw judge bodies during normal shutdown.
+func shutdownJudgeStore(store *JudgeStore) error {
+	if store == nil {
 		return nil
 	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), judgePersistShutdownTimeout)
+	defer cancel()
+	return store.Shutdown(drainCtx)
 }
 
 func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiToken string) {
@@ -986,12 +969,16 @@ func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-cha
 		select {
 		case <-ctx.Done():
 			cancel()
-			<-done
+			if err := <-done; err != nil && !isContextTermination(err) {
+				return err
+			}
 			return ctx.Err()
 		case <-restart:
 			fmt.Fprintf(os.Stderr, "[sidecar] restarting %s after config reload\n", name)
 			cancel()
-			<-done
+			if err := <-done; err != nil && !isContextTermination(err) {
+				return err
+			}
 			continue
 		case err := <-done:
 			cancel()
@@ -1001,6 +988,10 @@ func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-cha
 			return err
 		}
 	}
+}
+
+func isContextTermination(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func signalRestart(ch chan struct{}) {
@@ -1122,8 +1113,41 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
 	return judge
 }
 
-func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff) error {
-	if configReloadMode(newCfg) == "restart" && !onlyConfigReloadModeChanged(oldCfg, newCfg) {
+func (s *Sidecar) applyConfigReloadSnapshot(
+	ctx context.Context,
+	oldCfg, newCfg *config.Config,
+	diff ConfigDiff,
+	source configReloadSource,
+) error {
+	if oldCfg == nil || newCfg == nil || oldCfg.ConfigVersion != config.ObservabilityV8ConfigVersion ||
+		newCfg.ConfigVersion != config.ObservabilityV8ConfigVersion {
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+	}
+	v8PlanChanged := false
+	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
+		source.compiledV8 == nil || source.compiledV8.Plan == nil {
+		return fmt.Errorf("config reload schema v8 requires the validated source snapshot")
+	}
+	compiledLocal := source.compiledV8.Plan.Snapshot().Local
+	if source.compiledV8.DataDir != newCfg.DataDir ||
+		compiledLocal.Path != newCfg.AuditDB ||
+		compiledLocal.JudgeBodiesPath != newCfg.JudgeBodiesDB {
+		return fmt.Errorf("config reload schema v8 candidate does not match its compiled local paths")
+	}
+	activePlan := s.observabilityV8ActivePlan()
+	if activePlan == nil {
+		return fmt.Errorf("config reload schema v8 has no active owned runtime graph")
+	}
+	candidatePlan, candidateChanged, err := sidecarObservabilityV8ManagedReloadCandidate(
+		source.compiledV8, newCfg, activePlan, source.raw,
+	)
+	if err != nil {
+		return fmt.Errorf("config reload observability v8 managed destination: %w", err)
+	}
+	v8PlanChanged = candidateChanged
+	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
+		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
+	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange {
 		if s == nil || s.currentConfig() == nil || newCfg == nil {
 			return nil
 		}
@@ -1151,10 +1175,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	guardrailRestart := guardrailNeedsRestart(oldCfg, newCfg)
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
-	otelReload := otelNeedsReload(oldCfg, newCfg)
-	auditSinksReload := auditSinksNeedReload(oldCfg, newCfg)
-	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || otelReload
-	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || otelReload
+	watcherRestart := watcherNeedsRestart(oldCfg, newCfg)
+	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg)
 	rulePackReload := rulePackNeedsReload(oldCfg, newCfg)
 	judgeReload := judgeNeedsReload(oldCfg, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
@@ -1167,44 +1189,20 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		next.Gateway.Token = current.Gateway.Token
 	}
 
-	var nextOTel *telemetry.Provider
-	if otelReload {
-		p, err := s.buildReloadOTelProvider(ctx, &next)
-		if err != nil {
-			return err
-		}
-		nextOTel = p
-	}
-
-	var nextSinks *sinks.Manager
-	if auditSinksReload {
-		mgr, err := sinkconfig.BuildAuditSinks(next.AuditSinks, next.Observability, version.Current().BinaryVersion)
-		if err != nil {
-			if mgr != nil {
-				_ = mgr.Close()
-			}
-			if nextOTel != nil {
-				_ = nextOTel.Shutdown(context.Background())
-			}
-			return fmt.Errorf("config reload audit sinks: %w", err)
-		}
-		nextSinks = mgr
-	}
-
 	var nextAIDiscovery *inventory.ContinuousDiscoveryService
-	if aiRestart {
-		tel := s.otelSnapshot()
-		if otelReload {
-			tel = nextOTel
+	preparedCommitted := false
+	defer func() {
+		if preparedCommitted {
+			return
 		}
-		svc, err := inventory.NewContinuousDiscoveryService(&next, tel, s.events)
+		if nextAIDiscovery != nil {
+			_, _ = nextAIDiscovery.CloseIfNeverStarted()
+		}
+	}()
+
+	if aiRestart {
+		svc, err := inventory.NewContinuousDiscoveryService(&next)
 		if err != nil {
-			if nextSinks != nil {
-				_ = nextSinks.Close()
-			}
-			if nextOTel != nil {
-				_ = nextOTel.Shutdown(context.Background())
-			}
 			return fmt.Errorf("config reload ai_discovery: %w", err)
 		}
 		nextAIDiscovery = svc
@@ -1231,27 +1229,42 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	if aiRestart && nextAIDiscovery != nil && strings.TrimSpace(next.Gateway.Token) == "" {
 		apiToken, err := s.ensureGatewayTokenSynthesis()
 		if err != nil {
-			if nextSinks != nil {
-				_ = nextSinks.Close()
-			}
-			if nextOTel != nil {
-				_ = nextOTel.Shutdown(context.Background())
-			}
 			return fmt.Errorf("config reload application protection gateway token: %w", err)
 		}
 		next.Gateway.Token = apiToken
 	}
 
-	redaction.SetDisableAll(next.Privacy.DisableRedaction)
-	// Keep the managed_enterprise agent-reason carve-out consistent across
-	// hot reloads (mirrors internal/cli/root.go applyPrivacyConfig).
+	// Resolve the managed posture before the v8 commit boundary without
+	// mutating process-global state. The actual toggles are applied only after
+	// the candidate runtime graph has passed its canaries and committed.
 	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
-	redaction.SetAgentReasonRedactionDisabled(nextManagedEnterprise)
-	// Keep the cloud-controlled per-inspection redaction gate consistent
-	// across hot reloads too.
-	SetManagedEnterpriseActive(nextManagedEnterprise)
+	// The v8 runtime graph is the first mutation and the commit boundary. Its
+	// reload builds and canary-validates the complete candidate off-path, then
+	// atomically publishes it. Everything below is deliberately infallible, so
+	// a rejected graph leaves both the prior graph and Config authoritative.
+	if v8PlanChanged {
+		s.observabilityV8Mu.Lock()
+		owner, ok := s.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+		s.observabilityV8Mu.Unlock()
+		if !ok || owner == nil {
+			return fmt.Errorf("config reload observability v8: active runtime is unavailable")
+		}
+		if _, err := owner.reload(ctx, candidatePlan, owner.retainJudgeBodies); err != nil {
+			return newSidecarObservabilityV8BootstrapError(
+				sidecarObservabilityV8BootstrapReload,
+				err,
+			)
+		}
+	}
+
+	// Canonical v8 redaction is selected per destination, so there is no
+	// process-wide privacy kill switch to mutate on reload. Keep only the
+	// managed-enterprise local-agent carve-out and cloud-controlled
+	// per-inspection redaction gate in sync with the committed deployment mode.
+	setManagedEnterpriseRedactionPosture(nextManagedEnterprise)
+
 	appliedCfg := current
-	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
+	if !onlyReloadModeChange {
 		appliedCfg = s.publishConfig(&next)
 	}
 	if privateUpstreamsReload {
@@ -1260,26 +1273,6 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		// bypasses DialContext and could survive an allowlist revocation.
 		netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(appliedCfg.Guardrail.AllowPrivateUpstreams))
 		providerHTTPClient.CloseIdleConnections()
-	}
-
-	if otelReload {
-		oldOTel := s.swapOTel(nextOTel)
-		s.applyOTelProvider(nextOTel)
-		if oldOTel != nil && oldOTel != nextOTel {
-			_ = oldOTel.Shutdown(context.Background())
-		}
-	}
-
-	if auditSinksReload {
-		if s.logger != nil {
-			oldSinks := s.logger.SwapSinks(nextSinks)
-			if oldSinks != nil && oldSinks != nextSinks {
-				_ = oldSinks.Close()
-			}
-		} else if nextSinks != nil {
-			_ = nextSinks.Close()
-		}
-		s.reportSinksHealth()
 	}
 
 	if s.router != nil {
@@ -1294,7 +1287,16 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if judgeReload {
-		s.judge = nextJudge
+		if nextJudge != nil {
+			s.observabilityV8Mu.Lock()
+			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
+			if s.observabilityV8ConsumersDetached {
+				judgeRuntime = nil
+			}
+			nextJudge.bindJudgeTraceV8(judgeRuntime)
+			s.observabilityV8Mu.Unlock()
+		}
+		s.setSharedJudge(nextJudge)
 		if s.router != nil {
 			s.router.SetJudge(nextJudge)
 		}
@@ -1319,7 +1321,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	if webhooksChanged(oldCfg, newCfg) {
 		nextWebhooks := NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
 		if nextWebhooks != nil {
-			nextWebhooks.BindObservability(s.otelSnapshot())
+			metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+			nextWebhooks.BindObservabilityV8(metricRuntime)
 		}
 		oldWebhooks := s.swapWebhooks(nextWebhooks)
 		if proxy := s.proxySnapshot(); proxy != nil {
@@ -1339,9 +1342,24 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if aiRestart {
-		s.swapAIDiscovery(nextAIDiscovery)
+		if nextAIDiscovery != nil {
+			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter()))
+		}
+		oldDiscovery := s.swapAIDiscovery(nextAIDiscovery)
+		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
+			oldDiscovery.BindObservabilityV8(nil)
+		}
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
+		}
+		// The API setter waits for leases using the old service before it
+		// publishes the replacement. A coalesced intermediate that the restart
+		// worker never claimed can now be retired without racing a query;
+		// claimed/running services close from their Run defer.
+		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
+			if _, err := oldDiscovery.CloseIfNeverStarted(); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] close superseded ai discovery service: %v\n", err)
+			}
 		}
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
@@ -1354,11 +1372,16 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	// immediate snapshot so AI Defense sees the change without waiting
 	// for the next scan tick.
 	if nextManagedEnterprise {
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig())
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
 		if svc := s.aiDiscoverySnapshot(); svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)
+	} else if svc := s.aiDiscoverySnapshot(); svc != nil {
+		// The discovery service can survive a deployment-mode-only reload.
+		// Clear the generation-owned callback so later scan cadences cannot
+		// retain managed endpoint inventory behavior.
+		svc.SetManagedInventoryEmitHook(nil)
 	}
 
 	if watcherRestart {
@@ -1373,90 +1396,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
 	}
+	preparedCommitted = true
 	return nil
-}
-
-func (s *Sidecar) buildReloadOTelProvider(ctx context.Context, cfg *config.Config) (*telemetry.Provider, error) {
-	var opts []telemetry.ProviderOption
-	// Reuse the already-cached CMID provider so the reloaded telemetry sink and
-	// the managed inspector keep sharing one token cache + Invalidate. Best-
-	// effort: on error (OSS build, agent unavailable) the sink fail-closes.
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		if prov, provErr := s.ensureCMIDProvider(ctx); provErr == nil && prov != nil {
-			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
-		}
-	}
-	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("config reload otel: %w", err)
-	}
-	agentInstanceID := ""
-	if tel := s.otelSnapshot(); tel != nil {
-		agentInstanceID = tel.AgentInstanceID()
-	}
-	if agentInstanceID == "" {
-		agentInstanceID = audit.ProcessAgentInstanceID()
-	}
-	p.SetAgentInstanceID(agentInstanceID)
-	return p, nil
-}
-
-func (s *Sidecar) applyOTelProvider(p *telemetry.Provider) {
-	if s == nil {
-		return
-	}
-	if s.otelFanout != nil {
-		s.otelFanout.SetProvider(p)
-	}
-	telemetry.ActivateProvider(p)
-	SetEgressTelemetry(p)
-	if s.logger != nil {
-		s.logger.SetOTelProvider(p)
-	}
-	if s.router != nil {
-		s.router.SetOTelProvider(p)
-	}
-	if s.hilt != nil {
-		s.hilt.SetOTelProvider(p)
-	}
-	if webhooks := s.webhooksSnapshot(); webhooks != nil {
-		webhooks.BindObservability(p)
-	}
-	if s.shell != nil {
-		s.shell.BindObservability(p, s.events)
-	}
-	if api := s.apiSnapshot(); api != nil {
-		api.SetOTelProvider(p)
-	}
-	if proxy := s.proxySnapshot(); proxy != nil {
-		proxy.SetOTelProvider(p)
-	}
-	s.reportTelemetryHealth()
-}
-
-func otelNeedsReload(oldCfg, newCfg *config.Config) bool {
-	if oldCfg == nil || newCfg == nil {
-		return false
-	}
-	return !reflect.DeepEqual(oldCfg.OTel, newCfg.OTel) ||
-		oldCfg.Environment != newCfg.Environment ||
-		oldCfg.TenantID != newCfg.TenantID ||
-		oldCfg.WorkspaceID != newCfg.WorkspaceID ||
-		oldCfg.DeploymentMode != newCfg.DeploymentMode ||
-		oldCfg.DiscoverySource != newCfg.DiscoverySource ||
-		oldCfg.Gateway.Host != newCfg.Gateway.Host ||
-		oldCfg.Gateway.Port != newCfg.Gateway.Port ||
-		!reflect.DeepEqual(oldCfg.Claw, newCfg.Claw) ||
-		oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
-}
-
-func auditSinksNeedReload(oldCfg, newCfg *config.Config) bool {
-	if oldCfg == nil || newCfg == nil {
-		return false
-	}
-	return !reflect.DeepEqual(oldCfg.AuditSinks, newCfg.AuditSinks) ||
-		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
 }
 
 func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -1482,6 +1423,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		oldG.Connector != newG.Connector ||
+		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
 		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
@@ -1522,7 +1464,7 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
-		!reflect.DeepEqual(oldCfg.Privacy, newCfg.Privacy)
+		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
 }
 
 func notifierChanged(oldCfg, newCfg *config.Config) bool {
@@ -1541,9 +1483,23 @@ func webhooksChanged(oldCfg, newCfg *config.Config) bool {
 }
 
 func (s *Sidecar) setAPIServer(api *APIServer) {
+	if s == nil {
+		return
+	}
+	// Lock order: observabilityV8Mu before apiMu. Runtime publication,
+	// shutdown detach, and API construction therefore cannot pass each other.
+	s.observabilityV8Mu.Lock()
 	s.apiMu.Lock()
+	previous := s.apiServer
+	if previous != nil && previous != api {
+		previous.bindObservabilityV8Runtimes(nil, nil, nil, nil)
+	}
+	if api != nil {
+		s.bindAPIServerObservabilityV8Locked(api)
+	}
 	s.apiServer = api
 	s.apiMu.Unlock()
+	s.observabilityV8Mu.Unlock()
 }
 
 // pickInspector selects the AID inspector implementation based on
@@ -1556,14 +1512,15 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 // no managed cloud auth provider registered, agent unavailable), this
 // returns nil AND logs an ERROR — remote inspection is disabled
 // entirely rather than silently falling back to API-key auth.
-func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) Inspector {
+func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 	cfg := s.currentConfig()
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return s.newManagedInspector(ctx, tel, "remote inspection disabled")
+		return s.newManagedInspector(ctx, "remote inspection disabled")
 	}
 	// Opensource path — unchanged from before the picker was added.
 	if c := NewCiscoInspectClient(&cfg.CiscoAIDefense, filepath.Join(cfg.DataDir, ".env")); c != nil {
-		c.SetTelemetry(tel)
+		metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+		c.bindObservabilityV8(metricRuntime)
 		return c
 	}
 	return nil
@@ -1578,19 +1535,24 @@ func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) In
 // [Sidecar.pickInspector] and the proxy-swap block in runGuardrail).
 // Both call sites always read a fresh cfg snapshot, so this helper does
 // too.
-func (s *Sidecar) newManagedInspector(ctx context.Context, tel *telemetry.Provider, siteLabel string) Inspector {
+func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Inspector {
 	cfg := s.currentConfig()
+	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	prov, err := s.ensureCMIDProvider(ctx)
 	if err != nil {
-		EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
+		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
 			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+err.Error())
+		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
 		return nil
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
+		EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
+			"managed_enterprise inspector unavailable — "+siteLabel)
+		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 		return nil
 	}
-	m.SetTelemetry(tel)
+	m.bindObservabilityV8(metricRuntime)
 	return m
 }
 
@@ -1605,14 +1567,6 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
-	}
-	// Prefer the telemetry provider's CMID instance so the inspector and the
-	// Cisco AI Defense telemetry log sink share one token cache + Invalidate.
-	if tel := s.otelSnapshot(); tel != nil {
-		if prov := tel.CloudAuthProvider(); prov != nil {
-			s.cmidProviderInst = prov
-			return prov, nil
-		}
 	}
 	cfg := s.currentConfig()
 	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
@@ -1633,9 +1587,51 @@ func (s *Sidecar) apiSnapshot() *APIServer {
 }
 
 func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
+	if s == nil {
+		return
+	}
+	// Lock order: observabilityV8Mu before proxyMu and the proxy runtime lock.
+	s.observabilityV8Mu.Lock()
 	s.proxyMu.Lock()
+	previous := s.guardrailProxy
+	if previous != nil && previous != proxy {
+		previous.bindObservabilityV8TraceMode(nil, true)
+	}
+	if proxy != nil {
+		lifecycle := s.observabilityV8Lifecycle
+		if s.observabilityV8ConsumersDetached {
+			lifecycle = nil
+		}
+		proxy.bindObservabilityV8TraceMode(lifecycle, true)
+	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
+	s.observabilityV8Mu.Unlock()
+}
+
+// setEventRouter is construction-time wiring. Keeping the lifecycle binding in
+// this seam makes runtime-first and router-first assembly equivalent.
+func (s *Sidecar) setEventRouter(router *EventRouter) {
+	if s == nil {
+		return
+	}
+	// Lock order: observabilityV8Mu before the router lifecycle lock.
+	s.observabilityV8Mu.Lock()
+	previous := s.router
+	if previous != nil && previous != router {
+		previous.bindObservabilityV8Capabilities(nil, nil)
+	}
+	if router != nil {
+		emitter := s.observabilityV8
+		lifecycle := s.observabilityV8Lifecycle
+		if s.observabilityV8ConsumersDetached {
+			emitter = nil
+			lifecycle = nil
+		}
+		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+	}
+	s.router = router
+	s.observabilityV8Mu.Unlock()
 }
 
 func (s *Sidecar) proxySnapshot() *GuardrailProxy {
@@ -1683,12 +1679,6 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr,
 			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
 			connName, s.currentConfig().Gateway.Host)
-		emitLifecycle(ctx, "gateway", "disabled", map[string]string{
-			"connector": connName,
-			"host":      s.currentConfig().Gateway.Host,
-			"port":      fmt.Sprintf("%d", s.currentConfig().Gateway.Port),
-			"reason":    "no-fleet-configured",
-		})
 		<-ctx.Done()
 		s.health.SetGateway(StateStopped, "", nil)
 		return nil
@@ -1713,29 +1703,20 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			continue
 		}
 
-		// Capture the boot-vs-reconnect status BEFORE clearing
-		// firstConnect so the block below can still distinguish the
-		// two. Suppresses a spurious "protection restored" toast on
-		// process boot.
+		// Capture boot-versus-reconnect before clearing firstConnect. Reconnects
+		// emit both the canonical v8 restart metric and the managed service-state
+		// notification; initial boot emits neither.
 		reconnected := !firstConnect
-		if tel := s.otelSnapshot(); reconnected && tel != nil {
-			tel.RecordWatcherRestart(ctx)
+		if reconnected {
+			metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+			_ = recordWatcherRestartV8(ctx, metricRuntime)
 		}
 		firstConnect = false
 
 		hello := s.client.Hello()
 		s.logHello(hello)
-		// Mirror the "gateway is ready to serve" event on both
-		// structured (gateway.jsonl / OTel fanout) and audit paths
-		// (SQLite / Splunk HEC / HTTP JSONL sinks). The structured
-		// emit is synchronous and independent of the audit DB, so
-		// operators still see the transition on the observability
-		// bus even if the SQLite write later fails. Pairing the two
-		// emissions is the v7 contract — a ready gateway must be
-		// visible on every surface, not just the audit row.
-		emitLifecycle(ctx, "gateway", "ready", map[string]string{
-			"protocol": fmt.Sprintf("%d", hello.Protocol),
-		})
+		// The audit action below is the single generated-v8 ownership boundary;
+		// its configured destinations receive the same occurrence independently.
 		if err := s.logger.LogAction(string(audit.ActionSidecarConnected), "",
 			fmt.Sprintf("protocol=%d", hello.Protocol)); err != nil {
 			// Never silent: surface both on stderr (so operators see
@@ -1743,8 +1724,6 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			// (so SIEMs can alert on missing-ready-event incidents).
 			fmt.Fprintf(os.Stderr,
 				"[sidecar] WARN: sidecar-connected audit persist failed: %v\n", err)
-			emitError(ctx, "gateway", "audit-persist-failed",
-				"sidecar-connected audit event did not persist", err)
 		}
 		s.health.SetGateway(StateRunning, "", map[string]interface{}{
 			"protocol": hello.Protocol,
@@ -1914,13 +1893,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	tel := s.otelSnapshot()
-	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, tel, func(r watcher.AdmissionResult) {
+	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
-	if tel != nil {
-		w.SetOTelProvider(tel)
-	}
+	watcherRuntime, _ := s.observabilityV8LifecycleRuntime().(watcher.ObservabilityV8Runtime)
+	w.BindObservabilityV8(watcherRuntime)
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		w.SetWebhookDispatcher(webhooks)
 	}
@@ -2501,13 +2478,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
-	tel := s.otelSnapshot()
 	proxy, err := NewGuardrailProxy(
 		&s.currentConfig().Guardrail,
 		&s.currentConfig().CiscoAIDefense,
 		s.logger,
 		s.health,
-		tel,
 		s.store,
 		s.currentConfig().DataDir,
 		s.currentConfig().PolicyDir,
@@ -2534,7 +2509,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// Fail-closed: if the managed cloud auth provider can't
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
+			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
 			// block/allow, MCP block, block-list, approval, multi-turn,
@@ -3153,7 +3128,8 @@ func connectorNames(conns []connector.Connector) []string {
 }
 
 var newSidecarHookConfigGuard = func(sidecar *Sidecar, debounce time.Duration) *HookConfigGuard {
-	return NewHookConfigGuard(sidecar.logger, sidecar.otel, debounce)
+	metricRuntime, _ := sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	return NewHookConfigGuard(sidecar.logger, metricRuntime, debounce)
 }
 
 // startMultiHookConfigGuards starts one hook self-heal guard per connector
@@ -3750,11 +3726,14 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 
 // runAIDiscovery starts continuous shadow-AI visibility when enabled.
 func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
-	aiDiscovery := s.aiDiscoverySnapshot()
+	aiDiscovery, runDiscovery, claimed := s.claimAIDiscoveryRun()
 	if aiDiscovery == nil {
 		s.health.SetAIDiscovery(StateDisabled, "", nil)
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if !claimed || runDiscovery == nil {
+		return fmt.Errorf("ai discovery service is already running or retired")
 	}
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
@@ -3765,7 +3744,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 	})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- aiDiscovery.Run(ctx)
+		errCh <- runDiscovery(ctx)
 	}()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -3773,6 +3752,10 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		select {
 		case err := <-errCh:
 			if ctx.Err() != nil {
+				if err != nil && !isContextTermination(err) {
+					s.health.SetAIDiscovery(StateError, err.Error(), nil)
+					return err
+				}
 				s.health.SetAIDiscovery(StateStopped, "", nil)
 				return ctx.Err()
 			}
@@ -3795,6 +3778,14 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 				"result":          report.Summary.Result,
 			})
 		case <-ctx.Done():
+			// Run owns the inventory database. Wait for its cancellation path to
+			// finish the active scan and close the store before runRestartable can
+			// start the replacement generation.
+			err := <-errCh
+			if err != nil && !isContextTermination(err) {
+				s.health.SetAIDiscovery(StateError, err.Error(), nil)
+				return err
+			}
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return ctx.Err()
 		}
@@ -3816,8 +3807,6 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
-	tel := s.otelSnapshot()
-	api.SetOTelProvider(tel)
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
@@ -3837,7 +3826,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Callers must nil-check the concrete pointer BEFORE assigning to
 	// Inspector (interface): a typed-nil wrapper is a non-nil
 	// interface and defeats every downstream `!= nil` guard.
-	if inspector := s.pickInspector(ctx, tel); inspector != nil {
+	if inspector := s.pickInspector(ctx); inspector != nil {
 		api.SetCiscoInspector(inspector)
 	}
 	// Wire the LLM judge onto the API server so hook connectors listed
@@ -3846,8 +3835,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// proxy lane's router judge — one Bifrost client cache, one verdict
 	// cache. nil when guardrail.judge.enabled is false; the hook lane
 	// then skips the judge exactly as before.
-	if s.judge != nil {
-		api.SetHookJudge(s.judge)
+	if judge := s.sharedJudge(); judge != nil {
+		api.SetHookJudge(judge)
 	}
 	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
 	api.SetNotifier(s.osNotifier)
@@ -3935,97 +3924,6 @@ func (s *Sidecar) logHello(h *HelloOK) {
 	}
 }
 
-// reportTelemetryHealth sets the OTel telemetry subsystem health based on
-// whether the provider was initialized and which signals are active.
-type destinationRoutingHealth struct {
-	provider    *telemetry.Provider
-	destination string
-}
-
-func (h destinationRoutingHealth) MarshalJSON() ([]byte, error) {
-	stats := h.provider.DestinationRoutingStats(h.destination)
-	total := stats.Accepted + stats.Dropped
-	percentage := float64(0)
-	if total > 0 {
-		percentage = 100 * float64(stats.Accepted) / float64(total)
-	}
-	return json.Marshal(map[string]interface{}{
-		"eligible":               stats.Accepted,
-		"filtered":               stats.Dropped,
-		"total":                  total,
-		"eligibility_percentage": percentage,
-		// Compatibility aliases for clients predating delivery telemetry.
-		"accepted":            stats.Accepted,
-		"dropped":             stats.Dropped,
-		"accepted_percentage": percentage,
-	})
-}
-
-type destinationDeliveryHealth struct {
-	provider    *telemetry.Provider
-	destination string
-}
-
-func destinationSignalNames(destination config.OTelDestinationConfig) []string {
-	signals := make([]string, 0, 3)
-	if destination.Traces.Enabled {
-		signals = append(signals, "traces")
-	}
-	if destination.Metrics.Enabled {
-		signals = append(signals, "metrics")
-	}
-	if destination.Logs.Enabled {
-		signals = append(signals, "logs")
-	}
-	return signals
-}
-
-func (h destinationDeliveryHealth) MarshalJSON() ([]byte, error) {
-	return json.Marshal(h.provider.DestinationDeliveryStats(h.destination))
-}
-
-func (s *Sidecar) reportTelemetryHealth() {
-	tel := s.otelSnapshot()
-	if tel == nil || !tel.Enabled() {
-		s.health.SetTelemetry(StateDisabled, "", nil)
-		return
-	}
-
-	details := map[string]interface{}{}
-	if len(s.currentConfig().OTel.Destinations) > 0 {
-		destinations := make([]map[string]interface{}, 0, len(s.currentConfig().OTel.Destinations))
-		for _, destination := range s.currentConfig().OTel.Destinations {
-			signals := destinationSignalNames(destination)
-			entry := map[string]interface{}{
-				"name":     destination.Name,
-				"preset":   destination.Preset,
-				"enabled":  destination.Enabled,
-				"scope":    "process",
-				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
-				"signals":  strings.Join(signals, ", "),
-			}
-			if destination.Traces.Enabled {
-				entry["delivery"] = destinationDeliveryHealth{
-					provider: tel, destination: destination.Name,
-				}
-			}
-			if destination.SpanFilter.Enabled() {
-				entry["routing"] = destinationRoutingHealth{
-					provider: tel, destination: destination.Name,
-				}
-			}
-			destinations = append(destinations, entry)
-		}
-		details["destination_count"] = len(destinations)
-		details["destinations"] = destinations
-		s.health.SetTelemetry(StateRunning, "", details)
-		return
-	}
-	// Config validation requires at least one named destination whenever OTel
-	// is enabled, so reaching this branch indicates an invalid in-memory config.
-	s.health.SetTelemetry(StateError, "otel enabled without named destinations", details)
-}
-
 // reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
 // It starts a background goroutine that probes the sandbox endpoint and
 // transitions the state to running once reachable, or error on timeout.
@@ -4081,168 +3979,6 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 	}
 
 	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
-}
-
-// reportSinksHealth aggregates the configured audit-sink declarations
-// into the sidecar health snapshot. Per-sink Forward/Flush errors are
-// surfaced separately on the sinks.Manager itself; this function only
-// reports static configuration health (count, kinds, names) so the TUI
-// can render a "Sinks: 2 enabled (splunk_hec, otlp_logs)" row.
-//
-// The legacy splunk-bridge auto-generated credentials surface (Splunk
-// Web URL, local user/password) is intentionally dropped — the v4
-// audit_sinks model is provider-agnostic and operators bring their own
-// collector/SIEM credentials.
-func (s *Sidecar) reportSinksHealth() {
-	connectorNames := s.currentConfig().Observability.ConnectorNames()
-	total := len(s.currentConfig().AuditSinks)
-	for _, name := range connectorNames {
-		pc := s.currentConfig().Observability.Connectors[name]
-		if pc.AuditSinks == nil {
-			continue
-		}
-		if len(*pc.AuditSinks) == 0 {
-			total++ // explicit empty override suppresses global routing
-			continue
-		}
-		total += len(*pc.AuditSinks)
-	}
-	if total == 0 {
-		// Nothing configured — surface the explicit reason + a hint
-		// pointing operators at the right CLI command. Without this
-		// the CLI status row showed a bare "Sinks: DISABLED" with no
-		// context, leaving operators unsure whether their setup
-		// command had taken effect.
-		s.health.SetSinks(StateDisabled, "", map[string]interface{}{
-			"summary": "no audit sinks configured",
-			"hint":    "run 'defenseclaw setup local-observability' or 'defenseclaw setup observability add <preset>' to enable audit forwarding",
-		})
-		return
-	}
-
-	enabled := 0
-	enabledKinds := make([]string, 0, total)
-	rows := make([]map[string]interface{}, 0, total)
-	details := make(map[string]interface{}, total+4)
-
-	appendSink := func(sink config.AuditSink, scope string) {
-		row := map[string]interface{}{
-			"name":    sink.Name,
-			"kind":    string(sink.Kind),
-			"enabled": sink.Enabled,
-			"scope":   scope,
-		}
-		var endpoint string
-		switch sink.Kind {
-		case config.SinkKindSplunkHEC:
-			if sink.SplunkHEC != nil {
-				endpoint = sink.SplunkHEC.Endpoint
-				row["index"] = sink.SplunkHEC.Index
-			}
-		case config.SinkKindOTLPLogs:
-			if sink.OTLPLogs != nil {
-				endpoint = sink.OTLPLogs.Endpoint
-				row["protocol"] = sink.OTLPLogs.Protocol
-			}
-		case config.SinkKindHTTPJSONL:
-			if sink.HTTPJSONL != nil {
-				endpoint = sink.HTTPJSONL.URL
-			}
-		}
-		displayEndpoint := ""
-		if endpoint != "" {
-			displayEndpoint = netguard.EndpointForDisplay(endpoint)
-			if sink.Kind == config.SinkKindHTTPJSONL {
-				row["url"] = displayEndpoint
-			} else {
-				row["endpoint"] = displayEndpoint
-			}
-		}
-		rows = append(rows, row)
-
-		state := "disabled"
-		if sink.Enabled {
-			enabled++
-			enabledKinds = append(enabledKinds, string(sink.Kind))
-			state = "enabled"
-		}
-
-		// Per-sink scalar key so the CLI status renderer can show
-		// one human-readable line per sink. Two-digit zero-padded
-		// index keeps the alphabetical key sort matching the config
-		// order (sink_01 before sink_10), so the rendered list
-		// follows config.yaml ordering rather than map iteration.
-		key := fmt.Sprintf("sink_%02d", len(rows))
-		prefix := ""
-		if scope != "global" {
-			prefix = scope + ": "
-		}
-		if displayEndpoint != "" {
-			details[key] = fmt.Sprintf(
-				"%s%s (%s) -> %s [%s]", prefix, sink.Name, sink.Kind, displayEndpoint, state,
-			)
-		} else {
-			// Sink missing its kind block (validation should reject
-			// this at config-load, but be defensive — health is
-			// strictly read-only and must never panic).
-			details[key] = fmt.Sprintf(
-				"%s%s (%s) [%s, missing %s block]",
-				prefix, sink.Name, sink.Kind, state, sink.Kind,
-			)
-		}
-	}
-
-	for _, sink := range s.currentConfig().AuditSinks {
-		appendSink(sink, "global")
-	}
-	for _, connectorName := range connectorNames {
-		pc := s.currentConfig().Observability.Connectors[connectorName]
-		if pc.AuditSinks == nil {
-			continue // inherits global; no duplicate rows
-		}
-		if len(*pc.AuditSinks) == 0 {
-			rows = append(rows, map[string]interface{}{
-				"name":       "(none)",
-				"kind":       "suppressed",
-				"enabled":    false,
-				"scope":      "connector:" + connectorName,
-				"suppressed": true,
-			})
-			key := fmt.Sprintf("sink_%02d", len(rows))
-			details[key] = fmt.Sprintf(
-				"connector:%s: no sinks [global inheritance suppressed]", connectorName,
-			)
-			continue
-		}
-		for _, sink := range *pc.AuditSinks {
-			appendSink(sink, "connector:"+connectorName)
-		}
-	}
-
-	// Backward-compatible structured fields preserved for /health
-	// JSON consumers (TUI, dashboards, the regression test in
-	// gateway_test.go::TestHealthEndpointNoSecrets). The CLI
-	// printer's scalar-only filter hides these on the terminal —
-	// the per-sink string keys above carry the human-readable view.
-	details["count"] = enabled
-	details["kinds"] = enabledKinds
-	details["sinks"] = rows
-
-	if enabled == 0 {
-		// At least one sink is configured but all are disabled —
-		// distinct from "no audit sinks configured" so operators
-		// know they have stale entries to flip on or remove rather
-		// than nothing at all.
-		details["summary"] = fmt.Sprintf(
-			"0 of %d sink(s) enabled — flip one on with 'defenseclaw setup observability enable <name>'",
-			total,
-		)
-		s.health.SetSinks(StateDisabled, "", details)
-		return
-	}
-
-	details["summary"] = fmt.Sprintf("%d of %d enabled", enabled, total)
-	s.health.SetSinks(StateRunning, "", details)
 }
 
 // Client returns the underlying gateway client for direct RPC calls.
