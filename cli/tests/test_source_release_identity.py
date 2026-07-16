@@ -261,12 +261,25 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', stamp + 1)
     expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
     extension_build = workflow.index("run: make extensions", expected)
+    restore_generated = workflow.index("git restore --worktree --", extension_build)
+    cleanliness_check = workflow.index("git diff --exit-code --", restore_generated)
     gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
     publish = workflow.index('gh release create "$RELEASE_TAG"')
 
-    assert tracked < stamp < build_stamp < expected < extension_build < gateway_build < publish
+    assert (
+        tracked
+        < stamp
+        < build_stamp
+        < expected
+        < extension_build
+        < restore_generated
+        < cleanliness_check
+        < gateway_build
+        < publish
+    )
     for relative in VERSION_PATHS:
         assert relative in workflow[tracked:stamp]
+        assert f":(exclude){relative}" in workflow[cleanliness_check:gateway_build]
     assert "Require reviewed source release identity" not in workflow
     assert "git diff --exit-code --" not in workflow[tracked:expected]
     assert '--target "$RELEASE_COMMIT"' in workflow[publish:]

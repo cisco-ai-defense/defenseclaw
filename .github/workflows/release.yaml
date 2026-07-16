@@ -324,8 +324,15 @@ jobs:
             extensions/defenseclaw/dist \
             internal/gateway/connector/openclaw_extension/.placeholder
           git diff --exit-code -- \
-            extensions/defenseclaw/dist \
-            internal/gateway/connector/openclaw_extension/.placeholder
+            . \
+            ':(exclude)Makefile' \
+            ':(exclude)pyproject.toml' \
+            ':(exclude)uv.lock' \
+            ':(exclude)cli/defenseclaw/__init__.py' \
+            ':(exclude)extensions/defenseclaw/package.json' \
+            ':(exclude)extensions/defenseclaw/package-lock.json' \
+            ':(exclude)macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj' \
+            ':(exclude)release/source-install-identity.json'
 
       - name: Build gateway archives and SBOMs
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
