@@ -46,6 +46,10 @@ def test_mutate_v8_config_preserves_comments_validates_and_replaces_atomically(t
         assert "retention_days: 30 # keep inline" in text
         if os.name == "posix":
             assert stat.S_IMODE(os.stat(candidate).st_mode) == 0o640
+        else:
+            from defenseclaw.file_permissions import windows_acl_write_error
+
+            assert windows_acl_write_error(candidate) is None
 
     result = mutate_v8_config(
         path,
@@ -65,6 +69,10 @@ def test_mutate_v8_config_preserves_comments_validates_and_replaces_atomically(t
     assert "retention_days: 30 # keep inline" in final
     if os.name == "posix":
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
+    else:
+        from defenseclaw.file_permissions import windows_acl_write_error
+
+        assert windows_acl_write_error(path) is None
 
 
 def test_mutate_v8_config_noop_still_runs_canonical_validation(tmp_path: Path) -> None:
