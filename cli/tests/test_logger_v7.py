@@ -13,10 +13,15 @@ from unittest.mock import patch
 
 import click
 import pytest
+import requests
 from click.testing import CliRunner
 from defenseclaw import config as config_module
 from defenseclaw.audit_actions import ACTION_POLICY_RELOAD
-from defenseclaw.logger import CanonicalObservabilityError, Logger
+from defenseclaw.logger import (
+    CanonicalObservabilityError,
+    CanonicalObservabilityUnavailableError,
+    Logger,
+)
 from defenseclaw.main import cli
 from defenseclaw.models import Finding, ScanResult
 
@@ -243,8 +248,66 @@ def test_from_config_defers_missing_auth_failure_until_emit() -> None:
         guardrail=None,
     )
     logger = Logger.from_config(cfg)
-    with pytest.raises(CanonicalObservabilityError, match="authentication is unavailable"):
+    with pytest.raises(CanonicalObservabilityUnavailableError, match="authentication is unavailable"):
         logger.log_action("policy-reload", "default", "changed")
+
+
+@pytest.mark.parametrize("transport_error", [requests.ConnectionError, requests.Timeout])
+def test_from_config_classifies_only_unreachable_runtime_as_unavailable(transport_error: type[Exception]) -> None:
+    cfg = SimpleNamespace(
+        config_version=8,
+        gateway=SimpleNamespace(
+            api_bind="127.0.0.1",
+            api_port=18970,
+            resolved_token=lambda: "gateway-token",
+        ),
+        openshell=None,
+        guardrail=None,
+    )
+
+    class OfflineRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise transport_error("private endpoint")
+
+        def close(self) -> None:
+            return
+
+    with (
+        patch("defenseclaw.logger.OrchestratorClient", return_value=OfflineRecorder()),
+        pytest.raises(CanonicalObservabilityUnavailableError, match="runtime is unavailable") as caught,
+    ):
+        Logger.from_config(cfg).log_action("setup-hook-connector", "config", "secret")
+    assert "private endpoint" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_from_config_keeps_server_rejection_fail_closed() -> None:
+    cfg = SimpleNamespace(
+        config_version=8,
+        gateway=SimpleNamespace(
+            api_bind="127.0.0.1",
+            api_port=18970,
+            resolved_token=lambda: "gateway-token",
+        ),
+        openshell=None,
+        guardrail=None,
+    )
+
+    class RejectingRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise requests.HTTPError("private rejection body")
+
+        def close(self) -> None:
+            return
+
+    with (
+        patch("defenseclaw.logger.OrchestratorClient", return_value=RejectingRecorder()),
+        pytest.raises(CanonicalObservabilityError) as caught,
+    ):
+        Logger.from_config(cfg).log_action("setup-hook-connector", "config", "secret")
+    assert type(caught.value) is CanonicalObservabilityError
+    assert "private rejection body" not in str(caught.value)
+    assert "secret" not in str(caught.value)
 
 
 def test_from_config_refreshes_token_created_after_logger_initialization(

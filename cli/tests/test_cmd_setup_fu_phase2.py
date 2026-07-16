@@ -38,7 +38,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -46,6 +46,7 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -605,6 +606,20 @@ class TestBareSetupBatch(_BaseSetup):
         gc = self.app.cfg.guardrail
         self.assertEqual(set(gc.connectors), {"hermes", "codex"})
         self.assertEqual(gc.connectors["hermes"].mode, "action")
+
+    def test_batch_no_restart_allows_explicit_offline_staging(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _stub_side_effects():
+            res = _invoke(["-c", "codex", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("canonical setup audit event was not recorded", res.output)
+
+    def test_batch_default_restart_does_not_inherit_internal_offline_mode(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _stub_side_effects(), self.assertRaises(CanonicalObservabilityUnavailableError):
+            _invoke(["-c", "codex"], self.app)
 
     def test_detected_filters_to_hook_connectors(self):
         with _stub_side_effects(), \

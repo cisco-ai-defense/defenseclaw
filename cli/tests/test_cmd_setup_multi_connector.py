@@ -33,7 +33,7 @@ import io
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -47,6 +47,7 @@ from defenseclaw.commands.cmd_setup import (
     setup as setup_group,
 )
 from defenseclaw.config import PerConnectorGuardrailConfig
+from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -178,6 +179,27 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["hermes", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         bounce.assert_not_called()
+
+    def test_no_restart_allows_explicit_offline_connector_staging(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _setup_patches():
+            result = _invoke(["codex", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertIn("canonical setup audit event was not recorded", result.output)
+
+    def test_offline_exception_is_not_suppressed_when_restart_was_requested(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with _setup_patches(), self.assertRaises(CanonicalObservabilityUnavailableError):
+            _invoke(["codex", "--yes"], self.app)
+
+    def test_no_restart_keeps_server_admission_rejection_fail_closed(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityError("rejected")
+        with _setup_patches(), self.assertRaises(CanonicalObservabilityError):
+            _invoke(["codex", "--yes", "--no-restart"], self.app)
 
 
 class TestWriteConnectorIdentityUnit(unittest.TestCase):
@@ -414,6 +436,16 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         bounce.assert_not_called()
         self.assertIn("--no-restart", result.output)
+
+    def test_remove_no_restart_allows_explicit_offline_staging(self):
+        self._seed_map("codex", "cursor")
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "cursor", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertIn("canonical setup audit event was not recorded", result.output)
 
     # Declining the confirmation prompt is a no-op.
     def test_remove_declined_is_noop(self):

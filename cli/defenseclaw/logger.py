@@ -28,12 +28,18 @@ import os
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+import requests
+
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.models import ScanResult
 
 
 class CanonicalObservabilityError(RuntimeError):
     """The CLI could not confirm canonical v8 admission."""
+
+
+class CanonicalObservabilityUnavailableError(CanonicalObservabilityError):
+    """The canonical v8 runtime is absent or cannot be reached."""
 
 
 class _CanonicalRecorder(Protocol):
@@ -51,7 +57,7 @@ class _GatewayConfigRecorder:
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         gateway = getattr(self._cfg, "gateway", None)
         if gateway is None:
-            raise CanonicalObservabilityError("gateway configuration is unavailable")
+            raise CanonicalObservabilityUnavailableError("gateway configuration is unavailable")
         token_resolver = getattr(gateway, "resolved_token", None)
         token = token_resolver() if callable(token_resolver) else ""
         if not token:
@@ -67,7 +73,7 @@ class _GatewayConfigRecorder:
                 _load_dotenv_into_os(data_dir)
                 token = token_resolver() if callable(token_resolver) else ""
         if not token:
-            raise CanonicalObservabilityError(
+            raise CanonicalObservabilityUnavailableError(
                 "gateway authentication is unavailable; start or reconfigure the v8 gateway"
             )
         client = OrchestratorClient(
@@ -78,6 +84,8 @@ class _GatewayConfigRecorder:
         )
         try:
             client.emit_cli_observability(payload)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            raise CanonicalObservabilityUnavailableError("canonical Observability v8 runtime is unavailable") from exc
         finally:
             client.close()
 

@@ -80,6 +80,7 @@ from defenseclaw.connector_contracts import (
 )
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
@@ -98,6 +99,35 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+
+
+def _log_setup_action(
+    app: AppContext,
+    action: str,
+    details: str,
+    *,
+    allow_offline: bool,
+) -> None:
+    """Audit a setup mutation without breaking explicit offline staging.
+
+    Canonical admission and server responses remain fail-closed.  The only
+    exception is a setup command that explicitly selected ``--no-restart``
+    while the gateway runtime is absent or unreachable; that mode stages
+    configuration for the next gateway start.
+    """
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action(action, "config", details)
+    except CanonicalObservabilityUnavailableError:
+        if not allow_offline:
+            raise
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
+            "event was not recorded. Start defenseclaw-gateway before the next change.",
+            err=True,
+        )
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -2398,11 +2428,28 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     _rotate_token_atomic_write(dotenv_path, new_token)
     ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
 
+    restart_planned = bool(actives) and not no_restart
+    audit_details = (
+        f"action=rotate-token active_connectors={len(actives)} restart={str(restart_planned).lower()}"
+    )
+
     if not actives:
+        _log_setup_action(
+            app,
+            ACTION_SETUP_GATEWAY,
+            audit_details,
+            allow_offline=True,
+        )
         ux.subhead("(no active connector configured; nothing to refresh)")
         return
 
     if no_restart:
+        _log_setup_action(
+            app,
+            ACTION_SETUP_GATEWAY,
+            audit_details,
+            allow_offline=True,
+        )
         ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
         ux.subhead("The new token takes effect only once the gateway restarts and re-runs Setup for every connector:")
         ux.subhead("  defenseclaw-gateway restart")
@@ -2412,6 +2459,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     # connectors, which rewrites each connector's hook .token file from the
     # freshly-rotated .env. A full restart (not a per-connector teardown) is
     # what keeps every connector's shared token in lockstep.
+    os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = new_token
     click.echo(f"  {ux.dim('Refreshing hook scripts for')} {', '.join(actives)}…")
     _restart_services(
         app.cfg.data_dir,
@@ -2419,6 +2467,12 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         app.cfg.gateway.port,
         connector=connector or app.cfg.active_connector(),
         connectors=actives,
+    )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_GATEWAY,
+        audit_details,
+        allow_offline=False,
     )
     ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
     click.echo()
@@ -4263,13 +4317,13 @@ def setup_guardrail(
     click.echo("    defenseclaw setup guardrail --disable")
     click.echo()
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_GUARDRAIL,
-            "config",
-            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
-            f"model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_GUARDRAIL,
+        f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
+        f"model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
+        allow_offline=not restart,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4634,6 +4688,7 @@ def _apply_hook_connector_setup(
     connector: str,
     mode: str = "observe",
     restart: bool,
+    allow_offline_audit: bool = False,
     workspace_dir: str | None = None,
     write_mode: str = "replace",
     rule_pack: str | None = None,
@@ -4863,12 +4918,12 @@ def _apply_hook_connector_setup(
         )
         click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_HOOK_CONNECTOR,
-            "config",
-            f"connector={connector} mode={desired_mode} surface=hook",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_HOOK_CONNECTOR,
+        f"connector={connector} mode={desired_mode} surface=hook",
+        allow_offline=allow_offline_audit,
+    )
 
     return True
 
@@ -4887,6 +4942,7 @@ def _apply_connector_observability_only(
         connector=connector,
         mode="observe",
         restart=restart,
+        allow_offline_audit=not restart,
         workspace_dir=None,
     )
 
@@ -5278,6 +5334,7 @@ def _setup_observability_alias(
         connector=connector,
         mode=normalized_mode,
         restart=restart,
+        allow_offline_audit=not restart,
         workspace_dir=workspace_dir,
         write_mode=write_mode,
         rule_pack=rule_pack,
@@ -5300,6 +5357,7 @@ def _setup_observability_alias(
             connector=connector,
             mode=normalized_mode,
             restart=restart,
+            allow_offline_audit=not restart,
             workspace_dir=workspace_dir,
             write_mode=write_mode,
             rule_pack=rule_pack,
@@ -5779,6 +5837,7 @@ def _apply_setup_batch(
             connector=c,
             mode=connector_mode,
             restart=False,
+            allow_offline_audit=not restart,
             write_mode="add",
             enable_judge=enable_judge,
             judge_hook_connectors=None,
@@ -5793,6 +5852,7 @@ def _apply_setup_batch(
                 connector=c,
                 mode="observe",
                 restart=False,
+                allow_offline_audit=not restart,
                 write_mode="add",
                 enable_judge=enable_judge,
                 judge_hook_connectors=None,
@@ -6415,13 +6475,13 @@ def _remove_connector(
             "still installed until you restart defenseclaw-gateway."
         )
 
-    if app.logger:
-        remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
-        app.logger.log_action(
-            ACTION_SETUP_HOOK_CONNECTOR,
-            "config",
-            f"connector={match} action=remove remaining={remaining_label}",
-        )
+    remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
+    _log_setup_action(
+        app,
+        ACTION_SETUP_HOOK_CONNECTOR,
+        f"connector={match} action=remove remaining={remaining_label}",
+        allow_offline=not restart,
+    )
 
     return True
 
@@ -7092,12 +7152,12 @@ def setup_notifications(
         )
         ux.subhead("   defenseclaw-gateway restart")
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_NOTIFICATIONS_TOGGLE,
-            "config",
-            f"enabled={desired!s}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+        f"enabled={desired!s}",
+        allow_offline=not restart,
+    )
 
 
 # ``setup notifications`` is already a one-shot command (action is a
@@ -7227,12 +7287,12 @@ def setup_notifications_set(
             "Skipped restart (--no-restart). Run `defenseclaw-gateway restart` when ready.",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_NOTIFICATIONS_SET,
-            "config",
-            f"slot={slot} value={value.lower()}",
-        )
+    _log_setup_action(
+        app,
+        ACTION_SETUP_NOTIFICATIONS_SET,
+        f"slot={slot} value={value.lower()}",
+        allow_offline=not restart,
+    )
 
 
 # ``setup registry`` — discoverable shortcut that drops the operator

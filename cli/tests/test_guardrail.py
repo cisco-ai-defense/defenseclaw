@@ -52,6 +52,7 @@ from defenseclaw.guardrail import (
     restore_openclaw_config,
     uninstall_openclaw_plugin,
 )
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -2076,6 +2077,19 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
+
+    def test_no_restart_allows_explicit_offline_audit_staging(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("canonical setup audit event was not recorded", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
