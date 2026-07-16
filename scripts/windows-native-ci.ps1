@@ -77,6 +77,24 @@ function Get-StableHookRuntimeExecutable {
     )
 }
 
+function Get-ExpectedCodexWindowsHookScript([string]$HookExecutable) {
+    $literal = $HookExecutable.Replace("'", "''")
+    return [string]::Join('; ', [string[]]@(
+        '$ErrorActionPreference=''Stop''',
+        '$ProgressPreference=''SilentlyContinue''',
+        '$env:NoDefaultCurrentDirectoryInExePath=''1''',
+        '$defenseclawHookStartInfo=[System.Diagnostics.ProcessStartInfo]::new()',
+        ('$defenseclawHookStartInfo.FileName=''{0}''' -f $literal),
+        '$defenseclawHookStartInfo.Arguments=''hook --connector codex''',
+        '$defenseclawHookStartInfo.UseShellExecute=$false',
+        '$defenseclawHookProcess=[System.Diagnostics.Process]::Start($defenseclawHookStartInfo)',
+        '$defenseclawHookProcess.WaitForExit()',
+        '$defenseclawHookExitCode=$defenseclawHookProcess.ExitCode',
+        '$defenseclawHookProcess.Dispose()',
+        'exit $defenseclawHookExitCode'
+    ))
+}
+
 function Get-WorkspacePackageVersion {
     $projectPath = Join-Path $WorkspaceRoot 'pyproject.toml'
     if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
@@ -2406,7 +2424,8 @@ function Assert-WizardHookRegistration(
         if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
         catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-        if ($script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
+        $expectedScript = Get-ExpectedCodexWindowsHookScript (Get-StableHookRuntimeExecutable)
+        if (-not [string]::Equals($script, $expectedScript, [StringComparison]::Ordinal)) {
             throw "wizard-selected Codex registration does not use its exact native hook command: $($Specification.ConfigPath)"
         }
     } elseif ($Specification.Connector -eq 'claudecode') {
@@ -3330,6 +3349,7 @@ function Assert-WindowsReleaseRealClientResults([string]$ResultsPath) {
         Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
     $requiredEvents = @(
         'install', 'doctor:windows-hook-registration', 'lifecycle:fires', 'tool-allow:fires',
+        'tool-fail-closed:enforced', 'tool-fail-closed:trusted-cold-start',
         'tool-block:enforced', 'audit-correlation', 'telemetry', 'teardown'
     )
     foreach ($connectorName in @('codex', 'claudecode')) {

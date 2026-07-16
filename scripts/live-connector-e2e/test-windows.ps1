@@ -1068,7 +1068,28 @@ try {
         'native enterprise hooks require elevation in the standard-user connector contract'
     Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
+    $expectedCodexHook = [regex]::Match($harnessText, '(?s)function Get-ExpectedCodexWindowsHookScript\b.*?\n\}').Value
+    Assert-True ($expectedCodexHook -match 'ProcessStartInfo' -and
+        $expectedCodexHook -match '\.FileName=' -and
+        $expectedCodexHook -match 'UseShellExecute=\$false' -and
+        $expectedCodexHook -match '\.WaitForExit\(\)' -and
+        $expectedCodexHook -match 'exit \$defenseclawHookExitCode' -and
+        $expectedCodexHook -notmatch 'LASTEXITCODE') `
+        'Codex registration assertion pins the synchronous exact-child Windows process contract'
+    $outageContract = [regex]::Match($harnessText, '(?s)function Invoke-WithTrustedGatewayUnavailable\b.*?\n\}').Value
+    Assert-True ($harnessText -match 'schema_version -ne 2' -and
+        $harnessText -match 'gateway_sha256' -and
+        $outageContract -match 'Move-Item -LiteralPath \$trusted\.GatewayPath' -and
+        $outageContract -match '(?s)finally\s*\{.*?Move-Item -LiteralPath \$disabledPath -Destination \$trusted\.GatewayPath' -and
+        $outageContract -match 'restored trusted gateway digest') `
+        'gateway outage fixture binds trusted activation state and restores the exact executable in finally'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
+    Assert-True ([regex]::Matches($contractRun, 'Assert-RegisteredHookOutageContract').Count -eq 2 -and
+        $contractRun -match 'Assert-RegisteredHookOutageContract observe' -and
+        $contractRun -match 'Assert-RegisteredHookOutageContract action' -and
+        $harnessText -match 'exact registered \$Connector hook outage exit=' -and
+        $harnessText -match 'empty protocol body') `
+        'contract exercises exact registered fail-open and fail-closed gateway outage behavior'
     Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
         'unversioned fixture override is removed before Doctor tamper validation'
     $liveRun = [regex]::Match($harnessText, '(?s)function Invoke-LiveRun\b.*?\n\}').Value
@@ -1162,11 +1183,16 @@ try {
     Assert-True ($nativeHarnessText -match 'connector contract wrote to the default agent home' -and
         $nativeHarnessText -match 'connector contract wrote to the unrelated agent home' -and
         $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
-        [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 3 -and
+        [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 4 -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.codex\\config\.toml''' -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.claude\\settings\.json''') `
-        'contract setup, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
+        'contract setup, exact invocation, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
     Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
+    Assert-True ($liveRun -match 'Assert-LiveClientFailClosedOutage' -and
+        $harnessText -match 'tool-fail-closed:enforced' -and
+        $harnessText -match 'fail-closed-outage\.marker' -and
+        $nativeHarnessText -match "'tool-fail-closed:enforced', 'tool-fail-closed:trusted-cold-start'") `
+        'release live-client gate requires a harmless marker to remain absent during fail-closed outage'
     $workflowText = $nativeWorkflowText + "`n" + $liveWorkflowText
     Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
     $checkoutCount = [regex]::Matches($workflowText, 'uses:\s*actions/checkout@').Count

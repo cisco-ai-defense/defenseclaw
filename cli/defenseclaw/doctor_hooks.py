@@ -2041,14 +2041,38 @@ def _command_target(
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
+                r"\$ProgressPreference='SilentlyContinue'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"& '((?:[^']|'')+)' hook --connector " + re.escape(connector) + r"; exit \$LASTEXITCODE",
+                r"\$defenseclawHookStartInfo=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\); "
+                r"\$defenseclawHookStartInfo\.FileName='((?:[^']|'')+)'; "
+                r"\$defenseclawHookStartInfo\.Arguments='hook --connector "
+                + re.escape(connector)
+                + r"'; "
+                r"\$defenseclawHookStartInfo\.UseShellExecute=\$false; "
+                r"\$defenseclawHookProcess=\[System\.Diagnostics\.Process\]::Start\("
+                r"\$defenseclawHookStartInfo\); "
+                r"\$defenseclawHookProcess\.WaitForExit\(\); "
+                r"\$defenseclawHookExitCode=\$defenseclawHookProcess\.ExitCode; "
+                r"\$defenseclawHookProcess\.Dispose\(\); "
+                r"exit \$defenseclawHookExitCode",
                 script,
             )
+            legacy = False
+            if not match:
+                match = re.fullmatch(
+                    r"\$ErrorActionPreference='Stop'; "
+                    r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                    r"& '((?:[^']|'')+)' hook --connector "
+                    + re.escape(connector)
+                    + r"; exit \$LASTEXITCODE",
+                    script,
+                )
+                legacy = match is not None
             if not match:
                 raise _InspectionError("malformed", "PowerShell EncodedCommand hook has an unsupported script body")
             target = match.group(1).replace("''", "'")
-            return target, ["hook", "--connector", connector], "direct"
+            kind = "legacy-encoded-direct" if legacy else "direct"
+            return target, ["hook", "--connector", connector], kind
         try:
             file_index = lowered.index("-file")
         except ValueError as exc:
@@ -2244,6 +2268,12 @@ def validate_windows_hook_registration(
         else:
             raise _InspectionError(
                 "foreign", f"registered hook target is not the DefenseClaw hook launcher: {resolved}"
+            )
+        if kind == "legacy-encoded-direct":
+            raise _InspectionError(
+                "stale",
+                "registered PowerShell EncodedCommand uses the legacy asynchronous GUI launch form and cannot "
+                "reliably propagate fail-closed hook exit status",
             )
         return WindowsHookCheck(
             "healthy",

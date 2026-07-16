@@ -368,6 +368,34 @@ func TestNativeHookOwnershipRetainsLegacyUserInstall(t *testing.T) {
 	}
 }
 
+func TestNativeHookOwnershipRecognizesOnlyExactCurrentAndLegacyEncodedCommands(t *testing.T) {
+	ownedBinary := `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, ownedBinary)
+
+	current := windowsNativePowerShellHookCommandForBinary("codex", ownedBinary)
+	legacy := legacyWindowsNativePowerShellHookCommandForBinary("codex", ownedBinary)
+	for name, command := range map[string]string{
+		"current synchronous": current,
+		"legacy repairable":   legacy,
+	} {
+		if !isNativeHookCommand(command) {
+			t.Errorf("%s owned command was not recognized: %q", name, command)
+		}
+	}
+	for name, command := range map[string]string{
+		"foreign binary": windowsNativePowerShellHookCommandForBinary(
+			"codex",
+			`C:\Other Product\defenseclaw-hook.exe`,
+		),
+		"unsupported connector": windowsNativePowerShellHookCommandForBinary("foreign", ownedBinary),
+		"appended statement":    current + " ignored",
+	} {
+		if isNativeHookCommand(command) {
+			t.Errorf("%s command was incorrectly recognized as owned: %q", name, command)
+		}
+	}
+}
+
 func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows native launcher contract")
@@ -427,15 +455,23 @@ func TestHookInvocationCommand(t *testing.T) {
 
 	// Codex passes this string to cmd.exe /C as one argument. The outer command
 	// uses an unquoted system PowerShell path and an encoded script; the decoded
-	// script invokes the stable absolute launcher with PowerShell's call operator.
+	// script starts and waits for the stable absolute launcher through the exact
+	// ProcessStartInfo contract.
 	codex := hookInvocationCommandFor("windows", "codex", unix)
 	wantCodex := windowsNativePowerShellHookCommand("codex")
 	if codex != wantCodex {
 		t.Errorf("codex command = %q, want %q", codex, wantCodex)
 	}
 	decodedCodex := decodePowerShellEncodedCommandForTest(t, codex)
-	if want := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "codex"; !strings.Contains(decodedCodex, want) {
-		t.Errorf("decoded codex command = %q, want invocation %q", decodedCodex, want)
+	for _, want := range []string{
+		"$defenseclawHookStartInfo.FileName=" + powershellQuoteLiteral(windowsExe),
+		"$defenseclawHookStartInfo.Arguments=" + powershellQuoteLiteral(nativeHookFlag+"codex"),
+		"$defenseclawHookProcess.WaitForExit()",
+		"exit $defenseclawHookExitCode",
+	} {
+		if !strings.Contains(decodedCodex, want) {
+			t.Errorf("decoded codex command = %q, want contract fragment %q", decodedCodex, want)
+		}
 	}
 	if !isNativeHookCommand(codex) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
@@ -491,14 +527,23 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 			if want := windowsNativeHookCommand(connector); got != want {
 				t.Fatalf("wrapper command = %q, want shared builder output %q", got, want)
 			}
-			wantScript := strings.Join([]string{
-				"$ErrorActionPreference='Stop'",
-				"$env:NoDefaultCurrentDirectoryInExePath='1'",
-				"& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + connector,
-				"exit $LASTEXITCODE",
-			}, "; ")
+			wantScript := windowsNativePowerShellHookScriptForBinary(connector, windowsExe)
 			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
 				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
+			}
+			for _, required := range []string{
+				"$ProgressPreference='SilentlyContinue'",
+				"[System.Diagnostics.ProcessStartInfo]::new()",
+				".UseShellExecute=$false",
+				".WaitForExit()",
+				"exit $defenseclawHookExitCode",
+			} {
+				if decoded := decodePowerShellEncodedCommandForTest(t, got); !strings.Contains(decoded, required) {
+					t.Errorf("decoded command missing %q: %s", required, decoded)
+				}
+			}
+			if decoded := decodePowerShellEncodedCommandForTest(t, got); strings.Contains(decoded, "$LASTEXITCODE") {
+				t.Errorf("decoded command still depends on stale LASTEXITCODE: %s", decoded)
 			}
 		})
 	}
@@ -660,8 +705,20 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 
 	command := hookInvocationCommandFor("windows", "codex", "")
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
-	wantInvocation := "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "codex"
-	probeScript := strings.Replace(decoded, wantInvocation, "& 'where.exe' 'cmd.exe'", 1)
+	wantInvocation := "$defenseclawHookStartInfo.FileName=" + powershellQuoteLiteral(defenseclawHookBinary())
+	where := filepath.Join(trustedWindowsSystemDirectory(), "where.exe")
+	probeScript := strings.Replace(
+		decoded,
+		wantInvocation,
+		"$defenseclawHookStartInfo.FileName="+powershellQuoteLiteral(where),
+		1,
+	)
+	probeScript = strings.Replace(
+		probeScript,
+		"$defenseclawHookStartInfo.Arguments="+powershellQuoteLiteral(nativeHookFlag+"codex"),
+		"$defenseclawHookStartInfo.Arguments="+powershellQuoteLiteral("cmd.exe"),
+		1,
+	)
 	if probeScript == decoded {
 		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)
 	}
