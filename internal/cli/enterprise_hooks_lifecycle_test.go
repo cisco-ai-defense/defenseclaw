@@ -195,7 +195,7 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	originalUninstall := enterpriseHooksUninstallRunE
 	originalReconcile := enterpriseHooksReconcileRunE
 	originalWatch := enterpriseHooksWatchRunE
-	originalCfg, originalAuditStore, originalAuditLog, originalOTel := cfg, auditStore, auditLog, otelProvider
+	originalCfg, originalAuditStore, originalAuditLog := cfg, auditStore, auditLog
 	originalOut, originalErr := rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
 	t.Cleanup(func() {
 		enterpriseHooksRuntimeGOOS = originalGOOS
@@ -205,12 +205,12 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 		enterpriseHooksUninstallRunE = originalUninstall
 		enterpriseHooksReconcileRunE = originalReconcile
 		enterpriseHooksWatchRunE = originalWatch
-		cfg, auditStore, auditLog, otelProvider = originalCfg, originalAuditStore, originalAuditLog, originalOTel
+		cfg, auditStore, auditLog = originalCfg, originalAuditStore, originalAuditLog
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(originalOut)
 		rootCmd.SetErr(originalErr)
 	})
-	cfg, auditStore, auditLog, otelProvider = nil, nil, nil, nil
+	cfg, auditStore, auditLog = nil, nil, nil
 }
 
 func snapshotEnterpriseHooksTree(t *testing.T, root string) map[string]enterpriseHooksTreeEntry {

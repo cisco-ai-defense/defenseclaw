@@ -43,6 +43,8 @@ const (
 	watchdogLogFile        = "watchdog.log"
 	watchdogStateFile      = "watchdog.state"
 	maxWatchdogHealthBytes = 64 << 10
+	watchdogStartTimeout   = 15 * time.Second
+	watchdogStartInterval  = 25 * time.Millisecond
 )
 
 type watchdogState int
@@ -550,10 +552,36 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 		logFile.Close()
 		return fmt.Errorf("watchdog: start background: %w", err)
 	}
+	_ = logFile.Close()
+	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogStartTimeout, watchdogStartInterval); err != nil {
+		return fmt.Errorf("watchdog: start readiness: %w", err)
+	}
 
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
 	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
+}
+
+func waitForWatchdogStart(pidPath string, expectedPID int, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		locked, info, err := watchdogIsLocked(pidPath)
+		if err == nil && locked {
+			if info.PID != expectedPID {
+				return fmt.Errorf("ownership lock belongs to PID %d, expected %d", info.PID, expectedPID)
+			}
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			if err != nil {
+				return fmt.Errorf("PID ownership remained unreadable: %w", err)
+			}
+			return fmt.Errorf("PID %d did not acquire its ownership lock within %s", expectedPID, timeout)
+		}
+		if interval > 0 {
+			time.Sleep(interval)
+		}
+	}
 }
 
 type execCommand struct {

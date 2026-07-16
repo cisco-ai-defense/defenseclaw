@@ -110,6 +110,52 @@ try {
     . $harness -NoRun
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
 
+    $savedDefenseClawHome = $env:DEFENSECLAW_HOME
+    $savedResultsPath = $script:ResultsPath
+    $savedAgentVersion = Get-Variable -Name AgentVersion -Scope Script -ErrorAction SilentlyContinue
+    try {
+        $script:ResultsPath = Join-Path $temp 'gateway-port-results.jsonl'
+        $script:AgentVersion = 'harness-test'
+        $gatewayPortCases = @(
+            [pscustomobject]@{
+                Name = 'fresh v8 config omits default gateway block'
+                Body = "config_version: 8`nobservability: {}`n"
+            },
+            [pscustomobject]@{
+                Name = 'existing gateway block omits default api port'
+                Body = "config_version: 8`r`ngateway:`r`n  host: 127.0.0.1`r`nobservability: {}`r`n"
+            },
+            [pscustomobject]@{
+                Name = 'legacy explicit gateway api port is replaced'
+                Body = "config_version: 8`ngateway:`n  api_port: 18970`nobservability: {}`n"
+            }
+        )
+        foreach ($case in $gatewayPortCases) {
+            $caseRoot = Join-Path $temp ('gateway-port-' + ($case.Name -replace '[^A-Za-z0-9]+', '-'))
+            [IO.Directory]::CreateDirectory($caseRoot) | Out-Null
+            $env:DEFENSECLAW_HOME = $caseRoot
+            $casePath = Join-Path $caseRoot 'config.yaml'
+            [IO.File]::WriteAllText($casePath, $case.Body, [Text.UTF8Encoding]::new($false))
+            Set-IsolatedGatewayPort
+            $updated = [IO.File]::ReadAllText($casePath)
+            $ports = [regex]::Matches($updated, '(?m)^[ \t]*api_port:[ \t]*(\d+)[ \t]*(?=\r?$)')
+            Assert-True ($ports.Count -eq 1) "$($case.Name) writes exactly one gateway api_port"
+            $isolatedPort = [int]$ports[0].Groups[1].Value
+            Assert-True ($isolatedPort -ge 1 -and $isolatedPort -le 65535) `
+                "$($case.Name) writes a valid isolated port"
+            Assert-True ([regex]::Matches($updated, '(?m)^gateway:[ \t]*(?=\r?$)').Count -eq 1) `
+                "$($case.Name) preserves exactly one gateway block"
+        }
+    } finally {
+        $env:DEFENSECLAW_HOME = $savedDefenseClawHome
+        $script:ResultsPath = $savedResultsPath
+        if ($null -ne $savedAgentVersion) {
+            $script:AgentVersion = $savedAgentVersion.Value
+        } else {
+            Remove-Variable -Name AgentVersion -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+
     $liveRoot = New-SyntheticProcessIdentity 100 '2026-07-15T00:10:00Z'
     Assert-SyntheticProcessTree @($liveRoot) @(
         (New-SyntheticProcessRow 100 1 '2026-07-15T00:10:00Z'),

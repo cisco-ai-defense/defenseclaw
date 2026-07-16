@@ -17,7 +17,7 @@ from click.testing import CliRunner
 from defenseclaw import config
 from defenseclaw.commands import cmd_setup
 from defenseclaw.context import AppContext
-from defenseclaw.observability import apply_preset
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.observability.local_splunk import (
     LOCAL_TOKEN_ENV,
     NativeSplunkContract,
@@ -72,8 +72,11 @@ def _app(tmp_path: Path) -> AppContext:
     tmp_path.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         set_known_windows_directory_acl(tmp_path)
-    (tmp_path / "config.yaml").write_bytes(b"config_version: 4\ncustom:\n  preserve: true\n")
-    (tmp_path / ".env").write_bytes(b"KEEP_ME=unchanged\n")
+    atomic_write_private_bytes(
+        tmp_path / "config.yaml",
+        b"config_version: 8\nenvironment: preserve-me\nobservability:\n  destinations: []\n",
+    )
+    atomic_write_private_bytes(tmp_path / ".env", b"KEEP_ME=unchanged\n")
     app = AppContext()
     app.cfg = config.Config(data_dir=str(tmp_path))
     return app
@@ -88,8 +91,12 @@ def _invoke_native_transaction(app: AppContext, events: list[str], *, restart_ok
 
     def write_config(*_args, **_kwargs):
         events.append("config-write")
-        (Path(app.cfg.data_dir) / "config.yaml").write_bytes(b"config_version: 4\naudit_sinks: []\n")
-        (Path(app.cfg.data_dir) / ".env").write_bytes(
+        atomic_write_private_bytes(
+            Path(app.cfg.data_dir) / "config.yaml",
+            b"config_version: 8\nobservability:\n  destinations: []\n",
+        )
+        atomic_write_private_bytes(
+            Path(app.cfg.data_dir) / ".env",
             b"KEEP_ME=unchanged\n" + LOCAL_TOKEN_ENV.encode() + b"=new-value\n"
         )
 
@@ -102,7 +109,7 @@ def _invoke_native_transaction(app: AppContext, events: list[str], *, restart_ok
             "defenseclaw.observability.local_splunk.start_native_local_splunk",
             side_effect=start,
         ),
-        patch("defenseclaw.observability.apply_preset", side_effect=write_config),
+        patch.object(cmd_setup, "_apply_v8_observability_preset", side_effect=write_config),
         patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
         patch.object(cmd_setup, "_restart_defense_gateway_native", side_effect=restart),
         patch.object(cmd_setup, "_is_pid_alive", return_value=False),
@@ -189,7 +196,7 @@ def test_keyboard_interrupt_after_runtime_start_rolls_back(tmp_path: Path) -> No
             "defenseclaw.observability.local_splunk.start_native_local_splunk",
             return_value=transaction,
         ),
-        patch("defenseclaw.observability.apply_preset", side_effect=KeyboardInterrupt),
+        patch.object(cmd_setup, "_apply_v8_observability_preset", side_effect=KeyboardInterrupt),
         patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
         patch.object(cmd_setup, "_is_pid_alive", return_value=False),
         pytest.raises(KeyboardInterrupt),
@@ -209,6 +216,24 @@ def test_keyboard_interrupt_after_runtime_start_rolls_back(tmp_path: Path) -> No
     assert events == ["rollback"]
 
 
+def test_windows_routes_logs_to_native_controller(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch.object(cmd_setup, "_apply_native_windows_logs_config") as native,
+        patch.object(cmd_setup, "_bootstrap_bridge") as bridge,
+    ):
+        cmd_setup._apply_logs_config(
+            app,
+            index="defenseclaw_local",
+            source="defenseclaw",
+            sourcetype="defenseclaw:json",
+            bootstrap_bridge=True,
+        )
+    native.assert_called_once()
+    bridge.assert_not_called()
+
+
 @pytest.mark.parametrize("os_name", ["darwin", "linux"])
 def test_macos_linux_keep_the_existing_bridge_path(tmp_path: Path, os_name: str) -> None:
     app = _app(tmp_path)
@@ -219,7 +244,7 @@ def test_macos_linux_keep_the_existing_bridge_path(tmp_path: Path, os_name: str)
     with (
         patch.object(cmd_setup.platform_support, "host_os", return_value=os_name),
         patch.object(cmd_setup, "_bootstrap_bridge", return_value=contract) as bridge,
-        patch("defenseclaw.observability.apply_preset") as writer,
+        patch.object(cmd_setup, "_apply_v8_observability_preset") as writer,
         patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
         patch("defenseclaw.observability.local_splunk.start_native_local_splunk") as native,
     ):
@@ -236,35 +261,44 @@ def test_macos_linux_keep_the_existing_bridge_path(tmp_path: Path, os_name: str)
 
 
 def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path) -> None:
-    data_dir = str(tmp_path)
-    (tmp_path / "config.yaml").write_text("config_version: 4\n", encoding="utf-8")
-    apply_preset(
-        "splunk-hec",
-        {
-            "endpoint": "https://127.0.0.1:8088/services/collector/event",
-            "index": "defenseclaw_local",
-            "source": "defenseclaw",
-            "sourcetype": "defenseclaw:json",
-        },
-        data_dir,
-        name="local-splunk",
-        secret_value="local-" + "a" * 32,
-        secret_env_name=LOCAL_TOKEN_ENV,
-    )
-    apply_preset(
-        "splunk-enterprise",
-        {
-            "endpoint": "https://splunk.example.test:8088/services/collector/event",
-            "index": "defenseclaw",
-            "source": "defenseclaw",
-            "sourcetype": "_json",
-        },
-        data_dir,
-        name="remote-splunk",
-        secret_value="remote-" + "b" * 32,
-    )
+    app = _app(tmp_path)
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=()),
+        ),
+        patch("defenseclaw.observability.v8_writer._validate_candidate"),
+    ):
+        cmd_setup._apply_v8_observability_preset(
+            app,
+            "splunk-hec",
+            {
+                "endpoint": "https://127.0.0.1:8088/services/collector/event",
+                "index": "defenseclaw_local",
+                "source": "defenseclaw",
+                "sourcetype": "defenseclaw:json",
+            },
+            name="local-splunk",
+            secret_value="local-" + "a" * 32,
+            secret_env_name=LOCAL_TOKEN_ENV,
+        )
+        cmd_setup._apply_v8_observability_preset(
+            app,
+            "splunk-enterprise",
+            {
+                "endpoint": "https://splunk.example.test:8088/services/collector/event",
+                "index": "defenseclaw",
+                "source": "defenseclaw",
+                "sourcetype": "_json",
+            },
+            name="remote-splunk",
+            secret_value="remote-" + "b" * 32,
+        )
     raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    sinks = {item["name"]: item["splunk_hec"]["token_env"] for item in raw["audit_sinks"]}
+    sinks = {
+        item["name"]: item["token_env"]
+        for item in raw["observability"]["destinations"]
+    }
     assert sinks == {
         "local-splunk": LOCAL_TOKEN_ENV,
         "remote-splunk": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
@@ -283,13 +317,51 @@ def test_native_disable_selects_only_owned_local_sink(tmp_path: Path) -> None:
     disabled: list[str] = []
     with (
         patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
-        patch("defenseclaw.observability.list_destinations", return_value=[owned, foreign]),
-        patch("defenseclaw.observability.set_destination_enabled", side_effect=lambda name, *_: disabled.append(name)),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(owned, foreign)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+            side_effect=lambda _data_dir, name, *_: disabled.append(name),
+        ),
         patch("defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop", return_value=(None, False)),
         patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
     ):
         cmd_setup._disable_splunk(app, False, True, False, True)
     assert disabled == ["local-splunk"]
+
+
+def test_native_disable_remote_only_skips_local_runtime_preflight(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    remote = SimpleNamespace(
+        name="remote-splunk",
+        kind="splunk_hec",
+        enabled=True,
+        endpoint="https://splunk.example.test:8088/services/collector/event",
+    )
+    disabled: list[str] = []
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(remote,)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+            side_effect=lambda _data_dir, name, *_: disabled.append(name),
+        ),
+        patch(
+            "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop"
+        ) as native_preflight,
+        patch.object(cmd_setup, "_stop_bridge") as stop_bridge,
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._disable_splunk(app, False, False, False, True)
+
+    assert disabled == ["remote-splunk"]
+    native_preflight.assert_not_called()
+    stop_bridge.assert_not_called()
 
 
 def test_native_disable_failure_restores_config_and_running_stack(tmp_path: Path) -> None:
@@ -317,12 +389,21 @@ def test_native_disable_failure_restores_config_and_running_stack(tmp_path: Path
     )
 
     def mutate_config(*_args, **_kwargs):
-        config_path.write_bytes(b"config_version: 4\naudit_sinks: []\n")
+        atomic_write_private_bytes(
+            config_path,
+            b"config_version: 8\nobservability:\n  destinations: []\n",
+        )
 
     with (
         patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
-        patch("defenseclaw.observability.list_destinations", return_value=[owned]),
-        patch("defenseclaw.observability.set_destination_enabled", side_effect=mutate_config),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(owned,)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+            side_effect=mutate_config,
+        ),
         patch(
             "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
             return_value=(Controller(), True),
@@ -345,8 +426,15 @@ def test_combined_native_setup_restores_remote_writes_when_local_fails(tmp_path:
     def remote_step(name: str):
         def mutate(*_args, **_kwargs):
             events.append(name)
-            config_path.write_bytes(f"config_version: 4\nstep: {name}\n".encode())
-            dotenv_path.write_bytes(f"STEP={name}\n".encode())
+            atomic_write_private_bytes(
+                config_path,
+                (
+                    "config_version: 8\n"
+                    f"environment: {name}\n"
+                    "observability:\n  destinations: []\n"
+                ).encode(),
+            )
+            atomic_write_private_bytes(dotenv_path, f"STEP={name}\n".encode())
 
         return mutate
 

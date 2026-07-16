@@ -23,6 +23,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SMOKE_BASELINES = (
+    "0.8.5",
     "0.8.4",
     "0.8.3",
     "0.8.2",
@@ -43,12 +44,14 @@ UPGRADE_SMOKE_BASELINES = (
 
 
 def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
-    text = (ROOT / "Makefile").read_text()
+    text = (ROOT / "Makefile").read_text(encoding="utf-8")
     match = re.search(r"^UPGRADE_SMOKE_FROM \?= (.+)$", text, re.MULTILINE)
     assert match is not None
     assert tuple(match.group(1).split()) == UPGRADE_SMOKE_BASELINES
 
-    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text())
+    policy = json.loads(
+        (ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
+    )
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
 
     assert "upgrade-refusal-contract-matrix: upgrade-smoke-matrix" in text
@@ -62,19 +65,19 @@ def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
 
 
 def test_upgrade_smoke_docs_cover_default_matrix() -> None:
-    text = (ROOT / "docs" / "TESTING.md").read_text()
+    text = (ROOT / "docs" / "TESTING.md").read_text(encoding="utf-8")
     default_line = next(line for line in text.splitlines() if line.startswith("The default matrix covers"))
     for version in UPGRADE_SMOKE_BASELINES:
         assert f"`{version}`" in default_line
 
 
 def test_upgrade_smoke_help_example_includes_latest_0_8_releases() -> None:
-    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
-    assert "0.8.3,0.8.2,0.8.1,0.8.0" in text
+    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    assert "0.8.5,0.8.4,0.8.3,0.8.2,0.8.1,0.8.0" in text
 
 
 def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> None:
-    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
     build_start = text.index("build_candidate_release() {")
     build_end = text.index("\n}\n\nprepare_release_root()", build_start)
     build = text[build_start:build_end]
@@ -99,8 +102,10 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
 
 
 def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_explicit() -> None:
-    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
-    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert "stage_authenticated_baseline" in smoke
     assert 'scripts/historical_release_auth.py"' in smoke
@@ -120,7 +125,9 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
 
 
 def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
-    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert 'installed_refusal_mode="artifact-provenance"' in protocol
     assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
@@ -135,7 +142,7 @@ def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_s
 def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() -> None:
     continuity = (
         ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
     fixture_end = continuity.index(
@@ -225,7 +232,7 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
 
 
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
-    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
     start = smoke.index("seed_pre_v8_otel_fixture() {")
     end = smoke.index("\n}\n\nseed_v8_observability_fixture()", start)
     fixture = smoke[start:end]
@@ -234,7 +241,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "gateway:\n  fleet_mode: disabled" in fixture
     assert "watcher:\n    enabled: false" in fixture
 
-    resolver = (ROOT / "scripts" / "upgrade.sh").read_text()
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     assert '"${GW_STATE}" == "running" || "${GW_STATE}" == "disabled"' in resolver
     assert '"${GW_VERSION}" == "${RELEASE_VERSION}"' in resolver
     assert "fleet uplink is disabled by configuration" in resolver
@@ -271,6 +278,7 @@ def _posix_target_controller_handoff_verifier_program() -> str:
     return resolver[start:end]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX protected-artifact materializer")
 def test_posix_production_materializer_binds_opened_outer_bytes_to_signed_digest(
     tmp_path: Path,
 ) -> None:
@@ -434,7 +442,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
 
 
 def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
-    text = (ROOT / "scripts" / "upgrade.sh").read_text()
+    text = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     header = text.index("# ── Platform Detection")
     recovery_call = text.rfind("recover_interrupted_phase_two", 0, header)
     version_detection = text.index('CURRENT_VERSION="unknown"')

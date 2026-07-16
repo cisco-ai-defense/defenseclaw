@@ -106,7 +106,9 @@ func TestJudgeBodyStoreRejectsLeafReplacementDuringOpen(t *testing.T) {
 	if err == nil {
 		t.Fatal("database replacement race was accepted")
 	}
-	if !strings.Contains(err.Error(), "symbolic link") && !strings.Contains(err.Error(), "changed during secure open") {
+	if !strings.Contains(err.Error(), "symbolic link") &&
+		!strings.Contains(err.Error(), "changed during secure open") &&
+		!strings.Contains(err.Error(), "Windows reparse point") {
 		t.Fatalf("replacement race error = %v", err)
 	}
 }

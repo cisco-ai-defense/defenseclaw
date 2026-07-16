@@ -94,7 +94,7 @@ jobs:
           ) -join '|') + ')$'
           # Keep package execution serial on the four-core hosted runner so
           # bounded discovery tests are not starved by concurrent packages.
-          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-timeout=20m', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('vet', './...') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-vet.log') | Out-Null
           $bin = Join-Path $env:DC_STATE_ROOT 'bin'
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
