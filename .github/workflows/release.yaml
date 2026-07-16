@@ -53,7 +53,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: release-${{ github.event_name }}-${{ inputs.version || github.ref }}
+  group: release-promotion-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:

@@ -179,6 +179,17 @@ def test_resolve_version_prefers_request_or_next_live_stable_patch() -> None:
     ) == ("1.0.0", "0.8.5")
 
 
+def test_release_version_resolution_rejects_v_prefixed_tags() -> None:
+    releases = [{"tag_name": "v0.8.5", "draft": False, "prerelease": False}]
+
+    with pytest.raises(release_certification.CertificationError, match="no canonical stable"):
+        release_certification.resolve_version(
+            requested=None,
+            source_version="0.8.5",
+            published_releases=releases,
+        )
+
+
 def test_workflow_version_is_automatic_digest_of_helper_and_policies(tmp_path: Path) -> None:
     policy = tmp_path / "policy.json"
     policy.write_bytes(release_certification.DEFAULT_POLICY.read_bytes())
@@ -238,6 +249,12 @@ def test_metadata_creation_refuses_partial_or_reordered_matrix(tmp_path: Path) -
             tested_baselines=list(reversed(_versions(selection))),
             completed_at=CERTIFIED_AT,
         )
+
+
+@pytest.mark.parametrize("value", (None, 7, [], {}))
+def test_digest_normalization_rejects_non_string_metadata(value: object) -> None:
+    with pytest.raises(release_certification.CertificationError, match="lowercase SHA-256"):
+        release_certification._normalize_digest(value, "candidate artifact digest")
 
 
 @pytest.mark.parametrize(
@@ -416,6 +433,7 @@ def test_path_classification_does_not_require_release_network_inputs(
         "internal/cli/status.go",
         "bundles/local_observability_stack/docker-compose.yml",
         "schemas/config/v8/defenseclaw-config.schema.json",
+        "scripts/check_observability_v8_upgrade_continuity.py",
     ],
 )
 def test_paths_command_classifies_every_upgrade_runtime_boundary_as_sensitive(

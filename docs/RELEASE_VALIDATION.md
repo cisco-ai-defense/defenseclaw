@@ -75,6 +75,10 @@ and confirm immutable releases; publishing is restricted to the current
 `main` tip. A missing or rejected certification automatically selects the full
 certification path before publication.
 
+All scheduled and manual certification/publication runs share one repository-wide
+promotion lock. A later dispatch waits instead of racing another candidate, so
+its stable-version and tag preflight runs only after the earlier operation finishes.
+
 Resolve a nightly/main candidate from the live GitHub Releases response. A
 manual request wins; without one, the helper selects the greater of the source
 default and the next patch after the latest published stable:

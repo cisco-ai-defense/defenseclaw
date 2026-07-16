@@ -47,6 +47,9 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     assert rendered_selective.count('--target-version "$CANDIDATE_VERSION"') == 2
     assert rendered_selective.count("scripts/test-developer-target-activation.sh") == 1
     assert rendered_selective.count("scripts/test-upgrade-protocol-release.sh") == 1
+    assert 'case "$EXPECTED_RESULT" in' in rendered_selective
+    assert "success-and-refusal) run_success; run_refusal" in rendered_selective
+    assert "Unknown selective validation result" in rendered_selective
     assert "--scope full" not in text
     assert "unsigned-upgrade-candidate" in selective["needs"]
     pr = release_certification.select_cases("0.8.6", "pr", latest_stable="0.8.5")
@@ -92,6 +95,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "scripts/resolve_upgrade_baselines.py",
         "scripts/generate-upgrade-manifest.py",
         "scripts/verify-sigstore-blob.py",
+        "scripts/check_observability_v8_upgrade_continuity.py",
         "scripts/test-developer-target-activation.sh",
         "scripts/test-fresh-install-release.sh",
         "scripts/build-macos-app-release.sh",
@@ -169,6 +173,10 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "workflow_dispatch" in triggers
     operation = triggers["workflow_dispatch"]["inputs"]["operation"]
     assert set(operation["options"]) == {"certify", "release"}
+    assert workflow["concurrency"] == {
+        "group": "release-promotion-${{ github.repository }}",
+        "cancel-in-progress": "false",
+    }
 
     lookup = _render(jobs["lookup-certification"])
     assert "reuse=false" in lookup

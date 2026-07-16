@@ -393,6 +393,13 @@ if (config.get("ai_discovery") or {}).get("emit_otel") is not None:
 gateway = config.get("gateway") or {}
 if gateway.get("api_bind") != "127.0.0.1" or gateway.get("api_port") != developer_api_port:
     raise SystemExit("developer target gateway escaped its private API endpoint")
+openclaw_home = data_dir.parent / ".openclaw"
+try:
+    openclaw_info = openclaw_home.lstat()
+except FileNotFoundError:
+    raise SystemExit("developer fixture OpenClaw home disappeared across target activation") from None
+if not stat.S_ISDIR(openclaw_info.st_mode) or stat.S_IMODE(openclaw_info.st_mode) != 0o700:
+    raise SystemExit("developer fixture OpenClaw home mode changed across target activation")
 
 destinations = {
     item.get("name"): item

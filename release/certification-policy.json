@@ -69,6 +69,7 @@
     "scripts/source_release_identity.py",
     "scripts/stamp-version.sh",
     "scripts/test-upgrade-**",
+    "scripts/check_observability_v8_upgrade_continuity.py",
     "scripts/test-observability-v8-upgrade-continuity.sh",
     "cli/tests/test_release_**",
     "cli/tests/test_upgrade_**",

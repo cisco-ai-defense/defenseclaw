@@ -138,6 +138,9 @@ def test_developer_activation_removes_ambient_runtime_overrides() -> None:
     [
         ("defenseclaw, version 0.8.5", True),
         ("defenseclaw, version 0.8.50", False),
+        ("defenseclaw, version 0.8.5-rc1", False),
+        ("defenseclaw, version 0.8.5+dirty", False),
+        ("defenseclaw, version v0.8.5", False),
         ("defenseclaw 0.8.5 (dependency 0.8.5)", False),
     ],
 )
@@ -503,6 +506,10 @@ exec "{ROOT / '.venv/bin/python'}" "$@"
     assert completed.returncode == 0, completed.stderr
 
     data_dir = home / ".defenseclaw"
+    openclaw_home = home / ".openclaw"
+    assert openclaw_home.is_dir()
+    assert not openclaw_home.is_symlink()
+    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
     config_path = data_dir / "config.yaml"
     environment_path = data_dir / ".env"
     config_before = config_path.read_bytes()
@@ -627,6 +634,7 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
+    assert 'cosign_path="$(abs_path "$(command -v cosign)")"' in script
     for path in (SCRIPT, DEVELOPER_ACTIVATION_SCRIPT):
         lines = path.read_text(encoding="utf-8").splitlines()
         programs: list[str] = []
@@ -657,12 +665,15 @@ def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> 
         "tail_v8_upgrade_log_secret_safe",
         "config_v8_native_fixture=byte_exact",
         "native-v8 source unexpectedly ran the v7-to-v8 activation",
+        "native-v8 fixture OpenClaw home mode changed across the upgrade",
+        "local bundle manifest differs from the complete target package",
     ):
         assert verifier_contract in script
 
     developer = DEVELOPER_ACTIVATION_SCRIPT.read_text(encoding="utf-8")
     assert "legacy_source = source_config_version < 8" in developer
     assert "native-v8 source unexpectedly ran the v7-to-v8 activation" in developer
+    assert "developer fixture OpenClaw home mode changed across target activation" in developer
     assert "developer_target_native_v8_continuity=" in developer
 
 

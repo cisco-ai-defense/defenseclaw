@@ -648,22 +648,31 @@ jobs:
           # the target-owned migration and fresh-process health in a throwaway
           # HOME, while the production protocol harness proves pre-mutation
           # refusal. Signed resolver/handoff success belongs to certification.
-          if [[ "$EXPECTED_RESULT" == *success* ]]; then
+          run_success() {
             scripts/test-developer-target-activation.sh \
               --from-version "$BASELINE" \
               --target-version "$CANDIDATE_VERSION" \
               --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
               --baseline-mode seed \
               --health-timeout 60
-          fi
-          if [[ "$EXPECTED_RESULT" == *refusal* ]]; then
+          }
+          run_refusal() {
             scripts/test-upgrade-protocol-release.sh \
               --from-version "$BASELINE" \
               --target-version "$CANDIDATE_VERSION" \
               --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
               --baseline-mode seed \
               --refusal-contract-only
-          fi
+          }
+          case "$EXPECTED_RESULT" in
+            success) run_success ;;
+            refusal-before-mutation) run_refusal ;;
+            success-and-refusal) run_success; run_refusal ;;
+            *)
+              echo "::error title=Unknown selective validation result::$EXPECTED_RESULT"
+              exit 1
+              ;;
+          esac
 
   main-release-smoke:
     name: Main Release Candidate Smoke (${{ matrix.class }})

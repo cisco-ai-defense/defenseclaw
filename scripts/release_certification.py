@@ -94,8 +94,8 @@ def _sha256_bytes(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
 
-def _normalize_digest(value: str, label: str) -> str:
-    match = DIGEST_RE.fullmatch(value)
+def _normalize_digest(value: object, label: str) -> str:
+    match = DIGEST_RE.fullmatch(value) if isinstance(value, str) else None
     if not match:
         raise CertificationError(f"{label} must be a lowercase SHA-256 digest")
     return f"sha256:{match.group(1)}"
@@ -298,7 +298,6 @@ def _published_versions(value: Any) -> list[str]:
             continue
         tag = item.get("tag_name")
         if isinstance(tag, str):
-            tag = tag.removeprefix("v")
             if SEMVER_RE.fullmatch(tag):
                 versions.add(tag)
     if not versions:

@@ -110,7 +110,11 @@ import re
 import sys
 
 label, expected, reported = sys.argv[1:]
-versions = re.findall(r"(?<![0-9.])(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?![0-9.])", reported)
+versions = re.findall(
+    r"(?<![0-9A-Za-z.+-])(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)(?![0-9A-Za-z.+-])",
+    reported,
+)
 if versions != [expected]:
     raise SystemExit(f"{label} reported {versions!r}; want exactly [{expected!r}]")
 PY
@@ -1046,7 +1050,7 @@ stage_authenticated_baseline() {
         fi
     done
     local cosign_path
-    cosign_path="$(command -v cosign)" \
+    cosign_path="$(abs_path "$(command -v cosign)")" \
         || die "cosign is required to authenticate published baseline ${version}"
     python3 "${ROOT}/scripts/historical_release_auth.py" \
         --version "${version}" \
@@ -1686,6 +1690,7 @@ import sqlite3
 import stat
 import sys
 
+from defenseclaw.bundle_refresh import _build_local_observability_manifest
 from defenseclaw.observability.v8_config import load_validate_v8
 from defenseclaw.paths import bundled_local_observability_dir
 from dotenv import dotenv_values
@@ -1738,6 +1743,13 @@ if any(actual_environment.get(name) != value for name, value in expected_environ
     raise SystemExit("native-v8 environment continuity failed")
 if stat.S_IMODE(environment_path.stat().st_mode) != 0o600:
     raise SystemExit("native-v8 environment is not mode 0600")
+openclaw_home = data_dir.parent / ".openclaw"
+try:
+    openclaw_info = openclaw_home.lstat()
+except FileNotFoundError:
+    raise SystemExit("native-v8 fixture OpenClaw home disappeared across the upgrade") from None
+if not stat.S_ISDIR(openclaw_info.st_mode) or stat.S_IMODE(openclaw_info.st_mode) != 0o700:
+    raise SystemExit("native-v8 fixture OpenClaw home mode changed across the upgrade")
 log_text = upgrade_log.read_text(encoding="utf-8", errors="replace")
 protected_values = (
     value
@@ -1806,6 +1818,11 @@ if (stack / "grafana/dashboards/team-upgrade-smoke.json").read_bytes() != (
 ):
     raise SystemExit("native-v8 operator dashboard was lost")
 target_bundle = bundled_local_observability_dir()
+expected_bundle_manifest = json.loads(
+    _build_local_observability_manifest(target_bundle, target_version).raw
+)
+if bundle_manifest != expected_bundle_manifest:
+    raise SystemExit("native-v8 local bundle manifest differs from the complete target package")
 for item in bundle_manifest.get("files", []):
     relative = item.get("path")
     digest = item.get("sha256")
@@ -1865,6 +1882,7 @@ import sys
 
 from dotenv import dotenv_values
 import yaml
+from defenseclaw.bundle_refresh import _build_local_observability_manifest
 from defenseclaw.paths import bundled_local_observability_dir
 
 data_dir = Path(sys.argv[1])
@@ -2185,6 +2203,11 @@ if (stack / "grafana/dashboards/team-upgrade-smoke.json").read_bytes() != (
     raise SystemExit("operator custom dashboard was not preserved")
 
 target_bundle = bundled_local_observability_dir()
+expected_bundle_manifest = json.loads(
+    _build_local_observability_manifest(target_bundle, target_version).raw
+)
+if bundle_manifest != expected_bundle_manifest:
+    raise SystemExit("local bundle manifest differs from the complete target package")
 for item in bundle_manifest.get("files", []):
     relative = item.get("path")
     digest = item.get("sha256")
