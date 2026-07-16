@@ -1465,6 +1465,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1481,6 +1483,8 @@ jobs:
             --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cosign verify-blob `
+            --bundle=release-candidate/dist/checksums.txt.bundle `
+            --offline `
             --certificate release-candidate/dist/checksums.txt.pem `
             --signature release-candidate/dist/checksums.txt.sig `
             --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `

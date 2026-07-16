@@ -92,7 +92,7 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 9
+    assert len(installers) == 10
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
     assert all(step.get("with") == {"cosign-release": "v2.6.2"} for step in installers)
 
