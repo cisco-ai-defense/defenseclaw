@@ -107,6 +107,9 @@ class _MockWindowsAcl:
         self.flushes: list[str] = []
         self.tamper_publish_name: str | None = None
         self.tampered = False
+        self.drop_dacl_protection_name: str | None = None
+        self.dropped_dacl_protection = 0
+        self.security_repairs: list[str] = []
         self.mismatches: list[tuple[Any, Any]] = []
 
     @staticmethod
@@ -152,6 +155,21 @@ class _MockWindowsAcl:
         descriptor = os.open(key, os.O_RDONLY)
         self.claimed_fds[descriptor] = key
         return descriptor
+
+    def open_regular_security_mutation_fd(self, path: str) -> int:
+        key = self._key(path)
+        descriptor = os.open(key, os.O_RDWR)
+        self.claimed_fds[descriptor] = key
+        return descriptor
+
+    def apply_fd(self, descriptor: int, security: WindowsFileSecurity) -> None:
+        key = self.claimed_fds[descriptor]
+        self.security[key] = security
+        self.security_repairs.append(key)
+
+    def flush_fd(self, descriptor: int) -> None:
+        os.fsync(descriptor)
+        self.flushes.append(self.claimed_fds[descriptor])
 
     def move_regular_fd_no_replace(self, descriptor: int, target: str) -> None:
         source_key = self._key(self._fd_path(descriptor))
@@ -208,6 +226,19 @@ class _MockWindowsAcl:
         ):
             result = WindowsFileSecurity(result.owner, _dacl((0, 0, 0x001F01FF, USERS)), False)
             self.tampered = True
+        if (
+            self.drop_dacl_protection_name is not None
+            and self.drop_dacl_protection_name in os.path.basename(target_key)
+            and result.dacl_protected
+        ):
+            result = WindowsFileSecurity(
+                result.owner,
+                result.dacl,
+                False,
+                result.mandatory_label,
+                result.sacl_protected,
+            )
+            self.dropped_dacl_protection += 1
         self.security[target_key] = result
 
     def move_file_no_replace(self, source: str, target: str) -> None:
@@ -289,10 +320,13 @@ def _install_mock(monkeypatch: pytest.MonkeyPatch, fixture: dict[str, Any]) -> _
     for name in (
         "capture_fd",
         "capture_path",
+        "apply_fd",
         "apply_path",
+        "flush_fd",
         "private_security_for_directory",
         "write_new_file",
         "open_regular_mutation_fd",
+        "open_regular_security_mutation_fd",
         "move_regular_fd_no_replace",
         "delete_regular_fd",
         "flush_path",
@@ -382,6 +416,36 @@ def test_windows_fault_after_both_publications_restores_exact_owner_dacl_and_byt
     assert fixture["environment_path"].read_bytes() == fixture["environment"]
     assert mock.security[mock._key(fixture["config_path"])] == CONFIG_SECURITY
     assert mock.security[mock._key(fixture["environment_path"])] == ENVIRONMENT_SECURITY
+
+
+def test_windows_replace_dacl_protection_drift_is_repaired_on_exact_published_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path, environment_exists=True)
+    mock = _install_mock(monkeypatch, fixture)
+    mock.register(fixture["config_path"], PRIVATE_SECURITY)
+    mock.drop_dacl_protection_name = fixture["config_path"].name
+
+    with pytest.raises(V8ActivationError) as captured:
+        activate_v8_migration(
+            fixture["migration"],
+            validator=_validator(fixture),
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+            tighten_legacy_backup_root=True,
+            environment={},
+            fault_injector=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError("fault")) if stage == "after_config_write" else None
+            ),
+        )
+
+    config_key = mock._key(fixture["config_path"])
+    assert captured.value.code == "injected_failure"
+    assert fixture["config_path"].read_bytes() == fixture["source"]
+    assert mock.security[config_key] == PRIVATE_SECURITY
+    assert mock.dropped_dacl_protection == 3
+    assert mock.security_repairs.count(config_key) == 2
 
 
 def test_post_publish_dacl_drift_preserves_live_state_and_retained_original(

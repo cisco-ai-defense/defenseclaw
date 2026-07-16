@@ -166,6 +166,8 @@ class _WindowsApi(Protocol):
 
     def _open_regular_mutator_exclusive(self, path: str) -> int: ...
 
+    def _open_regular_security_mutator_exclusive(self, path: str) -> int: ...
+
     def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int: ...
 
     def assert_real_directory(self, handle: int) -> None: ...
@@ -707,6 +709,29 @@ class _CtypesWindowsApi:
             self.close_handle(int(handle))
             raise
 
+    def _open_regular_security_mutator_exclusive(self, path: str) -> int:
+        """Claim one real file for identity-bound security repair and flush."""
+
+        handle = self._create_file(
+            path,
+            _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _WRITE_DAC | _WRITE_OWNER | _DELETE,
+            _FILE_SHARE_READ,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_WRITE_THROUGH,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateFileW(exclusive security mutator)")
+        try:
+            attributes = self._file_information(int(handle)).file_attributes
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WindowsAclError("Windows security mutator target is not a real regular file")
+            return int(handle)
+        except BaseException:
+            self.close_handle(int(handle))
+            raise
+
     def _open_regular_reader_shared_delete(self, path: str) -> int:
         """Open an exact regular-file claim without blocking later deletion."""
 
@@ -921,6 +946,23 @@ def open_regular_flush_fd(path: str) -> int:
         raise
 
 
+def open_regular_security_mutation_fd(path: str) -> int:
+    """Claim one exact regular file for ACL repair, verification, and flush."""
+
+    if os.name != "nt":
+        raise WindowsAclError("exclusive CRT security mutation handles require Windows")
+    import msvcrt
+
+    api = _get_api()
+    handle = api._open_regular_security_mutator_exclusive(path)
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        api.close_handle(handle)
+        raise
+
+
 def move_regular_fd_no_replace(fd: int, target: str) -> None:
     """Rename the exact claimed CRT file without replacing ``target``."""
 
@@ -949,6 +991,30 @@ def capture_fd(fd: int) -> WindowsFileSecurity:
     import msvcrt
 
     return _get_api().get_security(msvcrt.get_osfhandle(fd))
+
+
+def apply_fd(fd: int, security: WindowsFileSecurity) -> None:
+    """Apply and verify exact security on an already identity-bound file."""
+
+    if os.name != "nt":
+        raise WindowsAclError("CRT handle conversion is unavailable on this platform")
+    import msvcrt
+
+    api = _get_api()
+    handle = msvcrt.get_osfhandle(fd)
+    api.set_security(handle, security)
+    if api.get_security(handle) != security:
+        raise WindowsAclError("Windows security did not match after SetSecurityInfo")
+
+
+def flush_fd(fd: int) -> None:
+    """Flush an already identity-bound Windows file handle."""
+
+    if os.name != "nt":
+        raise WindowsAclError("CRT handle conversion is unavailable on this platform")
+    import msvcrt
+
+    _get_api().flush(msvcrt.get_osfhandle(fd))
 
 
 def capture_path(path: str, *, directory: bool = False) -> WindowsFileSecurity:
@@ -1534,6 +1600,7 @@ if __name__ == "__main__":
 __all__ = [
     "WindowsAclError",
     "WindowsFileSecurity",
+    "apply_fd",
     "apply_path",
     "assert_not_broadly_readable",
     "assert_not_broadly_writable",
@@ -1544,6 +1611,7 @@ __all__ = [
     "ensure_phase_two_mutator_lease",
     "delete_regular_file_by_handle",
     "flush_path",
+    "flush_fd",
     "hold_directory",
     "hold_directory_chain",
     "hold_phase_two_mutator_lease",
@@ -1551,6 +1619,7 @@ __all__ = [
     "move_regular_fd_no_replace",
     "open_regular_flush_fd",
     "open_regular_mutation_fd",
+    "open_regular_security_mutation_fd",
     "open_regular_read_fd_shared_delete",
     "private_security_for_directory",
     "replace_regular_file_by_handle",

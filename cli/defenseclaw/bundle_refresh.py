@@ -3869,22 +3869,33 @@ def _sha256_descriptor(descriptor: int) -> str:
 
 
 def _fsync_file(path: Path) -> None:
+    windows_exclusive_lease = False
     if os.name == "nt":
         from defenseclaw import windows_acl
 
         descriptor = windows_acl.open_regular_flush_fd(str(path))
+        windows_exclusive_lease = True
     else:
         descriptor = os.open(
             path,
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
     try:
-        _fsync_claimed_file(descriptor, path)
+        _fsync_claimed_file(
+            descriptor,
+            path,
+            windows_exclusive_lease=windows_exclusive_lease,
+        )
     finally:
         os.close(descriptor)
 
 
-def _fsync_claimed_file(descriptor: int, path: Path) -> None:
+def _fsync_claimed_file(
+    descriptor: int,
+    path: Path,
+    *,
+    windows_exclusive_lease: bool = False,
+) -> None:
     """Flush and revalidate one already-open exact regular-file claim."""
 
     before = os.fstat(descriptor)
@@ -3896,9 +3907,19 @@ def _fsync_claimed_file(descriptor: int, path: Path) -> None:
         or not os.path.samestat(before, named_before)
     ):
         raise OSError("rollback custody member changed while syncing")
+    before_security = None
+    if windows_exclusive_lease:
+        if os.name != "nt":
+            raise OSError("exclusive Windows rollback lease requires Windows")
+        from defenseclaw import windows_acl
+
+        before_security = windows_acl.capture_fd(descriptor)
     os.fsync(descriptor)
     after = os.fstat(descriptor)
     named_after = os.lstat(path)
+    after_security = None
+    if windows_exclusive_lease:
+        after_security = windows_acl.capture_fd(descriptor)
     if (
         not stat.S_ISREG(after.st_mode)
         or not stat.S_ISREG(named_after.st_mode)
@@ -3907,7 +3928,14 @@ def _fsync_claimed_file(descriptor: int, path: Path) -> None:
         or not os.path.samestat(after, named_after)
         or before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
-        or before.st_ctime_ns != after.st_ctime_ns
+        or before.st_mode != after.st_mode
+        or getattr(before, "st_file_attributes", 0) != getattr(after, "st_file_attributes", 0)
+        or getattr(named_before, "st_file_attributes", 0) != getattr(named_after, "st_file_attributes", 0)
+        # FlushFileBuffers may commit a pending NTFS ctime update. Exempt only
+        # the share-none data handle, and compensate for Windows security and
+        # attribute writes that do not require compatible data sharing.
+        or (not windows_exclusive_lease and before.st_ctime_ns != after.st_ctime_ns)
+        or (windows_exclusive_lease and before_security != after_security)
     ):
         raise OSError("rollback custody member changed while syncing")
 

@@ -128,6 +128,10 @@ class V8ActivationRollbackError(V8ActivationError):
     """Activation failed and at least one original could not be restored."""
 
 
+class _WindowsPublicationVerificationError(RuntimeError):
+    """The exact staged Windows publication cannot be safely normalized."""
+
+
 @dataclass(frozen=True)
 class V8ActivationResult:
     """Secret-free result returned to the upgrade orchestrator."""
@@ -160,6 +164,8 @@ class _FileSnapshot:
     windows_security: windows_acl.WindowsFileSecurity | None = field(default=None, repr=False)
     flags: int | None = None
     darwin_acl: bytes | None = field(default=None, repr=False)
+    windows_file_attributes: int | None = None
+    windows_write_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1005,6 +1011,10 @@ def _snapshot_regular_file(path: str, *, required: bool) -> _FileSnapshot:
         windows_security=windows_security,
         flags=int(getattr(opened_stat, "st_flags", 0)),
         darwin_acl=darwin_acl,
+        windows_file_attributes=(
+            int(getattr(opened_stat, "st_file_attributes", 0)) if _is_windows() else None
+        ),
+        windows_write_time_ns=(int(opened_stat.st_mtime_ns) if _is_windows() else None),
     )
 
 
@@ -1061,6 +1071,8 @@ def _snapshot_claimed_windows_file(path: str, descriptor: int) -> _FileSnapshot:
         windows_security=security,
         flags=0,
         darwin_acl=None,
+        windows_file_attributes=int(getattr(opened_stat, "st_file_attributes", 0)),
+        windows_write_time_ns=int(opened_stat.st_mtime_ns),
     )
 
 
@@ -2044,8 +2056,14 @@ def _atomic_replace_windows(
             windows_security=expected_security,
         )
         try:
-            _assert_expected_file_state(snapshot.path, expected)
-            windows_acl.flush_path(snapshot.path)
+            _repair_and_verify_windows_publication(snapshot.path, staged, expected)
+        except _WindowsPublicationVerificationError:
+            raise _windows_rollback_incomplete(
+                "windows_publish_verification",
+                snapshot.path,
+                snapshot.path,
+                backup_path if snapshot.existed else "",
+            ) from None
         except BaseException:
             try:
                 published = _snapshot_regular_file(snapshot.path, required=False)
@@ -2098,6 +2116,109 @@ def _atomic_replace_windows(
                     # A leftover original/secret-bearing transient is a
                     # transaction failure, not harmless cleanup noise.
                     os.unlink(path)
+
+
+def _repair_and_verify_windows_publication(
+    path: str,
+    staged: _FileSnapshot,
+    expected: _ExpectedFileState,
+) -> None:
+    """Verify, repair, and flush one exact published Windows file object.
+
+    ``ReplaceFileW`` can preserve the raw DACL while intermittently clearing
+    ``SE_DACL_PROTECTED``.  Repair is safe only after an exclusive handle has
+    proved that the public path still names the staged file object and that no
+    non-security state changed.  All subsequent verification and the durable
+    flush stay on that same handle.
+    """
+
+    descriptor = windows_acl.open_regular_security_mutation_fd(path)
+    try:
+        try:
+            published = _snapshot_claimed_windows_file(path, descriptor)
+        except V8ActivationError:
+            raise _WindowsPublicationVerificationError from None
+        if (
+            not _same_windows_publication_identity(published, staged)
+            or not _same_windows_publication_metadata(published, staged)
+        ):
+            raise _WindowsPublicationVerificationError
+        expected_without_security = replace(expected, windows_security=published.windows_security)
+        if not _matches_expected_state(published, expected_without_security):
+            raise _WindowsPublicationVerificationError
+
+        if published.windows_security != expected.windows_security:
+            if not _is_replacefile_dacl_protection_drop(
+                published.windows_security,
+                expected.windows_security,
+            ):
+                raise _WindowsPublicationVerificationError
+            assert expected.windows_security is not None
+            windows_acl.apply_fd(descriptor, expected.windows_security)
+
+        try:
+            verified = _snapshot_claimed_windows_file(path, descriptor)
+        except V8ActivationError:
+            raise _WindowsPublicationVerificationError from None
+        if (
+            not _same_windows_publication_identity(verified, staged)
+            or not _same_windows_publication_metadata(verified, staged)
+            or not _matches_expected_state(verified, expected)
+        ):
+            raise _WindowsPublicationVerificationError
+        windows_acl.flush_fd(descriptor)
+
+        try:
+            durable = _snapshot_claimed_windows_file(path, descriptor)
+        except V8ActivationError:
+            raise _WindowsPublicationVerificationError from None
+        if (
+            not _same_windows_publication_identity(durable, staged)
+            or not _same_windows_publication_metadata(durable, staged)
+            or not _matches_expected_state(durable, expected)
+        ):
+            raise _WindowsPublicationVerificationError
+    finally:
+        os.close(descriptor)
+
+
+def _same_windows_publication_identity(current: _FileSnapshot, staged: _FileSnapshot) -> bool:
+    return (
+        current.existed
+        and staged.existed
+        and current.device == staged.device
+        and current.inode == staged.inode
+        and current.parent_device == staged.parent_device
+        and current.parent_inode == staged.parent_inode
+    )
+
+
+def _same_windows_publication_metadata(current: _FileSnapshot, staged: _FileSnapshot) -> bool:
+    """Bind stable DOS attributes and write time to the staged file."""
+
+    return (
+        current.mode == staged.mode
+        and current.windows_file_attributes == staged.windows_file_attributes
+        and current.windows_write_time_ns == staged.windows_write_time_ns
+    )
+
+
+def _is_replacefile_dacl_protection_drop(
+    actual: windows_acl.WindowsFileSecurity | None,
+    expected: windows_acl.WindowsFileSecurity | None,
+) -> bool:
+    """Match only ReplaceFileW's observed loss of SE_DACL_PROTECTED."""
+
+    return (
+        actual is not None
+        and expected is not None
+        and expected.dacl_protected
+        and not actual.dacl_protected
+        and actual.owner == expected.owner
+        and actual.dacl == expected.dacl
+        and actual.mandatory_label == expected.mandatory_label
+        and actual.sacl_protected == expected.sacl_protected
+    )
 
 
 def _assert_windows_staged_snapshot(
@@ -2630,9 +2751,21 @@ def _preflight_atomic_replace_windows(
     try:
         windows_acl.write_new_file(target, b"preflight-target", security)
         windows_acl.write_new_file(replacement, b"preflight-replacement", security)
+        staged_replacement = _snapshot_regular_file(replacement, required=True)
+        _assert_windows_staged_snapshot(staged_replacement, b"preflight-replacement", security)
         windows_acl.replace_file(target, replacement, backup)
-        published = _snapshot_regular_file(target, required=True)
-        _assert_windows_staged_snapshot(published, b"preflight-replacement", security)
+        _repair_and_verify_windows_publication(
+            target,
+            staged_replacement,
+            _ExpectedFileState(
+                existed=True,
+                sha256=_sha256(b"preflight-replacement"),
+                mode=None,
+                uid=None,
+                gid=None,
+                windows_security=security.staging_copy(),
+            ),
+        )
         retained = _snapshot_regular_file(backup, required=True)
         _assert_windows_staged_snapshot(retained, b"preflight-target", security)
         _assert_parent_identity(snapshot.path, snapshot.parent_device, snapshot.parent_inode)

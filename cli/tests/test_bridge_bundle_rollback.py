@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from defenseclaw import windows_acl
 from defenseclaw.commands import cmd_upgrade
 from defenseclaw.commands.cmd_upgrade import (
     _parse_bundle_rollback_metadata,
@@ -51,6 +52,81 @@ def test_fsync_claimed_file_rejects_named_reparse_point(tmp_path: Path) -> None:
             bundle_refresh._fsync_claimed_file(17, tmp_path / "member")
 
     fsync.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("platform", "windows_exclusive_lease", "rejects_skew"),
+    [("nt", True, False), ("nt", False, True), ("posix", False, True)],
+)
+def test_fsync_claimed_file_tolerates_only_exclusive_windows_ctime_flush_skew(
+    tmp_path: Path,
+    platform: str,
+    windows_exclusive_lease: bool,
+    rejects_skew: bool,
+) -> None:
+    import defenseclaw.bundle_refresh as bundle_refresh
+
+    before = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=1,
+        st_ino=2,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+        st_file_attributes=0,
+    )
+    after = SimpleNamespace(**vars(before))
+    after.st_ctime_ns += 1
+    path = tmp_path / "member"
+    outcome = pytest.raises(OSError, match="changed while syncing") if rejects_skew else nullcontext()
+    security = object()
+
+    with (
+        patch.object(bundle_refresh.os, "name", platform),
+        patch.object(bundle_refresh.os, "fstat", side_effect=[before, after]),
+        patch.object(bundle_refresh.os, "lstat", side_effect=[before, after]),
+        patch.object(bundle_refresh.os, "fsync") as fsync,
+        patch.object(windows_acl, "capture_fd", side_effect=[security, security]) as capture_fd,
+        outcome,
+    ):
+        bundle_refresh._fsync_claimed_file(
+            17,
+            path,
+            windows_exclusive_lease=windows_exclusive_lease,
+        )
+
+    fsync.assert_called_once_with(17)
+    assert capture_fd.call_count == (2 if windows_exclusive_lease else 0)
+
+
+def test_fsync_claimed_file_rejects_windows_security_change(tmp_path: Path) -> None:
+    import defenseclaw.bundle_refresh as bundle_refresh
+
+    unchanged = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=1,
+        st_ino=2,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+        st_file_attributes=0,
+    )
+
+    with (
+        patch.object(bundle_refresh.os, "name", "nt"),
+        patch.object(bundle_refresh.os, "fstat", return_value=unchanged),
+        patch.object(bundle_refresh.os, "lstat", return_value=unchanged),
+        patch.object(bundle_refresh.os, "fsync") as fsync,
+        patch.object(windows_acl, "capture_fd", side_effect=[object(), object()]),
+        pytest.raises(OSError, match="changed while syncing"),
+    ):
+        bundle_refresh._fsync_claimed_file(
+            17,
+            tmp_path / "member",
+            windows_exclusive_lease=True,
+        )
+
+    fsync.assert_called_once_with(17)
 
 
 def _write_restart_intent(backup_dir: Path, *, restart_required: bool) -> Path:

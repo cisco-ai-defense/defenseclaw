@@ -454,7 +454,13 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
         self.assertEqual(calls[4][1], "plan")
 
     def test_missing_token_reports_actionable_error(self) -> None:
-        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {}, clear=True):
+        # Seed the home variables Path.home() requires on Windows without
+        # inheriting unrelated Click environment options from the host.
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {"HOME": td, "USERPROFILE": td, "SFX_AUTH_TOKEN": ""},
+            clear=True,
+        ):
             result = CliRunner().invoke(
                 splunk_o11y_dashboards,
                 [

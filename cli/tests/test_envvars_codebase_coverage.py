@@ -149,6 +149,7 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # processes; they are not operator configuration and must not be
     # published as such.
     "internal/gateway/connector/otlp_token_test.go",
+    "internal/observability/redaction/key_store_windows_test.go",
     # Docs-site policy-creator quick-start: an illustrative apply.ts
     # snippet mentions DEFENSECLAW_LOG as an example client-side toggle;
     # it is sample documentation, not a var DefenseClaw reads.

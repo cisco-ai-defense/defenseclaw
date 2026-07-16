@@ -369,6 +369,34 @@ def test_native_exclusive_mutator_denies_write_and_delete_sharing() -> None:
     api.close_handle.assert_not_called()
 
 
+def test_native_exclusive_security_mutator_has_exact_repair_and_flush_rights() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    create_file = Mock(return_value=84)
+    api._create_file = create_file
+    api._file_information = Mock(return_value=SimpleNamespace(file_attributes=windows_acl._FILE_ATTRIBUTE_NORMAL))
+    api.close_handle = Mock()
+
+    assert api._open_regular_security_mutator_exclusive(r"C:\state\current.env") == 84
+
+    create_file.assert_called_once_with(
+        r"C:\state\current.env",
+        (
+            windows_acl._GENERIC_READ
+            | windows_acl._GENERIC_WRITE
+            | windows_acl._READ_CONTROL
+            | windows_acl._WRITE_DAC
+            | windows_acl._WRITE_OWNER
+            | windows_acl._DELETE
+        ),
+        windows_acl._FILE_SHARE_READ,
+        None,
+        windows_acl._OPEN_EXISTING,
+        windows_acl._FILE_FLAG_OPEN_REPARSE_POINT | windows_acl._FILE_FLAG_WRITE_THROUGH,
+        None,
+    )
+    api.close_handle.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "attributes",
     [windows_acl._FILE_ATTRIBUTE_DIRECTORY, windows_acl._FILE_ATTRIBUTE_REPARSE_POINT],
