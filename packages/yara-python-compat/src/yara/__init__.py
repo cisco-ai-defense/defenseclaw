@@ -1,6 +1,6 @@
 """MCP Scanner's small ``yara-python`` API subset backed by YARA-X.
 
-This module is packaged only in DefenseClaw's Windows CPython 3.14 runtime.
+This module is packaged only in DefenseClaw's native Windows runtime.
 It deliberately implements the exact surface used by cisco-ai-mcp-scanner
 4.3.0 instead of claiming general yara-python compatibility.
 """

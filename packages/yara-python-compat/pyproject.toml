@@ -1,8 +1,8 @@
 [project]
 name = "yara-python"
 version = "4.5.4.post1"
-description = "DefenseClaw's Windows CPython 3.14 adapter for MCP Scanner's yara-python API subset"
-requires-python = ">=3.14"
+description = "DefenseClaw's Windows adapter for MCP Scanner's yara-python API subset"
+requires-python = ">=3.13"
 license = "Apache-2.0"
 dependencies = ["yara-x>=1.13.0,<2"]
 

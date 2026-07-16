@@ -1,4 +1,4 @@
-"""Semantic parity tests for the Windows CPython 3.14 YARA adapter."""
+"""Semantic parity tests for the native Windows YARA adapter."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def test_mcp_scanner_rules_match_classic_yara(content: str, expected_rules: set[
     assert {match.rule for match in actual} == expected_rules
 
     # On Python 3.11-3.13, compare every consumed field against VirusTotal's
-    # extension. The Windows Python 3.14 job intentionally installs this
+    # extension. The native Windows package intentionally installs this
     # adapter under the ``yara`` name, so the fixed expected-rule assertion
     # above remains the independent contract on that target.
     if not getattr(classic_yara, "__defenseclaw_yarax_compat__", False):

@@ -30,11 +30,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.14.6"
-$PythonTargetVersion = "3.14"
+$PythonVersion = "3.13.14"
+$PythonTargetVersion = "3.13"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "DF901E84A896FF1EE720AD03377E0C8D8C2244FDA79808AEEAFF6316DF1CB75C"
+$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
 # Force the runtime owner to review the pinned binary at least quarterly. A
 # release after this deadline must deliberately move the deadline (and normally
 # the version/hash) after checking Python's current security release line.
@@ -409,7 +409,7 @@ if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.In
     throw "The native Windows installer build supports only Windows x64."
 }
 if ([DateTimeOffset]::UtcNow -ge $PythonRuntimeReviewDeadlineUTC) {
-    throw "Pinned CPython $PythonVersion security review expired at $($PythonRuntimeReviewDeadlineUTC.ToString('o')); review the current Python 3.14 Windows release and update the pin."
+    throw "Pinned CPython $PythonVersion security review expired at $($PythonRuntimeReviewDeadlineUTC.ToString('o')); review the current Python 3.13 Windows security release and update the pin."
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -495,7 +495,7 @@ $payload = Join-Path $build "payload"
 # still enter site-packages exclusively as hash-verified binary wheels.
 $yaraCompatSource = Join-Path $repoRoot 'packages\yara-python-compat'
 if (-not (Test-Path -LiteralPath (Join-Path $yaraCompatSource 'src\yara\__init__.py') -PathType Leaf)) {
-    throw 'Windows Python 3.14 YARA compatibility source is missing.'
+    throw 'Windows Python 3.13 YARA compatibility source is missing.'
 }
 $yaraCompatHashes = @()
 $yaraCompatWheels = @()
@@ -519,7 +519,7 @@ try {
     [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $savedSourceDateEpoch)
 }
 if ($yaraCompatHashes[0] -ne $yaraCompatHashes[1]) {
-    throw 'Windows Python 3.14 YARA compatibility wheel is not reproducible.'
+    throw 'Windows Python 3.13 YARA compatibility wheel is not reproducible.'
 }
 $yaraCompatWheel = $yaraCompatWheels[0]
 $yaraCompatSha256 = $yaraCompatHashes[0]
@@ -623,12 +623,17 @@ foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
 }
 $dependencyCheck = @'
 import importlib.metadata as metadata
+import platform
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 
 installed = {canonicalize_name(dist.metadata['Name']): dist.version for dist in metadata.distributions() if dist.metadata.get('Name')}
 problems = []
 for dist in metadata.distributions():
+    requires_python = dist.metadata.get('Requires-Python')
+    if requires_python and not SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True):
+        problems.append(f'{dist.metadata.get("Name")}: Python {platform.python_version()} violates Requires-Python {requires_python}')
     for raw in dist.requires or ():
         requirement = Requirement(raw)
         if requirement.marker and not requirement.marker.evaluate({'extra': ''}):
@@ -645,9 +650,13 @@ for module in ('defenseclaw', 'skill_scanner', 'mcpscanner', 'yara'):
     __import__(module)
 import asyncio
 import yara
+from magika import Magika
 from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
 if not getattr(yara, '__defenseclaw_yarax_compat__', False):
-    raise SystemExit('Windows CPython 3.14 payload did not select the YARA-X compatibility adapter')
+    raise SystemExit('Windows CPython 3.13 payload did not select the YARA-X compatibility adapter')
+magika_result = Magika().identify_bytes(b'DefenseClaw Windows Python 3.13 inference probe\n')
+if not magika_result.ok or not magika_result.output.is_text:
+    raise SystemExit('Windows CPython 3.13 payload failed Magika ONNX inference')
 findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
 if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
     raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')

@@ -143,7 +143,7 @@ func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 		Version:            "1.2.3",
 		SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
 		DistributionFlavor: "oss",
-		PythonVersion:      "3.14.6",
+		PythonVersion:      "3.13.14",
 		GatewayArchive:     "gateway.zip",
 		Wheel:              "defenseclaw.whl",
 		PythonEmbed:        "python.zip",
