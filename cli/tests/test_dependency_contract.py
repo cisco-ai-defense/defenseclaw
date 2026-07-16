@@ -24,6 +24,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -40,7 +41,8 @@ UV_LOCK = REPO_ROOT / "uv.lock"
 RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
-    "litellm": (">=1.84.0,<2", None),
+    "pygments": (">=2.20,<3", None),
+    "litellm": (">=1.84.0,<1.92.0", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -49,6 +51,8 @@ SKILL_SCANNER_SHA256 = "8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195
 MCP_SCANNER_VERSION = "4.3.0"
 MCP_SCANNER_SHA256 = "ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812"
 TEXTUAL_LOCKED_VERSION = "8.2.8"
+MAGIKA_MINIMUM_VERSION = Version("1.0.2")
+WINDOWS_PYTHON_313_ONNXRUNTIME_MINIMUM = Version("1.21.0")
 
 
 def _requirements(values: list[str]) -> dict[str, Requirement]:
@@ -89,6 +93,7 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         requirements = _requirements(requirement_set)
         assert Version("1.83.7") not in requirements["litellm"].specifier
         assert Version("1.84.0") in requirements["litellm"].specifier
+        assert Version("1.92.0") not in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
@@ -113,7 +118,8 @@ def test_lock_records_the_same_runtime_contract() -> None:
     expected = {
         "rich": (">=14.2,<15", None),
         "textual": (">=8.2.8,<9", None),
-        "litellm": (">=1.84.0,<2", None),
+        "pygments": (">=2.20,<3", None),
+        "litellm": (">=1.84.0,<1.92.0", None),
         "importlib-metadata": (">=8.7.1,<8.8", None),
     }
     assert {name: overrides[name] for name in expected} == expected
@@ -126,12 +132,65 @@ def test_lock_records_the_same_runtime_contract() -> None:
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
+    litellm = next(package for package in lock["package"] if package["name"] == "litellm")
+    assert any(
+        wheel["url"].endswith(f"litellm-{litellm['version']}-py3-none-any.whl")
+        for wheel in litellm["wheels"]
+    )
+
+
+def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() -> None:
+    """The embedded Python 3.13 runtime must select a compatible Windows ONNX wheel."""
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    project_python = SpecifierSet(document["project"]["requires-python"])
+    assert Version("3.13.14") in project_python
+    assert Version("3.14.0") not in project_python
+    direct = _requirements(document["project"]["dependencies"])
+    magika_requirement = direct["magika"]
+    assert Version("1.0.1") not in magika_requirement.specifier
+    assert MAGIKA_MINIMUM_VERSION in magika_requirement.specifier
+    assert Version("2.0.0") not in magika_requirement.specifier
+
+    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    magika = next(package for package in lock["package"] if package["name"] == "magika")
+    assert Version(magika["version"]) >= MAGIKA_MINIMUM_VERSION
+
+    windows_python_313_environment = {
+        "python_version": "3.13",
+        "python_full_version": "3.13.14",
+        "sys_platform": "win32",
+    }
+    windows_python_313 = [
+        package
+        for package in lock["package"]
+        if package["name"] == "onnxruntime"
+        and (
+            not package.get("resolution-markers")
+            or any(
+                Marker(marker).evaluate(windows_python_313_environment)
+                for marker in package["resolution-markers"]
+            )
+        )
+    ]
+    assert len(windows_python_313) == 1
+    assert Version(windows_python_313[0]["version"]) >= WINDOWS_PYTHON_313_ONNXRUNTIME_MINIMUM
+    assert any(
+        "cp313-cp313-win_amd64.whl" in wheel["url"]
+        for wheel in windows_python_313[0]["wheels"]
+    )
+
+    from magika import Magika
+
+    result = Magika().identify_bytes(b"DefenseClaw Windows Magika inference probe\n")
+    assert result.ok
+    assert result.output.is_text
+
 
 def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.0.4: rich>=13, textual>=1, and litellm>=1.77;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<2.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<1.92.
     # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
     # 2.0.10-2.0.12 cap Textual<8, so 2.0.4 is the newest viable wheel.
     intersections = {
@@ -140,7 +199,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm>=1.77.0"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.84.0,<2"),
+            Requirement("litellm>=1.84.0,<1.92.0"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -303,6 +362,8 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
 
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
     _assert_runtime_contract(wheel_requirements)
+    assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
+    assert Version("1.0.1") not in wheel_requirements["magika"].specifier
     assert str(wheel_requirements["cisco-ai-skill-scanner"].url).endswith(
         f"cisco_ai_skill_scanner-{SKILL_SCANNER_VERSION}-py3-none-any.whl#sha256={SKILL_SCANNER_SHA256}"
     )
