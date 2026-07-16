@@ -203,3 +203,28 @@ def test_release_documentation_matches_the_enforced_gate() -> None:
         assert claim in installer
     assert "`publish-release` job depends directly on that cell" in ci_flat
     assert "never builds or installs DefenseClaw from the source checkout" in ci_flat
+
+
+def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
+    stage = _function("Stage-PackageData")
+    build = _function("Invoke-BuildArtifacts")
+
+    for source in (
+        "schemas\\config\\v8\\defenseclaw-config.schema.json",
+        "schemas\\config\\v8\\reference\\$name",
+        "scripts/telemetry_runtime_assets.py",
+    ):
+        assert source in stage
+
+    for packaged in (
+        "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+        "defenseclaw/_data/config/v8/observability.yaml",
+        "defenseclaw/_data/config/v8/observability.md",
+        "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+        "defenseclaw/_data/telemetry/v8/catalog.json",
+        "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+        "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+        "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+        "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+    ):
+        assert packaged in build
