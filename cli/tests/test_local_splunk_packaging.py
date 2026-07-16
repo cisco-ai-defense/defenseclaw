@@ -67,6 +67,7 @@ def test_wheel_resolves_complete_splunk_bundle_outside_checkout(
                 "from defenseclaw.observability.local_splunk import validate_bundle_assets;"
                 "p=validate_bundle_assets(bundled_splunk_bridge_dir());"
                 "assert (p/'compose'/'docker-compose.local.yml').is_file();"
+                "assert (p/'splunk'/'apps'/'defenseclaw_local_mode'/'lookups'/'dcso_risk_state_labels.csv').is_file();"
                 "assert (p/'splunk'/'apps'/'defenseclaw_local_mode'/'lookups'/'dcso_severity_labels.csv').is_file();"
                 "assert sys.argv[2] not in str(p);print(p)"
             ),
