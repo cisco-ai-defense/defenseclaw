@@ -189,7 +189,7 @@ def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "9.8.7"],
+        [BASH, str(stamp), "9.8.7"],
         cwd=repo,
         text=True,
         capture_output=True,
