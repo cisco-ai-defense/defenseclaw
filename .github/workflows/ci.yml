@@ -33,12 +33,9 @@ jobs:
           # push or fetch on our behalf if a transient compromise
           # injects shell.
           persist-credentials: false
-      # Catches drift between the four in-repo version sources (Makefile,
-      # pyproject.toml, cli/__init__.py, package.json) before it can ship
-      # in a release. The release workflow restamps from the git tag, but
-      # PRs still need to keep the in-repo defaults in sync so local dev
-      # builds (`make dist`) produce artifacts whose names match what
-      # install.sh / `defenseclaw upgrade` will look up at the next tag.
+      # Keep local-development package metadata internally consistent. The
+      # release workflow dynamically stamps its dispatch version, so this
+      # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
   upgrade-manifest:
@@ -70,9 +67,14 @@ jobs:
       - run: make plugin
       - run: make go-lint
 
-  go-test:
-    name: Go Test
+  go-test-gateway:
+    name: Go Gateway Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -86,7 +88,94 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - run: make go-test-cov
+      - name: Run gateway race/coverage shard
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+          GO_TEST_SHARDS: 4
+        run: |
+          set -euo pipefail
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/gateway \
+            --shard-count "$GO_TEST_SHARDS" \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -race -count=1 -timeout 45m \
+            -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
+            -run "$test_regex" \
+            ./internal/gateway
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-gateway-${{ matrix.shard }}
+          path: coverage-go-gateway-${{ matrix.shard }}.out
+          retention-days: 1
+
+  go-test-other:
+    name: Go Test (remaining packages)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run remaining Go race/coverage suite once
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(
+            go list ./... | grep -v '^github.com/defenseclaw/defenseclaw/internal/gateway$'
+          )
+          test "${#packages[@]}" -gt 0
+          go test -race -count=1 -timeout 45m \
+            -coverprofile=coverage-go-other.out \
+            "${packages[@]}"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-other
+          path: coverage-go-other.out
+          retention-days: 1
+
+  go-test:
+    # Preserve the existing required-check name while combining the complete
+    # race/coverage suite from the gateway shards and all remaining packages.
+    name: Go Test
+    needs: [go-test-gateway, go-test-other]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Go test partition
+        env:
+          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          OTHER_RESULT: ${{ needs.go-test-other.result }}
+        run: test "$GATEWAY_RESULT" = success && test "$OTHER_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: go-coverage-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Go coverage
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 5
+          python3 scripts/merge_go_coverage.py \
+            --output coverage.out \
+            "${coverage_parts[@]}"
+          go tool cover -func=coverage.out >/dev/null
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage
@@ -118,17 +207,77 @@ jobs:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
 
-  python-lint-test:
-    name: Python Lint & Test
+  python-test:
+    name: Python Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
+      - run: make _bundle-data
+      - name: Run Python coverage shard
+        env:
+          PYTHON_TEST_SHARD: ${{ matrix.shard }}
+          PYTHON_TEST_SHARDS: 4
+        run: |
+          set -euo pipefail
+          mapfile -t test_files < <(
+            python3 scripts/python_test_shards.py \
+              --shard-count "$PYTHON_TEST_SHARDS" \
+              --shard-index "$PYTHON_TEST_SHARD"
+          )
+          test "${#test_files[@]}" -gt 0
+          COVERAGE_FILE="coverage-py-shard-$PYTHON_TEST_SHARD" \
+            .venv/bin/python -m pytest "${test_files[@]}" \
+              -q --tb=short \
+              --durations=25 \
+              --cov=defenseclaw \
+              --cov-report=
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: python-coverage-shard-${{ matrix.shard }}
+          path: coverage-py-shard-${{ matrix.shard }}
+          retention-days: 1
+
+  python-lint-test:
+    # Preserve the existing required-check name while making it the single
+    # authority that verifies lint and combines all isolated coverage shards.
+    name: Python Lint & Test
+    needs: python-test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Python test shard
+        env:
+          PYTHON_SHARD_RESULT: ${{ needs.python-test.result }}
+        run: test "$PYTHON_SHARD_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
       - run: make py-lint
-      - run: make cli-test-cov
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: python-coverage-shard-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Python coverage
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-py-shard-*' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 4
+          .venv/bin/coverage combine "${coverage_parts[@]}"
+          .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: python-coverage
@@ -459,33 +608,6 @@ jobs:
       - name: Stop the local observability stack
         if: ${{ always() }}
         run: bundles/local_observability_stack/bin/openclaw-observability-bridge reset
-
-  make-test:
-    name: make test (unified)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - run: make plugin
-      # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
-      # which `make test → cli-test` indirectly needs at import time:
-      # several cli/tests/*.py files use pytest fixtures/parametrize
-      # and `python -m unittest discover` aborts on the first failed
-      # import. The non-dev `make pycli` target only installs runtime
-      # deps and broke this job after the S4.1/S4.2 connector_paths
-      # tests landed.
-      - run: make dev-pycli
-      - run: make test
 
   windows-hook-path:
     name: Windows Hook Path

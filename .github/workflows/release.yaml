@@ -55,10 +55,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require latest stable macOS app source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/check-macos-upstream.py
+      - name: Require reviewed macOS app source
+        # A DefenseClaw release must build the macOS source that was reviewed
+        # and merged with this exact main commit. Upstream freshness is tracked
+        # independently by macos-upstream.yml and must not make an unrelated
+        # product release fail after its PR checks have already passed.
+        run: python3 scripts/check-macos-upstream.py --offline
 
       - name: Require immutable GitHub releases
         env:
@@ -107,7 +109,7 @@ jobs:
             --releases-json published-releases.json
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Require reviewed source release identity
+      - name: Validate release version stamping
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
@@ -121,22 +123,13 @@ jobs:
             extensions/defenseclaw/package-lock.json \
             macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
             release/source-install-identity.json >/dev/null
-          python3 scripts/source_release_identity.py check \
-            --expected-release "$RELEASE_TAG"
-          # The remote tag will point at this exact reviewed main commit. A
-          # workflow-only version rewrite would make GitHub source archives
-          # disagree with the signed wheel/gateway release, so prove the
-          # legacy stamp helper is already a byte-for-byte no-op.
+          SOURCE_DEFAULT="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          if [[ "$SOURCE_DEFAULT" != "$RELEASE_TAG" ]]; then
+            echo "::warning title=GitHub source snapshot uses development version::Installable assets will be stamped $RELEASE_TAG, while GitHub's automatic source archive remains the reviewed main snapshot with development version $SOURCE_DEFAULT."
+          fi
+          # The workflow-dispatch input is the release version authority. Prove
+          # the reviewed stamping code can apply it before native builders run.
           scripts/stamp-version.sh "$RELEASE_TAG"
-          git diff --exit-code -- \
-            Makefile \
-            pyproject.toml \
-            uv.lock \
-            cli/defenseclaw/__init__.py \
-            extensions/defenseclaw/package.json \
-            extensions/defenseclaw/package-lock.json \
-            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
-            release/source-install-identity.json
 
       - name: Verify release commit is reviewed and branch-owned
         id: provenance
@@ -303,6 +296,24 @@ jobs:
           git tag "$RELEASE_TAG"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
 
+      - name: Stamp runtime source version before native builds
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json >/dev/null
+          scripts/stamp-version.sh "$RELEASE_TAG"
+          python3 scripts/source_release_identity.py check \
+            --expected-release "$RELEASE_TAG"
+
       - name: Build OpenClaw plugin and populate embed tree
         run: make extensions
 
@@ -312,7 +323,16 @@ jobs:
           git restore --worktree -- \
             extensions/defenseclaw/dist \
             internal/gateway/connector/openclaw_extension/.placeholder
-          git diff --exit-code
+          git diff --exit-code -- \
+            . \
+            ':(exclude)Makefile' \
+            ':(exclude)pyproject.toml' \
+            ':(exclude)uv.lock' \
+            ':(exclude)cli/defenseclaw/__init__.py' \
+            ':(exclude)extensions/defenseclaw/package.json' \
+            ':(exclude)extensions/defenseclaw/package-lock.json' \
+            ':(exclude)macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj' \
+            ':(exclude)release/source-install-identity.json'
 
       - name: Build gateway archives and SBOMs
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
@@ -329,27 +349,6 @@ jobs:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
-          git ls-files --error-unmatch -- \
-            Makefile \
-            pyproject.toml \
-            uv.lock \
-            cli/defenseclaw/__init__.py \
-            extensions/defenseclaw/package.json \
-            extensions/defenseclaw/package-lock.json \
-            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
-            release/source-install-identity.json >/dev/null
-          scripts/stamp-version.sh "$RELEASE_TAG"
-          git diff --exit-code -- \
-            Makefile \
-            pyproject.toml \
-            uv.lock \
-            cli/defenseclaw/__init__.py \
-            extensions/defenseclaw/package.json \
-            extensions/defenseclaw/package-lock.json \
-            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
-            release/source-install-identity.json
-          python3 scripts/source_release_identity.py check \
-            --expected-release "$RELEASE_TAG"
           make dist-cli
           make dist-plugin
           make dist-upgrade-manifest
