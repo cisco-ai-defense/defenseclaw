@@ -67,6 +67,7 @@ from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTa
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
+from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
@@ -75,6 +76,7 @@ from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, Over
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
+from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
 
@@ -105,6 +107,33 @@ async def _wait_for_panel_render(app: DefenseClawTUI, panel: str) -> None:
         and panel not in app._panel_render_running  # noqa: SLF001
         and panel not in app._panel_render_pending,  # noqa: SLF001
     )
+
+
+async def _click_when_ready(
+    pilot: Pilot,
+    selector: str,
+    *,
+    offset: tuple[int, int] = (0, 0),
+    timeout: float = 8.0,
+) -> bool:
+    """Wait for layout hit-testing, then deliver one click to *selector*."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        await pilot.pause()
+        targets = list(pilot.app.screen.query(selector))
+        if targets:
+            target = targets[0]
+            click_x = target.region.x + offset[0]
+            click_y = target.region.y + offset[1]
+            if (
+                pilot.app.screen.region.contains(click_x, click_y)
+                and pilot.app.get_widget_at(click_x, click_y)[0] is target
+            ):
+                return await pilot.click(target, offset=offset)
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for clickable {selector}")
+        await asyncio.sleep(0.01)
 
 
 def _v8_destination(
@@ -342,6 +371,7 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
+        await _wait_for_panel_render(app, "overview")
         scroller = app.query_one("#body-scroll", VerticalScroll)
         assert scroller.max_scroll_y > 0
 
@@ -373,30 +403,23 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
             nonlocal refresh_calls
             refresh_calls += 1
 
-        metric_refresh_calls = 0
+        scheduled_reasons: list[str] = []
 
-        def counted_metric_refresh() -> None:
-            nonlocal metric_refresh_calls
-            metric_refresh_calls += 1
+        def counted_schedule(reason: str = "") -> int:
+            scheduled_reasons.append(reason)
+            return app._panel_render_generation  # noqa: SLF001 - scheduling boundary assertion.
 
         app._refresh_models_from_disk = counted_refresh  # type: ignore[method-assign]
-        app._render_overview_metrics = counted_metric_refresh  # type: ignore[method-assign]
+        app._schedule_active_panel_refresh = counted_schedule  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
-        app._overview_sampled_refresh_scheduled = True
         app._periodic_refresh()
         assert refresh_calls == 0
-        assert metric_refresh_calls == 1
+        assert scheduled_reasons == ["periodic-audit"]
 
         scroller.scroll_to(y=0, animate=False, immediate=True)
         app._periodic_refresh()
         assert refresh_calls == 0
-        assert metric_refresh_calls == 2
-
-        sampled_render_calls = 0
-
-        def counted_sampled_render() -> None:
-            nonlocal sampled_render_calls
-            sampled_render_calls += 1
+        assert scheduled_reasons == ["periodic-audit", "periodic-audit"]
 
         sampled_timer_calls = 0
 
@@ -406,18 +429,18 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
             callback()
             return object()
 
-        app._render_chrome = counted_sampled_render  # type: ignore[method-assign]
         app.set_timer = immediate_sampled_timer  # type: ignore[method-assign]
         # Keep the mount-time interval from racing this direct sampler assertion on slow CI.
         app._periodic_refresh_running = True  # noqa: SLF001
         app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - isolate direct sampler assertions.
+        scheduled_reasons.clear()
 
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
         app._schedule_overview_sampled_refresh()
         await pilot.pause()
         assert sampled_timer_calls == 0
-        assert sampled_render_calls == 0
+        assert scheduled_reasons == []
 
         scroller.scroll_to(y=0, animate=False, immediate=True)
         await pilot.pause()
@@ -426,7 +449,7 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
         app._schedule_overview_sampled_refresh()
         await pilot.pause()
         assert sampled_timer_calls == 1
-        assert sampled_render_calls == 1
+        assert scheduled_reasons == ["overview-sample"]
 
 
 def test_overview_body_signature_ignores_clock_only_labels() -> None:
@@ -491,7 +514,7 @@ def test_connector_signature_detects_raw_activity_change_without_count_change() 
 
     assert first != second
     row = next(row for row in app._overview_connector_rows() if row.connector == "codex")
-    assert row.calls == 4
+    assert row.calls == 0
     assert row.last_activity_at == now
 
 
@@ -532,7 +555,20 @@ def test_live_overview_signature_covers_scans_alerts_and_large_tiles() -> None:
             return list(self.events[-limit:])
 
         def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
-            return {}
+            if not self.events:
+                return {}
+            newest = self.events[-1].timestamp
+            return {
+                "codex": {
+                    "calls": len(self.events),
+                    "alerts": len(self.events),
+                    "blocks": 0,
+                    "newest": newest.isoformat() if newest is not None else "",
+                }
+            }
+
+        def audit_data_version(self) -> int:
+            return len(self.events)
 
     store = LiveStore()
     app = DefenseClawTUI(
@@ -1128,7 +1164,10 @@ async def test_overview_mode_picker_mouse_click_opens_preview(monkeypatch: pytes
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("m")
         await pilot.pause()
-        await pilot.click("#action-menu-row-3")
+        screen = app.screen
+        assert isinstance(screen, ModePickerScreen)
+        codex_row = next(index for index, choice in enumerate(screen.choices) if choice.wire == "codex")
+        assert await _click_when_ready(pilot, f"#action-menu-row-{codex_row}")
         await pilot.pause()
 
         screen = app.screen_stack[-1]
@@ -2295,7 +2334,7 @@ async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
 
     assert scheduled == [True]
     rows = {row.connector: row for row in app._overview_connector_rows()}
-    assert rows["codex"].calls == 5
+    assert rows["codex"].calls == 0
     assert rows["codex"].last_activity_at == now
 
 
@@ -5045,8 +5084,8 @@ async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() 
 
 
 @pytest.mark.asyncio
-async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
-    """Cold startup should not flash lifetime hook totals as active-session counts."""
+async def test_overview_startup_uses_persisted_totals_before_health_loads() -> None:
+    """Cold startup keeps authoritative persisted totals before and after health loads."""
 
     cfg = OverviewConfig(
         data_dir="/tmp/dc",
@@ -5115,12 +5154,12 @@ async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
         await pilot.pause()
 
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
-        assert metrics["hook_calls"].value == 3
-        assert metrics["blocks"].value == 1
+        assert metrics["hook_calls"].value == 27000
+        assert metrics["blocks"].value == 300
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["codex"].calls == 2
-        assert rows["cursor"].calls == 1
-        assert store.stats_calls == 0
+        assert rows["codex"].calls == 20000
+        assert rows["cursor"].calls == 7000
+        assert store.stats_calls == 1
 
         overview.set_health(
             HealthSnapshot(
@@ -5140,8 +5179,8 @@ async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_prefers_live_connector_counts_over_lifetime_history() -> None:
-    """Live health counters are the current dashboard number; history is fallback."""
+async def test_overview_prefers_persisted_hook_totals_over_gateway_request_counts() -> None:
+    """Persisted audit totals remain authoritative over gateway request counters."""
 
     since = datetime.now(timezone.utc) - timedelta(minutes=2)
     cfg = OverviewConfig(
@@ -5231,8 +5270,7 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
                 },
             }
 
-        def count_scan_results_since(self, since_arg: datetime | None) -> int:
-            assert since_arg is not None
+        def count_scan_results_since(self, _since_arg: datetime | None) -> int:
             return 2
 
     store = HookStatsStore()
@@ -5264,33 +5302,33 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
         await pilot.pause()
 
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["claudecode"].calls == 6
-        assert rows["codex"].calls == 135
-        assert rows["codex"].blocks == 0
-        assert rows["codex"].alerts == 2
+        assert rows["claudecode"].calls == 4408
+        assert rows["codex"].calls == 16216
+        assert rows["codex"].blocks == 27
+        assert rows["codex"].alerts == 54
         assert rows["codex"].last_activity != "—"
-        assert store.stats_calls == 0
+        assert store.stats_calls == 1
 
         app._set_connector_filter("codex")
         codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert codex_metrics["findings"].value == 2
-        assert store.stats_calls == 0
+        assert store.stats_calls == 1
 
         app._set_connector_filter("claudecode")
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
-        assert metrics["hook_calls"].value == 6
-        assert metrics["findings"].value == 1
-        assert store.stats_calls == 0
+        assert metrics["hook_calls"].value == 4408
+        assert metrics["findings"].value == 2
+        assert store.stats_calls == 1
 
         session_counts = app._overview_session_enforcement_counts()
-        assert session_counts.active_alerts == 3
+        assert session_counts.active_alerts == 59
         assert session_counts.total_scans == 2
 
 
 @pytest.mark.asyncio
-async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> None:
-    """Live counters without a gateway timestamp retain the audit fallback."""
+async def test_overview_persisted_counts_use_audit_activity_when_health_omits_it() -> None:
+    """Persisted counts retain audit activity when gateway timestamps are absent."""
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(minutes=2)
@@ -5346,8 +5384,8 @@ async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> No
         await pilot.pause()
 
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["codex"].calls == 1
-        assert rows["cursor"].calls == 2
+        assert rows["codex"].calls == 100
+        assert rows["cursor"].calls == 200
         assert rows["codex"].last_activity != "—"
         assert rows["cursor"].last_activity != "—"
         assert store.stats_calls >= 1
@@ -6408,32 +6446,28 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
+        await _wait_for_panel_render(app, "overview")
         scroller = app.query_one("#body-scroll", VerticalScroll)
         assert scroller.max_scroll_y > 0
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
 
         app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
-        render_calls = 0
+        body = app.query_one("#body", Static)
+        update_calls = 0
+        original_update = body.update
 
-        original_render_chrome = app._render_chrome
+        def counted_update(*args: object, **kwargs: object) -> None:
+            nonlocal update_calls
+            update_calls += 1
+            original_update(*args, **kwargs)
 
-        def counted_render_chrome() -> None:
-            nonlocal render_calls
-            render_calls += 1
-            original_render_chrome()
-
-        def immediate_timer(_delay: float, callback, **_kwargs: object) -> object:
-            callback()
-            return object()
-
-        app._render_chrome = counted_render_chrome  # type: ignore[method-assign]
-        app.set_timer = immediate_timer  # type: ignore[method-assign]
+        body.update = counted_update  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
 
         app._periodic_refresh()
-        await pilot.pause()
-        assert render_calls == 0
+        await _wait_for_panel_render(app, "overview")
+        assert update_calls == 0
 
         audit.set_events(
             [
@@ -6449,13 +6483,14 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         )
 
         app._periodic_refresh()
-        await pilot.pause()
+        await _wait_for_panel_render(app, "overview")
 
-        assert render_calls == 1
+        assert update_calls == 1
         assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()
         rows = {row.connector: row for row in app._overview_connector_rows()}
         assert rows["claudecode"].blocks == 1
         assert rows["claudecode"].last_activity.endswith("ago")
+        assert scroller.scroll_y == scroller.max_scroll_y
 
 
 @pytest.mark.asyncio
