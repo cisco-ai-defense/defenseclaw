@@ -13,8 +13,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
+
 from defenseclaw.platform_support import supported_connectors
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
@@ -22,17 +29,29 @@ INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 UPGRADE_SH = ROOT / "scripts" / "upgrade.sh"
 
 
-def test_installers_require_portable_litellm_wheels() -> None:
+def test_posix_requires_portable_litellm_and_windows_delegates_to_native_setup() -> None:
     install_sh = INSTALL_SH.read_text(encoding="utf-8")
     install_ps1 = INSTALL_PS1.read_text(encoding="utf-8")
-    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert install_sh.count("--only-binary litellm") == 3
-    assert "--only-binary litellm" in install_ps1
-    assert project.count('"litellm>=1.84.0,<1.92.0"') == 1
+    assert "--only-binary litellm" not in install_ps1
+    assert "It does not install Python, uv, wheels" in install_ps1
+    assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in install_ps1
+    expected = SpecifierSet(">=1.84.0,<1.92.0")
+    direct = {
+        requirement.name: requirement
+        for requirement in map(Requirement, project["project"]["dependencies"])
+    }
+    overrides = {
+        requirement.name: requirement
+        for requirement in map(Requirement, project["tool"]["uv"]["override-dependencies"])
+    }
+    assert direct["litellm"].specifier == expected
+    assert overrides["litellm"].specifier == expected
 
 
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
 MAKEFILE = ROOT / "Makefile"
 INSTALL_DOC = ROOT / "docs" / "INSTALL.md"
 
@@ -44,7 +63,8 @@ def test_unsigned_local_dist_is_never_advertised_as_schema2_installer_input() ->
     docs = INSTALL_DOC.read_text(encoding="utf-8")
 
     assert "unsigned directory produced by `make dist` is intentionally rejected" in posix
-    assert "unsigned directory produced by `make dist` is rejected" in windows
+    assert "Authenticated Setup provenance does not describe a signed release artifact" in windows
+    assert "Invoke-StagedChecksumVerification" in windows
     assert "$(DIST_DIR)/ is not authenticated installer input for 0.8.4+" in makefile
     assert "Do not pass the unsigned output of `make dist`" in docs
     assert "signed checksums and certificate" in docs
@@ -62,63 +82,37 @@ def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> 
     assert "Do not pass --version" in posix
     assert "blob/main/docs/CLI.md#upgrade" in posix
 
-    assert (
-        "authenticated release-owned upgrade resolver from the target release in latest mode"
-    ) in windows
-    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in windows
-    assert "Do not pass -Version" in windows
-    assert "blob/main/docs/CLI.md#upgrade" in windows
-    assert "defenseclaw upgrade where supported" not in windows
+    # Windows servicing is owned by the authenticated native Setup executable;
+    # the compatibility bootstrap must not route existing installs through the
+    # legacy PowerShell upgrade resolver.
+    assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in windows
+    assert "$arguments = New-SetupArgumentList" in windows
+    assert "return Invoke-BoundedNativeProcess -FilePath $SetupPath" in windows
+    assert "defenseclaw-upgrade.ps1" not in windows
 
 
-def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    match = re.search(
-        r"(?ms)^  windows-installer-smoke:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)",
-        workflow,
+def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance() -> None:
+    workflow = WINDOWS_NATIVE_WORKFLOW.read_text(encoding="utf-8")
+    package_match = re.search(
+        r"(?ms)^  package-artifact:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
     )
-    assert match is not None
-    job = match.group(0)
+    acceptance_match = re.search(
+        r"(?ms)^  packaged-acceptance:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
+    )
+    assert package_match is not None
+    assert acceptance_match is not None
+    package = package_match.group(0)
+    acceptance = acceptance_match.group(0)
 
-    assert "must never stub provenance verification" in job
-    legacy_epoch = job.index('payload["source_install_compatibility_epoch"] = 1')
-    legacy_runtime = job.index('payload["runtime_config_version"] = 7')
-    stamp = job.index("scripts/stamp-version.sh 0.8.3")
-    assert legacy_epoch < stamp
-    assert legacy_runtime < stamp
-    assert 'payload.get("schema_version") != 1' in job
-    assert "scripts/stamp-version.sh 0.8.3" in job
-    assert "scripts/source_release_identity.py check --expected-release 0.8.3" in job
-    assert "main.version=0.8.3" in job
-    assert "make dist-upgrade-manifest" in job
-    assert "make dist-upgrade-manifest dist-checksums" not in job
-    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in job
-    assert 'path.relative_to(root).as_posix()' in job
-    assert 'manifest.get("schema_version") != 1' in job
-    assert 'manifest.get("release_version") != "0.8.3"' in job
-    assert '"release_artifacts" in manifest' in job
-    assert "cosign.cmd" not in job
-    assert "installer smoke stub" not in job
-    assert "DEFENSECLAW-PROTECTED-ARTIFACT-V1" not in job
-    assert "did not report exact 0.8.3" in job
-    assert "Native installer rollback self-test (PowerShell 5.1 + 7)" in job
-    assert '@("powershell.exe", "pwsh")' in job
-    assert "-TestMode" in job
-    assert "-NativePrivateDirectorySelfTestRoot $root" in job
-    assert "native installer self-test failed" in job
-    assert "native installer self-test left residue" in job
-
-    native = job.index("Native installer rollback self-test (PowerShell 5.1 + 7)")
-    policy = job.index("Build and verify legacy installer policy fixture")
-    install = job.index("Run install.ps1 against local artifacts")
-    assert native < job.index("actions/setup-go")
-    assert native < job.index("astral-sh/setup-uv")
-    assert native < job.index("Stamp legacy schema-1 installer fixture")
-    assert native < job.index("Build gateway binary + CLI wheel")
-    assert native < policy < install
-    assert policy < job.index("upgrade-manifest.json", policy) < install
-    assert policy < job.index("make dist-upgrade-manifest", policy) < install
-    assert policy < job.index('root / "checksums.txt"', policy) < install
+    artifacts = package.index("-Operation build-artifacts")
+    installer = package.index("-Operation build-installer")
+    wizard = package.index("-Mode wizard-smoke")
+    upload = package.index("name: windows-native-package")
+    assert artifacts < installer < wizard < upload
+    assert "installer smoke stub" not in package
+    assert "needs: package-artifact" in acceptance
+    assert "name: windows-native-package" in acceptance
+    assert "-Mode setup-acceptance" in acceptance
 
 
 def test_sandbox_installer_fallback_uses_selected_release() -> None:
@@ -169,28 +163,26 @@ def test_release_installers_track_known_connector_choices() -> None:
     assert hook_choices == ()
 
 
-def test_posix_install_and_upgrade_validate_tui_before_launcher_publication() -> None:
+def test_posix_install_and_upgrade_validate_cli_before_launcher_publication() -> None:
     install_text = INSTALL_SH.read_text(encoding="utf-8")
     install_cli = install_text.split("install_python_cli()", 1)[1].split(
         "# ── Install: OpenClaw Plugin", 1
     )[0]
-    assert install_cli.index("pip check") < install_cli.index("app.run_test(size=(80, 24))")
-    assert install_cli.index("app.run_test(size=(80, 24))") < install_cli.index("ln -sf")
+    validation = '"${DEFENSECLAW_VENV}/bin/defenseclaw" --help'
+    assert install_cli.index("uv pip install") < install_cli.index(validation)
+    assert install_cli.index(validation) < install_cli.index("fresh-symlink")
 
     upgrade_text = UPGRADE_SH.read_text(encoding="utf-8")
     install_start = upgrade_text.index('VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"')
     launcher = upgrade_text.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', install_start)
     upgrade_install = upgrade_text[install_start:launcher]
-    assert upgrade_install.index("pip check") < upgrade_install.index("app.run_test(size=(80, 24))")
+    assert upgrade_install.index("pip install") < upgrade_install.index(validation)
 
 
 def test_posix_upgrade_binds_sigstore_to_exact_release_workflow() -> None:
     text = UPGRADE_SH.read_text(encoding="utf-8")
 
-    assert 'sed \'s/\\./\\\\./g\'' in text
-    assert (
-        r"^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/"
-        r"release\\.yaml@refs/(tags/${escaped_release_version}|heads/main)$"
-        in text
-    )
-    assert '"^https://github.com/${REPO}/.+"' not in text
+    identity = "https://github.com/${REPO}/.github/workflows/release.yaml@refs/heads/main"
+    assert f'--certificate-identity "{identity}"' in text
+    assert f"--certificate-identity '{identity}'" in text
+    assert "--certificate-identity-regexp" not in text

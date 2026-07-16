@@ -17,7 +17,7 @@
 
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
-  <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg" /></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python 3.10-3.13" src="https://img.shields.io/badge/python-3.10--3.13-blue.svg" /></a>
   <a href="https://go.dev/"><img alt="Go 1.26.4" src="https://img.shields.io/badge/go-1.26.4-00ADD8.svg" /></a>
   <a href="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="https://discord.com/invite/nKWtDcXxtx"><img alt="Discord: Join us" src="https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&amp;logoColor=white" /></a>
@@ -91,7 +91,7 @@ Project Markdown documentation is centralized under [docs/](docs/). Package-loca
 
 | Requirement | Version |
 |-------------|---------|
-| Python | 3.10+ |
+| Python | 3.10-3.13 |
 | Go | 1.26.4+ |
 | Node.js | 18+ for the OpenClaw plugin |
 | uv | Recommended for Python installs |
