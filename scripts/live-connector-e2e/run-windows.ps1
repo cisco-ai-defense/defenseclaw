@@ -695,13 +695,13 @@ function Get-RegisteredWindowsHookInvocation {
                 $command = [string]$handler.command
                 if ([string]::IsNullOrWhiteSpace($command) -or -not [IO.Path]::IsPathFullyQualified($command)) { continue }
                 $resolved = [IO.Path]::GetFullPath($command)
-                $args = [string[]]@($handler.args | ForEach-Object { [string]$_ })
+                $hookArguments = [string[]]@($handler.args | ForEach-Object { [string]$_ })
                 if ([string]::Equals($resolved, $hookExecutable, [StringComparison]::OrdinalIgnoreCase) -and
-                    ($args -join "`0") -ceq ($expectedArgs -join "`0")) {
+                    ($hookArguments -join "`0") -ceq ($expectedArgs -join "`0")) {
                     if ($null -ne $handler.PSObject.Properties['shell']) {
                         throw 'Claude Code registered hook unexpectedly crosses a shell boundary'
                     }
-                    $matches.Add([pscustomobject]@{ FilePath = $resolved; ArgumentList = $args })
+                    $matches.Add([pscustomobject]@{ FilePath = $resolved; ArgumentList = $hookArguments })
                 }
             }
         }
