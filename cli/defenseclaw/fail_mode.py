@@ -18,6 +18,7 @@ from typing import Any
 
 from defenseclaw import config as config_module
 from defenseclaw.connector_paths import codex_home, connector_config_files, normalize
+from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
@@ -492,11 +493,11 @@ def fail_mode_transaction_lock(cfg: Any) -> Iterator[None]:
         os.close(descriptor)
         raise
     try:
-        config_module._lock_file_exclusive(lock)
+        _lock_file_exclusive(lock)
         try:
             yield
         finally:
-            config_module._unlock_file(lock)
+            _unlock_file(lock)
     finally:
         lock.close()
 
