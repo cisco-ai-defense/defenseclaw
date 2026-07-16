@@ -12,6 +12,112 @@ t_plist_exists_and_parses() {
   fi
 }
 
+t_guardian_and_enumerator_plists_exist_and_parse() {
+  # The hook-guardian + hook-enumerator LaunchDaemons together deliver
+  # per-user hook wiring for every eligible local user on the box.
+  # install.sh installs and bootstraps both; the shipped bundle must
+  # therefore include both plist templates.
+  local g="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+  local e="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+  assert_file_exists "${g}"
+  assert_file_exists "${e}"
+  if command -v plutil >/dev/null 2>&1; then
+    local out rc=0
+    out="$(plutil -lint "${g}" 2>&1)" || rc=$?
+    assert_status "${rc}" 0 "guardian plutil -lint should succeed"
+    out="$(plutil -lint "${e}" 2>&1)" || rc=$?
+    assert_status "${rc}" 0 "enumerator plutil -lint should succeed"
+  fi
+  # The enumerator invokes the render-targets.sh helper we ship under
+  # /opt/cisco/secureclient/defenseclaw/lib/render-targets.sh. If a
+  # future edit accidentally points at a stale bin/ path, catch it here.
+  local body
+  body="$(cat "${e}")"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/lib/render-targets.sh" \
+    "enumerator plist points at lib/render-targets.sh"
+  assert_contains "${body}" "<key>StartInterval</key>" "enumerator has StartInterval"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-enumerator" \
+    "enumerator label is namespaced under com.cisco.secureclient.defenseclaw"
+
+  body="$(cat "${g}")"
+  assert_contains "${body}" "enterprise" "guardian invokes enterprise subcommand"
+  assert_contains "${body}" "hooks"      "guardian invokes hooks subcommand"
+  assert_contains "${body}" "reconcile"  "guardian runs reconcile"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml" \
+    "guardian points at the installer-rendered manifest path"
+}
+
+t_render_targets_sh_exists_and_is_executable() {
+  # render-targets.sh is invoked by the hook-enumerator LaunchDaemon.
+  # It must be shipped in the bundle and be +x so /bin/bash doesn't
+  # need to be edited to allow execution.
+  local rt="${PKG_DIR}/lib/render-targets.sh"
+  assert_file_exists "${rt}"
+  if [[ ! -x "${rt}" ]]; then
+    _fail "render-targets.sh missing +x"
+    return 1
+  fi
+  local rc=0
+  bash -n "${rt}" 2>&1 || rc=$?
+  assert_status "${rc}" 0 "render-targets.sh parses cleanly"
+}
+
+t_install_bootstraps_guardian_and_enumerator() {
+  # Regression guard: install.sh MUST install and bootstrap both the
+  # hook-guardian and hook-enumerator LaunchDaemons — otherwise no
+  # user's hooks ever get wired on a fresh customer install.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  assert_contains "${body}" 'install_file_no_replace "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}"' \
+    "install.sh copies the guardian plist"
+  assert_contains "${body}" 'install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}"' \
+    "install.sh copies the enumerator plist"
+  assert_contains "${body}" 'launchctl bootstrap system "${GUARDIAN_PLIST_DST}"' \
+    "install.sh bootstraps the guardian daemon"
+  assert_contains "${body}" 'launchctl bootstrap system "${ENUMERATOR_PLIST_DST}"' \
+    "install.sh bootstraps the enumerator daemon"
+  assert_contains "${body}" 'render_targets_manifest' \
+    "install.sh renders the initial targets.yaml manifest"
+  assert_contains "${body}" 'enumerate_local_users' \
+    "install.sh enumerates local users via the shared helper"
+}
+
+t_install_no_longer_hardcodes_single_target_user() {
+  # Regression guard: the pre-2026.7.3 flow called
+  #   "${GATEWAY_BIN}" enterprise hooks install --connector ... --user "${TARGET_USER}"
+  # inline, which silently no-op'd whenever TARGET_USER was empty. The
+  # multi-user rewrite REPLACES those inline calls with a manifest-based
+  # reconcile owned by the hook-guardian LaunchDaemon. Grepping for a
+  # bare `enterprise hooks install` invocation must return zero code
+  # matches (comments are fine — they're filtered by the same grep the
+  # guardian-auth-dir regression test uses).
+  local bad
+  bad="$(/usr/bin/python3 - "${PKG_DIR}/install.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+joined = re.sub(r"\\\n\s*", " ", src)
+bad = []
+for i, line in enumerate(joined.splitlines(), start=1):
+    if "enterprise hooks install" not in line:
+        continue
+    # Skip pure prints / logs / comments.
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        continue
+    if re.search(r"\blog\b|\bwarn\b|\bprintf\b", line):
+        continue
+    bad.append((i, line.strip()[:200]))
+for i, l in bad:
+    print(f"{i}: {l}")
+PY
+)"
+  if [[ -n "${bad}" ]]; then
+    _fail "found live 'enterprise hooks install' invocation(s) in install.sh — the multi-user rewrite should route wiring through the hook-guardian reconcile only:
+${bad}"
+    return 1
+  fi
+}
+
 t_plist_contains_managed_paths() {
   local plist="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"
   local body; body="$(cat "${plist}")"
@@ -445,6 +551,10 @@ t_install_refuses_existing_state_before_build_or_launchd_mutation() {
 }
 
 run_case "plist exists and lints"     t_plist_exists_and_parses
+run_case "guardian + enumerator plists exist and lint" t_guardian_and_enumerator_plists_exist_and_parse
+run_case "render-targets.sh present + executable + parses" t_render_targets_sh_exists_and_is_executable
+run_case "install.sh bootstraps guardian + enumerator daemons" t_install_bootstraps_guardian_and_enumerator
+run_case "install.sh no longer inline-calls 'enterprise hooks install'" t_install_no_longer_hardcodes_single_target_user
 run_case "plist references managed paths" t_plist_contains_managed_paths
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms

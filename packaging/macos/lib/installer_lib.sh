@@ -244,6 +244,117 @@ prepare_userspace_for() {
   esac
 }
 
+# ---- local-user enumeration --------------------------------------------
+
+# enumerate_local_users -> stdout, one line per eligible user in the form:
+#   user:uid:gid:home
+#
+# Filters: UID >= 500, username does not start with `_`, home under /Users/,
+# home is a real directory (not a symlink), and home_perms_ok passes.
+# Reads OpenDirectory via dscl — same pattern the fresh-install preflight in
+# install.sh already uses (see the block that gates on _existing_install_markers).
+#
+# Pure: no writes, no sudo. Callers under test can seed a fake dscl by
+# putting a shim ahead of PATH.
+enumerate_local_users() {
+  local names name uid gid home
+  names="$(dscl . -list /Users UniqueID 2>/dev/null)" || return 0
+  # dscl output is "user   uid". Filter and normalize in one pass.
+  while IFS= read -r line; do
+    name="$(printf '%s' "${line}" | awk '{print $1}')"
+    uid="$(printf '%s' "${line}" | awk '{print $2}')"
+    [[ -n "${name}" && -n "${uid}" ]] || continue
+    # Filter system accounts.
+    case "${name}" in
+      _*|daemon|nobody|root) continue;;
+    esac
+    [[ "${uid}" =~ ^[0-9]+$ ]] || continue
+    (( uid >= 500 )) || continue
+
+    home="$(dscl . -read "/Users/${name}" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+    [[ -n "${home}" ]] || continue
+    [[ "${home}" == /Users/* ]] || continue
+    [[ -d "${home}" && ! -L "${home}" ]] || continue
+    home_perms_ok "${home}" || continue
+
+    gid="$(dscl . -read "/Users/${name}" PrimaryGroupID 2>/dev/null | sed -n 's/^PrimaryGroupID: //p')"
+    [[ "${gid}" =~ ^[0-9]+$ ]] || gid="20"
+
+    printf '%s:%s:%s:%s\n' "${name}" "${uid}" "${gid}" "${home}"
+  done <<< "${names}"
+}
+
+# ---- targets.yaml rendering --------------------------------------------
+
+# render_targets_manifest SUPPORT_DIR CONNECTORS_CSV USER_LINES -> stdout
+#
+# Renders the hook-guardian manifest (`targets.yaml`) consumed by the
+# `enterprise hooks reconcile` command. Schema mirrors ManifestTarget in
+# internal/enterprisehooks/manifest.go.
+#
+# Args:
+#   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
+#   CONNECTORS_CSV comma-separated list of connectors (e.g. codex,claudecode,cursor)
+#   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
+#                  enumerate_local_users)
+#
+# One `- ` block per (user × supported connector). Unsupported connectors
+# are skipped (they have no per-user setup path in the CLI). Agent version
+# is discovered per (user, connector) via discover_agent_version; an empty
+# version is rendered as an empty string — the guardian's reconcile will
+# emit a per-target failure surfaced in hook_guardian_state.json without
+# affecting other targets in the manifest.
+render_targets_manifest() {
+  local support_dir="$1"
+  local connectors_csv="$2"
+  local user_lines="$3"
+  local runtime_dir="${support_dir}/runtime"
+
+  local -a connectors=()
+  local c
+  while IFS= read -r c; do
+    [[ -z "${c}" ]] && continue
+    connectors+=("${c}")
+  done < <(parse_connectors "${connectors_csv}" 2>/dev/null || true)
+
+  printf 'version: 1\n'
+  printf 'targets:\n'
+
+  if [[ ${#connectors[@]} -eq 0 ]]; then
+    return 0
+  fi
+  if [[ -z "${user_lines}" ]]; then
+    return 0
+  fi
+
+  local line name uid gid home ver
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    name="${line%%:*}"
+    local rest="${line#*:}"
+    uid="${rest%%:*}"
+    rest="${rest#*:}"
+    gid="${rest%%:*}"
+    home="${rest#*:}"
+    [[ -n "${name}" && -n "${uid}" && -n "${gid}" && -n "${home}" ]] || continue
+
+    for c in "${connectors[@]}"; do
+      is_supported_connector "${c}" || continue
+      ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
+      cat <<EOF
+  - user: "${name}"
+    user_home: "${home}"
+    uid: ${uid}
+    gid: ${gid}
+    connector: "${c}"
+    data_dir: "${runtime_dir}"
+    agent_version: "${ver}"
+    enabled: true
+EOF
+    done
+  done <<< "${user_lines}"
+}
+
 # ---- config rendering --------------------------------------------------
 
 # aid_endpoint_for_env ENV -> stdout

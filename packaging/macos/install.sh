@@ -79,6 +79,60 @@ for _candidate_origin in \
   fi
 done
 unset _candidate _candidate_origin
+
+# Guardian plist source lookup — same order as the gateway plist above,
+# minus the operator-override tier (there is no user-facing --guardian-plist
+# flag; the guardian is a managed subsystem shipped in the bundle).
+GUARDIAN_PLIST_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" \
+  "${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist"; do
+  if [[ -f "${_candidate}" ]]; then
+    GUARDIAN_PLIST_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
+# Enumerator plist source — the re-render-users-manifest daemon.
+ENUMERATOR_PLIST_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist" \
+  "${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"; do
+  if [[ -f "${_candidate}" ]]; then
+    ENUMERATOR_PLIST_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
+# render-targets.sh source — the per-tick manifest renderer.
+RENDER_TARGETS_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/lib/render-targets.sh" \
+  "${SCRIPT_DIR}/render-targets.sh" \
+  "${REPO_ROOT}/packaging/macos/lib/render-targets.sh"; do
+  if [[ -f "${_candidate}" ]]; then
+    RENDER_TARGETS_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
+# Library source — installer_lib.sh is copied into the managed tree so
+# render-targets.sh (launchd-invoked) can source it independently of the
+# repo/bundle layout.
+INSTALLER_LIB_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/lib/installer_lib.sh" \
+  "${REPO_ROOT}/packaging/macos/lib/installer_lib.sh"; do
+  if [[ -f "${_candidate}" ]]; then
+    INSTALLER_LIB_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -96,7 +150,13 @@ PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
 LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
 GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
 GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
+ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
+RENDER_TARGETS_BIN="${INSTALL_PREFIX}/lib/render-targets.sh"
+INSTALLER_LIB_DST="${INSTALL_PREFIX}/lib/installer_lib.sh"
+GUARDIAN_MANIFEST_DIR="${INSTALL_PREFIX}/hook-guardian"
+GUARDIAN_MANIFEST_PATH="${GUARDIAN_MANIFEST_DIR}/targets.yaml"
 
 # Legacy paths + label from pre-Cisco-path DefenseClaw installs. These
 # are only referenced by uninstall.sh for its migration sweep; install.sh
@@ -375,18 +435,22 @@ if [[ "${DC_INSTALLER_SKIP_PLIST_VALIDATION:-}" != "1" ]]; then
   unset _plist_stat _plist_owner _plist_mode
 fi
 
-# Resolve target user (default: the user who invoked sudo)
-if [[ -z "${TARGET_USER}" ]]; then
-  TARGET_USER="${SUDO_USER:-}"
-fi
-if [[ -z "${TARGET_USER}" && "${SKIP_CONNECTOR}" != "true" ]]; then
-  warn "no target user (run with sudo from a user shell, or pass --user); skipping per-user hook wiring"
-  SKIP_CONNECTOR="true"
-fi
+# Per-user hook wiring is no longer scoped to a single TARGET_USER: the
+# installer renders a machine-wide `targets.yaml` covering every eligible
+# local user, and the hook-guardian LaunchDaemon reconciles that manifest
+# every 5 minutes (fresh users after install are picked up by the
+# hook-enumerator daemon that re-renders the same manifest). --user is
+# preserved as a backward-compat no-op so operators / CI that still pass
+# it don't error out; --agent-version is likewise ignored (each user's
+# agent version is discovered per-connector by installer_lib.sh at
+# manifest-render time).
 if [[ -n "${TARGET_USER}" ]]; then
-  TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-  [[ -n "${TARGET_HOME}" && -d "${TARGET_HOME}" ]] || \
-    die "could not resolve home for --user ${TARGET_USER}"
+  warn "--user ${TARGET_USER} is ignored: hook wiring is now machine-wide via the hook guardian"
+  TARGET_USER=""
+fi
+if [[ -n "${AGENT_VERSION}" ]]; then
+  warn "--agent-version ${AGENT_VERSION} is ignored: per-user versions are discovered by the guardian at each tick"
+  AGENT_VERSION=""
 fi
 
 # This bundle is a fresh-install surface, not an updater.  Refuse an
@@ -399,6 +463,7 @@ _existing_install_markers=(
   "${LOGS_DIR}"
   "${PLIST_DST}"
   "${GUARDIAN_PLIST_DST}"
+  "${ENUMERATOR_PLIST_DST}"
   "${LEGACY_INSTALL_PREFIX}"
   "${LEGACY_SUPPORT_DIR}"
   "${LEGACY_LOGS_DIR}"
@@ -445,6 +510,7 @@ done
 for _label in \
   "${LAUNCHD_LABEL}" \
   "${GUARDIAN_LAUNCHD_LABEL}" \
+  "${ENUMERATOR_LAUNCHD_LABEL}" \
   "${LEGACY_LAUNCHD_LABEL}" \
   "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"; do
   if launchctl print "system/${_label}" >/dev/null 2>&1; then
@@ -491,6 +557,7 @@ fi
 for _lbl_plist in \
   "${LAUNCHD_LABEL}:${PLIST_DST}" \
   "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
+  "${ENUMERATOR_LAUNCHD_LABEL}:${ENUMERATOR_PLIST_DST}" \
   "${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}" \
   "${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"; do
   _lbl="${_lbl_plist%%:*}"
@@ -535,6 +602,21 @@ GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
 create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
 create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
+# Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
+# per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
+# the directory unconditionally keeps the guardian's LoadManifest happy
+# even if the enumerator hasn't run yet.
+create_install_directory_no_replace "${GUARDIAN_MANIFEST_DIR}" root wheel 0755
+create_install_directory_no_replace "${INSTALL_PREFIX}/lib" root wheel 0755
+# render-targets.sh is invoked by the hook-enumerator LaunchDaemon and
+# sources installer_lib.sh from a fixed path; both must land under the
+# managed tree so the daemon doesn't need to see the bundle layout.
+[[ -f "${RENDER_TARGETS_SRC}" ]] \
+  || die "render-targets.sh source not found (expected ${SCRIPT_DIR}/lib/render-targets.sh)"
+[[ -f "${INSTALLER_LIB_SRC}" ]] \
+  || die "installer_lib.sh source not found (expected ${SCRIPT_DIR}/lib/installer_lib.sh)"
+install_file_no_replace "${RENDER_TARGETS_SRC}" "${RENDER_TARGETS_BIN}" root wheel 0755
+install_file_no_replace "${INSTALLER_LIB_SRC}"  "${INSTALLER_LIB_DST}" root wheel 0644
 # LOGS_DIR — the /Library/Logs/Cisco/ and SecureClient/ ancestors may
 # be pre-existing and shared with other Cisco software. Same reasoning
 # as /opt/cisco above: only create them (with our default perms) when
@@ -574,6 +656,18 @@ chown -R root:wheel "${RUNTIME_DIR}" "${LOGS_DIR}"
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
 install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 
+# Guardian + enumerator plists: the two subsystems together do all
+# per-user hook wiring (enumerator re-renders targets.yaml on a 5 min
+# tick; guardian reconciles the manifest on its own 5 min tick).
+[[ -f "${GUARDIAN_PLIST_SRC}" ]] \
+  || die "hook-guardian plist source not found (expected ${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist)"
+[[ -f "${ENUMERATOR_PLIST_SRC}" ]] \
+  || die "hook-enumerator plist source not found (expected ${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist)"
+log "installing hook-guardian plist -> ${GUARDIAN_PLIST_DST}"
+install_file_no_replace "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}" root wheel 0644
+log "installing hook-enumerator plist -> ${ENUMERATOR_PLIST_DST}"
+install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}" root wheel 0644
+
 # The shipped plist deliberately omits UserName/GroupName so the daemon
 # runs as root (uid 0). If a stale plist from a pre-root DefenseClaw
 # install left those keys behind on this host, strip them now so the
@@ -612,126 +706,73 @@ if ! wait_for_launchd_running; then
   die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log"
 fi
 
-# ---- per-user hook wiring ----------------------------------------------
+# ---- per-user hook wiring (multi-user, via hook guardian) --------------
+#
+# The pre-2026.7.3 flow ran the per-connector CLI subcommand inline here
+# for a single --user or $SUDO_USER, which silently no-op'd whenever
+# $SUDO_USER was empty (e.g. under a pkg postinstall) and only covered
+# one user even when populated. The customer-shipping pkg therefore
+# wired hooks for nobody on a multi-user Mac.
+#
+# The current flow uses the hook-guardian LaunchDaemon (5-min reconcile,
+# already shipped) with a machine-wide `targets.yaml` manifest that lists
+# every eligible local user × requested connector. A companion
+# hook-enumerator LaunchDaemon (5-min tick) re-renders the manifest so
+# users provisioned AFTER install are picked up on the next reconcile
+# without any per-user login-time action.
+#
+# Bootstrapping order:
+#   1. Render an initial targets.yaml so the guardian's RunAtLoad has
+#      real content to reconcile (avoids a 5-min delay before the first
+#      user's hooks land on a demo box).
+#   2. Bootstrap the hook-enumerator daemon (RunAtLoad will re-render,
+#      but our initial file is already good).
+#   3. Bootstrap the hook-guardian daemon (RunAtLoad triggers immediate
+#      reconcile — hooks land within seconds on the eligible users).
 
 if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
-  log "wiring user-space hooks for ${TARGET_USER} (${CONNECTORS[*]})"
-  TARGET_UID="$(id -u "${TARGET_USER}")"
-  TARGET_GID="$(id -g "${TARGET_USER}")"
-
-  if ! home_perms_ok "${TARGET_HOME}"; then
-    HOME_MODE="$(stat -f '%Lp' "${TARGET_HOME}" 2>/dev/null || echo '?')"
-    warn "home directory ${TARGET_HOME} is group/other writable (mode ${HOME_MODE})"
-    warn "  the enterprise hook guardian will refuse to write into a loose home;"
-    warn "  this is an administrator responsibility to fix. Suggested:"
-    warn "    sudo chmod 0755 ${TARGET_HOME}"
-    warn "  skipping user-space hook wiring. Gateway is still running."
-    warn "  after fixing perms, finish wiring per-connector with:"
-    for c in "${CONNECTORS[@]}"; do
-      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=\"${GUARDIAN_AUTH_DIR}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
-    done
-    SKIP_CONNECTOR="true"
+  log "enumerating eligible local users"
+  USER_LINES="$(enumerate_local_users || true)"
+  USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
+  if [[ -z "${USER_LINES}" ]]; then
+    warn "no eligible local users detected on this host"
+    warn "  hooks will be wired for users that log in later once the enumerator's next 5-min tick runs"
+  else
+    log "  found ${USER_COUNT} eligible user(s):"
+    while IFS=: read -r _u _uid _gid _home; do
+      [[ -z "${_u}" ]] && continue
+      log "    ${_u} (uid=${_uid}, home=${_home})"
+    done <<< "${USER_LINES}"
+    unset _u _uid _gid _home
   fi
-fi
 
-if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
-  # The CLI subcommand opens the audit DB writer; pause the daemon once,
-  # run every per-connector install, then resume.
-  log "  pausing LaunchDaemon (CLI subcommands hold the audit DB lock)"
-  launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -fl "${GATEWAY_BIN}" >/dev/null 2>&1 || break
-    sleep 1
-  done
+  log "rendering initial hook-guardian manifest -> ${GUARDIAN_MANIFEST_PATH}"
+  MANIFEST_TMP="$(mktemp "${GUARDIAN_MANIFEST_PATH}.new.XXXXXX")" \
+    || die "could not reserve a private manifest staging file"
+  INSTALL_TEMP_FILES+=("${MANIFEST_TMP}")
+  render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" > "${MANIFEST_TMP}"
+  chown root:wheel "${MANIFEST_TMP}"
+  chmod 0640 "${MANIFEST_TMP}"
+  ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+    || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
+  rm -f -- "${MANIFEST_TMP}"
+  forget_install_temporary "${MANIFEST_TMP}"
 
-  for c in "${CONNECTORS[@]}"; do
-    if ! is_supported_connector "${c}"; then
-      log "  skipping unsupported connector ${c} (no userspace wiring)"
-      continue
-    fi
+  log "loading hook-enumerator LaunchDaemon"
+  launchctl bootstrap system "${ENUMERATOR_PLIST_DST}"
+  launchctl enable "system/${ENUMERATOR_LAUNCHD_LABEL}"
 
-    log "  [${c}] preparing userspace"
-    if ! prepare_userspace_for "${c}" "${TARGET_HOME}"; then
-      warn "  [${c}] refused to prepare userspace (symlinked or non-dir path); skipping"
-      continue
-    fi
-    # Match ownership on JUST the files DefenseClaw just pre-created.
-    # A recursive chown over ~/.codex or ~/.cursor is wrong: those
-    # dirs may contain unrelated user state (Codex ships a signed
-    # `computer-use/*.app` bundle, Cursor stores signed extensions),
-    # and SIP-protected files in those trees will fail chown with
-    # "Operation not permitted" even as root.
-    #
-    # We only touch what prepare_userspace_for could have written:
-    # the connector's hook config file + its parent .<agent> dir.
-    case "${c}" in
-      claudecode) DC_AGENT_TARGETS=( "${TARGET_HOME}/.claude" "${TARGET_HOME}/.claude/settings.json" );;
-      codex)      DC_AGENT_TARGETS=( "${TARGET_HOME}/.codex"  "${TARGET_HOME}/.codex/config.toml" );;
-      cursor)     DC_AGENT_TARGETS=( "${TARGET_HOME}/.cursor" "${TARGET_HOME}/.cursor/hooks.json" );;
-      *)          DC_AGENT_TARGETS=();;
-    esac
-    for path in "${DC_AGENT_TARGETS[@]}"; do
-      # Skip symlinks (guarded upstream by ensure_safe_userspace_path)
-      # and missing paths. Any real chown failure aborts the connector.
-      if [[ -e "${path}" && ! -L "${path}" ]]; then
-        if ! chown -h "${TARGET_UID}:${TARGET_GID}" "${path}"; then
-          die "[${c}] failed to set ownership on ${path}"
-        fi
-      fi
-    done
+  log "loading hook-guardian LaunchDaemon"
+  launchctl bootstrap system "${GUARDIAN_PLIST_DST}"
+  launchctl enable "system/${GUARDIAN_LAUNCHD_LABEL}"
 
-    AGENT_VER="${AGENT_VERSION}"
-    if [[ -z "${AGENT_VER}" ]]; then
-      # Expose TARGET_USER to the lib so its Codex fallback can exec
-      # `codex --version` as the user (not as root).
-      AGENT_VER="$(DC_INSTALLER_TARGET_USER="${TARGET_USER}" \
-        discover_agent_version "${c}" "${TARGET_HOME}" || true)"
-    fi
-    if [[ -z "${AGENT_VER}" ]]; then
-      warn "  [${c}] could not auto-detect agent version; skipping. Resume with:"
-      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=\"${GUARDIAN_AUTH_DIR}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
-      continue
-    fi
-
-    log "  [${c}] detected agent_version: ${AGENT_VER}"
-    log "  [${c}] running: enterprise hooks install --connector ${c} --user ${TARGET_USER}"
-    # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR MUST match what the plist sets
-    # for the running daemon (see packaging/launchd/com.cisco.secureclient.defenseclaw.plist).
-    # The CLI's default is `${data_dir}-hook-guardian` which resolves to
-    # ${SUPPORT_DIR}/runtime-hook-guardian and doesn't exist in our
-    # layout — the installer creates ${SUPPORT_DIR}/hook-guardian-state
-    # instead so the trust check walks a root-owned SUPPORT_DIR ancestor.
-    # Without explicitly passing this env var here, `enterprise hooks
-    # install` fails with:
-    #   authorization directory trust check failed: .../runtime-hook-guardian: no such file or directory
-    if DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-       DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR="${GUARDIAN_AUTH_DIR}" \
-       "${GATEWAY_BIN}" enterprise hooks install \
-         --connector "${c}" \
-         --user "${TARGET_USER}" \
-         --agent-version "${AGENT_VER}" \
-         --json; then
-      log "  [${c}] hook wiring OK"
-    else
-      warn "  [${c}] hook wiring failed; see JSON output above"
-    fi
-  done
-
-  # The CLI subcommands ran as root and wrote audit.db / judge_bodies.db
-  # + their -wal/-shm sidecars into RUNTIME_DIR. The daemon also runs as
-  # root, so ownership already matches — no chown pass is needed. This
-  # step used to fix a defenseclaw-uid inheritance issue that vanishes
-  # when everything is root.
-  log "  runtime files created by CLI are already root-owned (daemon runs as root)"
-
-  log "  resuming LaunchDaemon"
-  launchctl bootstrap system "${PLIST_DST}"
-  launchctl enable "system/${LAUNCHD_LABEL}"
-  if ! wait_for_launchd_running; then
-    warn "gateway did not resume within 15s; recent stderr:"
-    tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
-    die "${LAUNCHD_LABEL} failed to resume after per-user wiring"
-  fi
+  # Kick both daemons so the first reconcile happens immediately rather
+  # than at the next 5-min tick (RunAtLoad already fired, but kickstart
+  # is a defence-in-depth in case the daemon was already loaded from a
+  # previous state).
+  log "kickstarting hook-enumerator + hook-guardian for immediate first pass"
+  launchctl kickstart -k "system/${ENUMERATOR_LAUNCHD_LABEL}" 2>/dev/null || true
+  launchctl kickstart -k "system/${GUARDIAN_LAUNCHD_LABEL}"   2>/dev/null || true
 fi
 
 # ---- summary ------------------------------------------------------------
@@ -755,11 +796,15 @@ Next steps:
   Master gateway token (for direct curl tests):
     sudo grep DEFENSECLAW_GATEWAY_TOKEN "${RUNTIME_DIR}/.env"
 
-  Repair user-space hooks (per connector):
-$(for c in "${CONNECTORS[@]}"; do
-    printf '    sudo DEFENSECLAW_CONFIG="%s" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR="%s" %s enterprise hooks install --connector %s --user %s --agent-version "X.Y.Z" --json\n' \
-      "${CONFIG_PATH}" "${GUARDIAN_AUTH_DIR}" "${GATEWAY_BIN}" "${c}" "${TARGET_USER:-USER}"
-  done)
+  Hook-guardian status (per-user hook wiring):
+    sudo launchctl print system/${GUARDIAN_LAUNCHD_LABEL}   | head -20
+    sudo launchctl print system/${ENUMERATOR_LAUNCHD_LABEL} | head -20
+    sudo cat ${GUARDIAN_MANIFEST_PATH}
+    sudo cat ${GUARDIAN_AUTH_DIR}/protected_targets.json
+
+  Force a fresh reconcile after adding a user account:
+    sudo launchctl kickstart -k system/${ENUMERATOR_LAUNCHD_LABEL}
+    sudo launchctl kickstart -k system/${GUARDIAN_LAUNCHD_LABEL}
 
   Uninstall:
     sudo ${SCRIPT_DIR}/uninstall.sh
