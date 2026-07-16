@@ -185,7 +185,7 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
 		return windows.CreateFile(
 			name,
-			windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC,
 			windows.FILE_SHARE_READ,
 			nil,
 			windows.OPEN_EXISTING,
@@ -258,6 +258,10 @@ func validateWindowsCorrelationKeyHandle(handle windows.Handle) error {
 }
 
 func validateWindowsCorrelationSecurity(handle windows.Handle) error {
+	return validateWindowsCorrelationSecurityState(handle, true)
+}
+
+func validateWindowsCorrelationSecurityState(handle windows.Handle, repairTrustedInheritance bool) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
@@ -281,14 +285,27 @@ func validateWindowsCorrelationSecurity(handle windows.Handle) error {
 	if err != nil {
 		return keyStoreError(KeyStoreErrorUnavailable)
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return keyStoreError(KeyStoreErrorUnsafePermissions)
-	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil || dacl == nil {
 		return keyStoreError(KeyStoreErrorUnsafePermissions)
 	}
-	return validateWindowsCorrelationACL(dacl, current.User.Sid)
+	if err := validateWindowsCorrelationACL(dacl, current.User.Sid); err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		return nil
+	}
+	// Windows can reclassify an otherwise identical leaf DACL as inherited on
+	// an early OPEN_EXISTING after the atomic rename. Repair only after proving
+	// every effective allow ACE is still limited to the current owner, Local
+	// System, or Administrators. A broader inherited ACL remains a hard failure.
+	if !repairTrustedInheritance {
+		return keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	if err := protectWindowsCorrelationSecurity(handle); err != nil {
+		return err
+	}
+	return validateWindowsCorrelationSecurityState(handle, false)
 }
 
 func validateWindowsCorrelationACL(dacl *windows.ACL, currentUser *windows.SID) error {
@@ -387,6 +404,9 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 		err := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
 		if err == nil {
 			tempPresent = false
+			if err := finalizeWindowsCorrelationKey(targetPath, candidate); err != nil {
+				return false, err
+			}
 			if err := runAfterLink(hooks); err != nil {
 				return false, keyStoreError(KeyStoreErrorSync)
 			}
@@ -410,14 +430,75 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 	return false, keyStoreError(KeyStoreErrorInstall)
 }
 
-func createWindowsCorrelationTemp(path string) (*os.File, error) {
-	current, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || current == nil || current.User.Sid == nil {
-		return nil, keyStoreError(KeyStoreErrorTemporaryFile)
+// finalizeWindowsCorrelationKey makes the destination DACL authoritative after
+// the no-replace rename, then reopens and reloads the key through the ordinary
+// validation path. Some Windows hosts briefly recalculate inherited ACE state
+// on the first OPEN_EXISTING after a rename. Applying the protected DACL through
+// that pinned first handle prevents a successfully installed key from becoming
+// unloadable on the next gateway start.
+func finalizeWindowsCorrelationKey(path string, candidate CorrelationKey) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return keyStoreError(KeyStoreErrorInstall)
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		"O:" + current.User.Sid.String() + "D:P(A;;FA;;;" + current.User.Sid.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)",
-	)
+	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			name,
+			windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC,
+			0,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	}, true)
+	if err != nil {
+		return keyStoreError(KeyStoreErrorInstall)
+	}
+	closed := false
+	closeHandle := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return windows.CloseHandle(handle)
+	}
+	defer func() { _ = closeHandle() }()
+
+	var details windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &details); err != nil {
+		return keyStoreError(KeyStoreErrorUnavailable)
+	}
+	if details.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		details.NumberOfLinks != 1 {
+		return keyStoreError(KeyStoreErrorUnsafeType)
+	}
+	size := int64(details.FileSizeHigh)<<32 | int64(details.FileSizeLow)
+	if size != hashV1KeySize {
+		return keyStoreError(KeyStoreErrorInvalidLength)
+	}
+
+	if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+		return err
+	}
+	if err := closeHandle(); err != nil {
+		return keyStoreError(KeyStoreErrorInstall)
+	}
+
+	loaded, found, err := loadExistingWindowsCorrelationKey(filepath.Dir(path), keyStoreHooks{})
+	if err != nil {
+		return err
+	}
+	loadedMaterial, loadedOK := loaded.Material()
+	candidateMaterial, candidateOK := candidate.Material()
+	if !found || !loadedOK || !candidateOK || loaded.ID() != candidate.ID() || loadedMaterial != candidateMaterial {
+		return keyStoreError(KeyStoreErrorInstall)
+	}
+	return nil
+}
+
+func createWindowsCorrelationTemp(path string) (*os.File, error) {
+	descriptor, err := windowsCorrelationProtectedSecurityDescriptor()
 	if err != nil {
 		return nil, keyStoreError(KeyStoreErrorTemporaryFile)
 	}
@@ -454,4 +535,38 @@ func createWindowsCorrelationTemp(path string) (*os.File, error) {
 		return nil, keyStoreError(KeyStoreErrorTemporaryFile)
 	}
 	return file, nil
+}
+
+func windowsCorrelationProtectedSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	return windows.SecurityDescriptorFromString(
+		"O:" + current.User.Sid.String() + "D:P(A;;FA;;;" + current.User.Sid.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)",
+	)
+}
+
+func protectWindowsCorrelationSecurity(handle windows.Handle) error {
+	descriptor, err := windowsCorrelationProtectedSecurityDescriptor()
+	if err != nil {
+		return keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		return keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	runtime.KeepAlive(descriptor)
+	return nil
 }

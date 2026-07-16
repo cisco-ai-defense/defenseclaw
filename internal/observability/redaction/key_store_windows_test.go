@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -90,47 +91,53 @@ func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyRetriesTransientBusyHandle(t *testing.T) {
-	dir := t.TempDir()
-	created, err := LoadOrCreateCorrelationKey(dir)
-	if err != nil {
-		t.Fatalf("create key: %v", err)
-	}
-	path, err := windows.UTF16PtrFromString(filepath.Join(dir, correlationKeyFilename))
-	if err != nil {
-		t.Fatal(err)
-	}
-	handle, err := windows.CreateFile(
-		path,
-		windows.GENERIC_READ,
-		0,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		0,
-	)
-	if err != nil {
-		t.Fatalf("open incompatible handle: %v", err)
-	}
-	released := make(chan error, 1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		released <- windows.CloseHandle(handle)
-	}()
+	// Repeat the timing-sensitive first reopen so a future removal of the
+	// trusted-inheritance repair cannot disappear as a low-frequency flake.
+	for attempt := 0; attempt < 8; attempt++ {
+		dir := t.TempDir()
+		created, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("attempt %d create key: %v", attempt, err)
+		}
+		path, err := windows.UTF16PtrFromString(filepath.Join(dir, correlationKeyFilename))
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+			return windows.CreateFile(
+				path,
+				windows.GENERIC_READ,
+				0,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_ATTRIBUTE_NORMAL,
+				0,
+			)
+		}, false)
+		if err != nil {
+			t.Fatalf("attempt %d open incompatible handle: %v", attempt, err)
+		}
+		released := make(chan error, 1)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			released <- windows.CloseHandle(handle)
+		}()
 
-	loaded, loadErr := LoadOrCreateCorrelationKey(dir)
-	closeErr := <-released
-	if closeErr != nil {
-		t.Fatalf("close incompatible handle: %v", closeErr)
+		loaded, loadErr := LoadOrCreateCorrelationKey(dir)
+		closeErr := <-released
+		if closeErr != nil {
+			t.Fatalf("attempt %d close incompatible handle: %v", attempt, closeErr)
+		}
+		if loadErr != nil {
+			t.Fatalf("attempt %d load after transient sharing violation: %v", attempt, loadErr)
+		}
+		createdMaterial, createdOK := created.Material()
+		loadedMaterial, loadedOK := loaded.Material()
+		if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+			t.Fatalf("attempt %d key changed while retrying the transient sharing violation", attempt)
+		}
+		assertNoWindowsCorrelationTemps(t, dir)
 	}
-	if loadErr != nil {
-		t.Fatalf("load after transient sharing violation: %v", loadErr)
-	}
-	createdMaterial, createdOK := created.Material()
-	loadedMaterial, loadedOK := loaded.Material()
-	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
-		t.Fatal("key changed while retrying the transient sharing violation")
-	}
-	assertNoWindowsCorrelationTemps(t, dir)
 }
 
 func TestWindowsCorrelationHandleRetryLoopIsExercised(t *testing.T) {
@@ -172,6 +179,214 @@ func TestWindowsCorrelationKeyRetryableErrorClassification(t *testing.T) {
 				t.Fatalf("retryable = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	initial, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || initial == nil {
+		t.Fatalf("read initial descriptor: %v", err)
+	}
+	initialControl, _, err := initial.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialControl&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("freshly installed key DACL is not protected")
+	}
+	setWindowsCorrelationTrustedUnprotectedDACL(t, path)
+
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("repair trusted inherited DACL: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("repair changed correlation key material")
+	}
+	repaired, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || repaired == nil {
+		t.Fatalf("read repaired descriptor: %v", err)
+	}
+	control, _, err := repaired.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("trusted inherited DACL was not re-protected")
+	}
+}
+
+func TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL(t *testing.T) {
+	const (
+		dirEnv = "DEFENSECLAW_TEST_CORRELATION_RESTART_DIR"
+		idEnv  = "DEFENSECLAW_TEST_CORRELATION_RESTART_ID"
+	)
+	if dir := os.Getenv(dirEnv); dir != "" {
+		loaded, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("fresh-process load: %v", err)
+		}
+		if loaded.ID() != os.Getenv(idEnv) {
+			t.Fatalf("fresh-process key ID = %q, want %q", loaded.ID(), os.Getenv(idEnv))
+		}
+		return
+	}
+
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	setWindowsCorrelationTrustedUnprotectedDACL(t, path)
+
+	command := exec.Command(
+		os.Args[0],
+		"-test.run=^TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL$",
+		"-test.v",
+	)
+	command.Env = append(os.Environ(), dirEnv+"="+dir, idEnv+"="+created.ID())
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("fresh-process restart failed: %v\n%s", err, output)
+	}
+
+	repaired, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || repaired == nil {
+		t.Fatalf("read repaired descriptor: %v", err)
+	}
+	control, _, err := repaired.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("fresh-process restart did not protect the trusted DACL")
+	}
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("load after fresh-process repair: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("fresh-process restart changed correlation key material")
+	}
+}
+
+func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windowsCorrelationProtectedSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve canonical DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsCorrelationAccess(current.User.Sid, windows.GENERIC_ALL),
+		windowsCorrelationAccess(system, windows.GENERIC_ALL),
+		windowsCorrelationAccess(administrators, windows.GENERIC_ALL),
+		windowsCorrelationAccess(everyone, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || before == nil {
+		t.Fatalf("read untrusted descriptor: %v", err)
+	}
+	beforeSDDL := before.String()
+
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+		t.Fatalf("error = %v, want unsafe permissions", err)
+	}
+	after, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || after == nil {
+		t.Fatalf("read rejected descriptor: %v", err)
+	}
+	if after.String() != beforeSDDL {
+		t.Fatalf("untrusted descriptor was mutated\nbefore: %s\nafter:  %s", beforeSDDL, after.String())
+	}
+	control, _, err := after.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		t.Fatal("untrusted inherited DACL was unexpectedly protected")
 	}
 }
 
