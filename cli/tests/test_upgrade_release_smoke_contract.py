@@ -200,7 +200,7 @@ def test_v8_fixture_covers_each_historical_config_family(
 
 @pytest.mark.parametrize(
     ("version", "config_version"),
-    [("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
+    [("0.8.5", "8"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
 )
 def test_reviewed_baseline_config_version_lookup(
     version: str,
