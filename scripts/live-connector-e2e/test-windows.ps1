@@ -630,14 +630,12 @@ try {
     $fixtureEvents = @(
         [ordered]@{
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
-            record_id = 'windows-contract-verdict'; bucket = 'guardrail.evaluation'; signal = 'logs'
-            event_name = 'guardrail.evaluation.completed'; source = 'gateway'; connector = 'codex'
+            record_id = 'windows-contract-verdict'; bucket = 'asset.scan'; signal = 'logs'
+            event_name = 'scan.completed'; source = 'scanner'; connector = 'codex'
             correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
             mandatory = $false
             body = @{
-                'defenseclaw.guardrail.decision' = 'block'
-                'defenseclaw.guardrail.effective_action' = 'allow'
-                'defenseclaw.guardrail.raw_action' = 'block'
+                'defenseclaw.scan.verdict' = 'block'
             }
         },
         [ordered]@{
@@ -668,6 +666,13 @@ try {
             event_name = 'event'; source = 'gateway'; connector = 'cursor'
             correlation = @{}; provenance = $provenance; field_classes = @{}
             mandatory = $false; body = @{ note = 'claudecode' }
+        },
+        [ordered]@{
+            schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
+            record_id = 'windows-contract-invalid-scan-verdict'; bucket = 'asset.scan'; signal = 'logs'
+            event_name = 'scan.completed'; source = 'scanner'; connector = 'codex'
+            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            mandatory = $false; body = @{ 'defenseclaw.scan.verdict' = 'deny' }
         }
     ) | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
@@ -675,7 +680,7 @@ try {
     try {
         $sharedText = Read-SharedText $jsonl
         Assert-True ($sharedText -match 'hook_decision') 'diagnostics can read a live writer-owned JSONL'
-        Assert-True (@(Get-EventLines $jsonl).Count -eq 4) 'gateway JSONL remains readable while the gateway writer is open'
+        Assert-True (@(Get-EventLines $jsonl).Count -eq 5) 'gateway JSONL remains readable while the gateway writer is open'
     } finally {
         $liveWriter.Dispose()
     }
@@ -683,14 +688,14 @@ try {
     & python.exe -c $pythonCode $database $requestId
     if ($LASTEXITCODE -ne 0) { throw 'failed to create disposable audit fixture' }
     & python.exe (Join-Path $root 'scripts\assert-observability-v8-jsonl.py') $jsonl `
-        --min-records 4 --require-event-name hook_decision
+        --min-records 5 --require-event-name hook_decision
     Assert-True ($LASTEXITCODE -eq 0) 'mock canonical observability-v8 schema'
     & python.exe (Join-Path $PSScriptRoot 'assert-windows-evidence.py') --jsonl $jsonl --audit-db $database --connector codex
     Assert-True ($LASTEXITCODE -eq 0) 'mock audit correlation'
     Assert-True (Test-ConnectorEvent $jsonl 'codex' 0) 'connector event seam'
     Assert-True (-not (Test-ConnectorEvent $jsonl 'claudecode' 0)) 'connector event seam ignores body-text false positives'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
-    Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam requires a canonical guardrail verdict record'
+    Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam rejects hook decisions and non-canonical scan deny values'
     $hookDecision = Get-LatestHookDecision $jsonl 'codex' 0
     Assert-True ($null -ne $hookDecision -and $hookDecision.action -eq 'allow' -and
         $hookDecision.raw_action -eq 'block' -and $hookDecision.mode -eq 'observe' -and

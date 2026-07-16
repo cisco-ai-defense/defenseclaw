@@ -156,7 +156,11 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
             cwd=str(ROOT),
             capture_output=True,
             text=True,
-            timeout=30,
+            # Hosted Windows runners execute the Python and Go matrices in
+            # parallel and can take more than 30 seconds merely to schedule a
+            # new Go process. Keep a firm bound, but allow the same headroom as
+            # other metadata/bootstrap subprocesses before declaring a hang.
+            timeout=90,
             check=True,
         )
         go_cache = json.loads(go_paths.stdout)

@@ -6567,7 +6567,18 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
 
-        app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
+        # Establish one complete coherent render baseline before counting
+        # updates. Under a loaded full-suite run the mount-time snapshot may
+        # have sampled the model just before this test scrolls the panel; only
+        # resetting the connector-row fingerprint then leaves the body/live
+        # fingerprints from that older generation and makes the first explicit
+        # periodic refresh look like idle churn.
+        with app._connector_hook_event_render_cache():
+            app._last_body_signature = app._overview_body_signature()
+            app._overview_connector_rows_signature_cache = (
+                app._overview_connector_rows_signature()
+            )
+            app._overview_live_data_signature_cache = app._overview_live_data_signature()
         body = app.query_one("#body", Static)
         update_calls = 0
         original_update = body.update
