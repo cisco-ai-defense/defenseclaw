@@ -655,6 +655,56 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
+def _runtime_isolation_generations(data_dir: str) -> tuple[str, ...]:
+    """Return exact managed generations that still hold moved user skills.
+
+    Empty connector parents are harmless lifecycle residue. Any child below a
+    connector parent is retained fail-closed: it may be the sole copy of a
+    skill whose runtime policy moved it outside the client's discovery root.
+    The walk is deliberately fixed-depth and never follows a path alias.
+    """
+    root = os.path.join(data_dir, "quarantine", "skills", "runtime-isolation")
+    if not os.path.lexists(root):
+        return ()
+    if _is_reparse_path(root) or not os.path.isdir(root):
+        raise click.ClickException(
+            f"refusing unsafe runtime-isolation root: {root}"
+        )
+
+    generations: list[str] = []
+    with os.scandir(root) as connectors:
+        for connector in connectors:
+            if _is_reparse_path(connector.path) or not connector.is_dir(
+                follow_symlinks=False,
+            ):
+                raise click.ClickException(
+                    "refusing unsafe runtime-isolation connector entry: "
+                    f"{connector.path}"
+                )
+            with os.scandir(connector.path) as entries:
+                for entry in entries:
+                    if _is_reparse_path(entry.path):
+                        raise click.ClickException(
+                            "refusing unsafe runtime-isolation generation: "
+                            f"{entry.path}"
+                        )
+                    generations.append(entry.path)
+    return tuple(generations)
+
+
+def _require_runtime_isolation_restored(data_dir: str) -> None:
+    generations = _runtime_isolation_generations(data_dir)
+    if not generations:
+        return
+    raise click.ClickException(
+        f"refusing to delete {len(generations)} runtime-isolated skill "
+        "generation(s); these may be the only copies. Inspect each skill with "
+        "'defenseclaw skill info <name> --json', run 'defenseclaw skill enable "
+        "<name> --connector codex', then restore it with 'defenseclaw skill "
+        "restore <name> --connector codex' before reset or uninstall --all"
+    )
+
+
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
@@ -679,6 +729,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
             raise click.ClickException(
                 f"refusing to remove {plan.data_dir}: path does not look like a DefenseClaw data directory"
             )
+        _require_runtime_isolation_restored(plan.data_dir)
         if plan.install_root:
             install_root_candidate = _normalized(plan.install_root)
             try:
@@ -1231,6 +1282,8 @@ def _remove_data_dir(
         return
     if _is_reparse_path(data_dir):
         raise click.ClickException(f"refusing to remove symlink or reparse-point data path {data_dir}")
+
+    _require_runtime_isolation_restored(data_dir)
 
     unknown_preserves = set(preserve_entries) - set(_RESET_PRESERVED_ENTRIES)
     if unknown_preserves:

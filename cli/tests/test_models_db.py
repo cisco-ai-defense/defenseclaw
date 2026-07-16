@@ -264,6 +264,188 @@ class ModelsDbTests(unittest.TestCase):
         counts = self.store.get_counts()
         self.assertEqual(counts.blocked_egress_calls, 1)
 
+    def test_store_enables_quarantine_foreign_key_cascade(self):
+        self.assertEqual(self.store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        record = self.store.create_quarantine_record(
+            "skill",
+            "unsafe-skill",
+            "/tmp/unsafe-skill",
+            "/tmp/quarantine/unsafe-skill",
+            "sha256-fixture",
+            "test",
+            "codex",
+        )
+
+        with self.store.db:
+            self.store.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record.id,))
+
+        association = self.store.db.execute(
+            "SELECT 1 FROM quarantine_record_connectors WHERE quarantine_id = ?",
+            (record.id,),
+        ).fetchone()
+        self.assertIsNone(association)
+
+    def test_quarantine_purpose_round_trip_and_validation(self):
+        runtime_record = self.store.create_quarantine_record(
+            "skill",
+            "runtime-skill",
+            "/tmp/runtime-skill",
+            "/tmp/quarantine/runtime-skill",
+            "sha256-runtime",
+            "runtime isolation",
+            "codex",
+            purpose="runtime-isolation",
+        )
+        self.assertEqual(runtime_record.purpose, "runtime-isolation")
+        self.assertEqual(
+            self.store.get_quarantine_record(runtime_record.id).purpose,
+            "runtime-isolation",
+        )
+
+        operator_record = self.store.create_quarantine_record(
+            "skill",
+            "operator-skill",
+            "/tmp/operator-skill",
+            "/tmp/quarantine/operator-skill",
+            "sha256-operator",
+            "operator quarantine",
+            "codex",
+        )
+        self.assertEqual(operator_record.purpose, "operator")
+
+        with self.assertRaisesRegex(ValueError, "invalid quarantine purpose"):
+            self.store.create_quarantine_record(
+                "skill",
+                "invalid-skill",
+                "/tmp/invalid-skill",
+                "/tmp/quarantine/invalid-skill",
+                "sha256-invalid",
+                "invalid",
+                "codex",
+                purpose="runtime",
+            )
+
+        with self.assertRaisesRegex(ValueError, "different asset or purpose"):
+            self.store.create_quarantine_record(
+                "skill",
+                "runtime-skill",
+                "/tmp/runtime-skill",
+                "/tmp/quarantine/runtime-skill",
+                "sha256-runtime",
+                "do not reclassify",
+                "codex",
+                purpose="watcher-enforcement",
+            )
+
+    def test_quarantine_ownership_only_finalizes_pending_runtime_isolation(self):
+        runtime_record = self.store.create_quarantine_record(
+            "skill", "runtime", "/skills/runtime", "/quarantine/runtime",
+            "sha256-runtime", "runtime", "codex",
+            purpose="runtime-isolation",
+        )
+        self.store.update_quarantine_record_state(
+            runtime_record.id,
+            "active",
+            ownership_json='{"mode":"runtime-isolation-v1"}',
+        )
+        self.assertEqual(
+            self.store.get_quarantine_record(runtime_record.id).ownership_json,
+            '{"mode":"runtime-isolation-v1"}',
+        )
+        with self.assertRaisesRegex(ValueError, "pending runtime-isolation"):
+            self.store.update_quarantine_record_state(
+                runtime_record.id,
+                "active",
+                ownership_json='{"mode":"replacement"}',
+            )
+
+        watcher_record = self.store.create_quarantine_record(
+            "skill", "watcher", "/skills/watcher", "/quarantine/watcher",
+            "sha256-watcher", "watcher", "codex",
+            purpose="watcher-enforcement",
+        )
+        with self.assertRaisesRegex(ValueError, "pending runtime-isolation"):
+            self.store.update_quarantine_record_state(
+                watcher_record.id,
+                "active",
+                ownership_json='{"mode":"runtime-isolation-v1"}',
+            )
+        self.assertEqual(
+            self.store.get_quarantine_record(watcher_record.id).state,
+            "pending",
+        )
+
+    def test_complete_restore_preserves_file_policy_until_last_scoped_record(self):
+        pe = PolicyEngine(self.store)
+        first = self.store.create_quarantine_record(
+            "skill",
+            "multi-generation",
+            "/skills/multi-generation",
+            "/quarantine/first",
+            "sha256-first",
+            "watcher generation",
+            "codex",
+            state="active",
+            purpose="watcher-enforcement",
+        )
+        second = self.store.create_quarantine_record(
+            "skill",
+            "multi-generation",
+            "/skills/multi-generation",
+            "/quarantine/second",
+            "sha256-second",
+            "runtime generation",
+            "codex",
+            state="active",
+            purpose="runtime-isolation",
+        )
+        pe.quarantine_for_connector(
+            "skill", "multi-generation", "codex", "physical quarantine",
+        )
+        pe.set_source_path(
+            "skill", "multi-generation", "/skills/stale", "codex",
+        )
+        pe.disable_for_connector(
+            "skill", "multi-generation", "codex", "runtime policy",
+        )
+        pe.block_for_connector(
+            "skill", "multi-generation", "codex", "install policy",
+        )
+
+        self.store.complete_quarantine_restore(first.id, "/skills/restored-first")
+
+        retained = self.store.get_action("skill", "multi-generation", "codex")
+        self.assertEqual(retained.actions.file, "quarantine")
+        self.assertEqual(retained.actions.runtime, "disable")
+        self.assertEqual(retained.actions.install, "block")
+        self.assertEqual(retained.source_path, second.original_path)
+
+        self.store.complete_quarantine_restore(second.id, "/skills/restored-second")
+
+        completed = self.store.get_action("skill", "multi-generation", "codex")
+        self.assertEqual(completed.actions.file, "")
+        self.assertEqual(completed.actions.runtime, "disable")
+        self.assertEqual(completed.actions.install, "block")
+        self.assertEqual(completed.source_path, "/skills/restored-second")
+
+    def test_complete_restore_ignores_peer_only_remaining_record(self):
+        pe = PolicyEngine(self.store)
+        local = self.store.create_quarantine_record(
+            "skill", "shared-name", "/codex/shared-name", "/quarantine/codex",
+            "sha256-codex", "local", "codex", state="active",
+        )
+        self.store.create_quarantine_record(
+            "skill", "shared-name", "/claude/shared-name", "/quarantine/claude",
+            "sha256-claude", "peer", "claudecode", state="active",
+        )
+        pe.quarantine_for_connector("skill", "shared-name", "codex", "local")
+
+        self.store.complete_quarantine_restore(local.id, "/codex/shared-name")
+
+        action = self.store.get_action("skill", "shared-name", "codex")
+        self.assertEqual(action.actions.file, "")
+        self.assertEqual(action.source_path, "/codex/shared-name")
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)

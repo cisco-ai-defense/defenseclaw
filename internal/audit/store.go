@@ -1706,6 +1706,31 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		description: "quarantine: add explicit provenance purpose",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "quarantine_records")
+			if err != nil || !present {
+				return err
+			}
+			exists, err := hasColumnDB(ex, "quarantine_records", "purpose")
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			_, err = ex.Exec(
+				`ALTER TABLE quarantine_records ADD COLUMN purpose TEXT NOT NULL ` +
+					`DEFAULT 'operator' CHECK (purpose IN ` +
+					`('operator', 'watcher-enforcement', 'runtime-isolation'))`,
+			)
+			if err != nil {
+				return fmt.Errorf("alter quarantine_records.purpose: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2026,6 +2051,7 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
+	"quarantine_records":                  true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

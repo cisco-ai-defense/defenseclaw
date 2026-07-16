@@ -173,6 +173,7 @@ class QuarantineRecord:
     original_path: str
     quarantine_path: str
     content_hash: str
+    purpose: str = "operator"
     reason: str = ""
     state: str = "active"
     ownership_json: str = "{}"

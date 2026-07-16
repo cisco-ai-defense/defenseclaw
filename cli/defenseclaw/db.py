@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS quarantine_records (
     original_path TEXT NOT NULL,
     quarantine_path TEXT NOT NULL UNIQUE,
     content_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'operator'
+        CHECK (purpose IN ('operator', 'watcher-enforcement', 'runtime-isolation')),
     reason TEXT,
     state TEXT NOT NULL DEFAULT 'pending',
     ownership_json TEXT NOT NULL DEFAULT '{}',
@@ -232,6 +234,11 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "file": {"", "quarantine", "none"},
     "runtime": {"", "disable", "enable"},
 }
+QUARANTINE_RECORD_PURPOSES = frozenset({
+    "operator",
+    "watcher-enforcement",
+    "runtime-isolation",
+})
 _SUMMARY_DETAILS_BYTES = 4096
 
 
@@ -373,6 +380,7 @@ class Store:
         # in _migrate_old_lists resolves conflicts against the new index and
         # the migrated rows pick up connector='' (global).
         self._ensure_connector_column()
+        self._ensure_quarantine_purpose_column()
         self._migrate_old_lists()
         self._ensure_v7_tables()
 
@@ -528,6 +536,28 @@ class Store:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name_conn "
             "ON actions(target_type, target_name, connector)"
         )
+        self.db.commit()
+
+    def _ensure_quarantine_purpose_column(self) -> None:
+        """Add origin semantics without reclassifying legacy provenance.
+
+        Existing rows remain ``operator``. Runtime isolation and watcher
+        enforcement opt in explicitly when they create a new record, so later
+        restore rules never infer ownership from connector, reason, or action
+        state.
+        """
+        columns = {
+            row[1]
+            for row in self.db.execute(
+                "PRAGMA table_info(quarantine_records)"
+            ).fetchall()
+        }
+        if "purpose" not in columns:
+            self.db.execute(
+                "ALTER TABLE quarantine_records ADD COLUMN purpose TEXT NOT NULL "
+                "DEFAULT 'operator' CHECK (purpose IN "
+                "('operator', 'watcher-enforcement', 'runtime-isolation'))"
+            )
         self.db.commit()
 
     def _ensure_v7_tables(self) -> None:
@@ -1173,6 +1203,7 @@ class Store:
         *,
         ownership_json: str = "{}",
         state: str = "pending",
+        purpose: str = "operator",
     ) -> QuarantineRecord:
         """Create durable provenance before any filesystem move.
 
@@ -1181,10 +1212,13 @@ class Store:
         """
         if state not in {"pending", "active", "restoring"}:
             raise ValueError(f"invalid quarantine state {state!r}")
+        if purpose not in QUARANTINE_RECORD_PURPOSES:
+            raise ValueError(f"invalid quarantine purpose {purpose!r}")
         now = datetime.now(timezone.utc).isoformat()
         with self.db:
             row = self.db.execute(
-                """SELECT id, target_type, target_name, original_path, content_hash
+                """SELECT id, target_type, target_name, original_path,
+                          content_hash, purpose
                    FROM quarantine_records WHERE quarantine_path = ?""",
                 (quarantine_path,),
             ).fetchone()
@@ -1193,9 +1227,9 @@ class Store:
                 self.db.execute(
                     """INSERT INTO quarantine_records (
                          id, target_type, target_name, original_path,
-                         quarantine_path, content_hash, reason, state,
+                         quarantine_path, content_hash, purpose, reason, state,
                          ownership_json, restore_path, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
                     (
                         record_id,
                         target_type,
@@ -1203,6 +1237,7 @@ class Store:
                         original_path,
                         quarantine_path,
                         content_hash,
+                        purpose,
                         reason,
                         state,
                         ownership_json or "{}",
@@ -1217,8 +1252,11 @@ class Store:
                     or str(row[2]) != target_name
                     or os.path.normcase(str(row[3])) != os.path.normcase(original_path)
                     or str(row[4]) != content_hash
+                    or str(row[5] or "operator") != purpose
                 ):
-                    raise ValueError("quarantine path already belongs to a different asset")
+                    raise ValueError(
+                        "quarantine path already belongs to a different asset or purpose"
+                    )
                 self.db.execute(
                     """UPDATE quarantine_records
                        SET reason = CASE WHEN ? != '' THEN ? ELSE reason END,
@@ -1264,28 +1302,42 @@ class Store:
         state: str,
         *,
         restore_path: str = "",
+        ownership_json: str | None = None,
     ) -> None:
         if state not in {"pending", "active", "restoring"}:
             raise ValueError(f"invalid quarantine state {state!r}")
-        cur = self.db.execute(
-            """UPDATE quarantine_records
-               SET state = ?, restore_path = ?, updated_at = ?
-               WHERE id = ?""",
-            (
-                state,
-                restore_path or None,
-                datetime.now(timezone.utc).isoformat(),
-                record_id,
-            ),
-        )
+        now = datetime.now(timezone.utc).isoformat()
+        if ownership_json is not None:
+            if state != "active" or restore_path or not ownership_json.strip():
+                raise ValueError(
+                    "quarantine ownership may only finalize pending runtime isolation"
+                )
+            cur = self.db.execute(
+                """UPDATE quarantine_records
+                   SET state = 'active', ownership_json = ?, updated_at = ?
+                   WHERE id = ? AND state = 'pending'
+                     AND purpose = 'runtime-isolation'""",
+                (ownership_json, now, record_id),
+            )
+        else:
+            cur = self.db.execute(
+                """UPDATE quarantine_records
+                   SET state = ?, restore_path = ?, updated_at = ?
+                   WHERE id = ?""",
+                (state, restore_path or None, now, record_id),
+            )
         self.db.commit()
         if cur.rowcount != 1:
+            if ownership_json is not None:
+                raise ValueError(
+                    "quarantine ownership requires a pending runtime-isolation record"
+                )
             raise ValueError("quarantine record does not exist")
 
     def get_quarantine_record(self, record_id: str) -> QuarantineRecord | None:
         row = self.db.execute(
             """SELECT id, target_type, target_name, original_path,
-                      quarantine_path, content_hash, reason, state,
+                      quarantine_path, content_hash, purpose, reason, state,
                       ownership_json, restore_path, created_at, updated_at
                FROM quarantine_records WHERE id = ?""",
             (record_id,),
@@ -1311,7 +1363,7 @@ class Store:
             params.append(connector)
         rows = self.db.execute(
             """SELECT q.id, q.target_type, q.target_name, q.original_path,
-                      q.quarantine_path, q.content_hash, q.reason, q.state,
+                      q.quarantine_path, q.content_hash, q.purpose, q.reason, q.state,
                       q.ownership_json, q.restore_path, q.created_at, q.updated_at
                FROM quarantine_records q
                WHERE """
@@ -1350,24 +1402,61 @@ class Store:
                 ).fetchall()
             ]
             for connector in connectors:
-                self.db.execute(
-                    """INSERT INTO actions (
-                         id, target_type, target_name, source_path, actions_json,
-                         reason, updated_at, connector)
-                       VALUES (?, ?, ?, ?, '{}', '', ?, ?)
-                       ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
-                         source_path = excluded.source_path,
-                         actions_json = json_remove(actions_json, '$.file'),
-                         updated_at = excluded.updated_at""",
-                    (
-                        str(uuid.uuid4()),
-                        target_type,
-                        target_name,
-                        destination,
-                        now,
-                        connector,
-                    ),
-                )
+                remaining = self.db.execute(
+                    """SELECT q.original_path
+                       FROM quarantine_records q
+                       JOIN quarantine_record_connectors qc
+                         ON qc.quarantine_id = q.id
+                       WHERE q.id != ? AND q.target_type = ?
+                         AND q.target_name = ? AND qc.connector = ?
+                       ORDER BY q.created_at DESC, q.id DESC
+                       LIMIT 1""",
+                    (record_id, target_type, target_name, connector),
+                ).fetchone()
+                if remaining is not None:
+                    # An exact generation was restored, but another physical
+                    # quarantine still owns this connector-scoped asset. Keep
+                    # file policy truthful while leaving runtime/install
+                    # dimensions intact.
+                    self.db.execute(
+                        """INSERT INTO actions (
+                             id, target_type, target_name, source_path,
+                             actions_json, reason, updated_at, connector)
+                           VALUES (?, ?, ?, ?, '{"file":"quarantine"}', '', ?, ?)
+                           ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                             source_path = excluded.source_path,
+                             actions_json = json_set(
+                                 actions_json, '$.file', 'quarantine'
+                             ),
+                             updated_at = excluded.updated_at""",
+                        (
+                            str(uuid.uuid4()),
+                            target_type,
+                            target_name,
+                            str(remaining[0]),
+                            now,
+                            connector,
+                        ),
+                    )
+                else:
+                    self.db.execute(
+                        """INSERT INTO actions (
+                             id, target_type, target_name, source_path,
+                             actions_json, reason, updated_at, connector)
+                           VALUES (?, ?, ?, ?, '{}', '', ?, ?)
+                           ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                             source_path = excluded.source_path,
+                             actions_json = json_remove(actions_json, '$.file'),
+                             updated_at = excluded.updated_at""",
+                        (
+                            str(uuid.uuid4()),
+                            target_type,
+                            target_name,
+                            destination,
+                            now,
+                            connector,
+                        ),
+                    )
             self.db.execute(
                 "DELETE FROM quarantine_record_connectors WHERE quarantine_id = ?",
                 (record_id,),
@@ -1390,12 +1479,13 @@ class Store:
             original_path=str(row[3]),
             quarantine_path=str(row[4]),
             content_hash=str(row[5]),
-            reason=str(row[6] or ""),
-            state=str(row[7] or "active"),
-            ownership_json=str(row[8] or "{}"),
-            restore_path=str(row[9] or ""),
-            created_at=_parse_ts(row[10]),
-            updated_at=_parse_ts(row[11]),
+            purpose=str(row[6] or "operator"),
+            reason=str(row[7] or ""),
+            state=str(row[8] or "active"),
+            ownership_json=str(row[9] or "{}"),
+            restore_path=str(row[10] or ""),
+            created_at=_parse_ts(row[11]),
+            updated_at=_parse_ts(row[12]),
             connectors=connectors,
         )
 

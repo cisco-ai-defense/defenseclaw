@@ -819,6 +819,14 @@ def _skill_info_card(
     elif skill_name in scan_map:
         scan_entry = scan_map[skill_name]
     actions_map = _build_actions_map(app.store, connector)
+    quarantine_records = []
+    if app.store is not None:
+        try:
+            quarantine_records = app.store.list_quarantine_records(
+                "skill", skill_name, connector if connector else None,
+            )
+        except Exception:
+            quarantine_records = []
     scoped_action = None
     if suppress_global_action_only and connector and app.store is not None:
         try:
@@ -833,9 +841,14 @@ def _skill_info_card(
             and skill_name in actions_map
             and scoped_action is None
             and scan_entry is None
+            and not quarantine_records
         ):
             return None
-        if scan_entry is None and skill_name not in actions_map:
+        if (
+            scan_entry is None
+            and skill_name not in actions_map
+            and not quarantine_records
+        ):
             return None
         info_map = {"name": skill_name}
     else:
@@ -849,6 +862,17 @@ def _skill_info_card(
         ae = actions_map[skill_name]
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
+    if quarantine_records:
+        info_map["quarantine_records"] = [
+            {
+                "id": record.id,
+                "purpose": record.purpose,
+                "state": record.state,
+                "connectors": list(record.connectors),
+                "created_at": record.created_at,
+            }
+            for record in quarantine_records
+        ]
     return info_map
 
 
@@ -898,6 +922,17 @@ def _print_skill_info_card(
         state = ActionState.from_dict(actions_data)
         click.echo()
         click.echo(f"{ux.bold('Actions:')}     {state.summary()}")
+
+    quarantine_records = info_map.get("quarantine_records") or []
+    if quarantine_records:
+        click.echo()
+        click.echo(ux.bold("Quarantine records:"))
+        for record in quarantine_records:
+            click.echo(
+                f"  {record.get('id', '')} "
+                f"purpose={record.get('purpose', 'operator')} "
+                f"state={record.get('state', 'active')}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1915,6 +1950,18 @@ def _apply_scan_enforcement(
     enforcement_reason = f"post-scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
     failed_actions: list[str] = []
+    quarantine_succeeded = False
+    quarantine_purpose = (
+        "runtime-isolation"
+        if action_cfg.runtime == "disable"
+        and _skill_runtime_requires_filesystem_fallback(canonical_connector)
+        else "operator"
+    )
+    quarantine_connector = (
+        (scoped_connector or canonical_connector)
+        if quarantine_purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+        else scoped_connector
+    )
 
     if action_cfg.file == "quarantine":
         dest = _quarantine_skill_with_provenance(
@@ -1922,15 +1969,17 @@ def _apply_scan_enforcement(
             pe,
             skill_name,
             skill_path,
-            scoped_connector,
+            quarantine_connector,
             enforcement_reason,
+            purpose=quarantine_purpose,
         )
         if dest:
             try:
                 _verify_scan_action_persisted(
-                    app, skill_name, "file", "quarantine", scoped_connector,
+                    app, skill_name, "file", "quarantine", quarantine_connector,
                 )
                 applied_actions.append("quarantined")
+                quarantine_succeeded = True
             except Exception as exc:  # noqa: BLE001 - physical quarantine remains in place.
                 click.echo(
                     f"[scan] quarantine policy persistence failed for {skill_name!r}: {exc}",
@@ -1941,7 +1990,54 @@ def _apply_scan_enforcement(
             click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
             failed_actions.append("quarantine")
 
-    if action_cfg.runtime == "disable":
+    runtime_ready = True
+    if (
+        action_cfg.runtime == "disable"
+        and _skill_runtime_requires_filesystem_fallback(canonical_connector)
+        and not quarantine_succeeded
+    ):
+        if action_cfg.file == "quarantine":
+            runtime_ready = False
+        else:
+            dest = _quarantine_skill_with_provenance(
+                app,
+                pe,
+                skill_name,
+                skill_path,
+                scoped_connector or canonical_connector,
+                enforcement_reason,
+                purpose="runtime-isolation",
+            )
+            if dest:
+                try:
+                    _verify_scan_action_persisted(
+                        app,
+                        skill_name,
+                        "file",
+                        "quarantine",
+                        scoped_connector or canonical_connector,
+                    )
+                    applied_actions.append(
+                        f"quarantined for connector={canonical_connector} runtime isolation"
+                    )
+                    quarantine_succeeded = True
+                except Exception as exc:  # noqa: BLE001 - files remain safely isolated.
+                    click.echo(
+                        f"[scan] runtime-isolation policy persistence failed for "
+                        f"{skill_name!r}: {exc}",
+                        err=True,
+                    )
+                    failed_actions.append("runtime isolation policy")
+                    runtime_ready = False
+            else:
+                click.echo(
+                    f"[scan] managed runtime isolation failed for {skill_name!r}",
+                    err=True,
+                )
+                failed_actions.append("runtime isolation")
+                runtime_ready = False
+
+    if action_cfg.runtime == "disable" and runtime_ready:
         try:
             if canonical_connector == "openclaw":
                 client = _sidecar_client(app)
@@ -1957,14 +2053,26 @@ def _apply_scan_enforcement(
             )
             if canonical_connector == "openclaw":
                 applied_actions.append("disabled via gateway")
+            elif _skill_runtime_has_hard_enforcement(canonical_connector):
+                applied_actions.append(
+                    f"runtime disable enforced for connector={canonical_connector}"
+                )
             else:
                 applied_actions.append(
-                    f"runtime disable recorded for connector={canonical_connector}"
+                    f"runtime disable recorded for connector={canonical_connector} "
+                    "(advisory only)"
+                )
+                _warn_skill_runtime_disable_advisory(
+                    skill_name,
+                    canonical_connector,
+                    scoped=bool(scoped_connector),
                 )
         except Exception as exc:  # noqa: BLE001 - report persistence/RPC failures uniformly.
             label = "gateway disable" if canonical_connector == "openclaw" else "runtime policy persistence"
             click.echo(f"[scan] {label} failed for {skill_name!r}: {exc}", err=True)
             failed_actions.append("runtime disable")
+    elif action_cfg.runtime == "disable":
+        failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
         try:
@@ -3158,7 +3266,7 @@ def _skill_policy_fanout_connectors(
 
     if pe is not None:
         for entry in pe.list_by_type("skill"):
-            if entry.target_name == skill_name and entry.connector:
+            if _runtime_skill_names_equal(entry.target_name, skill_name) and entry.connector:
                 add(entry.connector)
 
     return sorted(connectors, key=lambda c: active_order.get(c, len(active_order)))
@@ -3193,6 +3301,21 @@ def _strict_path_within(path: str, root: str) -> bool:
         os.path.normcase(common) == os.path.normcase(root_abs)
         and os.path.normcase(path_abs) != os.path.normcase(root_abs)
     )
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    """Return true for equal paths or containment in either direction."""
+    try:
+        left_abs = os.path.abspath(left)
+        right_abs = os.path.abspath(right)
+        common = os.path.commonpath((left_abs, right_abs))
+    except (OSError, ValueError):
+        return False
+    common_key = os.path.normcase(common)
+    return common_key in {
+        os.path.normcase(left_abs),
+        os.path.normcase(right_abs),
+    }
 
 
 def _materialize_legacy_skill_quarantine(
@@ -3277,19 +3400,56 @@ def _quarantine_skill_with_provenance(
     skill_path: str,
     connector: str,
     reason: str,
+    *,
+    purpose: str = "operator",
 ) -> str | None:
-    """Journal, copy/verify/remove, then record logical quarantine state."""
+    """Journal a purpose-specific move, then record logical quarantine state."""
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
     if app.store is None:
         click.echo("error: quarantine metadata store is unavailable", err=True)
         return None
     enforcer = SkillEnforcer(app.cfg.quarantine_dir)
-    destination = enforcer.quarantine_path(skill_name, connector)
-    content_hash = enforcer.content_hash(skill_path)
-    if destination is None or content_hash is None:
+    runtime_isolation = purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+    if runtime_isolation:
+        allowed_roots = list(app.cfg.skill_dirs(connector)) if connector else []
+        for root in _all_active_skill_dirs(app):
+            if root not in allowed_roots:
+                allowed_roots.append(root)
+    else:
+        allowed_roots = None
+    if runtime_isolation and connector:
+        source_real = os.path.realpath(skill_path)
+        peer_roots = [
+            root
+            for peer in _active_skill_connectors(app)
+            if _normalize_runtime_connector(peer) != connector
+            for root in app.cfg.skill_dirs(peer)
+        ]
+        if any(
+            _paths_overlap(source_real, os.path.realpath(root))
+            for root in peer_roots
+        ):
+            click.echo(
+                f"error: {skill_name!r} is also discoverable by another "
+                "connector; scoped runtime isolation cannot move shared files",
+                err=True,
+            )
+            return None
+    if runtime_isolation:
+        destination = enforcer.quarantine_path(
+            skill_name,
+            connector,
+            purpose=purpose,
+            allowed_roots=allowed_roots,
+        )
+    else:
+        destination = enforcer.quarantine_path(skill_name, connector)
+    source_snapshot = enforcer.verified_snapshot(skill_path)
+    if destination is None or source_snapshot is None:
         click.echo(f"error: unsafe skill content for {skill_name!r}", err=True)
         return None
+    content_hash, source_identity, source_ownership = source_snapshot
     try:
         record = app.store.create_quarantine_record(
             "skill",
@@ -3299,22 +3459,46 @@ def _quarantine_skill_with_provenance(
             content_hash,
             reason,
             connector,
-            ownership_json=enforcer.ownership_marker(skill_path),
+            ownership_json=source_ownership,
             state="pending",
+            purpose=purpose,
         )
     except (OSError, ValueError):
         click.echo("error: could not persist quarantine provenance", err=True)
         return None
 
+    quarantine_kwargs: dict[str, Any] = {"expected_hash": content_hash}
+    if runtime_isolation:
+        quarantine_kwargs.update(
+            purpose=purpose,
+            quarantine_path=destination,
+            expected_ownership_json=source_ownership,
+            allowed_roots=allowed_roots,
+            isolation_roots=allowed_roots,
+        )
     moved_to = enforcer.quarantine(
         skill_name,
         skill_path,
         connector=connector,
-        expected_hash=content_hash,
+        **quarantine_kwargs,
     )
     if moved_to is None:
-        physical_hash = enforcer.content_hash(destination) if os.path.lexists(destination) else None
-        if physical_hash != content_hash:
+        if runtime_isolation:
+            delete_pending = (
+                os.path.lexists(skill_path)
+                and enforcer.path_identity(skill_path) == source_identity
+                and enforcer.content_hash(skill_path) == content_hash
+                and enforcer.ownership_marker(skill_path) == source_ownership
+            )
+        else:
+            # Legacy quarantine copies before removing the source.  A failed
+            # source removal can legitimately leave both copies, so retain
+            # provenance whenever the verified destination exists.
+            delete_pending = (
+                not os.path.lexists(destination)
+                or enforcer.content_hash(destination) != content_hash
+            )
+        if delete_pending:
             try:
                 app.store.delete_quarantine_record(record.id)
             except Exception:  # noqa: BLE001 - stale pending journal is safer than data loss.
@@ -3322,13 +3506,31 @@ def _quarantine_skill_with_provenance(
         click.echo(f"error: quarantine filesystem operation failed for {skill_name!r}", err=True)
         return None
 
+    active_ownership: str | None = None
+    if runtime_isolation:
+        active_ownership = enforcer.runtime_ownership_marker(
+            source_ownership, moved_to,
+        )
+        if active_ownership is None:
+            click.echo(
+                f"warning: {skill_name!r} is isolated, but its ownership/ACL "
+                "transition could not be durably bound",
+                err=True,
+            )
+            return None
     try:
-        app.store.update_quarantine_record_state(record.id, "active")
+        app.store.update_quarantine_record_state(
+            record.id,
+            "active",
+            ownership_json=active_ownership,
+        )
     except Exception:  # noqa: BLE001 - pending provenance is intentionally recoverable.
         click.echo(
-            f"warning: {skill_name!r} is quarantined; provenance finalization is pending",
+            f"warning: {skill_name!r} is quarantined; provenance finalization "
+            "is pending and isolation could not be verified from durable provenance",
             err=True,
         )
+        return None
 
     try:
         if connector:
@@ -3594,7 +3796,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
+    requested_name = os.path.basename(name)
     pe = PolicyEngine(app.store)
 
     if not reason:
@@ -3605,15 +3807,48 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     # is for the global/OpenClaw runtime lane and stays on the bare path.
     connector = _resolve_connector_scope(app, connector_flag)
     if connector:
-        if pe.is_allowed_for_connector("skill", skill_name, connector):
+        skill_name = _canonical_runtime_skill_name(
+            app, pe, requested_name, connector,
+        )
+        _, physical_records = _skill_quarantine_records(
+            app, pe, skill_name, connector_flag,
+        )
+        global_runtime_disabled = bool(
+            app.store is not None
+            and app.store.has_action(
+                "skill", skill_name, "runtime", "disable", "",
+            )
+        )
+        scoped_runtime_disabled = _effective_skill_runtime_disabled(
+            app, skill_name, connector,
+        )
+        if (
+            pe.is_allowed_for_connector("skill", skill_name, connector)
+            and not scoped_runtime_disabled
+        ):
             if app.store and app.store.has_action(
                 "skill", skill_name, "install", "allow", connector,
             ):
                 click.echo(f"Already allowed for {connector}: {skill_name}")
             else:
                 click.echo(f"Already allowed globally (covers {connector}): {skill_name}")
+            if physical_records:
+                click.echo(
+                    "  The allow policy does not restore quarantined files; "
+                    f"restore explicitly with 'defenseclaw skill restore "
+                    f"{skill_name} --connector {connector}'."
+                )
             return
         pe.allow_for_connector("skill", skill_name, connector, reason)
+        if global_runtime_disabled:
+            app.store.set_action_field(
+                "skill",
+                skill_name,
+                "runtime",
+                "enable",
+                "manual scoped allow via CLI; overrides global runtime disable",
+                connector,
+            )
         skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path, connector)
@@ -3625,28 +3860,57 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             app.logger.log_action(
                 "skill-allow", skill_name, f"reason={reason} connector={connector}",
             )
+        if physical_records:
+            click.echo(
+                "  The skill is allow-listed, but its files remain quarantined; "
+                f"restore explicitly with 'defenseclaw skill restore "
+                f"{skill_name} --connector {connector}'."
+            )
         return
 
-    targets = _skill_policy_fanout_connectors(app, pe, skill_name)
+    targets = _skill_policy_fanout_connectors(app, pe, requested_name)
     if targets:
+        restore_hints: list[tuple[str, str]] = []
         for target_connector in targets:
-            pe.allow_for_connector("skill", skill_name, target_connector, reason)
-            skill_path = _resolve_path(app, skill_name, target_connector)
+            target_name = _canonical_runtime_skill_name(
+                app, pe, requested_name, target_connector,
+            )
+            _, physical_records = _skill_quarantine_records(
+                app, pe, target_name, target_connector,
+            )
+            pe.allow_for_connector("skill", target_name, target_connector, reason)
+            skill_path = _resolve_path(app, target_name, target_connector)
             if skill_path:
-                pe.set_source_path("skill", skill_name, skill_path, target_connector)
+                pe.set_source_path("skill", target_name, skill_path, target_connector)
             click.secho(
-                f"[skill] {skill_name!r} added to allow list "
+                f"[skill] {target_name!r} added to allow list "
                 f"(connector={target_connector})",
                 fg="green",
             )
-        if app.store and pe.get_action("skill", skill_name) is not None:
-            pe.remove_action("skill", skill_name)
+            if physical_records:
+                restore_hints.append((target_name, target_connector))
+        global_names = {
+            entry.target_name
+            for entry in pe.list_by_type("skill")
+            if not entry.connector
+            and _runtime_skill_names_equal(entry.target_name, requested_name)
+        }
+        for global_name in global_names:
+            pe.remove_action("skill", global_name)
+        for target_name, target_connector in restore_hints:
+            click.echo(
+                "  The skill is allow-listed, but its files remain quarantined; "
+                f"restore explicitly with 'defenseclaw skill restore "
+                f"{target_name} --connector {target_connector}'."
+            )
         if app.logger:
             app.logger.log_action(
-                "skill-allow", skill_name, f"reason={reason} connector=all",
+                "skill-allow", requested_name, f"reason={reason} connector=all",
             )
         return
 
+    skill_name = _canonical_runtime_skill_name(app, pe, requested_name)
+    _, physical_records = _skill_quarantine_records(app, pe, skill_name)
     entry = pe.get_action("skill", skill_name)
     runtime_disabled = bool(entry and entry.actions.runtime == "disable")
     runtime_cleared = True
@@ -3668,6 +3932,11 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             f"[skill] {skill_name!r} added to allow list; runtime disable remains until the gateway is reachable",
             fg="yellow",
         )
+    if physical_records:
+        click.echo(
+            "  The skill is allow-listed, but its files remain quarantined; "
+            f"restore explicitly with 'defenseclaw skill restore {skill_name}'."
+        )
 
     if app.logger:
         app.logger.log_action("skill-allow", skill_name, f"reason={reason}")
@@ -3677,7 +3946,16 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # skill disable (runtime, via gateway RPC)
 # ---------------------------------------------------------------------------
 
-_SKILL_RUNTIME_PROBE_CONNECTORS = {"codex", "claudecode"}
+_SKILL_RUNTIME_FILESYSTEM_FALLBACK_CONNECTORS = {"codex"}
+_SKILL_RUNTIME_HARD_ENFORCEMENT_CONNECTORS = {"codex", "claudecode"}
+_SKILL_RUNTIME_QUARANTINE_PURPOSE = "runtime-isolation"
+
+
+def _runtime_skill_names_equal(left: str, right: str) -> bool:
+    """Use filesystem identity semantics without changing POSIX behavior."""
+    if os.name == "nt":
+        return left.casefold() == right.casefold()
+    return left == right
 
 
 def _normalize_runtime_connector(connector: str) -> str:
@@ -3692,8 +3970,300 @@ def _active_connector_name(app: AppContext) -> str:
     return "openclaw"
 
 
-def _skill_runtime_probe_enforced(connector: str) -> bool:
-    return _normalize_runtime_connector(connector) in _SKILL_RUNTIME_PROBE_CONNECTORS
+def _skill_runtime_requires_filesystem_fallback(connector: str) -> bool:
+    """Whether runtime disable also has to remove the skill from discovery.
+
+    Codex exposes explicit text at ``UserPromptSubmit`` but does not expose an
+    identity for implicit selection, and its hook runs after explicit skill
+    files have already been read.  A connector-scoped physical quarantine is
+    therefore required before the CLI may report a hard runtime disable.
+    """
+    return (
+        _normalize_runtime_connector(connector)
+        in _SKILL_RUNTIME_FILESYSTEM_FALLBACK_CONNECTORS
+    )
+
+
+def _skill_runtime_has_hard_enforcement(connector: str) -> bool:
+    return (
+        _normalize_runtime_connector(connector)
+        in _SKILL_RUNTIME_HARD_ENFORCEMENT_CONNECTORS
+    )
+
+
+def _canonical_runtime_skill_name(
+    app: AppContext, pe: Any, requested_name: str, connector: str = "",
+) -> str:
+    """Return the installed/persisted spelling for one skill identity.
+
+    Windows paths are case-insensitive while policy identities are exact
+    strings.  Bind new runtime rows to the spelling already discovered on
+    disk (or already persisted for the same connector) so the gateway and CLI
+    cannot drift on casing or connector aliases.
+    """
+    matches = _skill_match_dir_scopes(app, requested_name, connector)
+    if matches:
+        return os.path.basename(matches[0][1])
+    for entry in pe.list_by_type("skill"):
+        if not _runtime_skill_names_equal(entry.target_name, requested_name):
+            continue
+        if connector and entry.connector not in {"", connector}:
+            continue
+        return entry.target_name
+    return requested_name
+
+
+def _effective_skill_runtime_disabled(
+    app: AppContext, skill_name: str, connector: str,
+) -> bool:
+    """Resolve a scoped runtime field with the same scoped/global precedence."""
+    if app.store is None:
+        return False
+    if connector:
+        scoped = app.store.get_action("skill", skill_name, connector)
+        if scoped is not None and scoped.actions.runtime:
+            return scoped.actions.runtime == "disable"
+    return app.store.has_action(
+        "skill", skill_name, "runtime", "disable", "",
+    )
+
+
+def _existing_codex_runtime_quarantine(
+    app: AppContext,
+    pe: Any,
+    skill_name: str,
+    connector: str,
+    *,
+    expected_quarantine_path: str | None = None,
+) -> str | None:
+    """Return a valid, active physical quarantine for an idempotent disable."""
+    if app.store is None:
+        return None
+    from defenseclaw.enforce.skill_enforcer import SkillEnforcer
+
+    records = [
+        record
+        for record in app.store.list_quarantine_records(
+            "skill", skill_name, connector,
+        )
+        if record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+    ]
+    if not records:
+        roots = [os.path.realpath(root) for root in app.cfg.skill_dirs(connector)]
+        compatible = [
+            record
+            for record in app.store.list_quarantine_records("skill", skill_name)
+            if record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+            if any(
+                _strict_path_within(
+                    os.path.realpath(record.original_path), root,
+                )
+                for root in roots
+            )
+        ]
+        if len(compatible) == 1:
+            app.store.associate_quarantine_connector(
+                compatible[0].id, connector,
+            )
+            records = compatible
+    if not records:
+        return None
+    if expected_quarantine_path is not None:
+        expected_key = os.path.normcase(os.path.abspath(expected_quarantine_path))
+        records = [
+            record
+            for record in records
+            if os.path.normcase(os.path.abspath(record.quarantine_path))
+            == expected_key
+        ]
+        if len(records) != 1:
+            return None
+    # A skill can be reintroduced out-of-band while an older generation is
+    # already isolated. Post-move callers select the exact newly journaled
+    # destination above, so timestamp or UUID ordering cannot select a peer
+    # generation. Idempotent probes need only find one valid active journal.
+    record = records[-1]
+    enforcer = SkillEnforcer(app.cfg.quarantine_dir)
+    allowed_roots = list(app.cfg.skill_dirs(connector))
+    for root in _all_active_skill_dirs(app):
+        if root not in allowed_roots:
+            allowed_roots.append(root)
+    peer_roots = [
+        root
+        for peer in _active_skill_connectors(app)
+        if _normalize_runtime_connector(peer) != connector
+        for root in app.cfg.skill_dirs(peer)
+    ]
+    pending_path_valid = (
+        record.state == "pending"
+        and record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+        and not os.path.lexists(record.original_path)
+        and os.path.lexists(record.quarantine_path)
+        and enforcer.is_runtime_isolation_path(
+            record.quarantine_path,
+            connector,
+            allowed_roots=allowed_roots,
+        )
+        and enforcer.content_hash(record.quarantine_path) == record.content_hash
+    )
+    if pending_path_valid:
+        combined_ownership = (
+            record.ownership_json
+            if enforcer.matches_runtime_ownership_marker(
+                record.quarantine_path,
+                record.ownership_json,
+                isolated=True,
+            )
+            else enforcer.runtime_ownership_marker(
+                record.ownership_json, record.quarantine_path,
+            )
+        )
+        if combined_ownership is not None:
+            try:
+                app.store.update_quarantine_record_state(
+                    record.id,
+                    "active",
+                    ownership_json=combined_ownership,
+                )
+                refreshed = app.store.get_quarantine_record(record.id)
+                if refreshed is not None:
+                    record = refreshed
+            except Exception:  # noqa: BLE001 - caller reports honest failure.
+                pass
+    if (
+        record.state != "active"
+        or record.purpose != _SKILL_RUNTIME_QUARANTINE_PURPOSE
+        or os.path.lexists(record.original_path)
+        or not os.path.lexists(record.quarantine_path)
+        or not enforcer.is_runtime_isolation_path(
+            record.quarantine_path,
+            connector,
+            allowed_roots=allowed_roots,
+        )
+        or enforcer.content_hash(record.quarantine_path) != record.content_hash
+        or not enforcer.matches_runtime_ownership_marker(
+            record.quarantine_path,
+            record.ownership_json,
+            isolated=True,
+        )
+        or any(
+            _strict_path_within(
+                os.path.realpath(record.original_path), os.path.realpath(root),
+            )
+            for root in peer_roots
+        )
+    ):
+        return None
+    if not app.store.has_action(
+        "skill", skill_name, "file", "quarantine", connector,
+    ):
+        pe.quarantine_for_connector(
+            "skill", skill_name, connector, record.reason or "runtime isolation",
+        )
+        pe.set_source_path("skill", skill_name, record.original_path, connector)
+    return record.quarantine_path
+
+
+def _enforce_codex_runtime_isolation(
+    app: AppContext,
+    pe: Any,
+    skill_name: str,
+    connector: str,
+    reason: str,
+) -> str:
+    """Physically quarantine one Codex skill before recording runtime disable.
+
+    Runtime isolation journals a connector-private random destination, then
+    performs a same-volume atomic no-replace rename while holding parent
+    identities. It verifies filesystem identity and SHA-256 content before
+    and after the move, rejects links/reparse points, and fails hard when the
+    platform cannot provide that boundary. A failed move never produces a
+    successful runtime-disable row.
+    """
+    connector = _normalize_runtime_connector(connector)
+    try:
+        existing = _existing_codex_runtime_quarantine(
+            app, pe, skill_name, connector,
+        )
+    except Exception as exc:  # noqa: BLE001 - convert storage failures to CLI failure.
+        raise click.ClickException(
+            f"managed runtime isolation provenance could not be reconciled for "
+            f"{skill_name!r}; runtime disable was not recorded"
+        ) from exc
+    if existing:
+        return existing
+
+    matches = [
+        path
+        for matched_connector, path in _skill_match_dir_scopes(
+            app, skill_name, connector,
+        )
+        if _normalize_runtime_connector(matched_connector) == connector
+    ]
+    if not matches:
+        raise click.ClickException(
+            f"cannot hard-disable {skill_name!r} for connector={connector}: "
+            "no canonical installed skill directory was found"
+        )
+    if len(matches) != 1:
+        raise click.ClickException(
+            f"cannot hard-disable ambiguous skill {skill_name!r} for "
+            f"connector={connector}: found {len(matches)} installed copies"
+        )
+    destination = _quarantine_skill_with_provenance(
+        app,
+        pe,
+        skill_name,
+        matches[0],
+        connector,
+        reason,
+        purpose=_SKILL_RUNTIME_QUARANTINE_PURPOSE,
+    )
+    if destination is None:
+        raise click.ClickException(
+            f"managed runtime isolation failed for {skill_name!r} "
+            f"on connector={connector}; runtime disable was not recorded"
+        )
+    try:
+        verified = _existing_codex_runtime_quarantine(
+            app,
+            pe,
+            skill_name,
+            connector,
+            expected_quarantine_path=destination,
+        )
+    except Exception as exc:  # noqa: BLE001 - files remain isolated fail-closed.
+        raise click.ClickException(
+            f"managed runtime isolation provenance could not be verified for "
+            f"{skill_name!r}; runtime disable was not recorded"
+        ) from exc
+    if verified is None or os.path.normcase(verified) != os.path.normcase(destination):
+        raise click.ClickException(
+            f"managed runtime isolation for {skill_name!r} could not be "
+            "verified from durable provenance; runtime disable was not recorded"
+        )
+    return verified
+
+
+def _runtime_quarantine_restore_hint(
+    app: AppContext, skill_name: str, connector: str,
+) -> None:
+    if app.store is None:
+        return
+    records = app.store.list_quarantine_records(
+        "skill", skill_name, connector,
+    )
+    if not any(
+        record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+        for record in records
+    ):
+        return
+    click.secho(
+        f"  Skill files remain quarantined for connector={connector}; "
+        "clear any install block, then restore explicitly with "
+        f"'defenseclaw skill restore {skill_name} --connector {connector}'.",
+        fg="yellow",
+    )
 
 
 def _skill_runtime_fanout_connectors(
@@ -3736,6 +4306,32 @@ def _warn_skill_runtime_disable_advisory(skill_name: str, connector: str, scoped
     )
 
 
+def _announce_skill_runtime_enforcement(
+    skill_name: str, connector: str, *, scoped: bool,
+) -> None:
+    if connector == "codex":
+        click.echo(
+            "  Observable canonical $skill selections are denied at "
+            "UserPromptSubmit; managed file quarantine prevents fresh discovery "
+            "and implicit loading."
+        )
+        click.echo(
+            "  Existing sessions can retain a cached skill. Restart them: cached "
+            "use without an unambiguous canonical $skill token is not observable."
+        )
+        click.echo(
+            f"  Re-enable runtime first, then restore files explicitly with "
+            f"'defenseclaw skill restore {skill_name} --connector codex'."
+        )
+        return
+    if connector == "claudecode":
+        click.echo(
+            "  Enforced by Claude Code UserPromptExpansion and Skill tool hook gates."
+        )
+        return
+    _warn_skill_runtime_disable_advisory(skill_name, connector, scoped)
+
+
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
@@ -3746,8 +4342,10 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
 
     OpenClaw uses the gateway RPC. Hook connectors store a runtime-disable
     policy row that the hook runtime gate enforces when that connector emits
-    skill runtime events. This is runtime-only — it does not block install or
-    quarantine files.
+    skill runtime events. Codex does not expose implicit selection or a
+    pre-load identity, so its hard-disable path also records ``file=quarantine``
+    and moves the connector-scoped skill outside discovery roots. This added
+    filesystem action is visible in list/info and requires explicit restore.
 
     Bare records the disable for every matching configured connector copy when
     one can be found, falling back to the legacy unscoped row for older
@@ -3755,7 +4353,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     runtime-disable record to that peer.
     """
     from defenseclaw.enforce import PolicyEngine
-    skill_name = os.path.basename(name)
+    requested_name = os.path.basename(name)
 
     active = _active_connector_name(app)
 
@@ -3765,7 +4363,9 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     connector = _resolve_connector_scope(app, connector_flag)
     pe = PolicyEngine(app.store)
     target_connector = _normalize_runtime_connector(connector or active)
-
+    skill_name = _canonical_runtime_skill_name(
+        app, pe, requested_name, connector,
+    )
     if not connector_flag:
         fanout_connectors = _skill_runtime_fanout_connectors(
             app, pe, skill_name, include_stale=False,
@@ -3773,36 +4373,61 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         if _skill_runtime_should_fanout(app, target_connector, fanout_connectors):
             gateway_client = None
             for target in fanout_connectors:
+                target_skill_name = _canonical_runtime_skill_name(
+                    app, pe, requested_name, target,
+                )
+                if _skill_runtime_requires_filesystem_fallback(target):
+                    _enforce_codex_runtime_isolation(
+                        app, pe, target_skill_name, target, reason,
+                    )
                 if target == "openclaw":
                     gateway_client = gateway_client or _sidecar_client(app)
                     try:
-                        gateway_client.disable_skill(skill_name)
+                        gateway_client.disable_skill(target_skill_name)
                     except Exception as exc:
                         click.echo(f"error: gateway disable failed: {exc}", err=True)
                         raise SystemExit(1)
+                try:
+                    pe.disable_for_connector(
+                        "skill", target_skill_name, target, reason,
+                    )
+                    _verify_scan_action_persisted(
+                        app, target_skill_name, "runtime", "disable", target,
+                    )
+                except Exception as exc:  # noqa: BLE001 - do not claim false success.
                     click.echo(
-                        f"[skill] {skill_name!r} disabled via gateway RPC "
+                        f"error: runtime disable persistence failed for "
+                        f"connector={target}: {exc}",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+
+                if target == "openclaw":
+                    click.echo(
+                        f"[skill] {target_skill_name!r} disabled via gateway RPC "
                         f"(connector={target})"
                     )
                 else:
-                    click.echo(
-                        f"[skill] {skill_name!r} runtime disable recorded "
-                        f"(connector={target})"
+                    status = (
+                        "runtime disable enforced"
+                        if _skill_runtime_has_hard_enforcement(target)
+                        else "runtime disable recorded"
                     )
-                    if _skill_runtime_probe_enforced(target):
-                        click.echo(
-                            f"  Enforced by hook runtime gate for connector={target}."
-                        )
-                    else:
-                        _warn_skill_runtime_disable_advisory(skill_name, target, True)
-
-                pe.disable_for_connector("skill", skill_name, target, reason)
+                    click.echo(f"[skill] {target_skill_name!r} {status} (connector={target})")
+                    _announce_skill_runtime_enforcement(
+                        target_skill_name, target, scoped=True,
+                    )
 
             if app.logger:
                 app.logger.log_action(
                     "skill-disable", skill_name, f"reason={reason} connector=all",
                 )
             return
+
+    if _skill_runtime_requires_filesystem_fallback(target_connector):
+        _enforce_codex_runtime_isolation(
+            app, pe, skill_name, target_connector, reason,
+        )
 
     if target_connector == "openclaw":
         client = _sidecar_client(app)
@@ -3812,31 +4437,42 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
             click.echo(f"error: gateway disable failed: {exc}", err=True)
             raise SystemExit(1)
 
+    try:
+        if connector:
+            pe.disable_for_connector("skill", skill_name, target_connector, reason)
+        else:
+            pe.disable("skill", skill_name, reason)
+        _verify_scan_action_persisted(
+            app,
+            skill_name,
+            "runtime",
+            "disable",
+            target_connector if connector else "",
+        )
+    except Exception as exc:  # noqa: BLE001 - physical quarantine remains fail-closed.
+        click.echo(f"error: runtime disable persistence failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if target_connector == "openclaw":
         click.echo(f'[skill] {skill_name!r} disabled via gateway RPC')
     elif connector_flag:
+        status = (
+            "runtime disable enforced"
+            if _skill_runtime_has_hard_enforcement(target_connector)
+            else "runtime disable recorded"
+        )
         click.echo(
-            f"[skill] {skill_name!r} runtime disable recorded "
+            f"[skill] {skill_name!r} {status} "
             f"(connector={target_connector})"
         )
-        if _skill_runtime_probe_enforced(target_connector):
-            click.echo(
-                f"  Enforced by hook runtime gate for connector={target_connector}."
-            )
-        else:
-            _warn_skill_runtime_disable_advisory(skill_name, target_connector, True)
+        _announce_skill_runtime_enforcement(
+            skill_name, target_connector, scoped=True,
+        )
     else:
         click.echo(f"[skill] {skill_name!r} runtime disable recorded globally")
-        if _skill_runtime_probe_enforced(target_connector):
-            click.echo(
-                "  Enforced by hook runtime gates for connectors that emit skill events."
-            )
-        else:
-            _warn_skill_runtime_disable_advisory(skill_name, target_connector, False)
-
-    if connector:
-        pe.disable_for_connector("skill", skill_name, target_connector, reason)
-    else:
-        pe.disable("skill", skill_name, reason)
+        _announce_skill_runtime_enforcement(
+            skill_name, target_connector, scoped=False,
+        )
 
     if app.logger:
         app.logger.log_action(
@@ -3858,14 +4494,27 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     This is a runtime-only action. Bare clears runtime-disable records for
     every matching configured connector copy plus any legacy unscoped row.
     ``--connector <name>`` clears only that peer's runtime-disable record.
+    Files quarantined for Codex hard enforcement remain quarantined until a
+    separate ``skill restore`` so runtime and file lifecycle dimensions cannot
+    be collapsed accidentally.
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
+    requested_name = os.path.basename(name)
     active = _active_connector_name(app)
     connector = _resolve_connector_scope(app, connector_flag)
     target_connector = _normalize_runtime_connector(connector or active)
     pe = PolicyEngine(app.store)
+    skill_name = _canonical_runtime_skill_name(
+        app, pe, requested_name, connector,
+    )
+    scoped_overrides_global = bool(
+        connector
+        and app.store is not None
+        and app.store.has_action(
+            "skill", skill_name, "runtime", "disable", "",
+        )
+    )
 
     if not connector_flag:
         fanout_connectors = _skill_runtime_fanout_connectors(
@@ -3874,25 +4523,55 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         if _skill_runtime_should_fanout(app, target_connector, fanout_connectors):
             gateway_client = None
             for target in fanout_connectors:
+                target_skill_name = _canonical_runtime_skill_name(
+                    app, pe, requested_name, target,
+                )
                 if target == "openclaw":
                     gateway_client = gateway_client or _sidecar_client(app)
                     try:
-                        gateway_client.enable_skill(skill_name)
+                        gateway_client.enable_skill(target_skill_name)
                     except Exception as exc:
                         click.echo(f"error: gateway enable failed: {exc}", err=True)
                         raise SystemExit(1)
+                try:
+                    pe.enable_for_connector("skill", target_skill_name, target)
+                except Exception as exc:  # noqa: BLE001 - durable CLI boundary.
                     click.echo(
-                        f"[skill] {skill_name!r} enabled via gateway RPC "
+                        f"error: runtime enable persistence failed for "
+                        f"connector={target}: {exc}",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+                if target == "openclaw":
+                    click.echo(
+                        f"[skill] {target_skill_name!r} enabled via gateway RPC "
                         f"(connector={target})"
                     )
                 else:
                     click.echo(
-                        f"[skill] {skill_name!r} runtime disable cleared "
+                        f"[skill] {target_skill_name!r} runtime disable cleared "
                         f"(connector={target})"
                     )
-                pe.enable_for_connector("skill", skill_name, target)
+                if target == "codex":
+                    _runtime_quarantine_restore_hint(
+                        app, target_skill_name, target,
+                    )
 
-            pe.enable("skill", skill_name)
+            global_names = {
+                entry.target_name
+                for entry in pe.list_by_type("skill")
+                if not entry.connector
+                and _runtime_skill_names_equal(entry.target_name, requested_name)
+            }
+            for global_name in global_names or {skill_name}:
+                try:
+                    pe.enable("skill", global_name)
+                except Exception as exc:  # noqa: BLE001 - durable CLI boundary.
+                    click.echo(
+                        f"error: global runtime enable persistence failed: {exc}",
+                        err=True,
+                    )
+                    raise SystemExit(1)
             if app.logger:
                 app.logger.log_action(
                     "skill-enable",
@@ -3908,19 +4587,45 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         except Exception as exc:
             click.echo(f"error: gateway enable failed: {exc}", err=True)
             raise SystemExit(1)
+
+    try:
+        if connector:
+            pe.enable_for_connector("skill", skill_name, target_connector)
+            if scoped_overrides_global:
+                app.store.set_action_field(
+                    "skill",
+                    skill_name,
+                    "runtime",
+                    "enable",
+                    "manual scoped enable via CLI; overrides global runtime disable",
+                    target_connector,
+                )
+        else:
+            pe.enable("skill", skill_name)
+    except Exception as exc:  # noqa: BLE001 - durable CLI boundary.
+        click.echo(f"error: runtime enable persistence failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if target_connector == "openclaw":
         click.echo(f'[skill] {skill_name!r} enabled via gateway RPC')
     elif connector_flag:
-        click.echo(
-            f"[skill] {skill_name!r} runtime disable cleared "
-            f"(connector={target_connector})"
-        )
+        if scoped_overrides_global:
+            click.echo(
+                f"[skill] {skill_name!r} enabled for connector={target_connector}; "
+                "the global runtime disable remains for other connectors"
+            )
+        else:
+            click.echo(
+                f"[skill] {skill_name!r} runtime disable cleared "
+                f"(connector={target_connector})"
+            )
     else:
         click.echo(f"[skill] {skill_name!r} global runtime disable cleared")
 
-    if connector:
-        pe.enable_for_connector("skill", skill_name, target_connector)
-    else:
-        pe.enable("skill", skill_name)
+    if target_connector == "codex":
+        _runtime_quarantine_restore_hint(
+            app, skill_name, target_connector,
+        )
 
     if app.logger:
         app.logger.log_action(
@@ -4034,8 +4739,19 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
     "(default: any configured connector).",
 )
 @click.option("--path", "restore_path", default="", help="Override restore destination (defaults to original path)")
+@click.option(
+    "--record-id",
+    default="",
+    help="Restore one exact quarantine generation (required when destinations collide).",
+)
 @pass_ctx
-def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) -> None:
+def restore(
+    app: AppContext,
+    name: str,
+    connector_flag: str,
+    restore_path: str,
+    record_id: str,
+) -> None:
     """Restore a quarantined skill to its original location.
 
     By default restores to the original path recorded during quarantine.
@@ -4048,21 +4764,43 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
-    skill_name = os.path.basename(name)
+    requested_name = os.path.basename(name)
     pe = PolicyEngine(app.store)
+    canonical_connector = (
+        _resolve_connector_scope(app, connector_flag) if connector_flag else ""
+    )
+    skill_name = _canonical_runtime_skill_name(
+        app, pe, requested_name, canonical_connector,
+    )
+    if _runtime_skill_names_equal(skill_name, requested_name):
+        # Quarantine provenance outlives the action row.  On Windows, consult
+        # that durable identity as well so enable followed by a differently
+        # cased restore cannot strand a runtime-isolated directory.
+        matching_records = [
+            record
+            for record in app.store.list_quarantine_records("skill")
+            if _runtime_skill_names_equal(record.target_name, requested_name)
+            and (
+                not canonical_connector
+                or canonical_connector in record.connectors
+            )
+        ] if app.store is not None else []
+        matching_names = {record.target_name for record in matching_records}
+        if len(matching_names) == 1:
+            skill_name = matching_names.pop()
     resolved_connector, records = _skill_quarantine_records(
         app, pe, skill_name, connector_flag,
     )
-    if restore_path and len(records) > 1:
-        click.echo(
-            "error: --path with multiple quarantined connector copies is ambiguous; "
-            "pass --connector <name> to restore one copy to an explicit path",
-            err=True,
-        )
-        raise SystemExit(1)
 
     se = SkillEnforcer(app.cfg.quarantine_dir)
     if not records:
+        if record_id:
+            click.echo(
+                f"error: quarantine record {record_id!r} does not match "
+                f"{skill_name!r} in the selected connector scope",
+                err=True,
+            )
+            raise SystemExit(1)
         entries = []
         if resolved_connector:
             entry = pe.get_action("skill", skill_name, resolved_connector)
@@ -4080,6 +4818,78 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
             click.echo(f"[skill] {skill_name!r} is already restored; nothing to do")
             return
         click.echo(f"error: {skill_name!r} is not quarantined", err=True)
+        raise SystemExit(1)
+
+    all_records = records
+
+    if record_id:
+        records = [record for record in all_records if record.id == record_id]
+        if len(records) != 1:
+            click.echo(
+                f"error: quarantine record {record_id!r} does not match "
+                f"{skill_name!r} in the selected connector scope",
+                err=True,
+            )
+            raise SystemExit(1)
+    elif restore_path and len(all_records) > 1:
+        click.echo(
+            "error: --path with multiple quarantine generations is ambiguous; "
+            "pass --record-id <id> to restore one exact generation",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Preflight every record selected by this invocation before moving any of
+    # them. The runtime-disable prohibition belongs only to runtime-isolation
+    # provenance; an exact watcher/operator generation remains independently
+    # restorable while runtime and install policy dimensions are preserved.
+    for record in records:
+        record_connectors = [c for c in record.connectors if c]
+        runtime_owners = record_connectors or (
+            [resolved_connector] if resolved_connector else []
+        )
+        if any(
+            record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+            and _normalize_runtime_connector(owner) == "codex"
+            and _effective_skill_runtime_disabled(app, skill_name, owner)
+            for owner in runtime_owners
+        ):
+            independently_restorable = [
+                peer
+                for peer in records
+                if peer.id != record.id
+                and peer.purpose != _SKILL_RUNTIME_QUARANTINE_PURPOSE
+            ]
+            exact_hint = ""
+            if independently_restorable:
+                exact_hint = (
+                    "; other-purpose generations remain independently "
+                    "restorable: inspect 'defenseclaw skill info "
+                    f"{skill_name} --connector codex --json' and pass "
+                    "--record-id <id>"
+                )
+            click.echo(
+                f"error: {skill_name!r} remains runtime-disabled for Codex; "
+                "run 'defenseclaw skill enable "
+                f"{skill_name} --connector codex' before restoring its "
+                f"runtime-isolation files{exact_hint}",
+                err=True,
+            )
+            raise SystemExit(1)
+
+    destinations: dict[str, list[str]] = {}
+    for record in records:
+        destination = os.path.realpath(restore_path or record.original_path)
+        destinations.setdefault(os.path.normcase(destination), []).append(record.id)
+    collisions = [ids for ids in destinations.values() if len(ids) > 1]
+    if collisions:
+        ids = ", ".join(record_id for group in collisions for record_id in group)
+        click.echo(
+            f"error: multiple quarantine generations target the same restore "
+            f"destination ({ids}); pass --record-id <id> to restore one "
+            "generation at a time",
+            err=True,
+        )
         raise SystemExit(1)
 
     for record in records:
@@ -4105,6 +4915,75 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
         else:
             allowed_roots = _all_active_skill_dirs(app)
 
+        runtime_isolation_roots: list[str] = []
+        if record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE:
+            for root in [*(allowed_roots or []), *_all_active_skill_dirs(app)]:
+                if root not in runtime_isolation_roots:
+                    runtime_isolation_roots.append(root)
+            if not se.is_runtime_isolation_path(
+                record.quarantine_path,
+                display_connector,
+                allowed_roots=runtime_isolation_roots,
+            ):
+                click.echo(
+                    f"error: invalid managed runtime-isolation path for "
+                    f"{skill_name!r}; provenance was preserved",
+                    err=True,
+                )
+                raise SystemExit(1)
+
+            # A crash or database failure after the atomic move can leave the
+            # pre-move ownership marker in a pending journal.  Reconcile only
+            # the exact managed path/hash/ACL transition before allowing an
+            # explicit restore; no runtime policy was recorded for this state.
+            if record.state == "pending":
+                pending_valid = (
+                    not os.path.lexists(record.original_path)
+                    and os.path.lexists(record.quarantine_path)
+                    and se.content_hash(record.quarantine_path) == record.content_hash
+                )
+                combined_ownership = (
+                    record.ownership_json
+                    if pending_valid
+                    and se.matches_runtime_ownership_marker(
+                        record.quarantine_path,
+                        record.ownership_json,
+                        isolated=True,
+                    )
+                    else (
+                        se.runtime_ownership_marker(
+                            record.ownership_json,
+                            record.quarantine_path,
+                        )
+                        if pending_valid
+                        else None
+                    )
+                )
+                if combined_ownership is None:
+                    click.echo(
+                        f"error: pending runtime isolation for {skill_name!r} "
+                        "could not be safely reconciled; provenance was preserved",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+                try:
+                    app.store.update_quarantine_record_state(
+                        record.id,
+                        "active",
+                        ownership_json=combined_ownership,
+                    )
+                    refreshed = app.store.get_quarantine_record(record.id)
+                    if refreshed is None:
+                        raise RuntimeError("reconciled quarantine record disappeared")
+                    record = refreshed
+                except Exception:
+                    click.echo(
+                        f"error: pending runtime isolation metadata could not be "
+                        f"reconciled for {skill_name!r}; provenance was preserved",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+
         real_restore = os.path.realpath(target_restore_path)
         if allowed_roots and not any(
             _strict_path_within(real_restore, os.path.realpath(root))
@@ -4122,6 +5001,14 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
                 record.state == "restoring"
                 and os.path.exists(journal_destination)
                 and se.content_hash(journal_destination) == record.content_hash
+                and (
+                    record.purpose != _SKILL_RUNTIME_QUARANTINE_PURPOSE
+                    or se.matches_runtime_ownership_marker(
+                        journal_destination,
+                        record.ownership_json,
+                        isolated=False,
+                    )
+                )
             ):
                 try:
                     app.store.complete_quarantine_restore(record.id, journal_destination)
@@ -4146,6 +5033,20 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
                 err=True,
             )
             raise SystemExit(1)
+        if (
+            record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+            and not se.matches_runtime_ownership_marker(
+                record.quarantine_path,
+                record.ownership_json,
+                isolated=True,
+            )
+        ):
+            click.echo(
+                f"error: quarantine identity check failed for {skill_name!r}; "
+                "provenance was preserved",
+                err=True,
+            )
+            raise SystemExit(1)
         if os.path.lexists(target_restore_path):
             click.echo(
                 f"error: restore destination already exists for {skill_name!r}; provenance was preserved",
@@ -4164,22 +5065,56 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
             )
             raise SystemExit(1)
 
+        quarantine_identity = se.path_identity(record.quarantine_path)
         if not se.restore(
             skill_name,
             target_restore_path,
             allowed_roots=allowed_roots,
             connector=display_connector,
             expected_hash=record.content_hash,
+            expected_ownership_json=record.ownership_json,
             quarantine_path=record.quarantine_path,
+            purpose=record.purpose,
+            isolation_roots=runtime_isolation_roots,
         ):
-            try:
-                app.store.update_quarantine_record_state(record.id, "active")
-            except Exception:
-                pass
+            runtime_move_reached_destination = (
+                record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+                and quarantine_identity is not None
+                and not os.path.lexists(record.quarantine_path)
+                and se.path_identity(target_restore_path) == quarantine_identity
+            )
+            if not runtime_move_reached_destination:
+                try:
+                    app.store.update_quarantine_record_state(record.id, "active")
+                except Exception:
+                    pass
             click.echo(
                 f"error: restore failed for {skill_name!r}"
                 + (f" on connector={display_connector}" if display_connector else "")
-                + "; quarantined files and provenance were retained",
+                + (
+                    "; the atomic move reached its recorded destination and "
+                    "provenance was retained for retry reconciliation"
+                    if runtime_move_reached_destination
+                    else "; quarantined files and provenance were retained"
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+
+        if (
+            record.purpose == _SKILL_RUNTIME_QUARANTINE_PURPOSE
+            and (
+                se.content_hash(target_restore_path) != record.content_hash
+                or not se.matches_runtime_ownership_marker(
+                    target_restore_path,
+                    record.ownership_json,
+                    isolated=False,
+                )
+            )
+        ):
+            click.echo(
+                f"error: restored identity verification failed for {skill_name!r}; "
+                "provenance was retained for reconciliation",
                 err=True,
             )
             raise SystemExit(1)
@@ -4543,10 +5478,27 @@ def _scan_installed_skill_for_connector(
         return
 
     action_cfg = post_decision.action
+    if action_cfg.install == "allow" and (
+        action_cfg.runtime == "disable" or action_cfg.file == "quarantine"
+    ):
+        _rollback_skill_install_paths(rollback_paths or [skill_path])
+        click.echo(
+            "error: contradictory post-install actions: install=allow cannot be "
+            "combined with runtime=disable or file=quarantine",
+            err=True,
+        )
+        raise SystemExit(1)
     enforcement_reason = (
         f"post-install scan: {len(result.findings)} findings, max={sev}"
     )
     applied_actions: list[str] = []
+    failed_actions: list[str] = []
+    target_connector = _normalize_runtime_connector(connector)
+    runtime_requires_isolation = (
+        action_cfg.runtime == "disable"
+        and _skill_runtime_requires_filesystem_fallback(target_connector)
+    )
+    quarantine_succeeded = False
 
     if action_cfg.file == "quarantine":
         dest = _quarantine_skill_with_provenance(
@@ -4556,25 +5508,102 @@ def _scan_installed_skill_for_connector(
             skill_path,
             connector,
             enforcement_reason,
+            purpose=(
+                _SKILL_RUNTIME_QUARANTINE_PURPOSE
+                if runtime_requires_isolation
+                else "operator"
+            ),
         )
         if dest:
-            applied_actions.append("quarantined")
+            try:
+                _verify_scan_action_persisted(
+                    app, skill_name, "file", "quarantine", connector,
+                )
+                applied_actions.append("quarantined")
+                quarantine_succeeded = True
+            except Exception as exc:  # noqa: BLE001 - files remain isolated.
+                click.echo(
+                    f"[install] quarantine policy persistence failed: {exc}",
+                    err=True,
+                )
+                failed_actions.append("quarantine policy")
         else:
             click.echo("[install] quarantine failed", err=True)
+            failed_actions.append("quarantine")
 
-    if action_cfg.runtime == "disable":
-        target_connector = _normalize_runtime_connector(connector)
+    runtime_ready = True
+    if runtime_requires_isolation and not quarantine_succeeded:
+        if action_cfg.file == "quarantine":
+            runtime_ready = False
+        else:
+            dest = _quarantine_skill_with_provenance(
+                app,
+                pe,
+                skill_name,
+                skill_path,
+                connector,
+                enforcement_reason,
+                purpose=_SKILL_RUNTIME_QUARANTINE_PURPOSE,
+            )
+            if dest:
+                try:
+                    _verify_scan_action_persisted(
+                        app, skill_name, "file", "quarantine", connector,
+                    )
+                    applied_actions.append(
+                        f"quarantined for connector={connector} runtime isolation"
+                    )
+                    quarantine_succeeded = True
+                except Exception as exc:  # noqa: BLE001 - files remain isolated.
+                    click.echo(
+                        f"[install] runtime-isolation policy persistence failed: {exc}",
+                        err=True,
+                    )
+                    failed_actions.append("runtime isolation policy")
+                    runtime_ready = False
+            else:
+                click.echo("[install] managed runtime isolation failed", err=True)
+                failed_actions.append("runtime isolation")
+                runtime_ready = False
+
+    if action_cfg.runtime == "disable" and runtime_ready:
         if target_connector == "openclaw":
             client = _sidecar_client(app)
             try:
                 client.disable_skill(skill_name)
-                applied_actions.append("disabled via gateway")
                 pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+                _verify_scan_action_persisted(
+                    app, skill_name, "runtime", "disable", connector,
+                )
+                applied_actions.append("disabled via gateway")
             except Exception as exc:
                 click.echo(f"[install] gateway disable failed: {exc}", err=True)
+                failed_actions.append("runtime disable")
         else:
-            applied_actions.append(f"runtime disable recorded for connector={connector}")
-            pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+            try:
+                pe.disable_for_connector(
+                    "skill", skill_name, connector, enforcement_reason,
+                )
+                _verify_scan_action_persisted(
+                    app, skill_name, "runtime", "disable", connector,
+                )
+                if _skill_runtime_has_hard_enforcement(target_connector):
+                    applied_actions.append(
+                        f"runtime disable enforced for connector={target_connector}"
+                    )
+                else:
+                    applied_actions.append(
+                        f"runtime disable recorded for connector={target_connector} "
+                        "(advisory only)"
+                    )
+                    _warn_skill_runtime_disable_advisory(
+                        skill_name, target_connector, scoped=True,
+                    )
+            except Exception as exc:  # noqa: BLE001 - do not report false success.
+                click.echo(f"[install] runtime disable failed: {exc}", err=True)
+                failed_actions.append("runtime disable")
+    elif action_cfg.runtime == "disable":
+        failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
         pe.block_for_connector("skill", skill_name, connector, enforcement_reason)
@@ -4585,6 +5614,14 @@ def _scan_installed_skill_for_connector(
         applied_actions.append("added to allow list")
 
     pe.set_source_path("skill", skill_name, skill_path, connector)
+
+    if failed_actions:
+        click.echo(
+            f"error: enforcement incomplete for {skill_name!r}: "
+            + ", ".join(dict.fromkeys(failed_actions)),
+            err=True,
+        )
+        raise SystemExit(1)
 
     if applied_actions:
         actions_str = ", ".join(applied_actions)

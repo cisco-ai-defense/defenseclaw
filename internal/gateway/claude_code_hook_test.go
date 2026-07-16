@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -288,6 +290,259 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
+	}
+}
+
+func TestEvaluateClaudeCodeHook_RealUserSettingsSkillExpansionRuntimeDisable(t *testing.T) {
+	claudeHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "dc-test-benign")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "dc-test-benign", "claudecode", "runtime", "disable", "runtime acceptance"); err != nil {
+		t.Fatalf("seed Claude runtime disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	var req claudeCodeHookRequest
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"transcript_path":"C:\\temp\\claude-transcript.jsonl",
+		"cwd":"C:\\temp",
+		"prompt_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		"permission_mode":"default",
+		"hook_event_name":"UserPromptExpansion",
+		"expansion_type":"slash_command",
+		"command_name":"dc-test-benign",
+		"command_args":"Kevin",
+		"command_source":"userSettings",
+		"prompt":"/dc-test-benign Kevin"
+	}`), &req); err != nil {
+		t.Fatalf("decode captured Claude Code 2.1.196 payload: %v", err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output=%+v, want UserPromptExpansion decision=block", resp.ClaudeCodeOutput)
+	}
+	for _, want := range []string{"asset_type=skill", "asset_name=dc-test-benign", "connector=claudecode", "source=runtime-disable", "surface=prompt_expansion"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+	if strings.Contains(resp.Reason, "Kevin") || strings.Contains(resp.Reason, req.Prompt) {
+		t.Fatalf("reason leaked prompt content: %q", resp.Reason)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_UserPromptExpansionRuntimeDisableRemainsHardInObserveMode(t *testing.T) {
+	claudeHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "disabled-in-observe")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "disabled-in-observe", "claudecode", "runtime", "disable", "test"); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "disabled-in-observe",
+		CommandSource: "userSettings",
+		Prompt:        "/disabled-in-observe Kevin",
+	})
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("runtime disable became advisory in hook observe mode: action=%q raw=%q would_block=%v", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output=%+v, want UserPromptExpansion decision=block", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_RealUserSettingsSkillExpansionAllowed(t *testing.T) {
+	claudeHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "dc-test-benign")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	var req claudeCodeHookRequest
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		"transcript_path":"C:\\temp\\claude-transcript.jsonl",
+		"cwd":"C:\\temp",
+		"prompt_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		"permission_mode":"default",
+		"hook_event_name":"UserPromptExpansion",
+		"expansion_type":"slash_command",
+		"command_name":"dc-test-benign",
+		"command_args":"Kevin",
+		"command_source":"userSettings",
+		"prompt":"/dc-test-benign Kevin"
+	}`), &req); err != nil {
+		t.Fatalf("decode captured Claude Code 2.1.196 payload: %v", err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow", resp.Action, resp.RawAction)
+	}
+	if containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, allowed real skill must not produce a skill block", resp.Findings)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_RealProjectSettingsSkillExpansionRuntimeDisable(t *testing.T) {
+	workspace := t.TempDir()
+	writeClaudeCodeTestSkill(t, filepath.Join(workspace, ".claude", "skills"), "dc-project-runtime-capture")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "dc-project-runtime-capture", "claudecode", "runtime", "disable", "runtime acceptance"); err != nil {
+		t.Fatalf("seed Claude project runtime disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	// Captured from the signed Claude Code 2.1.196 client with an inert
+	// .claude/skills fixture. The project scope differs from the user-root
+	// capture only in command_source.
+	var req claudeCodeHookRequest
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"f3c1f319-72c4-4e12-8b40-c50d70baf666",
+		"transcript_path":"C:\\temp\\claude-project-transcript.jsonl",
+		"cwd":"`+filepath.ToSlash(workspace)+`",
+		"prompt_id":"7043fe36-08be-497b-a9b5-d6d7a70cfbac",
+		"permission_mode":"acceptEdits",
+		"hook_event_name":"UserPromptExpansion",
+		"expansion_type":"slash_command",
+		"command_name":"dc-project-runtime-capture",
+		"command_args":"Kevin",
+		"command_source":"projectSettings",
+		"prompt":"/dc-project-runtime-capture Kevin"
+	}`), &req); err != nil {
+		t.Fatalf("decode captured Claude Code project payload: %v", err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("project skill action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output=%+v, want project expansion decision=block", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_RealStructuredSkillToolRuntimeDisable(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "dc-test-benign", "claudecode", "runtime", "disable", "runtime acceptance"); err != nil {
+		t.Fatalf("seed Claude runtime disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	var req claudeCodeHookRequest
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+		"transcript_path":"C:\\temp\\claude-transcript.jsonl",
+		"cwd":"C:\\temp",
+		"prompt_id":"ffffffff-ffff-4fff-8fff-ffffffffffff",
+		"permission_mode":"default",
+		"effort":{"level":"high"},
+		"hook_event_name":"PreToolUse",
+		"tool_name":"Skill",
+		"tool_input":{"skill":"dc-test-benign","args":"Kevin"},
+		"tool_use_id":"toolu_inert"
+	}`), &req); err != nil {
+		t.Fatalf("decode captured Claude Code structured Skill payload: %v", err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	hookOutput, ok := resp.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})
+	if !ok || hookOutput["permissionDecision"] != "deny" {
+		t.Fatalf("claude output=%+v, want PreToolUse permissionDecision=deny", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_RealUserSettingsSkillConnectorAndGlobalScope(t *testing.T) {
+	claudeHome := t.TempDir()
+	codexHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "shared-skill")
+	writeClaudeCodeTestSkill(t, filepath.Join(codexHome, "skills"), "shared-skill")
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "global-skill")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	request := func(name string) claudeCodeHookRequest {
+		return claudeCodeHookRequest{
+			HookEventName: "UserPromptExpansion",
+			ExpansionType: "slash_command",
+			CommandName:   name,
+			CommandSource: "userSettings",
+			Prompt:        "/" + name,
+		}
+	}
+
+	if err := store.SetActionFieldForConnector("skill", "shared-skill", "codex", "runtime", "disable", "Codex only"); err != nil {
+		t.Fatalf("seed Codex-only disable: %v", err)
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), request("shared-skill"))
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("Codex-scoped disable leaked to Claude: action=%q raw=%q", resp.Action, resp.RawAction)
+	}
+
+	if err := store.SetActionFieldForConnector("skill", "shared-skill", "claudecode", "runtime", "disable", "Claude only"); err != nil {
+		t.Fatalf("seed Claude disable: %v", err)
+	}
+	resp = api.evaluateClaudeCodeHook(context.Background(), request("shared-skill"))
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("Claude-scoped disable did not block: action=%q raw=%q", resp.Action, resp.RawAction)
+	}
+
+	if err := store.SetActionField("skill", "global-skill", "runtime", "disable", "global"); err != nil {
+		t.Fatalf("seed global disable: %v", err)
+	}
+	resp = api.evaluateClaudeCodeHook(context.Background(), request("global-skill"))
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("global disable did not block Claude: action=%q raw=%q", resp.Action, resp.RawAction)
+	}
+
+	// Claude can retain a skill selection in an already-running session after
+	// the directory changes. The scoped policy record remains a canonical known
+	// identity and must still block that observable expansion.
+	if err := store.SetActionFieldForConnector("skill", "active-session-skill", "claudecode", "runtime", "disable", "active session"); err != nil {
+		t.Fatalf("seed active-session disable: %v", err)
+	}
+	resp = api.evaluateClaudeCodeHook(context.Background(), request("active-session-skill"))
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("active-session cached skill did not block: action=%q raw=%q", resp.Action, resp.RawAction)
 	}
 }
 
