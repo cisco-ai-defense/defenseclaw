@@ -161,9 +161,10 @@ func TestWindowsCodexHookWrapperIgnoresStaleLastExitCode(t *testing.T) {
 	}
 }
 
-func TestWindowsCodexSetupRepairsLegacyEncodedHookAndTrustState(t *testing.T) {
+func TestWindowsCodexSetupRepairsLegacyEncodedManagedHook(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, "codex", "config.toml")
+	managedConfigPath := filepath.Join(root, "codex", codexManagedConfigLogicalName)
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestWindowsCodexSetupRepairsLegacyEncodedHookAndTrustState(t *testing.T) {
 		t.Fatalf("initial Setup: %v", err)
 	}
 
-	raw, err := os.ReadFile(configPath)
+	raw, err := os.ReadFile(managedConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,35 +193,25 @@ func TestWindowsCodexSetupRepairsLegacyEncodedHookAndTrustState(t *testing.T) {
 	}
 	hooks := configured["hooks"].(map[string]interface{})
 	legacyCommand := legacyWindowsNativePowerShellHookCommandForBinary("codex", managedHook)
-	legacyState := map[string]interface{}{}
-	keySource := codexHookStateKeySource(configPath)
 	for _, expected := range codexHookGroups {
 		groups := hooks[expected.eventType].([]interface{})
 		group := groups[0].(map[string]interface{})
 		handler := group["hooks"].([]interface{})[0].(map[string]interface{})
 		handler["command"] = legacyCommand
 		handler["command_windows"] = legacyCommand
-		eventKey := codexHookEventKeyLabel(expected.eventType)
-		hash, err := codexCommandHookHashForPlatform("windows", eventKey, group["matcher"], handler)
-		if err != nil {
-			t.Fatalf("hash legacy %s handler: %v", expected.eventType, err)
-		}
-		key := codexHookStateKey(keySource, eventKey, 0, 0)
-		legacyState[key] = map[string]interface{}{"trusted_hash": hash}
 	}
-	hooks["state"] = legacyState
 	legacyRaw, err := toml.Marshal(configured)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, legacyRaw, 0o600); err != nil {
+	if err := os.WriteFile(managedConfigPath, legacyRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := connector.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("repair Setup: %v", err)
 	}
-	repairedRaw, err := os.ReadFile(configPath)
+	repairedRaw, err := os.ReadFile(managedConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,9 +223,9 @@ func TestWindowsCodexSetupRepairsLegacyEncodedHookAndTrustState(t *testing.T) {
 		t.Fatal(err)
 	}
 	repairedHooks := repaired["hooks"].(map[string]interface{})
-	if err := verifyTrustedCodexHookMatrix(
+	if err := verifyManagedCodexHookMatrix(
 		repairedHooks,
-		configPath,
+		managedConfigPath,
 		filepath.Join(opts.DataDir, "hooks"),
 	); err != nil {
 		t.Fatalf("repaired hook matrix or trust hashes are invalid: %v", err)
