@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sqlite3
@@ -216,7 +217,7 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
 
     async with app.run_test(size=(260, 50)) as pilot:
         await pilot.pause()
-        console = Console(width=260, height=80, record=True)
+        console = Console(file=io.StringIO(), width=260, height=80, record=True)
         console.print(app._overview_renderable())
         rendered = console.export_text()
 
@@ -286,7 +287,7 @@ async def test_overview_renders_canonical_v8_policy_and_bounded_live_health(tmp_
 
     async with app.run_test(size=(260, 55)) as pilot:
         await pilot.pause()
-        console = Console(width=260, height=100, record=True)
+        console = Console(file=io.StringIO(), width=260, height=100, record=True)
         console.print(app._overview_renderable())
         rendered = console.export_text()
 
@@ -338,7 +339,7 @@ async def test_exact_v8_hides_global_redaction_actions(tmp_path) -> None:
 
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
-        console = Console(width=170, height=80, record=True)
+        console = Console(file=io.StringIO(), width=170, height=80, record=True)
         console.print(app._overview_renderable())
         assert "[R] Redaction" not in console.export_text()
 
@@ -1131,6 +1132,8 @@ async def test_activity_panel_uses_activity_model() -> None:
         await pilot.press("a")
         await pilot.pause()
 
+        await _wait_for_background(lambda: "Checking gateway..." in app.body_text)
+
         assert app.active_panel == "activity"
         assert "Checking gateway..." in app.body_text
 
@@ -1381,12 +1384,15 @@ async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 2 and "All 2" in app.body_text)
         assert app.active_panel == "alerts"
         assert table.row_count == 2
         assert "All 2" in app.body_text
 
         await pilot.press("3")
         await pilot.pause()
+
+        await _wait_for_background(lambda: table.row_count == 1)
 
         assert app.active_panel == "alerts"
         assert alerts.severity_filter == "HIGH"
@@ -1557,7 +1563,9 @@ async def test_alerts_table_row_click_updates_cursor() -> None:
         await pilot.press("2")
         await pilot.pause()
 
-        clicked = await pilot.click("#panel-table", offset=(2, 2))
+        table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 2)
+        clicked = await _click_when_ready(pilot, "#panel-table", offset=(2, 2))
         await pilot.pause()
 
         assert clicked is True
@@ -1595,6 +1603,7 @@ async def test_registries_panel_renders_table_and_local_tabs(tmp_path) -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 1 and "Registries" in app.body_text)
         assert app.active_panel == "registries"
         assert table.row_count == 1
         assert "Registries" in app.body_text
@@ -1610,6 +1619,11 @@ async def test_registries_panel_renders_table_and_local_tabs(tmp_path) -> None:
 
         await pilot.press("2")
         await pilot.pause()
+
+        await _wait_for_background(
+            lambda: registries.current_tab == RegistriesTab.ENTRIES
+            and "Sync a source" in app.body_text
+        )
 
         assert app.active_panel == "registries"
         assert registries.current_tab == RegistriesTab.ENTRIES
@@ -1664,10 +1678,11 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 2)
         assert app.active_panel == "skills"
         assert table.row_count == 2
 
-        await pilot.click("#panel-table", offset=(2, 2))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 2))
         await pilot.pause()
         assert skills.cursor == 1
 
@@ -1709,6 +1724,7 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 2)
         table.move_cursor(row=1, column=0, animate=False)
         await _wait_for_background(lambda: table.cursor_row == 1)
         # move_cursor updates the coordinate synchronously but delivers its
@@ -1837,18 +1853,25 @@ async def test_logs_and_audit_panels_render_worker_models() -> None:
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
         await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 1 and "Gateway" in app.body_text)
         assert app.active_panel == "logs"
         assert "Gateway" in app.body_text
-        assert app.query_one("#panel-table", DataTable).row_count == 1
+        assert table.row_count == 1
 
         await pilot.press("1")
         await pilot.pause()
-        assert app.query_one("#panel-table", DataTable).row_count == 2
+        await _wait_for_background(lambda: table.row_count == 2)
+        assert table.row_count == 2
 
         await pilot.press("9")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: table.row_count == 1
+            and ("events recorded" in app.body_text or "shown of 1 events" in app.body_text)
+        )
         assert app.active_panel == "audit"
-        assert app.query_one("#panel-table", DataTable).row_count == 1
+        assert table.row_count == 1
         assert "events recorded" in app.body_text or "shown of 1 events" in app.body_text
 
 
@@ -1865,6 +1888,7 @@ async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 200)
         row_objects = tuple(table.rows.values())
 
         logs.cursor["gateway"] = 1
@@ -1891,6 +1915,7 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count == 200)
         previous_second_row = list(table.rows.values())[1]
         logs.set_cursor(50)
         app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
@@ -1947,8 +1972,14 @@ async def test_logs_notification_judge_history_and_enter_detail_modals(tmp_path)
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("8")
+        table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count >= 1)
         await pilot.press("enter")
         await pilot.pause()
+
+        await _wait_for_background(
+            lambda: app.screen_stack[-1].__class__.__name__ == "DetailScreen"
+        )
 
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "DetailScreen"
@@ -1992,13 +2023,21 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("8")
         await pilot.pause()
-        assert "line one" in str(app.query_one("#panel-table", DataTable).get_cell_at((0, 0)))
+        table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(lambda: table.row_count >= 1)
+        assert "line one" in str(table.get_cell_at((0, 0)))
 
         (tmp_path / "gateway.log").write_text("line one\nline two\n", encoding="utf-8")
         app._periodic_refresh()  # noqa: SLF001 - deterministic live-refresh gate.
         await pilot.pause()
 
-        assert app.query_one("#panel-table", DataTable).row_count == 2
+        await _wait_for_background(
+            lambda: table.row_count == 2
+            and app.overview_model.doctor is not None
+            and app.overview_model.doctor.failed == 1
+        )
+
+        assert table.row_count == 2
         assert app.overview_model.doctor is not None
         assert app.overview_model.doctor.failed == 1
 
@@ -2477,23 +2516,35 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(
+            lambda: table.row_count == len(WIZARD_NAMES) and "Setup Wizards" in app.body_text
+        )
         assert app.active_panel == "setup"
         assert "Setup Wizards" in app.body_text
         assert table.row_count == len(WIZARD_NAMES)
 
-        await pilot.click("#panel-table", offset=(2, 4))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 4))
         await pilot.pause()
+        await _wait_for_background(lambda: int(setup.active_wizard) == 3)
         assert int(setup.active_wizard) == 3
 
         # Enter opens the goal menu first; a second Enter picks a goal
         # and opens the filtered form.
         await pilot.press("enter")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: setup.goal_active and "What do you want to do?" in app.body_text
+        )
         assert setup.goal_active is True
         assert "What do you want to do?" in app.body_text
 
         await pilot.press("enter")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: setup.form_active
+            and "Setup Wizard" in app.body_text
+            and app.query_one("#panel-table", DataTable).row_count > 0
+        )
         assert setup.form_active is True
         assert "Setup Wizard" in app.body_text
         assert app.query_one("#panel-table", DataTable).row_count > 0
@@ -2636,18 +2687,31 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
         await pilot.press("6")
         await pilot.pause()
 
-        await pilot.click("#inventory-tab-plugins")
+        await _wait_for_panel_render(app, "inventory")
+
+        await _click_when_ready(pilot, "#inventory-tab-plugins")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: inventory.active_sub == "plugins"
+            and app.query_one("#panel-table", DataTable).row_count == 2
+        )
         assert inventory.active_sub == "plugins"
         assert app.query_one("#panel-table", DataTable).row_count == 2
 
-        await pilot.click("#inventory-filter-disabled")
+        await _click_when_ready(pilot, "#inventory-filter-disabled")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: inventory.filter == "disabled"
+            and app.query_one("#panel-table", DataTable).row_count == 1
+        )
         assert inventory.filter == "disabled"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
-        await pilot.click("#inventory-scope-fast")
+        await _click_when_ready(pilot, "#inventory-scope-fast")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: set(inventory.category_scope) == {"skills", "plugins", "mcp"}
+        )
         assert set(inventory.category_scope) == {"skills", "plugins", "mcp"}
 
 
@@ -2706,16 +2770,25 @@ async def test_registries_mouse_tabs_and_sync_button_open_preview(tmp_path) -> N
         app.action_switch_panel("registries")
         await pilot.pause()
 
-        await pilot.click("#registries-tab-entries")
+        await _wait_for_background(
+            lambda: app.query_one("#panel-table", DataTable).row_count == 1
+        )
+
+        await _click_when_ready(pilot, "#registries-tab-entries")
         await pilot.pause()
+        await _wait_for_background(lambda: registries.current_tab == RegistriesTab.ENTRIES)
         assert registries.current_tab == RegistriesTab.ENTRIES
 
-        await pilot.click("#registries-tab-sources")
+        await _click_when_ready(pilot, "#registries-tab-sources")
         await pilot.pause()
+        await _wait_for_background(lambda: registries.current_tab == RegistriesTab.SOURCES)
         assert registries.current_tab == RegistriesTab.SOURCES
 
-        await pilot.click("#registries-sync-source")
+        await _click_when_ready(pilot, "#registries-sync-source")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: app.screen_stack[-1].__class__.__name__ == "CommandPreviewScreen"
+        )
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
         assert "defenseclaw registry sync corp-skills --json" in screen.preview.masked_display
@@ -2742,16 +2815,22 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor(tmp_pat
         await pilot.press("0")
         await pilot.pause()
 
-        await pilot.click("#setup-mode-config")
+        await _wait_for_panel_render(app, "setup")
+
+        await _click_when_ready(pilot, "#setup-mode-config")
         await pilot.pause()
+        await _wait_for_background(lambda: setup.mode == "config")
         assert setup.mode == "config"
 
         setup.select_section(
             next(index for index, section in enumerate(setup.sections) if section.name == "Observability")
         )
         app._render_chrome()  # noqa: SLF001 - deterministic section switch.
-        await pilot.click("#setup-edit-list")
+        await _click_when_ready(pilot, "#setup-edit-list")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: app.screen_stack[-1].__class__.__name__ == "SetupResourceEditorScreen"
+        )
         assert app.screen_stack[-1].__class__.__name__ == "SetupResourceEditorScreen"
 
         await pilot.press("escape")
@@ -2774,8 +2853,10 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor(tmp_pat
         # the layout pass and ``pilot.click`` lands on the previous
         # frame, producing a no-op that flakes this assertion.
         await pilot.pause()
-        await pilot.click("#setup-save")
-        await pilot.pause(0.5)
+        await _click_when_ready(pilot, "#setup-save")
+        await _wait_for_background(
+            lambda: app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
+        )
         assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
 
 
@@ -2819,6 +2900,12 @@ async def test_activity_panel_exposes_clickable_action_bar() -> None:
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("A")  # Activity panel.
         await pilot.pause()
+        await _wait_for_background(
+            lambda: app.query_one("#activity-cancel", Button).has_class("hidden")
+            and app.query_one("#activity-rerun", Button).disabled
+            and app.query_one("#activity-clear", Button).disabled
+            and app.query_one("#activity-save", Button).disabled
+        )
         assert app.active_panel == "activity"
         for selector in (
             "#activity-cancel",
@@ -2999,7 +3086,7 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         # The filename embeds a timestamp + command slug.
         saved = list(tmp_path.glob("defenseclaw-activity-*-defenseclaw-doctor.txt"))
         assert len(saved) == 1
-        contents = saved[0].read_text()
+        contents = saved[0].read_text(encoding="utf-8")
         assert "defenseclaw doctor" in contents
         assert "checking docker daemon" in contents
         assert "ok" in contents
@@ -3026,6 +3113,13 @@ async def test_ai_discovery_panel_exposes_action_bar() -> None:
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("V")  # AI Discovery panel key.
         await pilot.pause()
+        await _wait_for_background(
+            lambda: not app.query_one("#ai-enable", Button).has_class("hidden")
+            and app.query_one("#ai-disable", Button).has_class("hidden")
+            and app.query_one("#ai-scan", Button).has_class("hidden")
+            and app.query_one("#ai-open-detail", Button).disabled
+            and app.query_one("#ai-export", Button).disabled
+        )
         assert app.active_panel == "ai"
         for selector in (
             "#ai-enable",
@@ -3056,6 +3150,12 @@ async def test_ai_discovery_bar_swaps_enable_for_disable_when_enabled() -> None:
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("V")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: app.query_one("#ai-enable", Button).has_class("hidden")
+            and not app.query_one("#ai-disable", Button).has_class("hidden")
+            and not app.query_one("#ai-scan", Button).has_class("hidden")
+            and not app.query_one("#ai-export", Button).disabled
+        )
         assert app.query_one("#ai-enable", Button).has_class("hidden") is True
         assert app.query_one("#ai-disable", Button).has_class("hidden") is False
         assert app.query_one("#ai-scan", Button).has_class("hidden") is False
@@ -3242,7 +3342,7 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
         assert len(matches) == 1, f"expected exactly one export, got {matches}"
         target = matches[0]
-        body = json.loads(target.read_text())
+        body = json.loads(target.read_text(encoding="utf-8"))
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
         assert body["signals"][0]["name"] == "openai-agent"
@@ -4516,7 +4616,7 @@ def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
     for path in files:
         rel = str(path.relative_to(repo))
         try:
-            tree = _ast_scanner.parse(path.read_text(), filename=str(path))
+            tree = _ast_scanner.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except SyntaxError:
             continue
         for node in _ast_scanner.walk(tree):
@@ -4681,7 +4781,7 @@ async def test_overview_lists_all_active_connectors_in_rendered_panel() -> None:
         await pilot.pause()
         # Rich's Console.size only honors an explicit width when height is also
         # set; otherwise it falls back to an 80-col terminal and crops cells.
-        console = Console(width=170, height=80, record=True)
+        console = Console(file=io.StringIO(), width=170, height=80, record=True)
         console.print(app._overview_renderable())
         text = console.export_text()
 
@@ -5996,7 +6096,7 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         app._enforcement_inventory_requested = True
 
         def render() -> str:
-            console = Console(width=170, height=80, record=True)
+            console = Console(file=io.StringIO(), width=170, height=80, record=True)
             console.print(app._overview_renderable())
             return console.export_text()
 
@@ -6087,6 +6187,10 @@ async def test_overview_enter_drills_into_filtered_alerts() -> None:
         app._set_connector_filter("cursor")
         await pilot.press("enter")
         await pilot.pause()
+        await _wait_for_background(
+            lambda: app.active_panel == "alerts"
+            and app.alerts_model.connector_filter == "cursor"
+        )
         assert app.active_panel == "alerts"
         assert app.alerts_model.connector_filter == "cursor"
 
@@ -6443,11 +6547,17 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
     audit = AuditPanelModel()
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
-    # Keep the mount-time two-second interval from racing the explicit refreshes
+    # Keep independent mount-time polls from racing the explicit refreshes
     # below under full-suite coverage instrumentation. The saved bound method
-    # still exercises the production scheduling and repaint path deterministically.
+    # still exercises the production periodic scheduling and repaint path
+    # deterministically; health, AI, observability, and credential workers are
+    # unrelated producers of Overview snapshots.
     periodic_refresh = app._periodic_refresh
     app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_observability_status_load = lambda: None  # type: ignore[method-assign]
+    app._schedule_credentials_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
@@ -6457,7 +6567,18 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
 
-        app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
+        # Establish one complete coherent render baseline before counting
+        # updates. Under a loaded full-suite run the mount-time snapshot may
+        # have sampled the model just before this test scrolls the panel; only
+        # resetting the connector-row fingerprint then leaves the body/live
+        # fingerprints from that older generation and makes the first explicit
+        # periodic refresh look like idle churn.
+        with app._connector_hook_event_render_cache():
+            app._last_body_signature = app._overview_body_signature()
+            app._overview_connector_rows_signature_cache = (
+                app._overview_connector_rows_signature()
+            )
+            app._overview_live_data_signature_cache = app._overview_live_data_signature()
         body = app.query_one("#body", Static)
         update_calls = 0
         original_update = body.update

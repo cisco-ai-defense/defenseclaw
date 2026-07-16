@@ -43,6 +43,10 @@ dependencies = [
     # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
     # a release compatible with LiteLLM >=1.84.0.
     "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
+    # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
+    # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
+    # so keep the fixed floor in published-wheel metadata as well as uv.lock.
+    "mcp>=1.28.1,<2",
     # Declare MCP Scanner's YARA engine directly so uv can select the local,
     # Native Setup substitutes the repository-owned, YARA-X-backed compatibility
     # wheel and validates the exact MCP Scanner API; source installs use

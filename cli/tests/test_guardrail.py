@@ -853,6 +853,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        # These tests cover guardrail configuration, prompts, and persistence.
+        # Native Windows Codex setup independently tests the required trusted
+        # executable receipt; do not make this suite depend on a host Codex
+        # installation merely because a case selects the Codex connector.
+        selection_patcher = patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
+        )
+        selection_patcher.start()
+        self.addCleanup(selection_patcher.stop)
         self.oc_path = os.path.join(self.tmp_dir, "openclaw.json")
         oc = {
             "agents": {"defaults": {"model": {"primary": "anthropic/claude-opus-4-5"}}},
@@ -1555,7 +1564,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 setup,
                 ["guardrail", "--no-restart"],
                 obj=self.app,
-                input="\n" * 15,
+                input="1\n" + "\n" * 15,
             )
 
         self.assertEqual(result.exit_code, 0, result.output)

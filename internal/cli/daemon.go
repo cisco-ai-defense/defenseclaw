@@ -449,21 +449,62 @@ func readDotEnv(path string) map[string]string {
 }
 
 func daemonGatewayToken(cfg *config.Config) string {
+	const (
+		canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
+		legacyTokenEnv    = "OPENCLAW_GATEWAY_TOKEN"
+	)
+
+	// Daemon.childEnv preserves a genuinely custom token environment
+	// override, but replaces the canonical/legacy process variables with the
+	// data directory's dotenv values when those exist. Resolve the parent's
+	// readiness credential in that same order so it always authenticates with
+	// the token the child actually received.
+	tokenEnv := ""
 	if cfg != nil {
-		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
-			return token
+		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
+			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
+				return token
+			}
 		}
 	}
+
 	paths := []string{filepath.Join(config.DefaultDataPath(), ".env")}
 	if cfg != nil && cfg.DataDir != "" {
 		paths = append(paths, filepath.Join(cfg.DataDir, ".env"))
 	}
+	tokenKeys := []string{canonicalTokenEnv, legacyTokenEnv}
+	if daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
+		tokenKeys = []string{legacyTokenEnv, canonicalTokenEnv}
+	}
 	for _, path := range paths {
 		env := readDotEnv(path)
-		for _, key := range []string{"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"} {
-			if token := strings.TrimSpace(env[key]); token != "" {
+		for _, key := range tokenKeys {
+			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" {
 				return token
 			}
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.Gateway.ResolvedToken())
+	}
+	return ""
+}
+
+func daemonEnvironmentKeyEqual(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func daemonDotenvValue(env map[string]string, key string) string {
+	if value, ok := env[key]; ok || runtime.GOOS != "windows" {
+		return value
+	}
+	for candidate, value := range env {
+		if strings.EqualFold(candidate, key) {
+			return value
 		}
 	}
 	return ""

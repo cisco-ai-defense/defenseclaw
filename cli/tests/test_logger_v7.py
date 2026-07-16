@@ -362,6 +362,11 @@ def test_from_config_refreshes_token_created_after_logger_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Register an undo entry even when the host process did not already carry
+    # this variable.  The production dotenv loader writes directly to
+    # os.environ after logger initialization, which pytest cannot otherwise
+    # know it needs to remove at teardown.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
     gateway = SimpleNamespace(
         api_bind="127.0.0.1",

@@ -40,6 +40,7 @@ pytestmark = [
 ]
 
 _TOKEN = "win-aud-038-native-test-token"
+_STALE_INLINE_TOKEN = "stale-pre-dotenv-token"
 
 
 async def _run_tui_command(binary: str, args: tuple[str, ...]) -> list[CommandEvent]:
@@ -149,7 +150,7 @@ data_dir: {json.dumps(str(data_dir))}
 gateway:
   api_bind: 127.0.0.1
   api_port: {port}
-  token: {_TOKEN}
+  token: {_STALE_INLINE_TOKEN}
   fleet_mode: disabled
   watcher:
     enabled: false
@@ -163,8 +164,20 @@ observability: {{}}
 """,
         encoding="utf-8",
     )
+    # Installed and upgraded profiles keep the live secret in the private
+    # dotenv.  Retain a deliberately stale legacy inline value above so this
+    # native lifecycle also proves parent readiness and the sidecar agree on
+    # dotenv-over-inline precedence across start and restart.
+    (data_dir / ".env").write_text(
+        f"DEFENSECLAW_GATEWAY_TOKEN={_TOKEN}\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
     monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(binary))
+    # Never let an operator or earlier test's process-level token silently
+    # select a different authentication source than this disposable profile.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("OPENCLAW_GATEWAY_TOKEN", raising=False)
     child_env = os.environ.copy()
 
     gateway_pid_path = data_dir / "gateway.pid"

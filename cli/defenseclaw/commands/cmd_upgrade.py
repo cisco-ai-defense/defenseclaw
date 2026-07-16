@@ -47,7 +47,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -473,6 +473,7 @@ def upgrade(
             target_version,
             staging_dir,
             allow_unverified=effective_allow_unverified,
+            require_sigstore=native_windows_state is not None,
         )
         if checksums is None:
             # F-0581 (BREAKING CHANGE): the only signed integrity manifest is
@@ -2406,6 +2407,7 @@ def _download_checksums(
         staging_dir,
         dest,
         allow_unverified=allow_unverified,
+        require_embedded_verifier=require_sigstore,
     )
 
     out: dict[str, str] = {}
@@ -2680,8 +2682,21 @@ def _verify_checksums_sigstore(
         )
         return
 
+    if require_embedded_verifier:
+        cosign = _managed_cosign_path()
+        if not cosign:
+            ux.err(
+                "Native Setup upgrade requires the installer-owned Cosign verifier; "
+                "repair or reinstall DefenseClaw before upgrading.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        verifier = nullcontext(cosign)
+    else:
+        verifier = _cosign_verifier(strict=strict_provenance)
+
     try:
-        with _cosign_verifier(strict=strict_provenance) as cosign:
+        with verifier as cosign:
             if not cosign:
                 ux.warn(
                     "checksums.txt Sigstore signature is present, but cosign was "

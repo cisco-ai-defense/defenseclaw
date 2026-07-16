@@ -183,6 +183,58 @@ def test_unprotected_set_security_input_omits_inherited_aces() -> None:
     )
 
 
+def test_unprotected_update_omits_inherited_aces_when_target_already_inherits() -> None:
+    requested = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x03, 0x001F01FF, OWNER),
+            (0, 0x10, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+    current = WindowsFileSecurity(OWNER, requested.dacl, False)
+
+    assert windows_acl._dacl_for_set_security(current, requested) == _dacl(
+        (0, 0x03, 0x001F01FF, OWNER),
+    )
+
+
+def test_unprotect_transition_omits_inherited_aces_from_protected_target() -> None:
+    requested = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x03, 0x001F01FF, OWNER),
+            (0, 0x10, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+    current = requested.staging_copy()
+
+    assert current.dacl_protected is True
+    assert windows_acl._dacl_for_set_security(current, requested) == _dacl(
+        (0, 0x03, 0x001F01FF, OWNER),
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
+def test_native_staged_file_round_trips_unprotected_security(tmp_path) -> None:
+    parent = tmp_path / "inherited"
+    parent.mkdir()
+    original = parent / "original.yaml"
+    original.write_bytes(b"original\n")
+    requested = windows_acl.capture_path(str(original))
+    assert requested.dacl_protected is False
+
+    staged = parent / "staged.yaml"
+    windows_acl.write_new_file(str(staged), b"restored\n", requested)
+    protected = windows_acl.capture_path(str(staged))
+    assert protected.dacl_protected is True
+
+    windows_acl.apply_path(str(staged), requested)
+
+    assert windows_acl.capture_path(str(staged)) == requested
+
+
 def test_write_new_file_fails_closed_when_acl_changes_during_write(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _FakeApi()
     api.change_after_write = True

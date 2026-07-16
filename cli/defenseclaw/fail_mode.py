@@ -355,7 +355,7 @@ def _windows_registration_freshness(
 
     workspace = _connector_workspace(cfg)
     paths = connector_config_files(connector, workspace_dir=workspace)
-    if connector == "codex" and _is_windows():
+    if connector == "codex":
         # Native Setup registers Codex hooks in the supported managed layer so
         # they are source-trusted without a manual /hooks approval. Keep the
         # fail-mode freshness guard on that effective source as well.

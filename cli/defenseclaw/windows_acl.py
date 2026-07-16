@@ -271,6 +271,27 @@ def _explicit_dacl_copy(dacl: bytes) -> bytes:
     return struct.pack("<BBHHH", revision, reserved, explicit_size, len(explicit), reserved2) + b"".join(explicit)
 
 
+def _dacl_for_set_security(
+    _current: WindowsFileSecurity,
+    requested: WindowsFileSecurity,
+) -> bytes:
+    """Build the DACL input without converting inherited ACEs to explicit.
+
+    ``UNPROTECTED_DACL_SECURITY_INFORMATION`` asks the file-system security
+    provider to reconstruct inheritance from the current parent.  Supplying
+    the snapshot's inherited ACEs as well can make some Windows kernels retain
+    or duplicate them as explicit ACEs when a protected staged file is made
+    inheriting again.  Pass only the snapshot's explicit ACEs for every
+    unprotected target and keep the exact descriptor check after the call.
+    A changed parent therefore still fails closed instead of silently
+    broadening the restored file.
+    """
+
+    if requested.dacl_protected:
+        return requested.dacl
+    return _explicit_dacl_copy(requested.dacl)
+
+
 @dataclass(frozen=True)
 class _HeldPhaseTwoMutatorLease:
     path: str
@@ -619,7 +640,7 @@ class _CtypesWindowsApi:
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None:
         owner_buffer = ctypes.create_string_buffer(security.owner)
-        dacl = security.dacl if security.dacl_protected else _explicit_dacl_copy(security.dacl)
+        dacl = _dacl_for_set_security(self.get_security(handle), security)
         dacl_buffer = ctypes.create_string_buffer(dacl)
         label_buffer = (
             ctypes.create_string_buffer(security.mandatory_label) if security.mandatory_label is not None else None

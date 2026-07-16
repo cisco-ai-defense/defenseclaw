@@ -519,15 +519,22 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
+            if ((Get-JsonPropertyValue $eventRecord 'schema_version') -ne 1) { continue }
             $eventName = [string](Get-JsonPropertyValue $eventRecord 'event_name')
-            if ($eventName -notin @('guardrail.evaluation.completed', 'guardrail.judge.completed')) { continue }
+            $bucket = [string](Get-JsonPropertyValue $eventRecord 'bucket')
             $body = Get-JsonPropertyValue $eventRecord 'body'
-            foreach ($field in @(
-                'defenseclaw.guardrail.decision',
-                'defenseclaw.guardrail.raw_action',
-                'defenseclaw.judge.action'
-            )) {
-                if ([string](Get-JsonPropertyValue $body $field) -in @('block', 'deny')) { return $true }
+            $fields = if ($bucket -ceq 'asset.scan' -and $eventName -ceq 'scan.completed') {
+                @('defenseclaw.scan.verdict')
+            } elseif ($bucket -ceq 'guardrail.evaluation' -and $eventName -ceq 'guardrail.evaluation.completed') {
+                @('defenseclaw.guardrail.decision', 'defenseclaw.guardrail.raw_action')
+            } elseif ($bucket -ceq 'guardrail.evaluation' -and $eventName -ceq 'guardrail.judge.completed') {
+                @('defenseclaw.judge.action')
+            } else {
+                @()
+            }
+            $blockedValues = if ($eventName -ceq 'scan.completed') { @('block') } else { @('block', 'deny') }
+            foreach ($field in $fields) {
+                if ([string](Get-JsonPropertyValue $body $field) -cin $blockedValues) { return $true }
             }
         } catch { continue }
     }

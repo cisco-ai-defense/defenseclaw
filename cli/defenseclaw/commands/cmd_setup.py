@@ -8615,13 +8615,21 @@ def _wait_for_defense_gateway_api(
     if not 1 <= port <= 65535:
         return False
 
-    deadline = time.monotonic() + max(0.0, timeout)
+    bounded_timeout = max(0.0, timeout)
+    deadline = time.monotonic() + bounded_timeout
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
+        probe_timeout = min(1.0, bounded_timeout, remaining)
+        if probe_timeout <= 0:
+            break
         connection = http.client.HTTPConnection(
             host,
             port,
-            timeout=max(0.05, min(1.0, remaining)),
+            # Subtracting a large monotonic timestamp can round a few ulps
+            # above the caller's budget. Clamp to that original budget so a
+            # single health probe never receives a longer timeout than setup
+            # promised, particularly for short test/automation deadlines.
+            timeout=probe_timeout,
         )
         try:
             connection.request("GET", "/health")
