@@ -107,6 +107,27 @@ WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
 CHECKSUMS_BUNDLE_FILENAME = "checksums.txt.bundle"
 MAX_WINDOWS_SETUP_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WINDOWS_SETUP_METADATA_BYTES = 128 * 1024 * 1024
+MAX_LEGACY_COSIGN_BUNDLE_BYTES = 16 * 1024 * 1024
+WINDOWS_PYTHON_EMBED_NAME = "python-3.14.6-embed-amd64.zip"
+WINDOWS_PYTHON_EMBED_URL = (
+    "https://www.python.org/ftp/python/3.14.6/python-3.14.6-embed-amd64.zip"
+)
+WINDOWS_PYTHON_EMBED_SHA256 = "df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c"
+WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE = "2026-09-10T00:00:00.0000000+00:00"
+WINDOWS_YARA_COMPAT_WHEEL = "yara_python-4.5.4.post1-py3-none-any.whl"
+WINDOWS_WIN_UNICODE_SOURCE_URL = (
+    "https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/"
+    "win_unicode_console-0.5.zip"
+)
+WINDOWS_WIN_UNICODE_SOURCE_SHA256 = "d4142d4d56d46f449d6f00536a73625a871cba040f0bc1a2e305a04578f07d1e"
+WINDOWS_COSIGN_VERSION = "2.6.2"
+WINDOWS_COSIGN_URL = "https://github.com/sigstore/cosign/releases/download/v2.6.2/cosign-windows-amd64.exe"
+WINDOWS_COSIGN_SHA256 = "dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d40feb07be"
+WINDOWS_RESOURCE_POLICY = "internal/windowsresources"
+WINDOWS_RESOURCE_ICON = (
+    "macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
+)
+WINDOWS_RESOURCE_ICON_SHA256 = "4425858688397762266ceb5304dcbca7afe330ec1c262dd2addcb7539b14b2bf"
 
 
 class CandidateError(RuntimeError):
@@ -3747,13 +3768,24 @@ def _read_windows_setup_json(path: Path, label: str) -> dict[str, Any]:
     return document
 
 
+def _require_sha256_fields(
+    document: dict[str, Any],
+    fields: tuple[str, ...],
+    label: str,
+) -> None:
+    for field in fields:
+        value = document.get(field)
+        if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+            raise CandidateError(f"{label} {field} is not a lowercase SHA-256 digest")
+
+
 def _validate_windows_setup_provenance(
     path: Path,
     *,
     version: str,
     commit: str,
     setup_sha256: str,
-) -> None:
+) -> dict[str, Any]:
     document = _read_windows_setup_json(path, "Windows Setup provenance")
     _require_object_fields(
         document,
@@ -3785,8 +3817,132 @@ def _validate_windows_setup_provenance(
     built_at = document.get("built_at_utc")
     if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
         raise CandidateError("Windows Setup provenance build timestamp is invalid")
-    if not isinstance(document.get("inputs"), dict) or not isinstance(document.get("toolchain"), dict):
-        raise CandidateError("Windows Setup provenance build inputs are invalid")
+    inputs = _require_object_fields(
+        document.get("inputs"),
+        {
+            "gateway_archive",
+            "gateway_archive_sha256",
+            "embedded_gateway_archive_sha256",
+            "embedded_payload_sha256",
+            "product_executables_authenticode_signed",
+            "wheel",
+            "wheel_sha256",
+            "python_embed",
+            "python_embed_sha256",
+            "site_packages_sha256",
+            "yara_compat_wheel",
+            "yara_compat_wheel_sha256",
+            "cosign_sha256",
+            "payload_manifest_sha256",
+            "go_component_inventory_sha256",
+            "payload_files",
+            "windows_resource_policy",
+            "windows_resource_icon",
+            "windows_resource_icon_sha256",
+        },
+        "Windows Setup provenance inputs",
+    )
+    _require_sha256_fields(
+        inputs,
+        (
+            "gateway_archive_sha256",
+            "embedded_gateway_archive_sha256",
+            "embedded_payload_sha256",
+            "wheel_sha256",
+            "python_embed_sha256",
+            "site_packages_sha256",
+            "yara_compat_wheel_sha256",
+            "cosign_sha256",
+            "payload_manifest_sha256",
+            "go_component_inventory_sha256",
+            "windows_resource_icon_sha256",
+        ),
+        "Windows Setup provenance input",
+    )
+    gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+    if (
+        inputs.get("gateway_archive") != gateway_archive
+        or inputs.get("wheel") != wheel
+        or inputs.get("python_embed") != WINDOWS_PYTHON_EMBED_NAME
+        or inputs.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
+        or inputs.get("yara_compat_wheel") != WINDOWS_YARA_COMPAT_WHEEL
+        or inputs.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
+        or inputs.get("product_executables_authenticode_signed") is not True
+        or inputs.get("windows_resource_policy") != WINDOWS_RESOURCE_POLICY
+        or inputs.get("windows_resource_icon") != WINDOWS_RESOURCE_ICON
+        or inputs.get("windows_resource_icon_sha256") != WINDOWS_RESOURCE_ICON_SHA256
+    ):
+        raise CandidateError("Windows Setup provenance input identity or reviewed pin mismatch")
+    payload_files = _require_object_fields(
+        inputs.get("payload_files"),
+        {
+            gateway_archive,
+            wheel,
+            WINDOWS_PYTHON_EMBED_NAME,
+            WINDOWS_YARA_COMPAT_WHEEL,
+            "site-packages.zip",
+            "defenseclaw-launcher.exe",
+            "defenseclaw-startup.exe",
+            "cosign.exe",
+            "requirements-release.txt",
+            "upgrade-manifest.json",
+        },
+        "Windows Setup provenance payload files",
+    )
+    _require_sha256_fields(
+        payload_files,
+        tuple(sorted(payload_files)),
+        "Windows Setup provenance payload file",
+    )
+    payload_bindings = {
+        gateway_archive: "embedded_gateway_archive_sha256",
+        wheel: "wheel_sha256",
+        WINDOWS_PYTHON_EMBED_NAME: "python_embed_sha256",
+        WINDOWS_YARA_COMPAT_WHEEL: "yara_compat_wheel_sha256",
+        "site-packages.zip": "site_packages_sha256",
+        "cosign.exe": "cosign_sha256",
+    }
+    if any(payload_files[name] != inputs[field] for name, field in payload_bindings.items()):
+        raise CandidateError("Windows Setup provenance payload digests are inconsistent")
+
+    toolchain = _require_object_fields(
+        document.get("toolchain"),
+        {
+            "go",
+            "uv",
+            "python_embed_url",
+            "python_embed_sha256",
+            "python_runtime_review_deadline_utc",
+            "yara_compat_sha256",
+            "win_unicode_console_source_url",
+            "win_unicode_console_source_sha256",
+            "cosign_version",
+            "cosign_url",
+            "cosign_sha256",
+        },
+        "Windows Setup provenance toolchain",
+    )
+    if (
+        not isinstance(toolchain.get("go"), str)
+        or re.fullmatch(r"go version go[0-9]+\.[0-9]+(?:\.[0-9]+)? windows/amd64", toolchain["go"])
+        is None
+        or not isinstance(toolchain.get("uv"), str)
+        or re.fullmatch(r"uv [0-9]+\.[0-9]+\.[0-9]+(?: .*)?", toolchain["uv"]) is None
+        or toolchain.get("python_embed_url") != WINDOWS_PYTHON_EMBED_URL
+        or toolchain.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
+        or toolchain.get("python_embed_sha256") != inputs.get("python_embed_sha256")
+        or toolchain.get("python_runtime_review_deadline_utc")
+        != WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE
+        or toolchain.get("yara_compat_sha256") != inputs.get("yara_compat_wheel_sha256")
+        or toolchain.get("win_unicode_console_source_url") != WINDOWS_WIN_UNICODE_SOURCE_URL
+        or toolchain.get("win_unicode_console_source_sha256") != WINDOWS_WIN_UNICODE_SOURCE_SHA256
+        or toolchain.get("cosign_version") != WINDOWS_COSIGN_VERSION
+        or toolchain.get("cosign_url") != WINDOWS_COSIGN_URL
+        or toolchain.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
+        or toolchain.get("cosign_sha256") != inputs.get("cosign_sha256")
+    ):
+        raise CandidateError("Windows Setup provenance toolchain identity or reviewed pin mismatch")
 
     authenticode = _require_object_fields(
         document.get("authenticode"),
@@ -3901,6 +4057,53 @@ def _validate_windows_setup_provenance(
         or embedded_timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
     ):
         raise CandidateError("Windows Setup embedded Authenticode timestamp identity is invalid")
+    return document
+
+
+def _validate_windows_setup_runtime_inputs(
+    provenance: dict[str, Any],
+    runtime_directory: Path,
+    version: str,
+) -> None:
+    """Bind installer provenance to the exact protected runtime candidate bytes."""
+
+    artifacts = _expected_release_artifacts(version)
+    gateway_path = runtime_directory / artifacts["gateways"]["windows"]["amd64"]
+    wheel_path = runtime_directory / artifacts["wheel"]
+    manifest_path = runtime_directory / "upgrade-manifest.json"
+    inputs = provenance["inputs"]
+    try:
+        gateway_sha256 = hashlib.sha256(_protected_payload(gateway_path)).hexdigest()
+        wheel_sha256 = hashlib.sha256(_protected_payload(wheel_path)).hexdigest()
+        manifest_sha256 = _sha256(manifest_path)
+    except (KeyError, OSError) as exc:
+        raise CandidateError(f"could not bind Windows Setup to runtime inputs: {exc}") from exc
+    if (
+        gateway_sha256 != inputs["gateway_archive_sha256"]
+        or wheel_sha256 != inputs["wheel_sha256"]
+        or manifest_sha256 != inputs["payload_files"]["upgrade-manifest.json"]
+    ):
+        raise CandidateError("Windows Setup provenance does not bind the exact runtime candidate")
+
+
+def _spdx_sha256(element: dict[str, Any], label: str) -> str:
+    checksums = element.get("checksums")
+    matches = (
+        [
+            row.get("checksumValue")
+            for row in checksums
+            if isinstance(row, dict) and row.get("algorithm") == "SHA256"
+        ]
+        if isinstance(checksums, list)
+        else []
+    )
+    if (
+        len(matches) != 1
+        or not isinstance(matches[0], str)
+        or SHA256_RE.fullmatch(matches[0]) is None
+    ):
+        raise CandidateError(f"{label} does not contain exactly one lowercase SHA-256 digest")
+    return matches[0]
 
 
 def _validate_windows_setup_sbom(
@@ -3909,22 +4112,93 @@ def _validate_windows_setup_sbom(
     version: str,
     commit: str,
     setup_sha256: str,
+    provenance: dict[str, Any],
 ) -> None:
     document = _read_windows_setup_json(path, "Windows Setup SBOM")
+    _require_object_fields(
+        document,
+        {
+            "spdxVersion",
+            "dataLicense",
+            "SPDXID",
+            "name",
+            "documentNamespace",
+            "comment",
+            "creationInfo",
+            "documentDescribes",
+            "packages",
+            "files",
+            "relationships",
+        },
+        "Windows Setup SBOM",
+    )
     expected_namespace = f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_sha256}"
     if (
         document.get("spdxVersion") != "SPDX-2.3"
         or document.get("dataLicense") != "CC0-1.0"
         or document.get("SPDXID") != "SPDXRef-DOCUMENT"
+        or document.get("name") != f"{WINDOWS_SETUP_ASSET}-{version}"
         or document.get("documentNamespace") != expected_namespace
         or document.get("comment") != f"DefenseClaw source commit: {commit}"
     ):
         raise CandidateError("Windows Setup SBOM document identity is invalid")
+    creation_info = _require_object_fields(
+        document.get("creationInfo"),
+        {"created", "creators", "licenseListVersion"},
+        "Windows Setup SBOM creationInfo",
+    )
+    created = creation_info.get("created")
+    if (
+        not isinstance(created, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", created) is None
+        or creation_info.get("creators")
+        != [
+            "Organization: Cisco Systems, Inc.",
+            "Tool: DefenseClaw Windows installer SBOM generator",
+        ]
+        or creation_info.get("licenseListVersion") != "3.25"
+    ):
+        raise CandidateError("Windows Setup SBOM creation identity is invalid")
     packages = document.get("packages")
     files = document.get("files")
     relationships = document.get("relationships")
     if not all(isinstance(value, list) for value in (packages, files, relationships)):
         raise CandidateError("Windows Setup SBOM inventory is invalid")
+
+    identifiers: set[str] = {"SPDXRef-DOCUMENT"}
+    for element in [*packages, *files]:
+        if not isinstance(element, dict):
+            raise CandidateError("Windows Setup SBOM contains a non-object element")
+        identifier = element.get("SPDXID")
+        if (
+            not isinstance(identifier, str)
+            or not identifier.startswith("SPDXRef-")
+            or identifier in identifiers
+        ):
+            raise CandidateError("Windows Setup SBOM contains a duplicate or invalid SPDXID")
+        identifiers.add(identifier)
+
+    relationship_rows: set[tuple[str, str, str]] = set()
+    for relationship in relationships:
+        if not isinstance(relationship, dict) or set(relationship) != {
+            "spdxElementId",
+            "relationshipType",
+            "relatedSpdxElement",
+        }:
+            raise CandidateError("Windows Setup SBOM contains an invalid relationship row")
+        row = (
+            relationship.get("spdxElementId"),
+            relationship.get("relationshipType"),
+            relationship.get("relatedSpdxElement"),
+        )
+        if (
+            not all(isinstance(item, str) and item for item in row)
+            or row[0] not in identifiers
+            or row[2] not in identifiers
+            or row in relationship_rows
+        ):
+            raise CandidateError("Windows Setup SBOM relationships are invalid")
+        relationship_rows.add(row)
     setup_packages = [
         item for item in packages if isinstance(item, dict) and item.get("name") == "DefenseClaw Windows Setup"
     ]
@@ -3938,15 +4212,7 @@ def _validate_windows_setup_sbom(
         or package.get("packageFileName") != WINDOWS_SETUP_ASSET
     ):
         raise CandidateError("Windows Setup SBOM package identity is invalid")
-    package_hashes = package.get("checksums")
-    if (
-        not isinstance(package_hashes, list)
-        or sum(
-            isinstance(item, dict) and item.get("algorithm") == "SHA256" and item.get("checksumValue") == setup_sha256
-            for item in package_hashes
-        )
-        != 1
-    ):
+    if _spdx_sha256(package, "Windows Setup SBOM package") != setup_sha256:
         raise CandidateError("Windows Setup SBOM package digest is invalid")
     expected_purl = f"pkg:github/cisco-ai-defense/defenseclaw@{version}"
     refs = package.get("externalRefs")
@@ -3969,35 +4235,83 @@ def _validate_windows_setup_sbom(
         raise CandidateError("Windows Setup SBOM must contain exactly one Setup file")
     setup_file = setup_files[0]
     file_id = setup_file.get("SPDXID")
-    file_hashes = setup_file.get("checksums")
-    if (
-        not isinstance(file_id, str)
-        or not isinstance(file_hashes, list)
-        or sum(
-            isinstance(item, dict) and item.get("algorithm") == "SHA256" and item.get("checksumValue") == setup_sha256
-            for item in file_hashes
-        )
-        != 1
-    ):
+    if not isinstance(file_id, str) or _spdx_sha256(setup_file, "Windows Setup SBOM file") != setup_sha256:
         raise CandidateError("Windows Setup SBOM file digest is invalid")
     if document.get("documentDescribes") != [package_id]:
         raise CandidateError("Windows Setup SBOM documentDescribes is invalid")
-    required_relationships = (
+    required_relationships: set[tuple[str, str, str]] = {
         ("SPDXRef-DOCUMENT", "DESCRIBES", package_id),
         (package_id, "CONTAINS", file_id),
+    }
+
+    embedded_packages = [
+        item
+        for item in packages
+        if isinstance(item, dict) and item.get("name") == "DefenseClaw embedded installer payload"
+    ]
+    if len(embedded_packages) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one embedded payload package")
+    embedded_package = embedded_packages[0]
+    embedded_package_id = embedded_package.get("SPDXID")
+    embedded_sha256 = provenance["inputs"]["embedded_payload_sha256"]
+    if (
+        not isinstance(embedded_package_id, str)
+        or embedded_package.get("versionInfo") != version
+        or embedded_package.get("packageFileName") != "installer-payload.zip"
+        or _spdx_sha256(embedded_package, "Windows Setup embedded payload package") != embedded_sha256
+    ):
+        raise CandidateError("Windows Setup SBOM embedded payload package is invalid")
+    embedded_files = [
+        item
+        for item in files
+        if isinstance(item, dict) and item.get("fileName") == "./embedded/installer-payload.zip"
+    ]
+    if len(embedded_files) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one embedded payload file")
+    embedded_file = embedded_files[0]
+    embedded_file_id = embedded_file.get("SPDXID")
+    if (
+        not isinstance(embedded_file_id, str)
+        or _spdx_sha256(embedded_file, "Windows Setup embedded payload file") != embedded_sha256
+    ):
+        raise CandidateError("Windows Setup SBOM embedded payload file is invalid")
+    required_relationships.update(
+        {
+            (embedded_package_id, "CONTAINS", embedded_file_id),
+            (package_id, "CONTAINS", embedded_package_id),
+        }
     )
-    for source, relationship_type, target in required_relationships:
+
+    expected_payload = dict(provenance["inputs"]["payload_files"])
+    expected_payload["manifest.json"] = provenance["inputs"]["payload_manifest_sha256"]
+    for name, digest in expected_payload.items():
+        component_packages = [
+            item for item in packages if isinstance(item, dict) and item.get("packageFileName") == name
+        ]
+        component_files = [
+            item for item in files if isinstance(item, dict) and item.get("fileName") == f"./payload/{name}"
+        ]
+        if len(component_packages) != 1 or len(component_files) != 1:
+            raise CandidateError(f"Windows Setup SBOM payload inventory is incomplete for {name}")
+        component_package = component_packages[0]
+        component_file = component_files[0]
+        component_package_id = component_package.get("SPDXID")
+        component_file_id = component_file.get("SPDXID")
         if (
-            sum(
-                isinstance(item, dict)
-                and item.get("spdxElementId") == source
-                and item.get("relationshipType") == relationship_type
-                and item.get("relatedSpdxElement") == target
-                for item in relationships
-            )
-            != 1
+            not isinstance(component_package_id, str)
+            or not isinstance(component_file_id, str)
+            or _spdx_sha256(component_package, f"Windows Setup SBOM package {name}") != digest
+            or _spdx_sha256(component_file, f"Windows Setup SBOM file {name}") != digest
         ):
-            raise CandidateError("Windows Setup SBOM relationships are invalid")
+            raise CandidateError(f"Windows Setup SBOM payload digest is invalid for {name}")
+        required_relationships.update(
+            {
+                (component_package_id, "CONTAINS", component_file_id),
+                (embedded_package_id, "CONTAINS", component_package_id),
+            }
+        )
+    if not required_relationships.issubset(relationship_rows):
+        raise CandidateError("Windows Setup SBOM custody relationships are incomplete")
 
 
 def _validate_windows_setup_certification(
@@ -4064,6 +4378,7 @@ def _validate_windows_installer_assets(
     commit: str,
     *,
     exact_file_set: bool = False,
+    runtime_directory: Path | None = None,
 ) -> None:
     names = windows_installer_asset_names(version)
     if not names:
@@ -4084,17 +4399,20 @@ def _validate_windows_installer_assets(
     )
     if match is None or match.group(1).decode("ascii") != setup_sha256:
         raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
-    _validate_windows_setup_provenance(
+    provenance = _validate_windows_setup_provenance(
         directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
     )
+    if runtime_directory is not None:
+        _validate_windows_setup_runtime_inputs(provenance, runtime_directory, version)
     _validate_windows_setup_sbom(
         directory / f"{WINDOWS_SETUP_ASSET}.sbom.json",
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
+        provenance=provenance,
     )
     _validate_windows_setup_certification(
         directory / f"{WINDOWS_SETUP_ASSET}.certification.json",
@@ -4164,7 +4482,12 @@ def assemble(
     _copy_exact(macos_dir, dist, macos_names)
     if windows_dir is not None:
         _copy_exact(windows_dir, dist, windows_names)
-        _validate_windows_installer_assets(dist, version, commit)
+        _validate_windows_installer_assets(
+            dist,
+            version,
+            commit,
+            runtime_directory=dist,
+        )
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
     if source_map is not None and provenance is not None:
@@ -4225,6 +4548,72 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     return document
 
 
+def _legacy_bundle_base64(value: object, label: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise CandidateError(f"legacy Cosign bundle {label} must be non-empty base64")
+    try:
+        encoded = value.encode("ascii")
+        decoded = base64.b64decode(encoded, validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise CandidateError(f"legacy Cosign bundle {label} is invalid base64") from exc
+    if not decoded or base64.b64encode(decoded) != encoded:
+        raise CandidateError(f"legacy Cosign bundle {label} is noncanonical base64")
+    return decoded
+
+
+def _validate_legacy_cosign_bundle(path: Path) -> None:
+    """Validate Cosign 2.6.2 bundle framing; workflow Cosign verifies its cryptography."""
+
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not 0 < info.st_size <= MAX_LEGACY_COSIGN_BUNDLE_BYTES
+        ):
+            raise CandidateError("legacy Cosign bundle has an invalid file type or size")
+        payload = path.read_bytes()
+        if len(payload) != info.st_size:
+            raise CandidateError("legacy Cosign bundle changed while being read")
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except CandidateError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateError(f"invalid legacy Cosign bundle {path}: {exc}") from exc
+    bundle = _require_object_fields(
+        document,
+        {"base64Signature", "cert", "rekorBundle"},
+        "legacy Cosign bundle",
+    )
+    _legacy_bundle_base64(bundle.get("base64Signature"), "base64Signature")
+    certificate = bundle.get("cert")
+    if not isinstance(certificate, str):
+        raise CandidateError("legacy Cosign bundle cert must be a certificate string")
+    try:
+        _release_certificate_payload(certificate.encode("ascii"), allow_base64_wrapper=True)
+    except (UnicodeEncodeError, CandidateError) as exc:
+        raise CandidateError("legacy Cosign bundle cert is not a canonical certificate") from exc
+
+    rekor = _require_object_fields(
+        bundle.get("rekorBundle"),
+        {"SignedEntryTimestamp", "Payload"},
+        "legacy Cosign Rekor bundle",
+    )
+    _legacy_bundle_base64(rekor.get("SignedEntryTimestamp"), "SignedEntryTimestamp")
+    rekor_payload = _require_object_fields(
+        rekor.get("Payload"),
+        {"body", "integratedTime", "logIndex", "logID"},
+        "legacy Cosign Rekor payload",
+    )
+    _legacy_bundle_base64(rekor_payload.get("body"), "Rekor body")
+    for field in ("integratedTime", "logIndex"):
+        value = rekor_payload.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CandidateError(f"legacy Cosign Rekor {field} must be a nonnegative integer")
+    log_id = rekor_payload.get("logID")
+    if not isinstance(log_id, str) or SHA256_RE.fullmatch(log_id) is None:
+        raise CandidateError("legacy Cosign Rekor logID must be a lowercase SHA-256 digest")
+
+
 def seal(root: Path, version: str, commit: str) -> None:
     _validate_version(version)
     _validate_commit(commit)
@@ -4244,7 +4633,12 @@ def seal(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
-    _validate_windows_installer_assets(dist, version, commit)
+    _validate_windows_installer_assets(
+        dist,
+        version,
+        commit,
+        runtime_directory=dist,
+    )
     names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
@@ -4254,6 +4648,8 @@ def seal(root: Path, version: str, commit: str) -> None:
             f"got {actual_names!r}, want {names!r}"
         )
     _require_canonical_release_certificate(dist / "checksums.txt.pem")
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        _validate_legacy_cosign_bundle(dist / CHECKSUMS_BUNDLE_FILENAME)
 
     checksums = _parse_checksums(dist / "checksums.txt")
     payload_names = payload_asset_names(version, macos_verification_status)
@@ -4298,13 +4694,20 @@ def verify(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
-    _validate_windows_installer_assets(dist, version, commit)
+    _validate_windows_installer_assets(
+        dist,
+        version,
+        commit,
+        runtime_directory=dist,
+    )
     expected_names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, expected_names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != expected_names:
         raise CandidateError("release candidate file set changed after sealing")
     _require_canonical_release_certificate(dist / "checksums.txt.pem")
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        _validate_legacy_cosign_bundle(dist / CHECKSUMS_BUNDLE_FILENAME)
 
     assets = manifest.get("assets")
     if not isinstance(assets, list):
