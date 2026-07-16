@@ -1007,6 +1007,22 @@ function Stage-PackageData([string]$PackageRoot) {
     Copy-Tree (Join-Path $WorkspaceRoot 'skills\codeguard') (Join-Path $data 'skills\codeguard')
     [IO.Directory]::CreateDirectory((Join-Path $data 'llm')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'bundles\llm\model_catalog.json') -Destination (Join-Path $data 'llm') -Force
+    $configData = Join-Path $data 'config\v8'
+    [IO.Directory]::CreateDirectory($configData) | Out-Null
+    Copy-Item -LiteralPath (
+        Join-Path $WorkspaceRoot 'schemas\config\v8\defenseclaw-config.schema.json'
+    ) -Destination $configData -Force
+    foreach ($name in @('observability.yaml', 'observability.md')) {
+        Copy-Item -LiteralPath (
+            Join-Path $WorkspaceRoot "schemas\config\v8\reference\$name"
+        ) -Destination $configData -Force
+    }
+    $telemetryData = Join-Path $data 'telemetry\v8'
+    [IO.Directory]::CreateDirectory($telemetryData) | Out-Null
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--no-project', '--python', '3.12', 'python',
+        'scripts/telemetry_runtime_assets.py', '--root', '.', '--stage', $telemetryData
+    ) -TimeoutSeconds 120 -WorkingDirectory $WorkspaceRoot | Out-Null
     foreach ($name in @('splunk_local_bridge', 'local_observability_stack', 'splunk_o11y_dashboards')) {
         Copy-Tree (Join-Path $WorkspaceRoot "bundles\$name") (Join-Path $data $name)
     }
@@ -1145,6 +1161,15 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/envvars/registry.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
             'defenseclaw/_data/llm/model_catalog.json',
+            'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
+            'defenseclaw/_data/config/v8/observability.yaml',
+            'defenseclaw/_data/config/v8/observability.md',
+            'defenseclaw/_data/telemetry/v8/telemetry.schema.json',
+            'defenseclaw/_data/telemetry/v8/catalog.json',
+            'defenseclaw/_data/telemetry/v8/v7-exporter-selection.json',
+            'defenseclaw/_data/telemetry/v8/galileo-rich-v2.json',
+            'defenseclaw/_data/telemetry/v8/local-observability-v1.json',
+            'defenseclaw/_data/telemetry/v8/openinference-v1.json',
             'defenseclaw/observability/local_splunk.py',
             'defenseclaw/_data/splunk_local_bridge/compose/docker-compose.local.yml',
             'defenseclaw/_data/splunk_local_bridge/splunk/default.yml',
