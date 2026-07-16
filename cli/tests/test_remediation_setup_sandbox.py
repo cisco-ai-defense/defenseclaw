@@ -35,6 +35,7 @@ behavior so a regression to the original vulnerable code re-fails the test:
 
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -164,6 +165,15 @@ class TestRestartFailsClosed(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=FileNotFoundError)
     def test_f0143_restart_openclaw_gateway_returns_false_on_failure(self, _mock_run):
+        from defenseclaw.commands.cmd_setup import _restart_openclaw_gateway
+
+        self.assertIs(_restart_openclaw_gateway(), False)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("openclaw", 60),
+    )
+    def test_f0143_restart_openclaw_gateway_returns_false_on_timeout(self, _mock_run):
         from defenseclaw.commands.cmd_setup import _restart_openclaw_gateway
 
         self.assertIs(_restart_openclaw_gateway(), False)

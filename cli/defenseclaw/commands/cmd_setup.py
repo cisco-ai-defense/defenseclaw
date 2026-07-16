@@ -8417,17 +8417,11 @@ def _restart_openclaw_gateway() -> bool:
         click.echo("    Install OpenClaw or restart its gateway manually.")
         return False
     except subprocess.TimeoutExpired:
-        # Windows trust/AV inspection can outlive the launcher timeout even
-        # though its detached managed daemon reaches READY. Reconcile through
-        # the real lifecycle command and canonical v8 API before declaring the
-        # setup failed. A timed-out initial start is stopped best-effort so a
-        # late daemon cannot appear after rollback.
-        if _gateway_lifecycle_status() and _wait_for_defense_gateway_api(data_dir):
-            click.echo(" ✓ (ready after launcher timeout)")
-            return True
-        if not was_running:
-            _cleanup_timed_out_gateway_start()
-        click.echo(" ✗ (timed out; final status is not healthy)")
+        # OpenClaw owns this lifecycle and exposes no DefenseClaw pid/data-dir
+        # state that we can safely reconcile here.  A timeout is therefore a
+        # fail-closed restart failure; the native DefenseClaw gateway helper
+        # below performs its own identity-aware timeout reconciliation.
+        click.echo(" ✗ (timed out)")
         return False
 
 
