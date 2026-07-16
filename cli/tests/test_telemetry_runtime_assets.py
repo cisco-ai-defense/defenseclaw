@@ -11,6 +11,8 @@ import pytest
 
 from scripts import telemetry_runtime_assets as assets
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_runtime_asset_inventory_is_exact_and_stable() -> None:
     assert assets.LOGICAL_TO_ENCODED == {
@@ -46,6 +48,13 @@ def test_canonical_gzip_is_deterministic_bounded_and_round_trips() -> None:
         assets.decode_canonical_gzip(first, maximum=len(payload) - 1)
 
 
+@pytest.mark.parametrize("logical_path", assets.LOGICAL_TO_ENCODED)
+def test_repository_runtime_assets_decode_portably(logical_path: str) -> None:
+    payload = assets.read_logical_asset(ROOT, logical_path)
+    assert isinstance(json.loads(payload), dict)
+    assert payload.endswith(b"\n")
+
+
 @pytest.mark.parametrize(
     "encoded",
     [
@@ -57,6 +66,15 @@ def test_canonical_gzip_is_deterministic_bounded_and_round_trips() -> None:
 def test_decoder_rejects_malformed_trailing_and_noncanonical_members(encoded: bytes) -> None:
     with pytest.raises(assets.RuntimeAssetError):
         assets.decode_canonical_gzip(encoded)
+
+
+def test_decoder_rejects_corrupt_crc_and_size_trailer() -> None:
+    encoded = assets.canonical_gzip(b'{"value":"exact"}\n')
+    for offset in (-8, -4):
+        corrupted = bytearray(encoded)
+        corrupted[offset] ^= 1
+        with pytest.raises(assets.RuntimeAssetError, match="malformed"):
+            assets.decode_canonical_gzip(bytes(corrupted))
 
 
 def test_stage_expands_exact_logical_json_names(tmp_path: Path) -> None:

@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
+import struct
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -73,18 +75,29 @@ def decode_canonical_gzip(
     *,
     maximum: int = MAX_RUNTIME_ASSET_BYTES,
 ) -> bytes:
-    """Decode one canonical member and reject bombs, trailers, and drift."""
-    if maximum < 0 or len(encoded) < 18:
+    """Decode one portable canonical member and reject bombs or trailers.
+
+    Deflate output is not byte-stable across every supported zlib build, so
+    canonicality is defined by the metadata-free RFC 1952 envelope, one raw
+    deflate stream, and its exact CRC/size trailer. Recompressing during read
+    would reject valid release inputs on hosts with a different zlib build.
+    """
+
+    header = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff"
+    if maximum < 0 or len(encoded) < 18 or encoded[:10] != header:
         raise RuntimeAssetError("telemetry runtime asset is malformed")
+    decoder = zlib.decompressobj(-zlib.MAX_WBITS)
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(encoded), mode="rb") as reader:
-            payload = reader.read(maximum + 1)
-    except (EOFError, OSError) as exc:
+        payload = decoder.decompress(encoded[10:], maximum + 1)
+    except zlib.error as exc:
         raise RuntimeAssetError("telemetry runtime asset is malformed") from exc
     if len(payload) > maximum:
         raise RuntimeAssetError("telemetry runtime asset exceeds its decoded size limit")
-    if canonical_gzip(payload) != encoded:
+    if not decoder.eof or decoder.unconsumed_tail or len(decoder.unused_data) != 8:
         raise RuntimeAssetError("telemetry runtime asset is not canonical gzip")
+    expected_crc, expected_size = struct.unpack("<II", decoder.unused_data)
+    if expected_crc != zlib.crc32(payload) or expected_size != (len(payload) & 0xFFFFFFFF):
+        raise RuntimeAssetError("telemetry runtime asset is malformed")
     return payload
 
 

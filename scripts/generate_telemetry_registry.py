@@ -738,6 +738,7 @@ REPOSITORY_PHYSICAL_OUTPUT_PATHS: Final = frozenset(
         *GO_CANDIDATE_OUTPUT_PATHS,
     }
 )
+RUNTIME_PHYSICAL_OUTPUT_PATHS: Final = frozenset(runtime_assets.LOGICAL_TO_ENCODED.values())
 RETIRED_REPOSITORY_OUTPUT_PATHS: Final = frozenset(
     {
         "schemas/telemetry/generated/output-manifest.json",
@@ -11507,14 +11508,24 @@ def _drift(root: Path, desired: Mapping[str, bytes]) -> list[str]:
             payload = target.read_bytes()
         except OSError as exc:
             raise RegistryError(f"cannot read generated output: {relative}") from exc
-        # Git's Windows checkout filter can materialize generated Go sources
-        # with CRLF. These are canonical text artifacts, unlike the compressed
-        # runtime assets, which must remain byte-exact on every platform.
+        # Deflate bytes can differ across supported zlib implementations even
+        # when the canonical gzip envelope and logical JSON are identical.
+        # Validate both members and compare their bounded decoded payloads.
         expected = desired[relative]
-        if relative in GO_CANDIDATE_OUTPUT_PATHS:
+        if relative in RUNTIME_PHYSICAL_OUTPUT_PATHS:
+            try:
+                actual_logical = runtime_assets.decode_canonical_gzip(payload)
+                expected_logical = runtime_assets.decode_canonical_gzip(expected)
+                matches = actual_logical == expected_logical
+            except runtime_assets.RuntimeAssetError:
+                matches = False
+        elif relative in GO_CANDIDATE_OUTPUT_PATHS:
             payload = payload.replace(b"\r\n", b"\n")
             expected = expected.replace(b"\r\n", b"\n")
-        if payload != expected:
+            matches = payload == expected
+        else:
+            matches = payload == expected
+        if not matches:
             problems.append(f"stale={relative}")
         # Windows' stat mode is only a read-only projection (normally 0666),
         # not a POSIX permission mode. ACL validation belongs to the Windows
@@ -11557,7 +11568,16 @@ def _atomic_write(root: Path, relative: str, payload: bytes) -> None:
     if metadata is not None:
         try:
             mode_matches = os.name == "nt" or stat.S_IMODE(metadata.st_mode) == REPOSITORY_OUTPUT_MODE
-            if target.read_bytes() == payload and mode_matches:
+            existing = target.read_bytes()
+            payload_matches = existing == payload
+            if not payload_matches and relative in RUNTIME_PHYSICAL_OUTPUT_PATHS:
+                try:
+                    existing_logical = runtime_assets.decode_canonical_gzip(existing)
+                    desired_logical = runtime_assets.decode_canonical_gzip(payload)
+                    payload_matches = existing_logical == desired_logical
+                except runtime_assets.RuntimeAssetError:
+                    payload_matches = False
+            if payload_matches and mode_matches:
                 return
         except OSError as exc:
             raise RegistryError(f"cannot read generated output: {relative}") from exc

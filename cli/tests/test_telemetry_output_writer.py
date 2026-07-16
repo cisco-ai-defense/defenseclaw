@@ -6,7 +6,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import stat
+import struct
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 
@@ -49,6 +51,16 @@ def _repository(tmp_path: Path) -> Path:
     root = tmp_path / "repository"
     root.mkdir()
     return root
+
+
+def _alternate_portable_gzip(payload: bytes) -> bytes:
+    compressor = zlib.compressobj(level=9, wbits=-zlib.MAX_WBITS, strategy=zlib.Z_FIXED)
+    body = compressor.compress(payload) + compressor.flush()
+    return (
+        b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff"
+        + body
+        + struct.pack("<II", zlib.crc32(payload), len(payload) & 0xFFFFFFFF)
+    )
 
 
 def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
@@ -99,6 +111,29 @@ def test_writer_publishes_exact_files_and_removes_only_retired_outputs(
         assert target.read_bytes() == payload
         if os.name != "nt":
             assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_checker_and_writer_accept_equivalent_portable_runtime_encoding(
+    generator: ModuleType,
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path)
+    outputs = _outputs(generator)
+    logical, relative = next(iter(generator.runtime_assets.LOGICAL_TO_ENCODED.items()))
+    logical_payload = (
+        b'{"values":[' + b",".join(str(index).encode() for index in range(2048)) + b"]}\n"
+    )
+    outputs[Path(logical)] = logical_payload
+    generator.write_outputs(root, outputs)
+
+    target = root / relative
+    alternate = _alternate_portable_gzip(logical_payload)
+    assert alternate != generator.runtime_assets.canonical_gzip(logical_payload)
+    target.write_bytes(alternate)
+
+    generator.check_outputs(root, outputs)
+    generator.write_outputs(root, outputs)
+    assert target.read_bytes() == alternate
 
 
 @pytest.mark.parametrize("drift", ["missing", "stale", "mode"])
