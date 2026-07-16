@@ -689,12 +689,13 @@ def test_windows_absent_target_rollback_claim_blocks_concurrent_creation(
     target = fixture["environment_path"]
     external = b"EXTERNAL_CREATE=after-rollback\n"
     real_delete = mock.delete_regular_fd
+    real_flush = mock.flush_fd
     blocked = False
 
-    def fail_flush(path: str) -> None:
-        if mock._key(path) == mock._key(target):
+    def fail_flush(descriptor: int) -> None:
+        if mock.claimed_fds[descriptor] == mock._key(target):
             raise WindowsAclError("injected publication flush failure")
-        mock.flush_path(path)
+        real_flush(descriptor)
 
     def race_delete(descriptor: int) -> None:
         nonlocal blocked
@@ -703,7 +704,7 @@ def test_windows_absent_target_rollback_claim_blocks_concurrent_creation(
         blocked = True
         real_delete(descriptor)
 
-    monkeypatch.setattr(activation.windows_acl, "flush_path", fail_flush)
+    monkeypatch.setattr(activation.windows_acl, "flush_fd", fail_flush)
     monkeypatch.setattr(activation.windows_acl, "delete_regular_fd", race_delete)
 
     with pytest.raises(WindowsAclError, match="flush failure"):
