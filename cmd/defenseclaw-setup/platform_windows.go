@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"debug/pe"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,23 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+var queryProcessMachines = windows.IsWow64Process2
+
+func requireNativeWindowsX64() error {
+	var processMachine uint16
+	var nativeMachine uint16
+	if err := queryProcessMachines(windows.CurrentProcess(), &processMachine, &nativeMachine); err != nil {
+		return fmt.Errorf("cannot verify native Windows x64 architecture: %w", err)
+	}
+	if nativeMachine != pe.IMAGE_FILE_MACHINE_AMD64 {
+		return fmt.Errorf(
+			"DefenseClawSetup-x64.exe requires native Windows x64; x64 emulation on machine type %#x is not certified",
+			nativeMachine,
+		)
+	}
+	return nil
+}
 
 func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
 	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
