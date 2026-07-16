@@ -48,6 +48,7 @@ RELEASE_URL=""
 FROM_VERSION_LIST=()
 FROM_CONFIG_VERSION=""
 CANDIDATE_WHEEL_NAME=""
+CANDIDATE_RUNTIME_CONFIG_VERSION=""
 
 usage() {
     cat <<'EOF'
@@ -289,9 +290,14 @@ normalize_baseline_versions() {
 
 published_baseline_config_version() {
     local version="$1"
+    local runtime_config="${CANDIDATE_RUNTIME_CONFIG_VERSION:-}"
+    if [[ -z "${runtime_config}" ]]; then
+        runtime_config="$(candidate_runtime_config_version "$(current_version)")"
+    fi
     python3 - \
         "${UPGRADE_BASELINE_POLICY}" \
-        "${version}" <<'PY'
+        "${version}" \
+        "${runtime_config}" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -301,6 +307,7 @@ import sys
 
 policy_path = Path(sys.argv[1])
 requested_version = sys.argv[2]
+candidate_runtime = int(sys.argv[3])
 canonical_version = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
@@ -364,8 +371,11 @@ if type(config_versions) is not dict or set(config_versions) != set(versions):
     fail("published_baseline_config_versions keys must exactly match published_baselines")
 for published_version in versions:
     value = config_versions[published_version]
-    if type(value) is not int or value not in {5, 6, 7}:
-        fail(f"{published_version} has no reviewed config version in {{5,6,7}}")
+    if type(value) is not int or value < 1 or value > candidate_runtime:
+        fail(
+            f"{published_version} config version must be positive and no newer "
+            "than the candidate runtime"
+        )
 
 platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
@@ -385,6 +395,28 @@ if windows_versions != [item for item in versions if item in windows_set]:
 if requested_version not in config_versions:
     fail(f"{requested_version} is not a reviewed published baseline")
 print(config_versions[requested_version])
+PY
+}
+
+candidate_runtime_config_version() {
+    local target_version="${1:-${TARGET_VERSION}}"
+    python3 - "${ROOT}" "${target_version}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+target = tuple(map(int, sys.argv[2].split(".")))
+if target >= (0, 8, 5):
+    path = root / "internal/config/observability_v8_types.go"
+    pattern = r"^\s*ObservabilityV8ConfigVersion\s*=\s*([1-9][0-9]*)\s*$"
+else:
+    path = root / "internal/config/config.go"
+    pattern = r"^\s*const\s+CurrentConfigVersion\s*=\s*([1-9][0-9]*)\s*$"
+match = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
+if match is None:
+    raise SystemExit(f"could not resolve candidate runtime config version from {path}")
+print(match.group(1))
 PY
 }
 
@@ -429,12 +461,16 @@ fresh_install_tool_path() {
 validate_inputs() {
     normalize_baseline_versions
     [[ "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --target-version: ${TARGET_VERSION}"
+    CANDIDATE_RUNTIME_CONFIG_VERSION="$(candidate_runtime_config_version)" \
+        || die "could not resolve candidate runtime config version"
+    [[ "${CANDIDATE_RUNTIME_CONFIG_VERSION}" =~ ^[1-9][0-9]*$ ]] \
+        || die "candidate runtime config version is invalid"
     local version config_version
     for version in "${FROM_VERSION_LIST[@]}"; do
         if ! config_version="$(published_baseline_config_version "${version}")"; then
             die "could not resolve the reviewed config version for baseline ${version}"
         fi
-        [[ "${config_version}" =~ ^[567]$ ]] \
+        [[ "${config_version}" =~ ^[1-9][0-9]*$ ]] \
             || die "published baseline ${version} resolved to an invalid config version"
     done
     case "${BASELINE_MODE}" in
@@ -1099,7 +1135,7 @@ resolve_baseline_config_version() {
     if ! FROM_CONFIG_VERSION="$(published_baseline_config_version "${FROM_VERSION}")"; then
         die "could not resolve the reviewed config version for baseline ${FROM_VERSION}"
     fi
-    [[ "${FROM_CONFIG_VERSION}" =~ ^[567]$ ]] \
+    [[ "${FROM_CONFIG_VERSION}" =~ ^[1-9][0-9]*$ ]] \
         || die "published baseline ${FROM_VERSION} resolved to an invalid config version"
 }
 
@@ -1145,9 +1181,10 @@ seed_v8_observability_fixture() {
     resolve_baseline_config_version
     log "Seeding representative comment-heavy config-v${FROM_CONFIG_VERSION} observability fixture for ${FROM_VERSION}"
     local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local openclaw_home="${SMOKE_HOME}/.openclaw"
     local evidence_dir="${SMOKE_HOME}/fixture-evidence"
-    mkdir -p "${data_dir}/state" "${evidence_dir}"
-    chmod 700 "${data_dir}" "${data_dir}/state" "${evidence_dir}"
+    mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+    chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
 
     # The values are deliberately recognizable test canaries. Verification
     # checks that they move into the private .env transaction and never occur
@@ -1162,6 +1199,10 @@ judge_bodies_db: ${data_dir}/state/judge-custom.db # custom judge path
 guardrail:
   enabled: true
   retain_judge_bodies: false
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
 otel:
   enabled: true
   protocol: grpc
@@ -1533,6 +1574,16 @@ if observability.get("local") != {
     raise SystemExit("non-default audit/judge paths were not preserved")
 if (config.get("guardrail") or {}).get("retain_judge_bodies") is not False:
     raise SystemExit("judge-body retention enablement was not preserved")
+gateway = config.get("gateway") or {}
+if gateway.get("fleet_mode") != "disabled" or (gateway.get("watcher") or {}).get("enabled") is not False:
+    raise SystemExit("hermetic gateway connectivity policy was not preserved")
+openclaw_home = data_dir.parent / ".openclaw"
+try:
+    openclaw_info = openclaw_home.lstat()
+except FileNotFoundError:
+    raise SystemExit("fixture OpenClaw home disappeared across the staged upgrade") from None
+if not stat.S_ISDIR(openclaw_info.st_mode) or stat.S_IMODE(openclaw_info.st_mode) != 0o700:
+    raise SystemExit("fixture OpenClaw home mode changed across the staged upgrade")
 
 destinations = {
     item.get("name"): item

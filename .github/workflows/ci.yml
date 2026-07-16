@@ -18,7 +18,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Supersede old commits within one PR, but never cancel a previous main
+  # merge's exact-SHA release canary when another merge lands.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -48,6 +50,102 @@ jobs:
       # Ensures future releases carry a release-owned migration contract
       # before the release workflow publishes upgrade-manifest.json.
       - run: make check-upgrade-manifest
+
+  release-validation-plan:
+    name: Release Validation Plan
+    runs-on: ubuntu-latest
+    outputs:
+      sensitive: ${{ steps.paths.outputs.sensitive }}
+      pr_matrix: ${{ steps.pr.outputs.matrix }}
+      medium_matrix: ${{ steps.medium.outputs.matrix }}
+      candidate_version: ${{ steps.version.outputs.candidate_version }}
+      latest_stable: ${{ steps.version.outputs.latest_stable }}
+      baseline_artifact: ${{ steps.baseline-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        name: Detect release-sensitive paths without network access
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            python3 scripts/release_certification.py paths \
+              --base "$BASE_SHA" --head "$HEAD_SHA" \
+              --github-output "$GITHUB_OUTPUT"
+          else
+            echo 'sensitive=false' >> "$GITHUB_OUTPUT"
+          fi
+      - id: version
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        name: Resolve candidate against live stable state when needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > published-releases.json
+          source_version="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          python3 scripts/release_certification.py resolve-version \
+            --source-version "$source_version" \
+            --published-releases published-releases.json \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+      - id: baseline-name
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        run: echo "name=ci-effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - id: baselines
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        name: Resolve one authenticated effective baseline snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_upgrade_baselines.py \
+            --target-version "$CANDIDATE_VERSION" \
+            --output effective-upgrade-baselines.json
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        with:
+          name: ${{ steps.baseline-name.outputs.name }}
+          path: effective-upgrade-baselines.json
+          if-no-files-found: error
+          retention-days: 2
+      - id: pr
+        if: ${{ github.event_name == 'pull_request' && steps.paths.outputs.sensitive == 'true' }}
+        name: Select risky-PR baselines by behavior class
+        env:
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
+        run: |
+          python3 scripts/release_certification.py select-baselines \
+            --baselines effective-upgrade-baselines.json \
+            --scope pr \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --latest-stable "$LATEST_STABLE" \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
+      - id: medium
+        if: ${{ github.event_name == 'push' }}
+        name: Select main-merge smoke by behavior class
+        env:
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
+        run: |
+          python3 scripts/release_certification.py select-baselines \
+            --baselines effective-upgrade-baselines.json \
+            --scope medium \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --latest-stable "$LATEST_STABLE" \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
 
   go-lint:
     name: Go Lint
@@ -210,7 +308,7 @@ jobs:
   python-test:
     name: Python Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -231,7 +329,9 @@ jobs:
           mapfile -t test_files < <(
             python3 scripts/python_test_shards.py \
               --shard-count "$PYTHON_TEST_SHARDS" \
-              --shard-index "$PYTHON_TEST_SHARD"
+              --shard-index "$PYTHON_TEST_SHARD" \
+              --exclude cli/tests/test_telemetry_registry_generator.py \
+              --exclude cli/tests/test_telemetry_registry_candidate_renderer.py
           )
           test "${#test_files[@]}" -gt 0
           COVERAGE_FILE="coverage-py-shard-$PYTHON_TEST_SHARD" \
@@ -242,40 +342,94 @@ jobs:
               --cov-report=
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: python-coverage-shard-${{ matrix.shard }}
+          name: python-coverage-part-regular-${{ matrix.shard }}
           path: coverage-py-shard-${{ matrix.shard }}
           retention-days: 1
 
-  python-lint-test:
-    # Preserve the existing required-check name while making it the single
-    # authority that verifies lint and combines all isolated coverage shards.
-    name: Python Lint & Test
-    needs: python-test
-    if: ${{ always() }}
+  python-telemetry-test:
+    name: Python Telemetry Test (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: registry-generator
+            test_file: cli/tests/test_telemetry_registry_generator.py
+          - suite: candidate-renderer
+            test_file: cli/tests/test_telemetry_registry_candidate_renderer.py
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
+      - run: make _bundle-data
+      - name: Run telemetry registry suite with node-level workers
+        env:
+          PYTHON_TELEMETRY_SUITE: ${{ matrix.suite }}
+          PYTHON_TELEMETRY_TEST_FILE: ${{ matrix.test_file }}
+        run: |
+          set -euo pipefail
+          COVERAGE_FILE="coverage-py-telemetry-$PYTHON_TELEMETRY_SUITE" \
+            .venv/bin/python -m pytest "$PYTHON_TELEMETRY_TEST_FILE" \
+              -q --tb=short \
+              --durations=25 \
+              --numprocesses=4 \
+              --dist=worksteal \
+              --cov=defenseclaw \
+              --cov-report=
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: python-coverage-part-telemetry-${{ matrix.suite }}
+          path: coverage-py-telemetry-${{ matrix.suite }}
+          retention-days: 1
+
+  python-lint:
+    name: Python Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Require every Python test shard
-        env:
-          PYTHON_SHARD_RESULT: ${{ needs.python-test.result }}
-        run: test "$PYTHON_SHARD_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: make py-lint
+
+  python-lint-test:
+    # Preserve the existing required-check name while making it the single
+    # authority over lint, every isolated test partition, and combined coverage.
+    name: Python Lint & Test
+    needs: [python-test, python-telemetry-test, python-lint]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require lint and every Python test partition
+        env:
+          PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
+          PYTHON_TELEMETRY_RESULT: ${{ needs.python-telemetry-test.result }}
+          PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
+        run: |
+          test "$PYTHON_REGULAR_RESULT" = success
+          test "$PYTHON_TELEMETRY_RESULT" = success
+          test "$PYTHON_LINT_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: python-coverage-shard-*
+          pattern: python-coverage-part-*
           path: coverage-parts
           merge-multiple: true
       - name: Combine Python coverage
         run: |
           set -euo pipefail
           mapfile -t coverage_parts < <(
-            find coverage-parts -type f -name 'coverage-py-shard-*' -print | sort
+            find coverage-parts -type f -name 'coverage-py-*' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 4
+          test "${#coverage_parts[@]}" -eq 6
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -378,8 +532,91 @@ jobs:
           )
 
   upgrade-smoke:
-    name: Upgrade Refusal Contract (unsigned PR candidate)
+    name: Release Regression (deterministic)
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # A PR cannot mint release.yaml@refs/heads/main's Fulcio identity. Keep
+      # ordinary CI deterministic and exercise the signed positive/live paths
+      # only in nightly/manual certification.
+      - name: Run fast release regression contracts
+        run: |
+          uv run python -m pytest -q \
+            cli/tests/test_verify_sigstore_blob.py \
+            cli/tests/test_observability_v8_upgrade_continuity_checker.py \
+            cli/tests/test_resolve_upgrade_baselines.py \
+            cli/tests/test_release_workflow_staged.py \
+            cli/tests/test_upgrade_smoke_static.py \
+            cli/tests/test_upgrade_release_smoke_contract.py \
+            cli/tests/test_release_certification.py \
+            cli/tests/test_release_validation_strategy.py
+
+  unsigned-upgrade-candidate:
+    name: Build selective exact-SHA upgrade candidate once
+    needs: release-validation-plan
+    if: >-
+      ${{
+        (github.event_name == 'pull_request' && needs.release-validation-plan.outputs.sensitive == 'true') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 25
+    outputs:
+      artifact_name: ${{ steps.name.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - id: name
+        run: echo "artifact_name=unsigned-upgrade-candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - id: prepare
+        name: Build exact PR SHA developer candidate
+        run: |
+          set -euo pipefail
+          scripts/test-upgrade-release.sh \
+            --prepare-only \
+            --platform linux/amd64 \
+            --target-version "${{ needs.release-validation-plan.outputs.candidate_version }}" \
+            --keep-workdir | tee prepare-candidate.log
+          root="$(sed -n 's/^OK: Prepared candidate release root: //p' prepare-candidate.log | tail -1)"
+          test -d "$root"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ steps.name.outputs.artifact_name }}
+          path: ${{ steps.prepare.outputs.root }}/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  selective-upgrade-smoke:
+    name: Selective upgrade (${{ matrix.class }} / ${{ matrix.baseline }})
+    needs: [release-validation-plan, unsigned-upgrade-candidate]
+    if: >-
+      ${{
+        github.event_name == 'pull_request' &&
+        needs.release-validation-plan.outputs.sensitive == 'true'
+      }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.pr_matrix) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -389,13 +626,92 @@ jobs:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      # A PR job cannot mint release.yaml@refs/heads/main's Fulcio identity.
-      # Exercise every immutable historical controller's schema-2 refusal and
-      # prove it cannot stop or mutate the install. The protected release
-      # workflow signs the sealed candidate, then owns the positive resolver
-      # and staged-handoff matrix. Never replace that boundary with a CI
-      # identity override or a fake cosign success.
-      - run: make upgrade-refusal-contract-matrix ARGS="--baseline-mode seed"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
+          path: unsigned-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - name: Run selected deterministic success/refusal contract
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
+          RISK_CLASS: ${{ matrix.class }}
+          VALIDATION_MODE: ${{ matrix.mode }}
+          EXPECTED_RESULT: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          echo "Selected release risk class: $RISK_CLASS ($VALIDATION_MODE → $EXPECTED_RESULT)"
+          # The direct-controller harness is the supported developer path for
+          # exercising real migrations against an unsigned exact-SHA build.
+          # The production protocol harness remains fail-closed and proves the
+          # explicit direct-target request refuses before mutation.
+          if [[ "$EXPECTED_RESULT" == *success* ]]; then
+            scripts/test-upgrade-release.sh \
+              --from-version "$BASELINE" \
+              --target-version "$CANDIDATE_VERSION" \
+              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+              --baseline-mode seed \
+              --success-path-only \
+              --health-timeout 60
+          fi
+          if [[ "$EXPECTED_RESULT" == *refusal* ]]; then
+            scripts/test-upgrade-protocol-release.sh \
+              --from-version "$BASELINE" \
+              --target-version "$CANDIDATE_VERSION" \
+              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+              --baseline-mode seed \
+              --refusal-contract-only
+          fi
+
+  main-release-smoke:
+    name: Main Release Candidate Smoke (${{ matrix.class }})
+    needs: [release-validation-plan, unsigned-upgrade-candidate]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.medium_matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
+          path: unsigned-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - name: Run exact-SHA candidate representative upgrade canary
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          RISK_CLASS: ${{ matrix.class }}
+          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          make check-upgrade-manifest
+          scripts/test-upgrade-release.sh \
+            --from-version "$BASELINE" \
+            --target-version "$CANDIDATE_VERSION" \
+            --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+            --baseline-mode seed \
+            --baseline-dependencies published \
+            --success-path-only \
+            --health-timeout 60
 
   connector-matrix:
     name: Connector Matrix

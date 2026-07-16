@@ -46,6 +46,21 @@ def discover_test_files(test_root: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(test_root).as_posix())
 
 
+def exclude_test_files(files: list[Path], excluded: list[Path]) -> list[Path]:
+    """Remove explicitly isolated modules without allowing silent omissions."""
+
+    resolved_files = [path.resolve() for path in files]
+    resolved_excluded = [path.resolve() for path in excluded]
+    if len(resolved_excluded) != len(set(resolved_excluded)):
+        raise ValueError("excluded test files must be unique")
+    missing = sorted(set(resolved_excluded) - set(resolved_files), key=Path.as_posix)
+    if missing:
+        rendered = ", ".join(path.as_posix() for path in missing)
+        raise ValueError(f"excluded test files were not discovered: {rendered}")
+    excluded_set = set(resolved_excluded)
+    return [path for path in resolved_files if path not in excluded_set]
+
+
 def partition_test_files(files: list[Path], shard_count: int) -> list[Shard]:
     """Greedily balance files by source size without splitting a module."""
 
@@ -73,13 +88,22 @@ def main() -> int:
     parser.add_argument("--shard-count", required=True, type=int)
     parser.add_argument("--shard-index", required=True, type=int)
     parser.add_argument("--test-root", type=Path, default=DEFAULT_TEST_ROOT)
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        type=Path,
+        help="test module to omit from regular shards, relative to the repository root",
+    )
     args = parser.parse_args()
 
     if args.shard_index < 0 or args.shard_index >= args.shard_count:
         parser.error("--shard-index must be within [0, --shard-count)")
     test_root = args.test_root.resolve()
     try:
-        shards = partition_test_files(discover_test_files(test_root), args.shard_count)
+        excluded = [(path if path.is_absolute() else ROOT / path).resolve() for path in args.exclude]
+        files = exclude_test_files(discover_test_files(test_root), excluded)
+        shards = partition_test_files(files, args.shard_count)
     except ValueError as exc:
         parser.error(str(exc))
 

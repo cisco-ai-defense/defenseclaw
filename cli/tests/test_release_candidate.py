@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import io
 import json
 import os
@@ -837,6 +838,13 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     assert (root / "dist/checksums.txt.pem").read_bytes() == TEST_CERTIFICATE_PEM
 
     manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
+    effective_policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    assert effective_policy.read_bytes() == (
+        ROOT / "release/upgrade-baselines.json"
+    ).read_bytes()
+    assert manifest["effective_upgrade_baselines_sha256"] == hashlib.sha256(
+        effective_policy.read_bytes()
+    ).hexdigest()
     assert [item["name"] for item in manifest["assets"]] == list(
         release_candidate.published_asset_names(VERSION, "notarized")
     )
@@ -867,6 +875,17 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+
+def test_candidate_verification_rejects_effective_baseline_snapshot_mutation(
+    tmp_path: Path,
+) -> None:
+    root = _sealed_candidate(tmp_path)
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    policy.write_bytes(policy.read_bytes() + b"\n")
+
+    with pytest.raises(release_candidate.CandidateError, match="policy digest mismatch"):
+        release_candidate.verify(root, VERSION, COMMIT)
 
 
 def test_publication_can_omit_every_windows_specific_asset(

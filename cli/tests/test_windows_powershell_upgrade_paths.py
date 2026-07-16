@@ -1503,7 +1503,9 @@ def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback
     assert "published_baseline_config_versions" in source
     assert "Upgrade baseline policy must be a schema_version 2 object" in source
     assert "Published baseline config-version keys must exactly match published_baselines" in source
-    assert "Published baseline $value must seed historical config version $expectedConfigVersion" in source
+    assert "Get-CandidateRuntimeConfigVersion" in source
+    assert "no newer" in source
+    assert "$env:UPGRADE_BASELINE_POLICY" in source
     assert "$script:BaselineConfigVersions.ContainsKey($script:BridgeVersion) -and" in source
     assert "if ([int]$script:BaselineConfigVersions[$script:BridgeVersion]" not in source
     assert "Get-PublishedBaselineConfigVersion" in source

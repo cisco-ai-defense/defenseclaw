@@ -71,7 +71,12 @@ PROTECTED_ARTIFACT_TRANSLATION = bytes(
 )
 MAX_PROTECTED_ARTIFACT_BYTES = MAX_GATEWAY_BINARY_BYTES + len(PROTECTED_ARTIFACT_MAGIC)
 ROOT = Path(__file__).resolve().parents[1]
-UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
+UPGRADE_BASELINES_PATH = Path(
+    os.environ.get(
+        "UPGRADE_BASELINE_POLICY",
+        str(ROOT / "release" / "upgrade-baselines.json"),
+    )
+)
 HISTORICAL_ARTIFACT_DIGESTS_PATH = ROOT / "release" / "historical-artifact-digests.json"
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
 RESOLVER_COMPLETENESS_MARKER = b"# DefenseClaw upgrade resolver complete v1"
@@ -81,6 +86,8 @@ RESOLVER_ASSET_SOURCES = {
 }
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_RELEASE_CERTIFICATE_BYTES = 64 * 1024
+MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES = 1024 * 1024
+EFFECTIVE_UPGRADE_BASELINES_FILENAME = "effective-upgrade-baselines.json"
 STRICT_BASE64_RE = re.compile(
     rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
 )
@@ -106,6 +113,50 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_bounded_regular_file(path: Path, *, label: str, max_bytes: int) -> bytes:
+    """Read one stable bounded regular file without following a leaf symlink."""
+
+    try:
+        named_before = path.lstat()
+    except OSError as exc:
+        raise CandidateError(f"{label} is unavailable: {path}") from exc
+    if not stat.S_ISREG(named_before.st_mode) or not 0 < named_before.st_size <= max_bytes:
+        raise CandidateError(f"{label} must be a non-empty bounded regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CandidateError(f"{label} is unavailable: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        bytes_read = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, max_bytes + 1 - bytes_read))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            if bytes_read > max_bytes:
+                raise CandidateError(f"{label} exceeds its size bound: {path}")
+        opened_after = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except OSError as exc:
+            raise CandidateError(f"{label} disappeared while being read: {path}") from exc
+        if (
+            _file_state(named_before) != _file_state(named_after)
+            or _file_state(opened) != _file_state(opened_after)
+            or _file_identity(named_after) != _file_identity(opened_after)
+            or bytes_read != opened_after.st_size
+        ):
+            raise CandidateError(f"{label} changed while being read: {path}")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -545,9 +596,25 @@ def stage_resolvers(directory: Path, version: str) -> None:
     _validate_resolver_assets(directory, version)
 
 
-def _load_upgrade_baseline_policy() -> tuple[list[str], dict[str, list[str]]]:
+def _load_upgrade_baseline_policy(
+    candidate_version: str | None = None,
+    policy_path: Path | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    if candidate_version is None:
+        try:
+            source_identity = json.loads(
+                (ROOT / "release" / "source-install-identity.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            candidate_version = source_identity["source_release"]
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise CandidateError("could not resolve source release for baseline validation") from exc
+        if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
+            raise CandidateError("source release for baseline validation is invalid")
+    policy_path = policy_path or UPGRADE_BASELINES_PATH
     try:
-        document = json.loads(UPGRADE_BASELINES_PATH.read_text(encoding="utf-8"))
+        document = json.loads(policy_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateError(f"could not load tested upgrade baselines: {exc}") from exc
     configured = document.get("published_baselines")
@@ -571,7 +638,10 @@ def _load_upgrade_baseline_policy() -> tuple[list[str], dict[str, list[str]]]:
         or not isinstance(config_versions, dict)
         or set(config_versions) != set(configured)
         or any(
-            not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7}
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+            or value > _runtime_config_version_from_source(candidate_version)
             for value in config_versions.values()
         )
         or (
@@ -646,7 +716,7 @@ def validate_release_progression(target: str, releases_json: Path) -> tuple[str,
     """Require a release target newer than reviewed and published stable state."""
 
     _validate_version(target)
-    configured, _platforms = _load_upgrade_baseline_policy()
+    configured, _platforms = _load_upgrade_baseline_policy(target)
     try:
         document = json.loads(releases_json.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -744,7 +814,12 @@ def _expected_release_artifacts(version: str) -> dict[str, Any]:
     }
 
 
-def _validate_upgrade_manifest(path: Path, version: str) -> None:
+def _validate_upgrade_manifest(
+    path: Path,
+    version: str,
+    *,
+    baseline_policy_path: Path | None = None,
+) -> None:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -772,7 +847,10 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
     if controller_protocol < min_protocol:
         raise CandidateError("candidate controller cannot drive its own minimum upgrade protocol")
 
-    configured, platform_configured = _load_upgrade_baseline_policy()
+    configured, platform_configured = _load_upgrade_baseline_policy(
+        version,
+        baseline_policy_path,
+    )
     tested = document.get("tested_source_versions")
     platform_tested = document.get("platform_tested_source_versions")
     runtime_config = document.get("runtime_config_version")
@@ -795,9 +873,14 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
         manifest_bridge = document.get("required_bridge_version")
         if manifest_bridge and manifest_bridge not in expected_windows:
             # An unpublished platform bridge makes the entire hard-cut path
-            # unsupported on that platform. Do not retain pre-bridge sources:
-            # that would falsely attest a staged upgrade path.
-            expected_windows = []
+            # from older sources unsupported on that platform. Retain only
+            # actually published post-hard-cut runtimes, which can drive a
+            # direct protocol-2 transition without the bridge.
+            expected_windows = [
+                item
+                for item in expected_windows
+                if tuple(map(int, item.split("."))) >= (0, 8, 5)
+            ]
         if tested != expected_tested:
             raise CandidateError(
                 "tested_source_versions must exactly match every reviewed baseline older than the candidate"
@@ -3520,6 +3603,24 @@ def _validate_release_identity(
     return provenance
 
 
+def _validated_effective_upgrade_baselines(root: Path, version: str) -> str:
+    path = root / EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    before = _read_bounded_regular_file(
+        path,
+        label="effective upgrade-baseline policy",
+        max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
+    )
+    _load_upgrade_baseline_policy(version, path)
+    after = _read_bounded_regular_file(
+        path,
+        label="effective upgrade-baseline policy",
+        max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
+    )
+    if before != after:
+        raise CandidateError("effective upgrade-baseline policy changed during validation")
+    return hashlib.sha256(after).hexdigest()
+
+
 def assemble(
     runtime_dir: Path,
     macos_dir: Path,
@@ -3532,6 +3633,7 @@ def assemble(
     bridge_commit: str | None = None,
     bridge_tree: str | None = None,
     bridge_checksums_sha256: str | None = None,
+    baseline_policy_path: Path | None = None,
 ) -> None:
     _validate_version(version)
     _validate_commit(commit)
@@ -3562,6 +3664,15 @@ def assemble(
 
     dist = root / "dist"
     dist.mkdir(parents=True)
+    policy_source = baseline_policy_path or UPGRADE_BASELINES_PATH
+    policy_payload = _read_bounded_regular_file(
+        policy_source,
+        label="effective upgrade-baseline policy",
+        max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
+    )
+    effective_policy = root / EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    effective_policy.write_bytes(policy_payload)
+    effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
     _copy_exact(runtime_dir, dist, runtime_asset_names(version))
     _copy_exact(macos_dir, dist, macos_names)
     _copy_resolver_assets(dist, version)
@@ -3592,6 +3703,7 @@ def assemble(
         "commit": commit,
         "macos_verification_status": macos_verification_status,
         "source_install_identity": _reviewed_source_install_identity(version),
+        "effective_upgrade_baselines_sha256": effective_policy_sha256,
     }
     (root / "candidate-metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
@@ -3633,12 +3745,14 @@ def seal(root: Path, version: str, commit: str) -> None:
     macos_verification_status = _validate_macos_verification_status(
         metadata.get("macos_verification_status")
     )
+    effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
     expected_metadata = {
         "schema_version": SCHEMA_VERSION,
         "release_version": version,
         "commit": commit,
         "macos_verification_status": macos_verification_status,
         "source_install_identity": _reviewed_source_install_identity(version),
+        "effective_upgrade_baselines_sha256": effective_policy_sha256,
     }
     if metadata != expected_metadata:
         raise CandidateError(f"candidate metadata mismatch: got {metadata!r}")
@@ -3695,6 +3809,9 @@ def verify(root: Path, version: str, commit: str) -> None:
     )
     if manifest.get("source_install_identity") != _reviewed_source_install_identity(version):
         raise CandidateError("release candidate source-install identity mismatch")
+    effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
+    if manifest.get("effective_upgrade_baselines_sha256") != effective_policy_sha256:
+        raise CandidateError("effective upgrade-baseline policy digest mismatch")
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
@@ -3745,7 +3862,11 @@ def verify(root: Path, version: str, commit: str) -> None:
             raise CandidateError(f"published checksum mismatch for {name}")
     _validate_resolver_assets(dist, version)
 
-    _validate_upgrade_manifest(dist / "upgrade-manifest.json", version)
+    _validate_upgrade_manifest(
+        dist / "upgrade-manifest.json",
+        version,
+        baseline_policy_path=root / EFFECTIVE_UPGRADE_BASELINES_FILENAME,
+    )
     if tuple(map(int, version.split("."))) >= (0, 8, 4):
         artifacts = _expected_release_artifacts(version)
         _validate_wheel(dist / artifacts["wheel"], version)
@@ -3839,6 +3960,7 @@ def _parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument("--bridge-commit")
     assemble_parser.add_argument("--bridge-tree")
     assemble_parser.add_argument("--bridge-checksums-sha256")
+    assemble_parser.add_argument("--baseline-policy", type=Path)
 
     canonicalize_certificate_parser = subparsers.add_parser("canonicalize-certificate")
     canonicalize_certificate_parser.add_argument("--certificate", type=Path, required=True)
@@ -3907,6 +4029,7 @@ def main(argv: list[str] | None = None) -> int:
                 bridge_commit=args.bridge_commit,
                 bridge_tree=args.bridge_tree,
                 bridge_checksums_sha256=args.bridge_checksums_sha256,
+                baseline_policy_path=args.baseline_policy,
             )
             print(f"release candidate assembled: {args.root}")
         elif args.command == "canonicalize-certificate":

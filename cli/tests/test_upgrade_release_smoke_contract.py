@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -62,6 +63,33 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert 'provenance.get("binary_version") != sys.argv[2]' in canary
     assert "version-bound healthy before resolver handoff" in canary
     assert "did not reach version-bound health" in canary
+
+
+@pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])
+def test_historical_canary_fixture_is_hermetic_before_gateway_start(
+    tmp_path: Path,
+    baseline: str,
+    config_version: int,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    completed = _source_script(
+        'SMOKE_HOME="$2"; FROM_VERSION="$3"; seed_v8_observability_fixture',
+        str(home),
+        baseline,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    config = yaml.safe_load((home / ".defenseclaw/config.yaml").read_text(encoding="utf-8"))
+    assert config["config_version"] == config_version
+    assert config["gateway"] == {
+        "fleet_mode": "disabled",
+        "watcher": {"enabled": False},
+    }
+    openclaw_home = home / ".openclaw"
+    assert openclaw_home.is_dir()
+    assert not openclaw_home.is_symlink()
+    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
 
 
 def test_protected_release_test_artifact_is_authenticated_before_private_decode(
@@ -257,6 +285,48 @@ def test_baseline_config_policy_fails_closed_and_allows_pre_bridge_topology(
         "0.8.1",
     )
     assert unsupported.returncode != 0
+
+
+def test_materialized_policy_accepts_config_8_but_not_newer_than_candidate(
+    tmp_path: Path,
+) -> None:
+    effective = json.loads(BASELINE_POLICY.read_text(encoding="utf-8"))
+    effective["published_baselines"].insert(0, "0.8.5")
+    effective["published_baseline_config_versions"]["0.8.5"] = 8
+    policy = tmp_path / "effective-upgrade-baselines.json"
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+
+    accepted = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.5",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == "8"
+
+    effective["published_baseline_config_versions"]["0.8.5"] = 9
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+    rejected = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.5",
+    )
+    assert rejected.returncode != 0
+    assert "no newer than the candidate runtime" in rejected.stderr
+
+
+def test_harnesses_accept_one_materialized_policy_snapshot() -> None:
+    posix = SCRIPT.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'UPGRADE_BASELINE_POLICY="${UPGRADE_BASELINE_POLICY:-' in posix
+    assert "[string]$BaselinePolicy" in windows
+    assert "$env:UPGRADE_BASELINE_POLICY" in windows
+    assert "$script:UpgradeBaselinePolicy" in windows
 
 
 def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:

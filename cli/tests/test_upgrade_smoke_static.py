@@ -255,6 +255,47 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "remains live without PID custody after stop" in post_stop
 
 
+def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> None:
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    start = smoke.index("seed_v8_observability_fixture() {")
+    end = smoke.index("\n}\n\nseed_upgrade_fixture()", start)
+    fixture = smoke[start:end]
+
+    assert 'local openclaw_home="${SMOKE_HOME}/.openclaw"' in fixture
+    assert 'mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"' in fixture
+    assert 'chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}"' in fixture
+    assert "gateway:\n  fleet_mode: disabled\n  watcher:\n    enabled: false" in fixture
+
+    verify_start = smoke.index("verify_upgrade() {")
+    verify_end = smoke.index("\n}\n\nrun_one_upgrade_smoke()", verify_start)
+    verification = smoke[verify_start:verify_end]
+    assert "hermetic gateway connectivity policy was not preserved" in verification
+    assert "openclaw_home.lstat()" in verification
+    assert "except FileNotFoundError:" in verification
+    assert "fixture OpenClaw home disappeared across the staged upgrade" in verification
+    assert "fixture OpenClaw home mode changed across the staged upgrade" in verification
+
+
+def test_live_continuity_uses_low_cardinality_metric_boundary() -> None:
+    harness = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text()
+    wait_start = harness.index("wait_for_pre_upgrade_metrics() {")
+    wait_end = harness.index("\n}\n\nrun_live_upgrade()", wait_start)
+    wait = harness[wait_start:wait_end]
+
+    assert "gen_ai_agent_id" not in wait
+    assert 'gen_ai_agent_type=~"root|direct|nested"' in wait
+    assert "minimum_fixture_time" in wait
+    assert 'METRIC_CUTOVER_SECONDS="$(python3 -c' in harness
+    assert '--metric-cutover-seconds "${METRIC_CUTOVER_SECONDS}"' in harness
+
+    pre_emit = harness.index('emit_continuity_phase pre "${PRE_STAMP}"')
+    pre_metrics = harness.index('wait_for_pre_upgrade_metrics "${PRE_STAMP}"')
+    cutover = harness.index('METRIC_CUTOVER_SECONDS="$(python3 -c')
+    upgrade = harness.index("run_live_upgrade", cutover)
+    post_emit = harness.index('emit_continuity_phase post "${POST_STAMP}"')
+    assert pre_emit < pre_metrics < cutover < upgrade < post_emit
+
+
 def _posix_protected_materializer_program() -> str:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     function = resolver.index("materialize_protected_artifact() {")

@@ -40,6 +40,10 @@
     in release/upgrade-baselines.json. If omitted, the newest published
     pre-bridge baseline is used for local compatibility; release CI should pass
     every pre-bridge baseline through a job matrix.
+.PARAMETER BaselinePolicy
+    Materialized effective schema-2 baseline policy. Defaults to the
+    UPGRADE_BASELINE_POLICY environment variable and then the checked-in
+    historical floor.
 .PARAMETER UnpublishedWindowsRefusalOnly
     Authenticate the exact sealed candidate and prove that its release-owned
     resolver refuses a hard cut whose signed Windows source matrix is empty.
@@ -60,6 +64,8 @@ param(
     [ValidatePattern('^$|^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')]
     [string]$SourceVersion = "",
 
+    [string]$BaselinePolicy = "",
+
     [ValidateRange(1, 600)]
     [int]$HealthTimeout = 60,
 
@@ -79,6 +85,15 @@ $script:PublishedBaselines = @()
 $script:PublishedPreBridgeBaselines = @()
 $script:PublishedWindowsBaselines = @()
 $script:BaselineConfigVersions = @{}
+$script:UpgradeBaselinePolicy = $BaselinePolicy
+if (-not $script:UpgradeBaselinePolicy -and $env:UPGRADE_BASELINE_POLICY) {
+    $script:UpgradeBaselinePolicy = $env:UPGRADE_BASELINE_POLICY
+}
+if (-not $script:UpgradeBaselinePolicy) {
+    $script:UpgradeBaselinePolicy = Join-Path (
+        Join-Path $PSScriptRoot ".."
+    ) "release\upgrade-baselines.json"
+}
 $script:SourceVersionSpecified = $PSBoundParameters.ContainsKey("SourceVersion")
 $script:WorkRoot = ""
 $script:ReleaseRoot = ""
@@ -125,8 +140,27 @@ function Get-Property {
     return $Object.PSObject.Properties[$Name]
 }
 
+function Get-CandidateRuntimeConfigVersion {
+    $relative = if ((Compare-Version $TargetVersion $script:HardCutVersion) -ge 0) {
+        "internal\config\observability_v8_types.go"
+    } else {
+        "internal\config\config.go"
+    }
+    $pattern = if ((Compare-Version $TargetVersion $script:HardCutVersion) -ge 0) {
+        '(?m)^\s*ObservabilityV8ConfigVersion\s*=\s*([1-9][0-9]*)\s*$'
+    } else {
+        '(?m)^\s*const\s+CurrentConfigVersion\s*=\s*([1-9][0-9]*)\s*$'
+    }
+    $path = Join-Path (Join-Path $PSScriptRoot "..") $relative
+    $match = [regex]::Match((Get-Content -LiteralPath $path -Raw -Encoding UTF8), $pattern)
+    if (-not $match.Success) {
+        Fail "Could not resolve candidate runtime config version from $path"
+    }
+    return [int64]$match.Groups[1].Value
+}
+
 function Read-UpgradeBaselinePolicy {
-    $path = Join-Path (Join-Path $PSScriptRoot "..") "release\upgrade-baselines.json"
+    $path = $script:UpgradeBaselinePolicy
     try {
         $policy = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     } catch {
@@ -163,24 +197,18 @@ function Read-UpgradeBaselinePolicy {
         Fail "Published baseline config-version keys must exactly match published_baselines"
     }
     $script:BaselineConfigVersions = @{}
+    $candidateRuntimeConfigVersion = Get-CandidateRuntimeConfigVersion
     foreach ($value in $values) {
         $property = Get-Property $configVersions.Value ([string]$value)
         if (-not $property -or -not (Test-Integer $property.Value)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
+            Fail "Published baseline $value has no positive reviewed config version"
         }
         $configVersion = [int64]$property.Value
-        if ($configVersion -notin @(5, 6, 7)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
-        }
-        $expectedConfigVersion = if ((Compare-Version ([string]$value) "0.8.3") -ge 0) {
-            7
-        } elseif ((Compare-Version ([string]$value) "0.7.1") -ge 0) {
-            6
-        } else {
-            5
-        }
-        if ($configVersion -ne $expectedConfigVersion) {
-            Fail "Published baseline $value must seed historical config version $expectedConfigVersion"
+        if ($configVersion -lt 1 -or $configVersion -gt $candidateRuntimeConfigVersion) {
+            Fail (
+                "Published baseline $value config version must be positive and no newer " +
+                "than candidate runtime $candidateRuntimeConfigVersion"
+            )
         }
         $script:BaselineConfigVersions[[string]$value] = $configVersion
     }
