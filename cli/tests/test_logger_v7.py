@@ -407,7 +407,8 @@ def test_no_runtime_capability_is_confined_to_bootstrap_and_recovery() -> None:
     callers = {
         path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
-        if path.name != "logger.py" and "Logger.no_runtime()" in path.read_text()
+        if path.name != "logger.py"
+        and "Logger.no_runtime()" in path.read_text(encoding="utf-8")
     }
     assert callers == {
         "bootstrap.py",
@@ -462,10 +463,10 @@ def test_real_v8_config_reaches_an_ordinary_command(tmp_path: Path) -> None:
         "\n".join(
             (
                 "config_version: 8",
-                f'data_dir: "{tmp_path}"',
+                f'data_dir: "{tmp_path.as_posix()}"',
                 "observability:",
                 "  local:",
-                f'    path: "{tmp_path / "audit.db"}"',
+                f'    path: "{(tmp_path / "audit.db").as_posix()}"',
             )
         )
         + "\n",

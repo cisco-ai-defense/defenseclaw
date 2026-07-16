@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from defenseclaw.observability.v8_status import (
     V8BucketStatus,
     V8DestinationStatus,
@@ -32,6 +33,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -613,7 +615,9 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
 
-    scoped_status = _with_field(fields, "Connector", "codex")
+    scoped_status = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "codex"}
+    )
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
         "guardrail",
         "status",
@@ -632,8 +636,10 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    fail_mode = _with_field(fields, "Action", "fail-mode")
-    fail_mode = _with_field(fail_mode, "Connector", "hermes")
+    fail_mode = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "hermes"}
+    )
+    fail_mode = _with_field(fail_mode, "Action", "fail-mode")
     fail_mode = _with_field(fail_mode, "Fail Mode", "closed")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fail_mode) == (
         "guardrail",
@@ -658,10 +664,12 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    block = _with_field(fields, "Action", "block-message")
+    block = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "antigravity"}
+    )
+    block = _with_field(block, "Action", "block-message")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
@@ -1805,13 +1813,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags

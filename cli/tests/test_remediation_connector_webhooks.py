@@ -41,6 +41,8 @@ from defenseclaw.webhooks import WebhookView
 from defenseclaw.webhooks.dispatch import _redact_payload_preview
 from defenseclaw.webhooks.writer import _write_yaml, redact_webhook_url
 
+from tests.permissions import assert_owner_only_file
+
 
 # ---------------------------------------------------------------------------
 # F-0041 — connector_paths._atomic_json_merge must not follow a symlinked
@@ -140,8 +142,11 @@ def test_f0441_write_yaml_is_0600_and_ignores_tmp_symlink(tmp_path):
 
     _write_yaml(str(target), {"webhooks": [{"name": "x"}]})
 
-    mode = stat.S_IMODE(os.stat(target).st_mode)
-    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    if os.name == "nt":
+        assert_owner_only_file(target)
+    else:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        assert mode == 0o600, f"expected 0600, got {oct(mode)}"
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
     assert "name: x" in target.read_text(encoding="utf-8")
 

@@ -46,6 +46,12 @@ from defenseclaw.safety import DotenvValueError
 from dotenv import dotenv_values
 
 
+def _same_test_path(left: str | os.PathLike[str], right: str | os.PathLike[str]) -> bool:
+    return os.path.normcase(os.path.abspath(os.fspath(left))) == os.path.normcase(
+        os.path.abspath(os.fspath(right))
+    )
+
+
 def _source() -> str:
     return """config_version: 8
 observability:
@@ -183,29 +189,58 @@ def test_v8_secret_dotenv_fsyncs_staged_file_before_atomic_replace(
 ) -> None:
     preset = PRESETS["datadog"]
     events: list[str] = []
-    real_fsync = os.fsync
-    real_link = os.link
+    dotenv = tmp_path / ".env"
+    if os.name == "nt":
+        real_write = v8_activation_module.windows_acl.write_new_file
+        real_move = v8_activation_module.windows_acl.move_file_no_replace
+        real_flush = v8_activation_module.windows_acl.flush_fd
 
-    def fsync(descriptor: int) -> None:
-        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
-        events.append(f"fsync:{kind}")
-        real_fsync(descriptor)
+        def write_new_file(path, payload, security) -> None:
+            real_write(path, payload, security)
+            if b"durable-secret" in payload:
+                events.append("staged-file-flushed")
 
-    def link(source, destination, *args, **kwargs):
-        if os.fspath(destination) == ".env":
-            events.append("publish")
-        return real_link(source, destination, *args, **kwargs)
+        def move_file_no_replace(source, target) -> None:
+            real_move(source, target)
+            if _same_test_path(target, dotenv):
+                events.append("publish")
 
-    monkeypatch.setattr(v8_activation_module.os, "fsync", fsync)
-    monkeypatch.setattr(v8_activation_module.os, "link", link)
+        def flush_fd(descriptor: int) -> None:
+            real_flush(descriptor)
+            if "publish" in events:
+                events.append("published-file-flushed")
+
+        monkeypatch.setattr(v8_activation_module.windows_acl, "write_new_file", write_new_file)
+        monkeypatch.setattr(v8_activation_module.windows_acl, "move_file_no_replace", move_file_no_replace)
+        monkeypatch.setattr(v8_activation_module.windows_acl, "flush_fd", flush_fd)
+    else:
+        real_fsync = os.fsync
+        real_link = os.link
+
+        def fsync(descriptor: int) -> None:
+            kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(f"fsync:{kind}")
+            real_fsync(descriptor)
+
+        def link(source, destination, *args, **kwargs):
+            if os.fspath(destination) == ".env":
+                events.append("publish")
+            return real_link(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(v8_activation_module.os, "fsync", fsync)
+        monkeypatch.setattr(v8_activation_module.os, "link", link)
     monkeypatch.setenv(preset.token_env, "before-test")
 
     apply_secret(str(tmp_path), preset, "durable-secret", dry_run=False)
 
     publish = events.index("publish")
-    assert "fsync:file" in events[:publish]
-    assert "fsync:directory" in events[publish + 1 :]
-    assert dotenv_values(tmp_path / ".env").get(preset.token_env) == "durable-secret"
+    if os.name == "nt":
+        assert "staged-file-flushed" in events[:publish]
+        assert "published-file-flushed" in events[publish + 1 :]
+    else:
+        assert "fsync:file" in events[:publish]
+        assert "fsync:directory" in events[publish + 1 :]
+    assert dotenv_values(dotenv).get(preset.token_env) == "durable-secret"
 
 
 def test_v8_secret_dotenv_replace_failure_preserves_existing_file(
@@ -218,14 +253,32 @@ def test_v8_secret_dotenv_replace_failure_preserves_existing_file(
     dotenv = tmp_path / ".env"
     before = dotenv.read_bytes()
 
-    def reject_replace(*_args, **_kwargs) -> None:
-        raise V8ActivationError("replace_failed", "locked_publish_check", target_path=str(dotenv))
+    if os.name == "nt":
+        real_replace = v8_activation_module.windows_acl.replace_file
 
-    monkeypatch.setattr(v8_activation_module, "_exchange_entries", reject_replace)
-    with pytest.raises(V8ActivationError) as captured:
+        def reject_replace(target, replacement, backup) -> None:
+            if _same_test_path(target, dotenv):
+                raise v8_activation_module.windows_acl.WindowsAclError(
+                    errno.EIO,
+                    "injected ReplaceFileW failure",
+                )
+            real_replace(target, replacement, backup)
+
+        monkeypatch.setattr(v8_activation_module.windows_acl, "replace_file", reject_replace)
+        expected_error = v8_activation_module.windows_acl.WindowsAclError
+    else:
+
+        def reject_replace(*_args, **_kwargs) -> None:
+            raise V8ActivationError("replace_failed", "locked_publish_check", target_path=str(dotenv))
+
+        monkeypatch.setattr(v8_activation_module, "_exchange_entries", reject_replace)
+        expected_error = V8ActivationError
+
+    with pytest.raises(expected_error) as captured:
         apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
 
-    assert captured.value.code == "replace_failed"
+    if os.name != "nt":
+        assert captured.value.code == "replace_failed"
     assert dotenv.read_bytes() == before
     assert os.environ[preset.token_env] == "original-secret"
     assert not list(tmp_path.glob("..env.observability-v8-*.tmp"))
@@ -352,17 +405,30 @@ def test_v8_secret_dotenv_final_window_cas_restores_concurrent_writer(
     apply_secret(str(tmp_path), preset, "original-secret", dry_run=False)
     dotenv = tmp_path / ".env"
     concurrent = b"EXTERNAL_ROTATION=preserve\n"
-    real_exchange = v8_activation_module._exchange_entries
     raced = False
 
-    def race(parent_descriptor, first, second, target_path):
-        nonlocal raced
-        if not raced and target_path == str(dotenv):
-            raced = True
-            dotenv.write_bytes(concurrent)
-        return real_exchange(parent_descriptor, first, second, target_path)
+    if os.name == "nt":
+        real_replace = v8_activation_module.windows_acl.replace_file
 
-    monkeypatch.setattr(v8_activation_module, "_exchange_entries", race)
+        def race(target, replacement, backup) -> None:
+            nonlocal raced
+            if not raced and _same_test_path(target, dotenv):
+                raced = True
+                dotenv.write_bytes(concurrent)
+            real_replace(target, replacement, backup)
+
+        monkeypatch.setattr(v8_activation_module.windows_acl, "replace_file", race)
+    else:
+        real_exchange = v8_activation_module._exchange_entries
+
+        def race(parent_descriptor, first, second, target_path):
+            nonlocal raced
+            if not raced and target_path == str(dotenv):
+                raced = True
+                dotenv.write_bytes(concurrent)
+            return real_exchange(parent_descriptor, first, second, target_path)
+
+        monkeypatch.setattr(v8_activation_module, "_exchange_entries", race)
 
     with pytest.raises(V8ActivationError) as captured:
         apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
@@ -456,18 +522,35 @@ def test_v8_secret_dotenv_incomplete_cas_rollback_retains_external_recovery_file
     apply_secret(str(tmp_path), preset, "original-secret", dry_run=False)
     dotenv = tmp_path / ".env"
     concurrent = b"EXTERNAL_ROTATION=must-remain-recoverable\n"
-    real_exchange = v8_activation_module._exchange_entries
     raced = False
 
-    def race(parent_descriptor, first, second, target_path):
-        nonlocal raced
-        if not raced and target_path == str(dotenv):
-            raced = True
-            dotenv.write_bytes(concurrent)
-        return real_exchange(parent_descriptor, first, second, target_path)
+    if os.name == "nt":
+        real_replace = v8_activation_module.windows_acl.replace_file
 
-    monkeypatch.setattr(v8_activation_module, "_exchange_entries", race)
-    monkeypatch.setattr(v8_activation_module, "_restore_displaced_exchange", lambda *_args: False)
+        def race(target, replacement, backup) -> None:
+            nonlocal raced
+            if not raced and _same_test_path(target, dotenv):
+                raced = True
+                dotenv.write_bytes(concurrent)
+            real_replace(target, replacement, backup)
+
+        def reject_restore(*_args, **_kwargs) -> None:
+            raise OSError(errno.EIO, "injected Windows rollback failure")
+
+        monkeypatch.setattr(v8_activation_module.windows_acl, "replace_file", race)
+        monkeypatch.setattr(v8_activation_module, "_restore_windows_original", reject_restore)
+    else:
+        real_exchange = v8_activation_module._exchange_entries
+
+        def race(parent_descriptor, first, second, target_path):
+            nonlocal raced
+            if not raced and target_path == str(dotenv):
+                raced = True
+                dotenv.write_bytes(concurrent)
+            return real_exchange(parent_descriptor, first, second, target_path)
+
+        monkeypatch.setattr(v8_activation_module, "_exchange_entries", race)
+        monkeypatch.setattr(v8_activation_module, "_restore_displaced_exchange", lambda *_args: False)
 
     with pytest.raises(v8_activation_module.V8ActivationRollbackError) as captured:
         apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
@@ -518,32 +601,71 @@ def test_v8_secret_dotenv_directory_fsync_failure_retains_exact_original(
     dotenv = tmp_path / ".env"
     before = dotenv.read_bytes()
     before_stat = dotenv.stat()
-    real_fsync = os.fsync
     failed = False
 
-    def fail_publish_fsync(descriptor: int) -> None:
-        nonlocal failed
-        if not failed and stat.S_ISDIR(os.fstat(descriptor).st_mode) and b"replacement-secret" in dotenv.read_bytes():
-            failed = True
-            raise OSError(errno.EIO, "injected directory fsync failure")
-        real_fsync(descriptor)
+    if os.name == "nt":
+        before_security = v8_activation_module.windows_acl.capture_path(str(dotenv))
+        real_flush = v8_activation_module.windows_acl.flush_fd
+        real_replace = v8_activation_module.windows_acl.replace_file
+        published = False
 
-    monkeypatch.setattr(v8_activation_module.os, "fsync", fail_publish_fsync)
+        def mark_publish(target, replacement, backup) -> None:
+            nonlocal published
+            real_replace(target, replacement, backup)
+            if _same_test_path(target, dotenv):
+                published = True
 
-    with pytest.raises(v8_activation_module.V8ActivationRollbackError) as captured:
-        apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
+        def fail_publish_flush(descriptor: int) -> None:
+            nonlocal failed
+            if published and not failed:
+                failed = True
+                raise v8_activation_module.windows_acl.WindowsAclError(
+                    errno.EIO,
+                    "injected FlushFileBuffers failure",
+                )
+            real_flush(descriptor)
 
-    recovery = Path(captured.value.backup_directory or "")
-    assert captured.value.code == "rollback_incomplete"
-    assert captured.value.stage == "publication_commit"
-    assert failed
-    assert b"replacement-secret" in dotenv.read_bytes()
-    assert recovery.read_bytes() == before
-    recovery_stat = recovery.stat()
-    assert (recovery_stat.st_uid, recovery_stat.st_gid) == (before_stat.st_uid, before_stat.st_gid)
-    assert stat.S_IMODE(recovery_stat.st_mode) == stat.S_IMODE(before_stat.st_mode)
+        monkeypatch.setattr(v8_activation_module.windows_acl, "replace_file", mark_publish)
+        monkeypatch.setattr(v8_activation_module.windows_acl, "flush_fd", fail_publish_flush)
+        with pytest.raises(v8_activation_module.windows_acl.WindowsAclError):
+            apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
+
+        after_stat = dotenv.stat()
+        assert failed
+        assert dotenv.read_bytes() == before
+        assert (after_stat.st_dev, after_stat.st_ino) == (before_stat.st_dev, before_stat.st_ino)
+        assert v8_activation_module.windows_acl.capture_path(str(dotenv)) == before_security
+        assert not list(tmp_path.glob("..env.observability-v8-*.tmp"))
+    else:
+        real_fsync = os.fsync
+
+        def fail_publish_fsync(descriptor: int) -> None:
+            nonlocal failed
+            if (
+                not failed
+                and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                and b"replacement-secret" in dotenv.read_bytes()
+            ):
+                failed = True
+                raise OSError(errno.EIO, "injected directory fsync failure")
+            real_fsync(descriptor)
+
+        monkeypatch.setattr(v8_activation_module.os, "fsync", fail_publish_fsync)
+
+        with pytest.raises(v8_activation_module.V8ActivationRollbackError) as captured:
+            apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
+
+        recovery = Path(captured.value.backup_directory or "")
+        assert captured.value.code == "rollback_incomplete"
+        assert captured.value.stage == "publication_commit"
+        assert failed
+        assert b"replacement-secret" in dotenv.read_bytes()
+        assert recovery.read_bytes() == before
+        recovery_stat = recovery.stat()
+        assert (recovery_stat.st_uid, recovery_stat.st_gid) == (before_stat.st_uid, before_stat.st_gid)
+        assert stat.S_IMODE(recovery_stat.st_mode) == stat.S_IMODE(before_stat.st_mode)
+        recovery.unlink()
     assert os.environ[preset.token_env] == "original-secret"
-    recovery.unlink()
 
 
 def test_v8_secret_dotenv_parent_open_failure_propagates_without_change(
@@ -555,17 +677,27 @@ def test_v8_secret_dotenv_parent_open_failure_propagates_without_change(
     apply_secret(str(tmp_path), preset, "original-secret", dry_run=False)
     dotenv = tmp_path / ".env"
     before = dotenv.read_bytes()
-    real_open_parent = v8_activation_module._open_pinned_parent
-    calls = 0
+    if os.name == "nt":
+        real_write = v8_activation_module.windows_acl.write_new_file
 
-    def fail_actual_publish(snapshot):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError(errno.EIO, "injected parent open failure")
-        return real_open_parent(snapshot)
+        def fail_actual_publish(path, payload, security) -> None:
+            if b"replacement-secret" in payload:
+                raise OSError(errno.EIO, "injected Windows staging failure")
+            real_write(path, payload, security)
 
-    monkeypatch.setattr(v8_activation_module, "_open_pinned_parent", fail_actual_publish)
+        monkeypatch.setattr(v8_activation_module.windows_acl, "write_new_file", fail_actual_publish)
+    else:
+        real_open_parent = v8_activation_module._open_pinned_parent
+        calls = 0
+
+        def fail_actual_publish(snapshot):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.EIO, "injected parent open failure")
+            return real_open_parent(snapshot)
+
+        monkeypatch.setattr(v8_activation_module, "_open_pinned_parent", fail_actual_publish)
 
     with pytest.raises(OSError) as captured:
         apply_secret(str(tmp_path), preset, "replacement-secret", dry_run=False)
@@ -743,7 +875,7 @@ def test_v8_enable_mutates_exact_source_index() -> None:
     ):
         _set_v8_destination_enabled("/tmp/dc", "collector", True, "")
     args, kwargs = mutate.call_args
-    assert str(args[0]).endswith("/tmp/dc/config.yaml")
+    assert Path(args[0]) == Path("/tmp/dc/config.yaml")
     assert args[1][0].path == ("observability", "destinations", 3, "enabled")
     assert args[1][0].value is True
     assert kwargs == {"data_dir": "/tmp/dc"}

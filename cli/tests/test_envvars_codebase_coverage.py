@@ -198,11 +198,18 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
     "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
     "DEFENSECLAW_LOCAL_": frozenset({"internal/cli/daemon.go"}),
+    "DEFENSECLAW_MIGRATED_": frozenset(
+        {
+            "cli/defenseclaw/observability/v8_migration.py",
+            "cli/tests/test_observability_v8_migration.py",
+        }
+    ),
     "DEFENSECLAW_OTEL_": frozenset(
         {
-            "cli/defenseclaw/observability/writer.py",
+            "cli/defenseclaw/observability/v8_migration.py",
             "docs/OBSERVABILITY.md",
             "docs/OTEL.md",
+            "docs-site/content/docs/observability/index.mdx",
             "internal/config/config.go",
             "internal/config/config_test.go",
         }

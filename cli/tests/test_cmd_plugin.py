@@ -104,6 +104,8 @@ class PluginCommandTestBase(unittest.TestCase):
         os.makedirs(plugin_src, exist_ok=True)
         with open(os.path.join(plugin_src, "plugin.py"), "w") as f:
             f.write("# plugin code\n")
+        with open(os.path.join(plugin_src, "plugin.json"), "w") as f:
+            json.dump({"id": name}, f)
         return plugin_src
 
     def _install_plugin(self, name: str) -> str:
@@ -640,7 +642,7 @@ class TestPluginAllow(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_cls.return_value.enable_plugin.assert_called_once_with("xai")
         self.assertFalse(self.app.store.has_action("plugin", "xai", "runtime", "disable"))
-        self.assertTrue(pe.is_allowed("plugin", "xai-plugin"))
+        self.assertTrue(pe.is_allowed("plugin", "xai"))
 
 
 class TestResolveOpenclawPluginId(unittest.TestCase):
@@ -1241,12 +1243,13 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         codex_list = self.invoke(["list", "--connector", "codex"])
         self.assertEqual(codex_list.exit_code, 0, codex_list.output)
         self.assertIn("shared", codex_list.output)
-        self.assertIn("quarant", codex_list.output)
+        # Rich may truncate the column one character earlier on Windows.
+        self.assertIn("quaran", codex_list.output)
 
         hermes_list = self.invoke(["list", "--connector", "hermes"])
         self.assertEqual(hermes_list.exit_code, 0, hermes_list.output)
         self.assertIn("shared", hermes_list.output)
-        self.assertIn("quarant", hermes_list.output)
+        self.assertIn("quaran", hermes_list.output)
 
         codex_json = self.invoke(["list", "--connector", "codex", "--json"])
         self.assertEqual(codex_json.exit_code, 0, codex_json.output)
@@ -1346,6 +1349,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             "antigravity": [antigravity_root],
         }.get(connector or "antigravity", [])
         src = self._create_plugin_dir("not-an-antigravity-plugin")
+        os.remove(os.path.join(src, "plugin.json"))
 
         result = self.invoke(["install", src, "--connector", "antigravity"])
 
@@ -1649,11 +1653,15 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     def test_install_blocked_plugin(self, mock_fetch):
         pe = PolicyEngine(self.app.store)
         pe.block("plugin", "blocked-pkg", "testing")
+        src = self._create_plugin_dir("downloaded-blocked-source")
+        with open(os.path.join(src, "plugin.json"), "w") as f:
+            json.dump({"id": "blocked-pkg"}, f)
+        mock_fetch.return_value = src
 
         result = self._invoke_install(["install", "blocked-pkg"])
         self.assertEqual(result.exit_code, 1)
         self.assertIn("block list", result.output)
-        mock_fetch.assert_not_called()
+        mock_fetch.assert_called_once()
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
@@ -1674,6 +1682,8 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     def test_install_duplicate_without_force(self, mock_fetch):
         self._install_connector_plugin("dup-npm")
         src = self._create_plugin_dir("dup-npm-source")
+        with open(os.path.join(src, "plugin.json"), "w") as f:
+            json.dump({"id": "dup-npm"}, f)
         mock_fetch.return_value = src
 
         result = self._invoke_install(["install", "dup-npm"])
@@ -2271,9 +2281,10 @@ class HostPluginEnumerationTests(unittest.TestCase):
         out = _list_host_plugins("", FakeCfg())
         self.assertEqual(out, [])
 
-    def test_list_host_plugins_dedups_across_dirs(self):
-        """Two plugin dirs with the same id surface only once."""
+    def test_list_host_plugins_fails_closed_across_dirs(self):
+        """Two physical directories cannot silently collapse to one ID."""
         from defenseclaw.commands.cmd_plugin import _list_host_plugins
+        from defenseclaw.inventory.plugin_identity import AmbiguousPluginIdentityError
 
         a = os.path.join(self.tmp_dir, "user-scope")
         b = os.path.join(self.tmp_dir, "workspace-scope")
@@ -2285,15 +2296,12 @@ class HostPluginEnumerationTests(unittest.TestCase):
             with open(os.path.join(sub, "plugin.json"), "w") as fh:
                 json.dump({"id": "shared-plugin", "name": "Shared"}, fh)
 
-        outer_self = self
-
         class FakeCfg:
             def plugin_dirs(self, connector=None):
                 return [a, b]  # noqa: F823 — closure over outer scope
 
-        out = _list_host_plugins("claudecode", FakeCfg())
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["id"], "shared-plugin")
+        with self.assertRaisesRegex(AmbiguousPluginIdentityError, "ambiguous plugin identity"):
+            _list_host_plugins("claudecode", FakeCfg())
 
 
 class MergeAllPluginsHostBranchTests(unittest.TestCase):

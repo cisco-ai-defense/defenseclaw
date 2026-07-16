@@ -22,11 +22,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+from defenseclaw.observability.v8_config import load_validate_v8
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
@@ -36,9 +38,40 @@ MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
 
 
+def _bash_executable() -> str:
+    """Select a real Bash runtime without invoking Windows' WSL app alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        git_path = Path(git).resolve()
+        # A normal Git for Windows install exposes git.exe from either cmd/ or
+        # bin/.  Its Bash runtime is always under the sibling bin directory.
+        candidates.append(git_path.parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX upgrade-smoke contract on Windows")
+
+
 def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", f'source "$1"; {command}', "upgrade-smoke-contract", str(SCRIPT), *arguments],
+        [
+            _bash_executable(),
+            "-c",
+            f'source "$1"; {command}',
+            "upgrade-smoke-contract",
+            str(SCRIPT),
+            *arguments,
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -198,6 +231,45 @@ def test_v8_fixture_covers_each_historical_config_family(
     ).read_bytes()
 
 
+def test_already_v8_baseline_uses_a_canonical_byte_evidenced_fixture(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    completed = _source_script(
+        'SMOKE_HOME="$2"; FROM_VERSION="0.8.5"; mkdir -p "$SMOKE_HOME"; '
+        "seed_already_v8_observability_fixture",
+        str(home),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    data_dir = home / ".defenseclaw"
+    config_source = (data_dir / "config.yaml").read_bytes()
+    document = load_validate_v8(config_source, source_name=str(data_dir / "config.yaml")).source
+    assert document["config_version"] == 8
+    assert not {"otel", "audit_sinks", "privacy"}.intersection(document)
+    assert document["observability"]["defaults"]["redaction_profile"] == "strict"
+    assert document["observability"]["local"]["retention_days"] == 37
+    destinations = document["observability"]["destinations"]
+    assert len(destinations) == 1
+    destination = destinations[0]
+    assert destination["name"] == "upgrade-smoke-jsonl"
+    assert destination["kind"] == "jsonl"
+    assert Path(destination["path"]) == data_dir / "gateway-upgrade-smoke.jsonl"
+    assert destination["rotation"] == {
+        "max_size_mb": 17,
+        "max_backups": 3,
+        "max_age_days": 11,
+        "compress": True,
+    }
+    assert destination["send"] == {
+        "signals": ["logs"],
+        "buckets": ["platform.health"],
+        "redaction_profile": "strict",
+    }
+    assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_source
+    assert (home / "fixture-evidence/environment.historical.source").read_bytes() == (
+        data_dir / ".env"
+    ).read_bytes()
+
+
 @pytest.mark.parametrize(
     ("version", "config_version"),
     [("0.8.5", "8"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
@@ -271,6 +343,34 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         'terminal_receipt.get("from_version") != bridge_version',
     ):
         assert contract in text
+
+
+def test_already_v8_upgrade_bootstraps_and_preserves_source_custody() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    bootstrap_start = text.index("bootstrap_already_v8_migration_cursor()")
+    bootstrap_end = text.index("\n}\n\nrun_v8_source_contract_tests()", bootstrap_start)
+    bootstrap = text[bootstrap_start:bootstrap_end]
+    for contract in (
+        "from defenseclaw.migrations import run_migrations",
+        "upgrade_handles_local_bundle=True",
+        "migration-cursor.source",
+        "same-version observability-v8 bootstrap count",
+        "already-v8 cursor bootstrap created a v7-to-v8 activation manifest",
+    ):
+        assert contract in bootstrap
+
+    run_one = text[text.index("run_one_upgrade_smoke()") : text.index("main()")]
+    assert run_one.index("seed_upgrade_fixture") < run_one.index(
+        "bootstrap_already_v8_migration_cursor"
+    ) < run_one.index("start_source_gateway_canary")
+
+    for verifier_contract in (
+        "already-v8 config bytes changed during upgrade",
+        "already-v8 migration cursor lost byte-exact continuity",
+        "post-hard-cut upgrade incorrectly created a v7-to-v8 activation manifest",
+        "post-hard-cut upgrade retained no normal byte-exact config/.env backup",
+    ):
+        assert verifier_contract in text
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
