@@ -148,7 +148,7 @@ directly; it performs the guarded developer publication itself.
 | Tool | Minimum | Check | Install |
 |------|---------|-------|---------|
 | Go | 1.26.4+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
-| Python | 3.10+ (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
+| Python | 3.10-3.13 (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
 | uv | latest | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js / npm | 18+ | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node` |
 | Git | any | `git --version` | System package manager |

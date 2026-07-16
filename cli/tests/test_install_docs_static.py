@@ -127,6 +127,22 @@ def _write_python_selector_shims(root: Path, body: str) -> None:
         _write_executable(root / name, body)
 
 
+def test_posix_installer_rejects_python_314_before_creating_policy_venv() -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert 'readonly MIN_PYTHON_VERSION="3.10"' in source
+    assert 'readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"' in source
+    selector = source[source.index("ensure_python() {") : source.index("# ── Resolve dist artifacts")]
+    assert 'version_gte "$ver" "${MIN_PYTHON_VERSION}"' in selector
+    assert '! version_gte "$ver" "${MAX_PYTHON_VERSION_EXCLUSIVE}"' in selector
+
+    developer_installer = (ROOT / "scripts/install-dev.sh").read_text(encoding="utf-8")
+    assert 'readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"' in developer_installer
+    assert (
+        'version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"'
+        in developer_installer
+    )
+
+
 def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
     system = platform.system().lower()
     machine = platform.machine().lower()
