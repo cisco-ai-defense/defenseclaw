@@ -165,6 +165,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Direction: "prompt",
 			Connector: "codex",
 		})
+		assetDecisions = append(assetDecisions, a.codexPromptSkillAssetDecisions(ctx, req.Prompt)...)
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool:          codexToolName(req),
@@ -213,7 +214,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
-			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+			asset.decision, true, asset.targetType, codexSkillAssetMergeEvent(req.HookEventName, asset), action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
 		action = mergedAction
 		rawAction = mergedRawAction

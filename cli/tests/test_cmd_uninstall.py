@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -1009,7 +1010,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
 
 
 class RemoveDataDirTests(unittest.TestCase):
-    def test_reset_preserves_only_managed_venv_and_removes_all_user_state(self):
+    def test_reset_refuses_to_delete_runtime_isolated_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / ".defenseclaw"
             venv = data_dir / ".venv"
@@ -1024,6 +1025,8 @@ class RemoveDataDirTests(unittest.TestCase):
                 "logs/gateway.log": "log",
                 "policies/default.yaml": "policy",
                 "quarantine/item": "quarantine",
+                "quarantine/skills/runtime-isolation/codex/"
+                "0123456789abcdef0123456789abcdef/SKILL.md": "runtime isolation",
                 "connector_backups/codex/config.toml.json": "connector",
                 "tokens/session": "token",
                 "arbitrary/new-state.bin": "future state",
@@ -1033,10 +1036,42 @@ class RemoveDataDirTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
 
-            cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
+            with self.assertRaisesRegex(
+                click.ClickException,
+                "runtime-isolated skill generation",
+            ):
+                cmd_uninstall._remove_data_dir(
+                    str(data_dir), preserve_entries=(".venv",),
+                )
 
             self.assertTrue(venv.is_dir())
             self.assertTrue((venv / "runtime.pyd").is_file())
+            self.assertTrue(
+                (
+                    data_dir
+                    / "quarantine/skills/runtime-isolation/codex/"
+                    "0123456789abcdef0123456789abcdef/SKILL.md"
+                ).is_file()
+            )
+
+            shutil.rmtree(data_dir / "quarantine/skills/runtime-isolation")
+            cmd_uninstall._remove_data_dir(
+                str(data_dir), preserve_entries=(".venv",),
+            )
+            self.assertEqual({path.name for path in data_dir.iterdir()}, {".venv"})
+
+    def test_empty_runtime_isolation_connector_parent_does_not_block_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / ".venv").mkdir(parents=True)
+            (data_dir / "quarantine/skills/runtime-isolation/codex").mkdir(
+                parents=True,
+            )
+
+            cmd_uninstall._remove_data_dir(
+                str(data_dir), preserve_entries=(".venv",),
+            )
+
             self.assertEqual({path.name for path in data_dir.iterdir()}, {".venv"})
 
     def test_full_uninstall_removes_managed_venv_too(self):

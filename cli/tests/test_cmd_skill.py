@@ -272,7 +272,10 @@ class TestSkillScan(SkillCommandTestBase):
             verdict="blocked",
             action=SeverityAction(file="quarantine", runtime="disable", install="block"),
         )
-        def quarantine_side_effect(_app, pe, name, _path, connector, reason):
+        def quarantine_side_effect(
+            _app, pe, name, _path, connector, reason, *, purpose,
+        ):
+            self.assertEqual(purpose, "runtime-isolation")
             pe.quarantine_for_connector("skill", name, connector, reason)
             return os.path.join(self.tmp_dir, "quarantined")
         mock_quarantine.side_effect = quarantine_side_effect
@@ -298,6 +301,132 @@ class TestSkillScan(SkillCommandTestBase):
             "skill", "dirty-skill", "install", "block", "codex",
         ))
         self.assertIsNone(self.app.store.get_action("skill", "dirty-skill", "claudecode"))
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_codex_runtime_only_adds_managed_quarantine(
+        self,
+        mock_admission,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="none"),
+        )
+        skill_name = "runtime-only-skill"
+        discovery_root = os.path.join(self.tmp_dir, "runtime-only-codex-root")
+        os.makedirs(discovery_root)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [discovery_root]  # type: ignore[method-assign]
+        skill_dir = os.path.join(discovery_root, skill_name)
+        os.makedirs(skill_dir)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("inert test fixture\n")
+        result = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _apply_scan_enforcement(
+            self.app,
+            PolicyEngine(self.app.store),
+            skill_name,
+            skill_dir,
+            result,
+            connector="codex",
+        )
+
+        self.assertFalse(os.path.exists(skill_dir))
+        entry = self.app.store.get_action("skill", skill_name, "codex")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.actions.file, "quarantine")
+        self.assertEqual(entry.actions.runtime, "disable")
+        self.assertEqual(entry.actions.install, "")
+        self.assertEqual(entry.source_path, os.path.realpath(skill_dir))
+        records = self.app.store.list_quarantine_records(
+            "skill",
+            skill_name,
+            "codex",
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].state, "active")
+        self.assertEqual(records[0].purpose, "runtime-isolation")
+        self.assertEqual(records[0].connectors, ("codex",))
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_unobservable_connector_is_explicitly_advisory(
+        self,
+        mock_admission,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="none"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "advisory-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        with patch("click.secho") as secho:
+            _apply_scan_enforcement(
+                self.app,
+                PolicyEngine(self.app.store),
+                "advisory-skill",
+                skill_dir,
+                result,
+                connector="hermes",
+            )
+
+        warning = " ".join(str(call.args[0]) for call in secho.call_args_list)
+        self.assertIn("advisory", warning)
+        self.assertIn("skill quarantine advisory-skill --connector hermes", warning)
+
+    @patch(
+        "defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance",
+        return_value=None,
+    )
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_codex_runtime_only_quarantine_failure_records_no_disable(
+        self,
+        mock_admission,
+        _mock_quarantine,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="none"),
+        )
+        skill_name = "runtime-only-failure"
+        skill_dir = os.path.join(self.tmp_dir, skill_name)
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        with self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                self.app,
+                PolicyEngine(self.app.store),
+                skill_name,
+                skill_dir,
+                result,
+                connector="codex",
+            )
+
+        self.assertIsNone(self.app.store.get_action("skill", skill_name, "codex"))
+        self.assertEqual(
+            self.app.store.list_quarantine_records("skill", skill_name, "codex"),
+            [],
+        )
 
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
@@ -391,12 +520,33 @@ class TestSkillScan(SkillCommandTestBase):
                 self.app, pe, "partial-skill", skill_dir, result, connector="codex",
             )
 
-        self.assertTrue(self.app.store.has_action(
-            "skill", "partial-skill", "runtime", "disable", "codex",
-        ))
-        self.assertTrue(self.app.store.has_action(
-            "skill", "partial-skill", "install", "block", "codex",
-        ))
+        self.assertFalse(
+            self.app.store.has_action(
+                "skill",
+                "partial-skill",
+                "runtime",
+                "disable",
+                "codex",
+            )
+        )
+        self.assertFalse(
+            self.app.store.has_action(
+                "skill",
+                "partial-skill",
+                "file",
+                "quarantine",
+                "codex",
+            )
+        )
+        self.assertTrue(
+            self.app.store.has_action(
+                "skill",
+                "partial-skill",
+                "install",
+                "block",
+                "codex",
+            )
+        )
 
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_scan_action_policy_persistence_failures_preserve_other_action(
@@ -413,8 +563,14 @@ class TestSkillScan(SkillCommandTestBase):
             duration=timedelta(seconds=0.1),
         )
 
+        discovery_root = os.path.join(self.tmp_dir, "persistence-codex-root")
+        os.makedirs(discovery_root)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [discovery_root]  # type: ignore[method-assign]
+
         runtime_skill = "runtime-persistence-failure"
-        runtime_dir = os.path.join(self.tmp_dir, runtime_skill)
+        runtime_dir = os.path.join(discovery_root, runtime_skill)
         os.makedirs(runtime_dir)
         runtime_pe = PolicyEngine(self.app.store)
         with patch.object(
@@ -428,7 +584,7 @@ class TestSkillScan(SkillCommandTestBase):
         ))
 
         install_skill = "install-persistence-failure"
-        install_dir = os.path.join(self.tmp_dir, install_skill)
+        install_dir = os.path.join(discovery_root, install_skill)
         os.makedirs(install_dir)
         install_pe = PolicyEngine(self.app.store)
         with patch.object(
@@ -469,12 +625,33 @@ class TestSkillScan(SkillCommandTestBase):
 
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("configured enforcement incomplete", result.output)
-        self.assertTrue(self.app.store.has_action(
-            "skill", "cli-partial-skill", "runtime", "disable", "codex",
-        ))
-        self.assertTrue(self.app.store.has_action(
-            "skill", "cli-partial-skill", "install", "block", "codex",
-        ))
+        self.assertFalse(
+            self.app.store.has_action(
+                "skill",
+                "cli-partial-skill",
+                "runtime",
+                "disable",
+                "codex",
+            )
+        )
+        self.assertFalse(
+            self.app.store.has_action(
+                "skill",
+                "cli-partial-skill",
+                "file",
+                "quarantine",
+                "codex",
+            )
+        )
+        self.assertTrue(
+            self.app.store.has_action(
+                "skill",
+                "cli-partial-skill",
+                "install",
+                "block",
+                "codex",
+            )
+        )
 
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_scan_action_missing_store_and_silent_noop_fail_closed(self, mock_admission):
@@ -498,7 +675,7 @@ class TestSkillScan(SkillCommandTestBase):
                 missing_store_app, noop_pe, "missing-store-skill", skill_dir, result,
                 connector="codex",
             )
-        noop_pe.disable_for_connector.assert_called_once()
+        noop_pe.disable_for_connector.assert_not_called()
         noop_pe.block_for_connector.assert_called_once()
 
         silent_name = "silent-noop-skill"
@@ -510,7 +687,7 @@ class TestSkillScan(SkillCommandTestBase):
                 self.app, silent_pe, silent_name, silent_dir, result, connector="codex",
             )
         self.assertIsNone(self.app.store.get_action("skill", silent_name, "codex"))
-        silent_pe.disable_for_connector.assert_called_once()
+        silent_pe.disable_for_connector.assert_not_called()
         silent_pe.block_for_connector.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")
@@ -632,9 +809,13 @@ class TestSkillScan(SkillCommandTestBase):
             verdict="blocked",
             action=SeverityAction(file="quarantine", runtime="disable", install="block"),
         )
-        def quarantine_side_effect(_app, pe, skill, _path, connector, reason):
+        def quarantine_side_effect(
+            _app, pe, skill, _path, connector, reason, *, purpose,
+        ):
             if connector == "codex":
+                self.assertEqual(purpose, "runtime-isolation")
                 return None
+            self.assertEqual(purpose, "operator")
             pe.quarantine_for_connector("skill", skill, connector, reason)
             return os.path.join(self.tmp_dir, "mock-quarantine")
         mock_quarantine.side_effect = quarantine_side_effect
@@ -645,7 +826,8 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(mock_scan.call_count, 2)
         mock_client.assert_not_called()
         codex_entry = self.app.store.get_action("skill", name, "codex")
-        self.assertEqual(codex_entry.actions.runtime, "disable")
+        self.assertEqual(codex_entry.actions.file, "")
+        self.assertEqual(codex_entry.actions.runtime, "")
         self.assertEqual(codex_entry.actions.install, "block")
         claude_entry = self.app.store.get_action("skill", name, "claudecode")
         self.assertEqual(claude_entry.actions.file, "quarantine")
@@ -1385,6 +1567,184 @@ class TestSkillInstall(SkillCommandTestBase):
         events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
         self.assertEqual(len(events), 1)
         self.assertIn("allow-listed-post-scan", events[0].details)
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_action_codex_runtime_disable_uses_managed_isolation(
+        self, mock_install, mock_scan, mock_eval,
+    ):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        name = "runtime-install-fixture"
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(codex_root)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [codex_root]  # type: ignore[method-assign]
+        destination = os.path.join(codex_root, name)
+        mock_install.side_effect = self._fake_clawhub_install
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=destination,
+            timestamp=datetime.now(timezone.utc),
+            findings=[
+                Finding(
+                    id="f-runtime-install",
+                    severity="HIGH",
+                    title="Inert enforcement fixture",
+                    scanner="skill-scanner",
+                ),
+            ],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_eval.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision(
+                "blocked",
+                "runtime enforcement",
+                action=SeverityAction(
+                    file="none", runtime="disable", install="block",
+                ),
+            ),
+        ]
+
+        result = self.invoke([
+            "install", name, "--connector", "codex", "--action",
+        ])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertFalse(os.path.exists(destination))
+        entry = self.app.store.get_action("skill", name, "codex")
+        self.assertEqual(entry.actions.file, "quarantine")
+        self.assertEqual(entry.actions.runtime, "disable")
+        self.assertEqual(entry.actions.install, "block")
+        records = self.app.store.list_quarantine_records(
+            "skill", name, "codex",
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].purpose, "runtime-isolation")
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_rejects_allow_with_hard_actions_before_enforcement(
+        self, mock_install, mock_scan, mock_eval,
+    ):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        codex_root = os.path.join(self.tmp_dir, "codex-conflict", "skills")
+        os.makedirs(codex_root)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [codex_root]  # type: ignore[method-assign]
+        mock_install.side_effect = self._fake_clawhub_install
+
+        cases = (
+            ("conflicting-runtime-allow", SeverityAction(
+                file="none", runtime="disable", install="allow",
+            )),
+            ("conflicting-quarantine-allow", SeverityAction(
+                file="quarantine", runtime="none", install="allow",
+            )),
+        )
+        for name, action in cases:
+            with self.subTest(name=name):
+                destination = os.path.join(codex_root, name)
+                mock_scan.return_value = ScanResult(
+                    scanner="skill-scanner",
+                    target=destination,
+                    timestamp=datetime.now(timezone.utc),
+                    findings=[Finding(
+                        id=f"f-{name}",
+                        severity="HIGH",
+                        title="Inert enforcement fixture",
+                        scanner="skill-scanner",
+                    )],
+                    duration=timedelta(seconds=0.1),
+                )
+                mock_eval.side_effect = [
+                    AdmissionDecision("scan", "scan required"),
+                    AdmissionDecision(
+                        "blocked", "contradictory actions", action=action,
+                    ),
+                ]
+
+                result = self.invoke([
+                    "install", name, "--connector", "codex", "--action",
+                ])
+
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("contradictory post-install actions", result.output)
+                self.assertNotIn("runtime disable enforced", result.output)
+                self.assertNotIn("added to allow list", result.output)
+                self.assertFalse(os.path.lexists(destination))
+                self.assertIsNone(self.app.store.get_action("skill", name, "codex"))
+                self.assertEqual(
+                    self.app.store.list_quarantine_records("skill", name, "codex"),
+                    [],
+                )
+
+    @patch(
+        "defenseclaw.enforce.skill_enforcer.SkillEnforcer.runtime_isolate",
+        return_value=False,
+    )
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_action_runtime_isolation_failure_records_no_false_disable(
+        self, mock_install, mock_scan, mock_eval, _mock_isolate,
+    ):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        name = "runtime-install-isolation-failure"
+        codex_root = os.path.join(self.tmp_dir, "codex-failure", "skills")
+        os.makedirs(codex_root)
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [codex_root]  # type: ignore[method-assign]
+        destination = os.path.join(codex_root, name)
+        mock_install.side_effect = self._fake_clawhub_install
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=destination,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(
+                id="f-runtime-install-failure",
+                severity="HIGH",
+                title="Inert enforcement fixture",
+                scanner="skill-scanner",
+            )],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_eval.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision(
+                "blocked",
+                "runtime enforcement",
+                action=SeverityAction(
+                    file="none", runtime="disable", install="block",
+                ),
+            ),
+        ]
+
+        result = self.invoke([
+            "install", name, "--connector", "codex", "--action",
+        ])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("managed runtime isolation failed", result.output)
+        self.assertIn("enforcement incomplete", result.output)
+        self.assertTrue(os.path.isfile(os.path.join(destination, "SKILL.md")))
+        entry = self.app.store.get_action("skill", name, "codex")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.actions.runtime, "")
+        self.assertEqual(entry.actions.file, "")
+        self.assertEqual(entry.actions.install, "block")
+        self.assertEqual(
+            self.app.store.list_quarantine_records("skill", name, "codex"),
+            [],
+        )
 
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
@@ -2796,6 +3156,7 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("runtime disable recorded globally", result.output)
         self.assertIn("advisory", result.output)
+        self.assertNotIn("runtime disable enforced", result.output)
         self.assertIn("quarantine", result.output)
         self.assertTrue(self.app.store.has_action("skill", "some-skill", "runtime", "disable"))
         mock_client.assert_not_called()
@@ -2808,22 +3169,10 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=hermes", result.output)
         self.assertIn("advisory", result.output)
+        self.assertIn("runtime disable recorded", result.output)
+        self.assertNotIn("runtime disable enforced", result.output)
         self.assertTrue(
             self.app.store.has_action("skill", "some-skill", "runtime", "disable", "hermes")
-        )
-        mock_client.assert_not_called()
-
-    def test_disable_connector_with_probe_records_scoped_enforced(self):
-        self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
-        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
-            result = self.invoke(["disable", "some-skill", "--connector", "codex"])
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=codex", result.output)
-        self.assertIn("Enforced by hook runtime gate", result.output)
-        self.assertNotIn("advisory", result.output)
-        self.assertTrue(
-            self.app.store.has_action("skill", "some-skill", "runtime", "disable", "codex")
         )
         mock_client.assert_not_called()
 

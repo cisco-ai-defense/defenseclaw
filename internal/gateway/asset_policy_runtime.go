@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -87,10 +88,15 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
 	targetType := slashCommandAssetType(req.CommandSource)
-	if targetType == "" {
-		return nil
-	}
 	name := normalizeSkillRuntimeName(req.CommandName)
+	if targetType == "" {
+		var known bool
+		name, known = a.claudeCodeSettingsSkillIdentity(req.CommandSource, req.CommandName, req.CWD)
+		if !known {
+			return nil
+		}
+		targetType = "skill"
+	}
 	if name == "" {
 		return nil
 	}
@@ -464,6 +470,96 @@ func slashCommandAssetType(commandSource string) string {
 	default:
 		return ""
 	}
+}
+
+// claudeCodeSettingsSkillIdentity classifies Claude Code slash-command
+// expansions whose command_source identifies a settings scope rather than an
+// asset type. Claude Code 2.1.196 emits "userSettings" for a skill loaded from
+// ~/.claude/skills and "projectSettings" for ./.claude/skills. Older synthetic
+// tests used the non-client value "skill". A settings scope can also contain
+// ordinary custom slash commands, so the source alone is not sufficient: the
+// command name must exactly match a skill installed in that scope or an
+// existing Claude Code/global skill-policy record.
+func (a *APIServer) claudeCodeSettingsSkillIdentity(commandSource, commandName, cwd string) (string, bool) {
+	source := strings.ToLower(strings.TrimSpace(commandSource))
+	if source != "usersettings" && source != "projectsettings" {
+		return "", false
+	}
+
+	// Do not apply normalizeSkillRuntimeName here. It intentionally accepts
+	// path-shaped structured tool inputs for audit purposes, but a real prompt
+	// expansion carries a canonical command identity. Requiring byte-for-byte
+	// trimmed input and rejecting path components prevents an agent-crafted hook
+	// payload from turning a path, quoted alias, or @-prefixed name into an
+	// installed skill match.
+	name := strings.TrimSpace(commandName)
+	if name == "" || name != commandName || name == "." || name == ".." ||
+		strings.HasPrefix(name, "@") || strings.ContainsAny(name, `/\\"'`) {
+		return "", false
+	}
+
+	if a != nil && a.scannerCfg != nil {
+		root := filepath.Join(a.scannerCfg.ConnectorHomeDir("claudecode"), "skills")
+		if source == "projectsettings" {
+			workspace := strings.TrimSpace(cwd)
+			if workspace == "" {
+				workspace = strings.TrimSpace(a.scannerCfg.ConnectorWorkspaceDir())
+			}
+			if workspace == "" {
+				root = ""
+			} else {
+				root = filepath.Join(workspace, ".claude", "skills")
+			}
+		}
+		if claudeCodeSkillDirHasCanonicalName(root, name) {
+			return name, true
+		}
+	}
+
+	// A policy record remains authoritative for an active session that cached a
+	// skill before its on-disk directory changed. Only Claude Code-scoped and
+	// global records count; a Codex-only record must not classify or affect this
+	// connector's command.
+	if a != nil && a.store != nil {
+		for _, connector := range []string{"claudecode", ""} {
+			entry, err := a.store.GetActionForConnector("skill", name, connector)
+			if err != nil {
+				// Preserve the runtime policy gate's fail-closed contract. The
+				// evaluator will repeat the lookup and emit a
+				// runtime-disable-error decision without exposing prompt text.
+				return name, true
+			}
+			if entry != nil && entry.TargetName == name {
+				return name, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+func claudeCodeSkillDirHasCanonicalName(root, name string) bool {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() != name {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		manifest, err := os.Lstat(filepath.Join(dir, "SKILL.md"))
+		return err == nil && manifest.Mode().IsRegular() && manifest.Mode()&os.ModeSymlink == 0
+	}
+	return false
 }
 
 func mcpPromptServerName(commandSource, commandName string) string {

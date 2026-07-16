@@ -12,6 +12,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,6 +26,18 @@ func enableSkillRuntimeDetection(cfg *config.Config) {
 
 func enablePluginRuntimeDetection(cfg *config.Config) {
 	cfg.AssetPolicy.Plugin.RuntimeDetection.Enabled = true
+}
+
+func writeClaudeCodeTestSkill(t *testing.T, skillsRoot, name string) string {
+	t.Helper()
+	dir := filepath.Join(skillsRoot, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create Claude Code test skill directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\n---\n\n# Inert test skill\n"), 0o600); err != nil {
+		t.Fatalf("write Claude Code test skill: %v", err)
+	}
+	return dir
 }
 
 func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *testing.T) {
@@ -155,6 +169,87 @@ func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
 	}
 	if got.decision.TargetType != "plugin" || got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
 		t.Fatalf("decision=%+v, want plugin runtime-disable block", got.decision)
+	}
+}
+
+func TestClaudeCodeSettingsSkillIdentityRequiresCanonicalKnownSkill(t *testing.T) {
+	claudeHome := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	writeClaudeCodeTestSkill(t, filepath.Join(claudeHome, "skills"), "dc-test-benign")
+	writeClaudeCodeTestSkill(t, filepath.Join(workspace, ".claude", "skills"), "project-skill")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	api := &APIServer{scannerCfg: cfg}
+
+	tests := []struct {
+		name          string
+		commandSource string
+		commandName   string
+		cwd           string
+		wantName      string
+		wantKnown     bool
+	}{
+		{name: "real 2.1.196 user skill", commandSource: "userSettings", commandName: "dc-test-benign", wantName: "dc-test-benign", wantKnown: true},
+		{name: "real 2.1.196 project skill", commandSource: "projectSettings", commandName: "project-skill", cwd: workspace, wantName: "project-skill", wantKnown: true},
+		{name: "source casing is canonicalized", commandSource: "USERSETTINGS", commandName: "dc-test-benign", wantName: "dc-test-benign", wantKnown: true},
+		{name: "ordinary user slash command", commandSource: "userSettings", commandName: "not-an-installed-skill"},
+		{name: "user skill does not satisfy project source", commandSource: "projectSettings", commandName: "dc-test-benign", cwd: workspace},
+		{name: "path shaped name", commandSource: "userSettings", commandName: "folder/dc-test-benign"},
+		{name: "quoted alias", commandSource: "userSettings", commandName: `"dc-test-benign"`},
+		{name: "at prefixed alias", commandSource: "userSettings", commandName: "@dc-test-benign"},
+		{name: "leading whitespace", commandSource: "userSettings", commandName: " dc-test-benign"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotKnown := api.claudeCodeSettingsSkillIdentity(tc.commandSource, tc.commandName, tc.cwd)
+			if gotName != tc.wantName || gotKnown != tc.wantKnown {
+				t.Fatalf("identity=(%q,%v), want (%q,%v)", gotName, gotKnown, tc.wantName, tc.wantKnown)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeSettingsSkillIdentityPolicyScope(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	store, _ := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	if err := store.SetActionFieldForConnector("skill", "shared-name", "codex", "runtime", "disable", "codex only"); err != nil {
+		t.Fatalf("seed Codex-only disable: %v", err)
+	}
+	if name, known := api.claudeCodeSettingsSkillIdentity("userSettings", "shared-name", ""); known || name != "" {
+		t.Fatalf("Codex-only policy classified Claude identity=(%q,%v)", name, known)
+	}
+
+	if err := store.SetActionFieldForConnector("skill", "claude-cached", "claudecode", "runtime", "disable", "Claude active session"); err != nil {
+		t.Fatalf("seed Claude disable: %v", err)
+	}
+	if name, known := api.claudeCodeSettingsSkillIdentity("userSettings", "claude-cached", ""); !known || name != "claude-cached" {
+		t.Fatalf("Claude-scoped policy identity=(%q,%v), want cached known skill", name, known)
+	}
+
+	if err := store.SetActionField("skill", "global-cached", "runtime", "disable", "global"); err != nil {
+		t.Fatalf("seed global disable: %v", err)
+	}
+	if name, known := api.claudeCodeSettingsSkillIdentity("userSettings", "global-cached", ""); !known || name != "global-cached" {
+		t.Fatalf("global policy identity=(%q,%v), want cached known skill", name, known)
+	}
+}
+
+func TestClaudeCodeUserSettingsSkillIdentityDoesNotUseProjectRoot(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	workspace := t.TempDir()
+	writeClaudeCodeTestSkill(t, filepath.Join(workspace, ".claude", "skills"), "project-only")
+
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Claw.WorkspaceDir = workspace
+	api := &APIServer{scannerCfg: cfg}
+
+	if name, known := api.claudeCodeSettingsSkillIdentity("userSettings", "project-only", workspace); known || name != "" {
+		t.Fatalf("project skill reclassified user settings command as identity=(%q,%v)", name, known)
 	}
 }
 
