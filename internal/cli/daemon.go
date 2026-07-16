@@ -118,6 +118,12 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	// Start can return early when the configured listener is already healthy.
+	// Validate every process-identity artifact before that fast path so malformed
+	// or unreadable watchdog state can never be hidden by a valid gateway PID.
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return err
+	}
 	cfg, _ := loadDaemonConfig(cmd)
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
@@ -212,6 +218,12 @@ func runStop(cmd *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	// Restart may stop an otherwise healthy managed gateway. Validate every
+	// process-identity artifact before that first side effect so malformed or
+	// unreadable watchdog state can never authorize a partial restart.
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return err
+	}
 	cfg, _ := loadDaemonConfig(cmd)
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
@@ -609,7 +621,10 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 	requirements := daemonReadinessRequirements{
 		guardrailEnabled: cfg.Guardrail.Enabled,
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
-		telemetryEnabled: cfg.OTel.Enabled,
+		// Schema v8 clears the legacy cfg.OTel projection, but its canonical
+		// observability runtime always binds the sidecar telemetry health source.
+		// Match that runtime state instead of waiting forever for "disabled".
+		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion || cfg.OTel.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,
 		listenerHost:     gatewayBindHost(cfg),

@@ -22,6 +22,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import defenseclaw.observability.v8_activation as activation_module
 import pytest
 from defenseclaw import windows_acl
 from defenseclaw.observability import v8_activation as activation
@@ -110,6 +111,17 @@ def _validator(fixture: dict[str, Any]):
         assert environment["MIGRATED_HEADER_TEST_SECRET"] == fixture["secret"]
 
     return validate
+
+
+def test_native_windows_snapshot_preserves_raw_crlf_bytes_and_digest(tmp_path: Path) -> None:
+    path = tmp_path / "raw-crlf.yaml"
+    payload = b"config_version: 7\r\ncustom: keep\r\n"
+    path.write_bytes(payload)
+
+    snapshot = activation_module._snapshot_regular_file(str(path), required=True)
+
+    assert snapshot.payload == payload
+    assert snapshot.sha256 == _sha256(payload)
 
 
 def test_native_windows_activation_preserves_exact_owner_and_dacl(tmp_path: Path) -> None:

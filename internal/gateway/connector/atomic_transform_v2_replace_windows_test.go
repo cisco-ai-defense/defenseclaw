@@ -299,6 +299,116 @@ func TestAtomicTransformV2WindowsDACLIsReplaceNormalization(t *testing.T) {
 	}
 }
 
+func TestRestoreAtomicTransformBoundRenameProtectionRepairsNTFSNormalization(t *testing.T) {
+	directory := t.TempDir()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
+		t.Fatalf("resolve current user: %v", err)
+	}
+	parentDescriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;%s)", currentUser.User.Sid,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDACL, _, err := parentDescriptor.DACL()
+	if err != nil || parentDACL == nil {
+		t.Fatalf("extract private parent DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		directory, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, parentDACL, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := bindAtomicTransformDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+
+	const name = "bound-rename-dacl"
+	if _, err := atomicTransformBoundCreate(dir, name, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openAtomicTransformBoundFilePlatform(dir.file, name, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	before, err := captureAtomicTransformBoundRenameProtectionPlatform(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, aces, err := atomicTransformV2WindowsDACLParts(before.canonical)
+	if err != nil || prefix != "D:P" {
+		t.Fatalf("captured private DACL = %q/%v, %v", prefix, aces, err)
+	}
+	var inherited strings.Builder
+	inherited.WriteString("D:")
+	for _, ace := range aces {
+		first := strings.IndexByte(ace, ';')
+		secondRelative := -1
+		if first >= 0 {
+			secondRelative = strings.IndexByte(ace[first+1:], ';')
+		}
+		if first < 0 || secondRelative < 0 {
+			t.Fatalf("invalid captured ACE %q", ace)
+		}
+		second := first + 1 + secondRelative
+		if strings.Contains(ace[first+1:second], "ID") {
+			t.Fatalf("captured ACE is already inherited: %q", ace)
+		}
+		inherited.WriteString(ace[:second])
+		inherited.WriteString("ID")
+		inherited.WriteString(ace[second:])
+	}
+
+	normalizedDescriptor, err := windows.SecurityDescriptorFromString(inherited.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizedDACL, _, err := normalizedDescriptor.DACL()
+	if err != nil || normalizedDACL == nil {
+		t.Fatalf("extract normalized DACL: %v", err)
+	}
+	if err := windows.SetSecurityInfo(
+		windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, normalizedDACL, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	actualNormalized, err := atomicTransformV2WindowsDACLCanonicalFromOpen(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized, normalizeErr := atomicTransformV2WindowsDACLIsReplaceNormalization(
+		actualNormalized, before.canonical,
+	); normalizeErr != nil || !normalized {
+		t.Fatalf(
+			"fixture is not exact NTFS rename normalization: %t, %v\nbefore=%q\nafter=%q",
+			normalized, normalizeErr, before.canonical, actualNormalized,
+		)
+	}
+
+	if err := restoreAtomicTransformBoundRenameProtectionPlatform(file, before); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := atomicTransformV2WindowsDACLCanonicalFromOpen(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != before.canonical {
+		t.Fatalf("restored DACL = %q, want %q", restored, before.canonical)
+	}
+	if err := validateAtomicTransformWindowsPrivateHandle(windows.Handle(file.Fd())); err != nil {
+		t.Fatalf("restored file is not private: %v", err)
+	}
+}
+
 func windowsErrorForAtomicTransformV2Test(code uintptr) error {
 	return os.NewSyscallError("replace", syscall.Errno(code))
 }

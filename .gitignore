@@ -99,6 +99,7 @@ temp/
 
 # Telemetry updater staging directories.
 /telemetry-upstream-update-*/
+/.defenseclaw-telemetry-upstream.lock
 
 # Reproducible telemetry reports and test corpora. The registry compiler
 # validates these in memory and can materialize them for release/debug work;

@@ -382,7 +382,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -390,14 +390,16 @@ curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 The installer detects the platform, downloads the correct gateway
 binary + CLI wheel + plugin tarball, installs them, and prompts to run
 `defenseclaw init --enable-guardrail`. Use `--yes` / `-y` to skip
-confirmations. The release installers are fresh-install-only. If the CLI,
-gateway, or managed virtual environment already exists, they exit before
+confirmations. The macOS/Linux release scripts are fresh-install-only. If the
+CLI, gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
 current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
-pre-bridge host. The signed `scripts/upgrade.ps1` surface is refusal-only
-because this cut publishes no Windows runtime. A `0.8.3`-or-older built-in
-`defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
-required two-process bridge handoff retroactively.
+pre-bridge host. For the historical `0.8.5` hard cut, the signed
+`scripts/upgrade.ps1` surface was refusal-only because that release published no
+Windows runtime. Release `0.8.6` publishes the signed native Setup described
+below, but `0.8.5` is not a Windows upgrade baseline. A `0.8.3`-or-older
+built-in `defenseclaw upgrade` safely refuses a hard-cut target but cannot
+perform the required two-process bridge handoff retroactively.
 
 Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
 directory for inactive rollback objects. A durable mode-0600 in-progress marker
@@ -410,7 +412,7 @@ artifact work.
 Pin a specific version:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -422,7 +424,7 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
@@ -445,6 +447,28 @@ Run interactively (without `--yes` and without `--connector`) and the
 installer prompts which connector to use. The picked connector is
 recorded at `~/.defenseclaw/picked_connector` so the CLI's `defenseclaw
 setup` defaults to it on the next invocation.
+
+### Native Windows Setup (0.8.6)
+
+Release `0.8.6` publishes the signed `DefenseClawSetup-x64.exe` for native x64
+Windows. Download the Setup artifact from the `0.8.6` GitHub release, then
+double-click it for the graphical wizard or run it silently:
+
+```powershell
+.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
+```
+
+Setup installs the CLI/TUI, native gateway, no-console hook launcher, and
+managed Python runtime under `%LOCALAPPDATA%\Programs\DefenseClaw`, and adds its
+managed `bin` directory to the current user's `PATH`. Use
+`CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure a
+connector later.
+
+Release `0.8.5` was POSIX-only and published no native Setup, gateway, or
+rollback artifact. It therefore remains outside the Windows upgrade-baseline
+matrix. The `0.8.6` Setup qualifies fresh install, repair, same-version
+servicing, and uninstall; it does not claim an in-place Windows upgrade from
+`0.8.5`.
 
 ---
 
@@ -746,10 +770,11 @@ path. The resolver fails closed before stopping services and prints the exact
 tested source versions.
 
 Support is platform-specific. POSIX release gates cover the reviewed global
-matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or
-rollback binary, so this hard cut has no supported Windows source version; the
-PowerShell resolver fails closed before stopping services. Global POSIX
-coverage must not be treated as a Windows upgrade claim.
+matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or rollback
+binary, so the `0.8.5` hard cut had no supported Windows source version; its
+PowerShell resolver failed closed before stopping services. The signed native
+Setup published in `0.8.6` does not retroactively make `0.8.5` a Windows upgrade
+baseline. Global POSIX coverage must not be treated as a Windows upgrade claim.
 
 If the installed version is not in that list, remain on the current version and
 contact support for a source-specific, state-aware recovery plan. Do not infer
@@ -787,9 +812,11 @@ of whether Cosign is already installed.
 
 The supported staged path is the authenticated current-release
 `defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
-`scripts/upgrade.sh` from a trusted current-release checkout). The signed
-PowerShell resolver remains a preflight refusal surface only. An
-already-published `0.8.3`-or-older
+`scripts/upgrade.sh` from a trusted current-release checkout). For the
+historical `0.8.5` hard cut, the signed PowerShell resolver was a preflight
+refusal surface only. Release `0.8.6` publishes native Setup for fresh install
+and same-version servicing, without treating `0.8.5` as a Windows upgrade
+source. An already-published `0.8.3`-or-older
 `defenseclaw upgrade` command cannot gain the new two-hop orchestration after
 installation, so its signed protocol check deliberately refuses the hard cut
 before stopping services. Some frozen versions then print an obsolete raw
@@ -889,10 +916,12 @@ pre-bridge sources.
 Do not replace the managed CLI wheel through `pip`, `uv`, or another package
 manager, and do not copy the wheel or gateway archive over an existing
 installation. Those operations cannot provide bridge selection, durable
-rollback, or version-bound health verification. The local shell and PowerShell
-installers are fresh-install-only and refuse existing managed state before
-dependency setup or artifact replacement. Every supported existing POSIX host,
-including one already on `0.8.4`, must use the target-release upgrade resolver.
+rollback, or version-bound health verification. The local shell and legacy
+PowerShell script installers are fresh-install-only and refuse existing managed
+state before dependency setup or artifact replacement. Native Windows `0.8.6`
+Setup separately supports repair and same-version servicing. Every supported
+existing POSIX host, including one already on `0.8.4`, must use the
+target-release upgrade resolver.
 
 For protocol-2 releases, the installable bytes are published only inside
 manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads
@@ -911,10 +940,13 @@ target release. Follow the complete Sigstore and SHA-256 bootstrap in the
 authenticated checkout of that release. Do not stream an unauthenticated
 network response into a shell.
 
-Windows cannot cross this hard cut because the published `0.8.4` bridge has no
-Windows gateway or rollback binary. The signed `scripts/upgrade.ps1` resolver
-is retained only to refuse before stopping services and explain that no tested
-path exists. Keep the current Windows installation unchanged.
+Windows could not cross the `0.8.5` hard cut because the published `0.8.4`
+bridge had no Windows gateway or rollback binary. Its signed
+`scripts/upgrade.ps1` resolver was retained only to refuse before stopping
+services and explain that no tested path existed. Release `0.8.6` now publishes
+signed native Setup for fresh install, repair, same-version servicing, and
+uninstall, but that does not retroactively make `0.8.5` a Windows upgrade
+baseline.
 
 An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
 service stop, or installed-file mutation. Fresh installers also refuse to

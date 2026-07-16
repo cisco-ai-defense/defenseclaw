@@ -404,7 +404,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 
 	win := hookInvocationCommandFor("windows", "claudecode", unix)
-	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector claudecode`
+	wantWin := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "claudecode"
 	if win != wantWin {
 		t.Errorf("windows command = %q, want %q", win, wantWin)
 	}

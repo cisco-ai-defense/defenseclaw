@@ -1452,7 +1452,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 	}
 }
 
-func claudeCodePR520ExecMatrix(command string) map[string]interface{} {
+func claudeCodePreTrackingWindowsExecMatrix(command string) map[string]interface{} {
 	hooks := map[string]interface{}{}
 	for _, group := range hookGroups {
 		handler := map[string]interface{}{
@@ -1490,12 +1490,12 @@ func claudeCodeFirstTestHookHandler(
 	return group["hooks"].([]interface{})[0].(map[string]interface{})
 }
 
-func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactPR520Shape(t *testing.T) {
+func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactWindowsExecMatrix(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("pre-tracking native exec migration is Windows-specific")
 	}
 	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
-	exact := claudeCodePR520ExecMatrix(command)
+	exact := claudeCodePreTrackingWindowsExecMatrix(command)
 	commands, err := inferPreTrackedClaudeCodeManagedCommands(exact, map[string]interface{}{}, true)
 	if err != nil {
 		t.Fatalf("infer exact predecessor matrix: %v", err)
@@ -1554,7 +1554,7 @@ func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactPR520Shape(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hooks := claudeCodePR520ExecMatrix(command)
+			hooks := claudeCodePreTrackingWindowsExecMatrix(command)
 			tt.mutate(hooks)
 			commands, err := inferPreTrackedClaudeCodeManagedCommands(
 				hooks,
@@ -1576,8 +1576,8 @@ func TestInferPreTrackedClaudeCodeManagedCommandsRejectsPristineIdentity(t *test
 		t.Skip("pre-tracking native exec migration is Windows-specific")
 	}
 	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
-	current := claudeCodePR520ExecMatrix(command)
-	pristine := claudeCodePR520ExecMatrix(command)
+	current := claudeCodePreTrackingWindowsExecMatrix(command)
+	pristine := claudeCodePreTrackingWindowsExecMatrix(command)
 	claudeCodeFirstTestHookHandler(pristine, "SessionStart")["timeout"] = 1
 
 	commands, err := inferPreTrackedClaudeCodeManagedCommands(current, pristine, true)
@@ -1589,16 +1589,16 @@ func TestInferPreTrackedClaudeCodeManagedCommandsRejectsPristineIdentity(t *test
 	}
 }
 
-func TestClaudeCode_SetupMigratesPR520ExecMatrixAfterBinaryMove(t *testing.T) {
+func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		t.Skip("PR520 native exec migration is Windows-specific")
+		t.Skip("pre-tracking native exec migration is Windows-specific")
 	}
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "claude-settings.json")
 	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
 	newBinary := filepath.Join(dir, "new-install", windowsHookBinaryName)
 	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
-	hooks := claudeCodePR520ExecMatrix(oldBinary)
+	hooks := claudeCodePreTrackingWindowsExecMatrix(oldBinary)
 	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
 		"hooks": []interface{}{
 			map[string]interface{}{
@@ -1612,10 +1612,10 @@ func TestClaudeCode_SetupMigratesPR520ExecMatrixAfterBinaryMove(t *testing.T) {
 	})
 	raw, err := json.Marshal(map[string]interface{}{"hooks": hooks})
 	if err != nil {
-		t.Fatalf("marshal PR520 settings: %v", err)
+		t.Fatalf("marshal pre-tracking Windows settings: %v", err)
 	}
 	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
-		t.Fatalf("write PR520 settings: %v", err)
+		t.Fatalf("write pre-tracking Windows settings: %v", err)
 	}
 
 	previousSettingsOverride := ClaudeCodeSettingsPathOverride
@@ -1628,10 +1628,10 @@ func TestClaudeCode_SetupMigratesPR520ExecMatrixAfterBinaryMove(t *testing.T) {
 	})
 
 	c := NewClaudeCodeConnector()
-	// PR520 wrote this protected backup but intentionally did not populate the
-	// Windows managed-command list.
+	// The pre-tracking Windows Setup wrote this protected backup but intentionally
+	// did not populate the Windows managed-command list.
 	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
-		t.Fatalf("save PR520 backup: %v", err)
+		t.Fatalf("save pre-tracking Windows backup: %v", err)
 	}
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
 	if err := c.Setup(context.Background(), opts); err != nil {
@@ -1886,10 +1886,10 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 		defenseclawHookBinaryOverride = previousBinaryOverride
 	})
 
-	// PR520 deliberately left ManagedHookCommands empty on Windows. This is the
+	// The pre-tracking Windows state left ManagedHookCommands empty. This is the
 	// predecessor backup state behind the live duplicate report. The canonical
 	// installed path remains provably ours; the arbitrary source-tree path lacks
-	// the exact PR520 matcher/timeout/async evidence required for migration and
+	// the exact predecessor matcher/timeout/async evidence required for migration and
 	// must remain foreign, just like the isolated third-party hook above.
 	c := NewClaudeCodeConnector()
 	if err := c.saveBackup(dir, claudeCodeBackup{
@@ -2647,7 +2647,7 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("tombstone missing after Teardown — cached host PIDs would hit exit-127: %v", err)
 			}
-			if info.Mode()&0o111 == 0 {
+			if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 				t.Errorf("tombstone is not executable: mode %v — cached PIDs would still hit a fork/exec failure", info.Mode())
 			}
 
@@ -2890,7 +2890,7 @@ func TestClaudeCode_TeardownMigratesPreTrackingExecMatrixAfterBinaryMove(t *test
 	settingsPath := filepath.Join(dir, "claude-settings.json")
 	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
 	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
-	hooks := claudeCodePR520ExecMatrix(oldBinary)
+	hooks := claudeCodePreTrackingWindowsExecMatrix(oldBinary)
 	// Drift after the predecessor Setup forces surgical restore. This isolated
 	// same-basename exec hook was never part of DefenseClaw's complete matrix.
 	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
@@ -2922,7 +2922,7 @@ func TestClaudeCode_TeardownMigratesPreTrackingExecMatrixAfterBinaryMove(t *test
 	})
 
 	c := NewClaudeCodeConnector()
-	// This is the real PR520 Windows backup shape: protected, but without a
+	// This is the pre-tracking Windows backup shape: protected, but without a
 	// command allow-list.
 	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
 		t.Fatalf("save predecessor backup: %v", err)
@@ -4840,6 +4840,25 @@ env_key = "OPENAI_API_KEY"
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	if runtime.GOOS == "windows" {
+		for _, path := range []string{
+			configPath,
+			filepath.Join(dir, ".defenseclaw-v2-protocol.lock"),
+		} {
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("open protected Codex lifecycle artifact %s: %v", filepath.Base(path), err)
+			}
+			privateErr := validateAtomicTransformBoundFilePrivatePlatform(file)
+			closeErr := file.Close()
+			if privateErr != nil {
+				t.Fatalf("Codex Setup left %s without a protected private DACL: %v", filepath.Base(path), privateErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close protected Codex lifecycle artifact %s: %v", filepath.Base(path), closeErr)
+			}
+		}
+	}
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -5598,6 +5617,9 @@ func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// On every sidecar boot, Setup runs. If it overwrites the backup each
 	// time, the second boot captures the already-patched api_base (the
 	// proxy URL) as the "original", losing the user's real upstream. The
@@ -5680,6 +5702,9 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
 	// re-read the (already-patched) config file on every request.
@@ -5734,6 +5759,9 @@ func TestResolveSubprocessPolicy(t *testing.T) {
 // --- Subprocess enforcement tests ---
 
 func TestWriteShimScripts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	if err := WriteShimScripts(dir, "127.0.0.1:18970"); err != nil {
 		t.Fatalf("WriteShimScripts failed: %v", err)
@@ -5761,6 +5789,9 @@ func TestWriteShimScripts(t *testing.T) {
 }
 
 func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
 	if err := WriteShimScripts(dir, addr); err != nil {
@@ -5793,7 +5824,7 @@ func TestWriteHookScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("hook script not executable")
 	}
 }
@@ -5834,7 +5865,7 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 			t.Errorf("hook %s not created: %v", name, err)
 			continue
 		}
-		if info.Mode()&0o111 == 0 {
+		if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 			t.Errorf("hook %s not executable", name)
 		}
 		data, _ := os.ReadFile(path)
@@ -5883,12 +5914,19 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read generic hook %s: %v", name, err)
 		}
-		if !strings.Contains(string(body), ".hook-openclaw.token") {
-			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		if !strings.Contains(string(body), "defenseclaw_shared_hook_token_file") {
+			t.Errorf("generic hook %s does not resolve the connector-scoped token at invocation time", name)
 		}
-		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
-			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
+		if !strings.Contains(string(body), "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}") {
+			t.Errorf("generic hook %s does not bind the scoped token to the runtime connector", name)
 		}
+	}
+	runtimeState, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+".openclaw"))
+	if err != nil {
+		t.Fatalf("read OpenClaw runtime sidecar: %v", err)
+	}
+	if !strings.Contains(string(runtimeState), "DEFENSECLAW_CONNECTOR=openclaw") {
+		t.Fatalf("OpenClaw runtime sidecar does not select the connector:\n%s", runtimeState)
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
 		if _, err := os.Stat(filepath.Join(hookDir, name)); !os.IsNotExist(err) {
@@ -6012,6 +6050,9 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 // runtime-computed Authorization header.
 func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
+	}
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
 	stub := filepath.Join(stubDir, "curl")
@@ -6244,6 +6285,9 @@ func TestWriteSandboxPolicy(t *testing.T) {
 }
 
 func TestTeardownSubprocessEnforcement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
 
@@ -6759,7 +6803,7 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	}
 	if info, err := os.Stat(settingsPath); err != nil {
 		t.Fatalf("stat settings.json: %v", err)
-	} else if mode := info.Mode().Perm(); mode != 0o600 {
+	} else if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
 	}
 }
@@ -7539,6 +7583,9 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 }
 
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 
 	configDir := filepath.Join(dir, "zeptoclaw-config")
@@ -7613,6 +7660,9 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	// ZeptoClaw's real hooks schema: before_tool/after_tool are arrays.
@@ -7714,6 +7764,9 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// Regression test: before the fix, Setup wrote config["hooks"] as
 	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
 	// "expected a sequence" because its HooksConfig defines before_tool as
@@ -8734,6 +8787,9 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	os.WriteFile(configPath, []byte(`{}`), 0o644)
@@ -9005,6 +9061,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		out = append(out, vendor)
 		return out
 	}
+	cursorScripts := withVendor("cursor-hook.sh")
+	if runtime.GOOS == "windows" {
+		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
+	}
 
 	cases := []struct {
 		ctor func() Connector
@@ -9016,7 +9076,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
 		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
-		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
@@ -9315,6 +9375,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	cursorHooks := []string{"cursor-hook.sh"}
+	if runtime.GOOS == "windows" {
+		cursorHooks = append(cursorHooks, "cursor-hook.ps1")
+	}
 	cases := []struct {
 		name string
 		ctor func() Connector
@@ -9323,7 +9387,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
-		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, cursorHooks},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
@@ -9749,9 +9813,15 @@ func TestZeptoClawConfigPath_ZEPTOCLAW_HOME(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw when ZEPTOCLAW_HOME unset", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
-		got := zeptoClawConfigPath()
-		want := filepath.Join("/home/testuser", ".zeptoclaw", "config.json")
+		home := t.TempDir()
+		var got string
+		if err := WithUserHomeDir(home, func() error {
+			got = zeptoClawConfigPath()
+			return nil
+		}); err != nil {
+			t.Fatalf("override user home: %v", err)
+		}
+		want := filepath.Join(home, ".zeptoclaw", "config.json")
 		if got != want {
 			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
 		}
@@ -9779,9 +9849,15 @@ func TestZeptoClawHomeDir(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
-		got := zeptoClawHomeDir()
-		want := filepath.Join("/home/testuser", ".zeptoclaw")
+		home := t.TempDir()
+		var got string
+		if err := WithUserHomeDir(home, func() error {
+			got = zeptoClawHomeDir()
+			return nil
+		}); err != nil {
+			t.Fatalf("override user home: %v", err)
+		}
+		want := filepath.Join(home, ".zeptoclaw")
 		if got != want {
 			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
 		}

@@ -492,11 +492,18 @@ func atomicTransformBoundRenameNoReplace(
 		}
 		return atomicTransformArtifactState{}, err
 	}
+	renameProtection, err := captureAtomicTransformBoundRenameProtectionPlatform(source)
+	if err != nil {
+		return atomicTransformArtifactState{}, fmt.Errorf("capture bound rename protection: %w", err)
+	}
 	if err := dir.validate(); err != nil {
 		return atomicTransformArtifactState{}, err
 	}
 	if err := renameAtomicTransformBoundFilePlatform(dir.file, source, targetName, false); err != nil {
 		return atomicTransformArtifactState{}, err
+	}
+	if err := restoreAtomicTransformBoundRenameProtectionPlatform(source, renameProtection); err != nil {
+		return atomicTransformArtifactState{}, fmt.Errorf("restore bound rename protection: %w", err)
 	}
 	if err := dir.validate(); err != nil {
 		return atomicTransformArtifactState{}, fmt.Errorf("bound directory detached during rename: %w", err)

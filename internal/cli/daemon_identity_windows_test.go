@@ -60,12 +60,12 @@ func TestNativeWindowsDisposableStartAndRestartCollisionHaveNoSideEffects(t *tes
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)
 	port := listener.Addr().(*net.TCPAddr).Port
-	configText := fmt.Sprintf("gateway:\n  api_bind: 127.0.0.1\n  api_port: %d\n  token: disposable-test-token\n", port)
+	configText := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: %d\n  token: disposable-test-token\nobservability: {}\n", home, port)
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	watchdogPath := filepath.Join(home, watchdogPIDFile)
-	const watchdogSentinel = "foreign-watchdog-sentinel"
+	watchdogSentinel := fmt.Sprintf("{\"pid\":%d}\n", os.Getpid())
 	if err := os.WriteFile(watchdogPath, []byte(watchdogSentinel), 0o600); err != nil {
 		t.Fatal(err)
 	}

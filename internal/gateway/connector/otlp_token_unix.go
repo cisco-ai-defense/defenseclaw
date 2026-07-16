@@ -72,7 +72,7 @@ func otlpPathTokenNeedsSecureReplacement(_ string) (bool, error) {
 }
 
 func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), "."+filepath.Base(tokenPath)+".tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), otlpPathTokenTempPrefix(tokenPath)+"*")
 	if err != nil {
 		return nil, "", err
 	}

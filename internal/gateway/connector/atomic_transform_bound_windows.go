@@ -279,7 +279,11 @@ func openAtomicTransformBoundFilePlatform(parent *os.File, name string, rename b
 	access := uint32(windows.GENERIC_READ | windows.READ_CONTROL | windows.SYNCHRONIZE)
 	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
 	if rename {
-		access |= windows.GENERIC_WRITE | windows.DELETE
+		// A same-directory NTFS rename can normalize a protected explicit DACL
+		// into the same inherited ACEs. Keep WRITE_DAC on the already-bound inode
+		// so the authenticated pre-rename DACL can be restored before releasing
+		// the rename handle. No path-based reopen is trusted for that repair.
+		access |= windows.GENERIC_WRITE | windows.DELETE | windows.WRITE_DAC
 		share = windows.FILE_SHARE_READ
 	}
 	var handle windows.Handle

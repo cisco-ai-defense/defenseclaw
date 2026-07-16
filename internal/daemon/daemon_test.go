@@ -58,6 +58,12 @@ func TestDaemonRestartProbe(t *testing.T) {
 	if marker == "" {
 		return
 	}
+	// Native Windows daemon children are the sole writers of their strong PID
+	// identity. Mirror the real gateway startup path so the parent can verify
+	// this long-lived probe before exercising restart refusal.
+	if err := RegisterCurrentProcess(); err != nil {
+		os.Exit(2)
+	}
 	if err := os.WriteFile(marker, []byte("running\n"), 0o600); err != nil {
 		os.Exit(2)
 	}

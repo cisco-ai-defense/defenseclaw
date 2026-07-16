@@ -30,12 +30,12 @@
     release bundle plus a pinned Cosign executable.
 
 .EXAMPLE
-    $Version = "0.8.3"
+    $Version = "0.8.6"
     $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
     & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
-    .\install.ps1 -Version 0.8.3 -Connector codex -Yes -Quickstart
+    .\install.ps1 -Version 0.8.6 -Connector codex -Yes -Quickstart
 
 .EXAMPLE
     .\install.ps1 -Local .\release -CosignPath .\tools\cosign-windows-amd64.exe -Yes
@@ -100,10 +100,10 @@ function Show-Help {
 DefenseClaw native Windows bootstrap
 
 Usage:
-  `$Version = "0.8.3"
+  `$Version = "0.8.6"
   `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
   & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
-  .\install.ps1 -Version 0.8.3 -Connector codex -Yes -Quickstart
+  .\install.ps1 -Version 0.8.6 -Connector codex -Yes -Quickstart
   .\install.ps1 -Local .\release -CosignPath .\cosign-windows-amd64.exe
 
 Options:

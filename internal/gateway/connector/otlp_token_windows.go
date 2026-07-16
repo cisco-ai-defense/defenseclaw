@@ -260,7 +260,7 @@ func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, erro
 		}
 		tmpPath := filepath.Join(
 			securityDir,
-			"."+filepath.Base(tokenPath)+".tmp-"+hex.EncodeToString(random),
+			otlpPathTokenTempPrefix(tokenPath)+hex.EncodeToString(random),
 		)
 		file, err := openSecureOTLPWindowsFile(tmpPath, windows.CREATE_NEW, 0, true)
 		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {

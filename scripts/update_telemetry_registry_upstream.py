@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
@@ -30,6 +29,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 import yaml
+
+if os.name == "nt":
+    from defenseclaw.file_lock import locked_file_update
+else:
+    import fcntl
+
 from generate_telemetry_registry import (
     EXPECTED_DEPENDENCIES,
     NORMALIZED_SNAPSHOT_FORMAT,
@@ -47,6 +52,7 @@ MAX_AUTHORED_JSON_NESTING: Final = 256
 MAX_LOCK_BYTES: Final = 16 * 1024 * 1024
 LEGACY_NORMALIZED_SNAPSHOT_FORMAT: Final = "defenseclaw-normalized-semconv-v1"
 _PROCESS_UPDATE_LOCK: Final = threading.Lock()
+_WINDOWS_REPOSITORY_LOCK_BASENAME: Final = ".defenseclaw-telemetry-upstream"
 ALLOWED_REPOSITORIES: Final = {
     "otel_core": "https://github.com/open-telemetry/semantic-conventions",
     "otel_genai": "https://github.com/open-telemetry/semantic-conventions-genai",
@@ -876,6 +882,24 @@ def _directory_descriptor(path: Path):  # type: ignore[no-untyped-def]
 @contextlib.contextmanager
 def _repository_update_lock(root: Path):  # type: ignore[no-untyped-def]
     with _PROCESS_UPDATE_LOCK:
+        if os.name == "nt":
+            # Windows cannot flock a directory. Reuse the CLI's dependency-free
+            # byte-range lock primitive on one durable repository sentinel.
+            # The sentinel must remain in place: unlinking it after release can
+            # split concurrent waiters across distinct file identities.
+            stack = contextlib.ExitStack()
+            try:
+                stack.enter_context(
+                    locked_file_update(os.fspath(root / _WINDOWS_REPOSITORY_LOCK_BASENAME))
+                )
+            except OSError as exc:
+                stack.close()
+                raise RegistryError("cannot acquire telemetry upstream repository lock") from exc
+            try:
+                yield None
+            finally:
+                stack.close()
+            return
         with _directory_descriptor(root) as root_descriptor:
             try:
                 fcntl.flock(root_descriptor, fcntl.LOCK_EX)

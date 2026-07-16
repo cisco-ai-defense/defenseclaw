@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -35,6 +36,17 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	if defaultStartReadinessTimeout != 60*time.Second {
 		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	}
+}
+
+func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.OTel.Enabled = false
+
+	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+	if !requirements.telemetryEnabled {
+		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
 	}
 }
 
