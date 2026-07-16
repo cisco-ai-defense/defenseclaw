@@ -2144,7 +2144,7 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
             OtherConnector = 'claudecode'
             HookScript = 'codex-hook.sh'
             OtherHookScript = 'claude-code-hook.sh'
-            ConfigPath = Join-Path $UserProfile '.codex\config.toml'
+            ConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
             OtherConfigPath = Join-Path $UserProfile '.claude\settings.json'
             DoctorLabel = 'Codex hooks'
             OtherDoctorLabel = 'Claude Code hooks'
@@ -2157,7 +2157,7 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
             HookScript = 'claude-code-hook.sh'
             OtherHookScript = 'codex-hook.sh'
             ConfigPath = Join-Path $UserProfile '.claude\settings.json'
-            OtherConfigPath = Join-Path $UserProfile '.codex\config.toml'
+            OtherConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
             DoctorLabel = 'Claude Code hooks'
             OtherDoctorLabel = 'Codex hooks'
         }
@@ -2711,6 +2711,7 @@ function Invoke-SetupAcceptance {
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
     $connectorConfigPaths = @(
         (Join-Path $userProfile '.codex\config.toml'),
+        (Join-Path $userProfile '.codex\managed_config.toml'),
         (Join-Path $userProfile '.claude\settings.json')
     )
     if (Test-Path -LiteralPath $installRoot) { throw "refusing to overwrite an existing current-user install: $installRoot" }
@@ -3350,7 +3351,7 @@ function Assert-WindowsReleaseRealClientResults([string]$ResultsPath) {
         $_.status -eq 'pass'
     })
     if ($autoTrust.Count -lt 1) {
-        throw 'release certification is missing automatic Codex trusted-hash evidence'
+        throw 'release certification is missing automatic Codex managed-hook trust evidence'
     }
 }
 
@@ -3376,7 +3377,9 @@ function Assert-WindowsReleaseCleanUninstall(
     [string[]]$ConnectorConfigs,
     [AllowNull()][string]$OriginalUserPath,
     [string]$PreservedCodexHooksPath,
-    [string]$ExpectedCodexHooks
+    [string]$ExpectedCodexHooks,
+    [string]$PreservedCodexManagedConfigPath,
+    [string]$ExpectedCodexManagedConfig
 ) {
     for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $CacheRoot); $attempt++) {
         Start-Sleep -Milliseconds 250
@@ -3393,6 +3396,17 @@ function Assert-WindowsReleaseCleanUninstall(
     $actualCodexHooks = [IO.File]::ReadAllText($PreservedCodexHooksPath)
     if (-not [string]::Equals($actualCodexHooks, $ExpectedCodexHooks, [StringComparison]::Ordinal)) {
         throw 'release uninstall did not preserve the unrelated Codex hook byte-for-byte'
+    }
+    if (-not (Test-Path -LiteralPath $PreservedCodexManagedConfigPath -PathType Leaf)) {
+        throw "release uninstall removed the unrelated Codex managed config: $PreservedCodexManagedConfigPath"
+    }
+    $actualCodexManagedConfig = [IO.File]::ReadAllText($PreservedCodexManagedConfigPath)
+    if (-not [string]::Equals(
+        $actualCodexManagedConfig,
+        $ExpectedCodexManagedConfig,
+        [StringComparison]::Ordinal
+    )) {
+        throw 'release uninstall did not preserve the unrelated Codex managed config byte-for-byte'
     }
     if (-not [string]::Equals(
         $OriginalUserPath,
@@ -3465,9 +3479,15 @@ function Invoke-WindowsReleaseCertification {
     $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
     $codexConfigPath = Join-Path $userProfile '.codex\config.toml'
+    $codexManagedConfigPath = Join-Path $userProfile '.codex\managed_config.toml'
     $codexHooksPath = Join-Path $userProfile '.codex\hooks.json'
     $claudeConfigPath = Join-Path $userProfile '.claude\settings.json'
-    $connectorConfigs = @($codexConfigPath, $codexHooksPath, $claudeConfigPath)
+    $connectorConfigs = @(
+        $codexConfigPath,
+        $codexManagedConfigPath,
+        $codexHooksPath,
+        $claudeConfigPath
+    )
     foreach ($path in @($installRoot, $dataRoot, $cacheRoot, $arpKey) + $connectorConfigs) {
         if (Test-Path -LiteralPath $path) {
             throw "release certification refuses pre-existing product or connector state: $path"
@@ -3491,6 +3511,12 @@ function Invoke-WindowsReleaseCertification {
         }
     } | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($codexHooksPath, $unrelatedCodexHooks, [Text.UTF8Encoding]::new($false))
+    $unrelatedCodexManagedConfig = "[operator_policy]`r`nmode = `"strict`"`r`n"
+    [IO.File]::WriteAllText(
+        $codexManagedConfigPath,
+        $unrelatedCodexManagedConfig,
+        [Text.UTF8Encoding]::new($false)
+    )
 
     $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $originalEnvironment = @{}
@@ -3586,7 +3612,8 @@ function Invoke-WindowsReleaseCertification {
         $installed = $false
         Assert-WindowsReleaseCleanUninstall `
             $installRoot $dataRoot $cacheRoot $arpKey $connectorConfigs $originalUserPath `
-            $codexHooksPath $unrelatedCodexHooks
+            $codexHooksPath $unrelatedCodexHooks `
+            $codexManagedConfigPath $unrelatedCodexManagedConfig
 
         $finalHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($finalHash -cne $setupHash) {
@@ -3654,7 +3681,8 @@ function Invoke-WindowsReleaseCertification {
         if ($completed) {
             Assert-WindowsReleaseCleanUninstall `
                 $installRoot $dataRoot $cacheRoot $arpKey $connectorConfigs $originalUserPath `
-                $codexHooksPath $unrelatedCodexHooks
+                $codexHooksPath $unrelatedCodexHooks `
+                $codexManagedConfigPath $unrelatedCodexManagedConfig
         }
     }
 }

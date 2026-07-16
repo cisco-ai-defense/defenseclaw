@@ -163,19 +163,6 @@ func (c *CodexConnector) restoreCodexManagedHooks(opts SetupOpts) error {
 	if err := ensureCodexConfigDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("prepare Codex managed config directory for restore: %w", err)
 	}
-	if restored, err := restoreManagedFileBackupIfUnchanged(
-		opts.DataDir,
-		c.Name(),
-		codexManagedConfigLogicalName,
-		path,
-	); err != nil {
-		// A target that drifted or whose exact backup cannot be restored still
-		// gets surgical cleanup below. A malformed/tampered backup must not block
-		// removal of an owned active hook.
-		fmt.Fprintf(os.Stderr, "[codex] exact managed hook restore skipped: %v\n", err)
-	} else if restored {
-		return nil
-	}
 	backup, err := loadManagedFileBackupForTransform(
 		opts.DataDir,
 		c.Name(),
@@ -189,43 +176,37 @@ func (c *CodexConnector) restoreCodexManagedHooks(opts SetupOpts) error {
 	if err := withFileLock(path, func() error {
 		return atomicTransformFileWithStateDir(path, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if exact, ok := managedFileBackupTransform(backup, raw, exists); ok {
+				if exact.Remove {
+					return exact, nil
+				}
+				cleaned, changed, err := removeOwnedCodexHooksFromTOML(
+					exact.Data,
+					path,
+					filepath.Join(opts.DataDir, "hooks"),
+				)
+				if err != nil {
+					return atomicTransformResult{}, fmt.Errorf("clean exact-restored Codex managed hooks: %w", err)
+				}
+				if changed {
+					exact.Data = cleaned
+					exact.Remove = len(cleaned) == 0
+				}
 				return exact, nil
 			}
 			if !exists {
 				return atomicTransformResult{Remove: true}, nil
 			}
-			cfg := map[string]interface{}{}
-			if err := toml.Unmarshal(raw, &cfg); err != nil {
-				return atomicTransformResult{}, fmt.Errorf("parse Codex managed config: %w", err)
-			}
-			rawHooks, present := cfg["hooks"]
-			if !present {
-				return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
-			}
-			hooks, ok := rawHooks.(map[string]interface{})
-			if !ok {
-				return atomicTransformResult{}, fmt.Errorf("restore Codex managed hooks: unsupported type %T", rawHooks)
-			}
-			changed, err := removeOwnedCodexHooksAndState(hooks, path, filepath.Join(opts.DataDir, "hooks"))
+			cleaned, changed, err := removeOwnedCodexHooksFromTOML(raw, path, filepath.Join(opts.DataDir, "hooks"))
 			if err != nil {
 				return atomicTransformResult{}, fmt.Errorf("restore Codex managed hooks: %w", err)
 			}
 			if !changed {
 				return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
 			}
-			if len(hooks) == 0 {
-				delete(cfg, "hooks")
-			} else {
-				cfg["hooks"] = hooks
-			}
-			if len(cfg) == 0 {
+			if len(cleaned) == 0 {
 				return atomicTransformResult{Remove: true}, nil
 			}
-			out, err := toml.Marshal(cfg)
-			if err != nil {
-				return atomicTransformResult{}, fmt.Errorf("marshal restored Codex managed config: %w", err)
-			}
-			return atomicTransformResult{Data: out}, nil
+			return atomicTransformResult{Data: cleaned}, nil
 		})
 	}); err != nil {
 		return fmt.Errorf("write restored Codex managed config: %w", err)

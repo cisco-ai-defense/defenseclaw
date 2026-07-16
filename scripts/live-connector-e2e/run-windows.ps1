@@ -65,7 +65,7 @@ function Resolve-EffectiveConnectorHome(
 function Get-EffectiveConnectorConfigPath(
     [ValidateSet('codex', 'claudecode')][string]$ConnectorName
 ) {
-    $fileName = if ($ConnectorName -eq 'codex') { 'config.toml' } else { 'settings.json' }
+    $fileName = if ($ConnectorName -eq 'codex') { 'managed_config.toml' } else { 'settings.json' }
     return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
 }
 
@@ -1176,11 +1176,11 @@ function Assert-CodexHookMetadata(
     $managedProperty = $Hook.PSObject.Properties['isManaged']
     if ([string]$Hook.handlerType -cne 'command' -or
         $null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool] -or -not $enabledProperty.Value -or
-        $null -eq $managedProperty -or $managedProperty.Value -isnot [bool] -or $managedProperty.Value) {
-        throw "Codex $VersionLabel hook $eventName is not an enabled unmanaged command handler"
+        $null -eq $managedProperty -or $managedProperty.Value -isnot [bool] -or -not $managedProperty.Value) {
+        throw "Codex $VersionLabel hook $eventName is not an enabled managed command handler"
     }
-    if ([string]$Hook.source -cne 'user' -or [string]$Hook.command -cne $ExpectedCommand) {
-        throw "Codex $VersionLabel hook $eventName is not the effective user command handler"
+    if ([string]$Hook.source -cne 'legacyManagedConfigFile' -or [string]$Hook.command -cne $ExpectedCommand) {
+        throw "Codex $VersionLabel hook $eventName is not the effective managed command handler"
     }
     $matcherProperty = $Hook.PSObject.Properties['matcher']
     $actualMatcher = if ($null -eq $matcherProperty) { $null } else { $matcherProperty.Value }
@@ -1201,10 +1201,10 @@ function Assert-CodexHookMetadata(
     $expectedKeyPrefix = $ConfigPath + ':'
     if (-not ([string]$Hook.key).StartsWith($expectedKeyPrefix, [StringComparison]::OrdinalIgnoreCase) -or
         -not $SeenKeys.Add([string]$Hook.key)) {
-        throw "Codex $VersionLabel hook $eventName has an invalid or duplicate positional trust key"
+        throw "Codex $VersionLabel hook $eventName has an invalid or duplicate positional hook key"
     }
-    if ([string]$Hook.trustStatus -cne 'trusted') {
-        throw "Codex $VersionLabel hook $eventName trustStatus=$($Hook.trustStatus), want trusted"
+    if ([string]$Hook.trustStatus -cne 'managed') {
+        throw "Codex $VersionLabel hook $eventName trustStatus=$($Hook.trustStatus), want managed"
     }
     if ([string]$Hook.currentHash -notmatch '^sha256:[0-9a-f]{64}$') {
         throw "Codex $VersionLabel hook $eventName has an invalid currentHash"
@@ -1221,7 +1221,7 @@ function Assert-CodexHooksListTrusted(
         return
     }
     $codexHome = Resolve-EffectiveConnectorHome 'codex'
-    $configPath = [IO.Path]::GetFullPath((Join-Path $codexHome 'config.toml'))
+    $configPath = [IO.Path]::GetFullPath((Join-Path $codexHome 'managed_config.toml'))
     $expectedCommand = (Get-CodexWindowsHookCommand ([IO.File]::ReadAllText($configPath))).Command
     $workingDirectory = [IO.Path]::GetFullPath($WorkspaceRoot)
     $response = Invoke-CodexHooksList $CodexJavaScript $codexHome $workingDirectory $VersionLabel
@@ -1258,7 +1258,7 @@ function Assert-CodexHooksListTrusted(
         }
         Assert-CodexHookMetadata $hook $expectedSpec $expectedCommand $configPath $VersionLabel $seenKeys
     }
-    Write-Result "codex-hooks-list:$VersionLabel" pass "$($hooks.Count) enabled handlers trusted without manual approval"
+    Write-Result "codex-hooks-list:$VersionLabel" pass "$($hooks.Count) enabled policy-managed handlers require no manual approval"
 }
 
 function Assert-CodexPinnedTrustMatrix {
