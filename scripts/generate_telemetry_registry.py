@@ -246,12 +246,32 @@ EXPECTED_STRUCTURED_BINDINGS: Final = (
         "ordered_typed_entries",
         "native_json_object",
     ),
-    ("defenseclaw.inventory.connector.identifiers", "defenseclaw.inventory.connector_identifiers", "sealed_typed", "native_json"),
-    ("defenseclaw.inventory.connector.metadata", "defenseclaw.inventory.connector_metadata", "sealed_typed", "native_json"),
-    ("defenseclaw.inventory.connector.content", "defenseclaw.inventory.connector_content", "sealed_typed", "native_json"),
+    (
+        "defenseclaw.inventory.connector.identifiers",
+        "defenseclaw.inventory.connector_identifiers",
+        "sealed_typed",
+        "native_json",
+    ),
+    (
+        "defenseclaw.inventory.connector.metadata",
+        "defenseclaw.inventory.connector_metadata",
+        "sealed_typed",
+        "native_json",
+    ),
+    (
+        "defenseclaw.inventory.connector.content",
+        "defenseclaw.inventory.connector_content",
+        "sealed_typed",
+        "native_json",
+    ),
     ("defenseclaw.inventory.mcp.identifiers", "defenseclaw.inventory.mcp_identifiers", "sealed_typed", "native_json"),
     ("defenseclaw.inventory.mcp.metadata", "defenseclaw.inventory.mcp_metadata", "sealed_typed", "native_json"),
-    ("defenseclaw.inventory.agent.identifiers", "defenseclaw.inventory.agent_identifiers", "sealed_typed", "native_json"),
+    (
+        "defenseclaw.inventory.agent.identifiers",
+        "defenseclaw.inventory.agent_identifiers",
+        "sealed_typed",
+        "native_json",
+    ),
     ("defenseclaw.inventory.agent.metadata", "defenseclaw.inventory.agent_metadata", "sealed_typed", "native_json"),
 )
 EXPECTED_GO_SYMBOL_POLICY: Final = {
@@ -1223,7 +1243,15 @@ def _read_utf8(path: Path) -> tuple[bytes, str]:
         raise RegistryError(f"{path}: invalid UTF-8") from exc
     if text.startswith("\ufeff"):
         raise RegistryError(f"{path}: UTF-8 BOM is not allowed")
-    return raw, text
+    # Git may materialize text files with CRLF when core.autocrlf=true. The
+    # registry lock and generated provenance intentionally hash the canonical
+    # repository representation (LF), so normalize only Git's CRLF rewrite at
+    # this single-read boundary. Bare CR remains significant and still fails a
+    # pinned digest instead of being silently rewritten.
+    canonical = raw.replace(b"\r\n", b"\n")
+    if canonical == raw:
+        return raw, text
+    return canonical, text.replace("\r\n", "\n")
 
 
 def _parse_yaml_strict_bytes(path: Path, raw: bytes) -> dict[str, Any]:
@@ -11479,9 +11507,19 @@ def _drift(root: Path, desired: Mapping[str, bytes]) -> list[str]:
             payload = target.read_bytes()
         except OSError as exc:
             raise RegistryError(f"cannot read generated output: {relative}") from exc
-        if payload != desired[relative]:
+        # Git's Windows checkout filter can materialize generated Go sources
+        # with CRLF. These are canonical text artifacts, unlike the compressed
+        # runtime assets, which must remain byte-exact on every platform.
+        expected = desired[relative]
+        if relative in GO_CANDIDATE_OUTPUT_PATHS:
+            payload = payload.replace(b"\r\n", b"\n")
+            expected = expected.replace(b"\r\n", b"\n")
+        if payload != expected:
             problems.append(f"stale={relative}")
-        if stat.S_IMODE(metadata.st_mode) != REPOSITORY_OUTPUT_MODE:
+        # Windows' stat mode is only a read-only projection (normally 0666),
+        # not a POSIX permission mode. ACL validation belongs to the Windows
+        # packaging/runtime gates; retain the exact 0644 contract on POSIX.
+        if os.name != "nt" and stat.S_IMODE(metadata.st_mode) != REPOSITORY_OUTPUT_MODE:
             problems.append(f"mode={relative}")
     problems.extend(f"extra={relative}" for relative in _extra_outputs(root))
     return problems
@@ -11518,7 +11556,8 @@ def _atomic_write(root: Path, relative: str, payload: bytes) -> None:
     _, metadata = _target_metadata(root, relative)
     if metadata is not None:
         try:
-            if target.read_bytes() == payload and stat.S_IMODE(metadata.st_mode) == REPOSITORY_OUTPUT_MODE:
+            mode_matches = os.name == "nt" or stat.S_IMODE(metadata.st_mode) == REPOSITORY_OUTPUT_MODE
+            if target.read_bytes() == payload and mode_matches:
                 return
         except OSError as exc:
             raise RegistryError(f"cannot read generated output: {relative}") from exc

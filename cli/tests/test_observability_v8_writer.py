@@ -44,7 +44,8 @@ def test_mutate_v8_config_preserves_comments_validates_and_replaces_atomically(t
         calls.append((candidate, data_dir))
         text = Path(candidate).read_text()
         assert "retention_days: 30 # keep inline" in text
-        assert stat.S_IMODE(os.stat(candidate).st_mode) == 0o640
+        if os.name == "posix":
+            assert stat.S_IMODE(os.stat(candidate).st_mode) == 0o640
 
     result = mutate_v8_config(
         path,
@@ -62,7 +63,8 @@ def test_mutate_v8_config_preserves_comments_validates_and_replaces_atomically(t
     assert "# keep top-level context" in final
     assert "# capacity choice" in final
     assert "retention_days: 30 # keep inline" in final
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
 
 
 def test_mutate_v8_config_noop_still_runs_canonical_validation(tmp_path: Path) -> None:

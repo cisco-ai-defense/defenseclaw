@@ -798,6 +798,7 @@ func TestLocalModelAPILifecycleDistinguishesTransientFailureFromEmptyInventory(t
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -860,6 +861,7 @@ func TestLocalModelAPILifecycleCompletesPagedInventoryBeforeMarkingRemoval(t *te
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
 	}, []AISignature{openAIAPITestSignature(server.URL)})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	firstPage, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -932,6 +934,7 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
 		t.Fatalf("first scan: %v", err)
@@ -1013,6 +1016,7 @@ func TestDetectLocalAPIModelsDeduplicatesLemonadeCompatibilityEndpoints(t *testi
 func TestLocalEndpointsForSignatureAddsLemonadePresenceAndConfiguredPorts(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
 	t.Setenv("LEMONADE_PORT", "32124")
 	t.Setenv("LEMONADE_HOST", "127.0.0.1")
 	t.Setenv("LEMONADE_CACHE_DIR", "")

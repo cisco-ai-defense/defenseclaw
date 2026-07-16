@@ -51,6 +51,15 @@ def _repository(tmp_path: Path) -> Path:
     return root
 
 
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip(f"Windows symlink privilege unavailable: {exc}")
+        raise
+
+
 def test_physical_inventory_is_exact_and_deterministic(generator: ModuleType) -> None:
     outputs = _outputs(generator)
     first = generator._physical_outputs(outputs)
@@ -88,7 +97,8 @@ def test_writer_publishes_exact_files_and_removes_only_retired_outputs(
     for relative, payload in generator._physical_outputs(outputs).items():
         target = root / relative
         assert target.read_bytes() == payload
-        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        if os.name != "nt":
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 @pytest.mark.parametrize("drift", ["missing", "stale", "mode"])
@@ -107,6 +117,8 @@ def test_checker_reports_file_drift(
     elif drift == "stale":
         target.write_bytes(b"stale\n")
     else:
+        if os.name == "nt":
+            pytest.skip("POSIX generated-output mode contract")
         target.chmod(0o600)
 
     with pytest.raises(generator.RegistryError, match=rf"{drift}={relative}"):
@@ -149,7 +161,7 @@ def test_writer_rejects_symlinked_output_parent(
     outside.mkdir()
     runtime_parent = root / "schemas/telemetry"
     runtime_parent.mkdir(parents=True)
-    (runtime_parent / "runtime").symlink_to(outside, target_is_directory=True)
+    _symlink_or_skip(runtime_parent / "runtime", outside, target_is_directory=True)
 
     with pytest.raises(generator.RegistryError, match="not a real directory"):
         generator.write_outputs(root, _outputs(generator))
@@ -166,7 +178,7 @@ def test_writer_refuses_symlinked_retired_file(
     outside.write_text("do not remove", encoding="utf-8")
     retired = root / sorted(generator.RETIRED_REPOSITORY_OUTPUT_PATHS)[0]
     retired.parent.mkdir(parents=True)
-    retired.symlink_to(outside)
+    _symlink_or_skip(retired, outside)
 
     with pytest.raises(generator.RegistryError, match="not a regular file"):
         generator.write_outputs(root, _outputs(generator))

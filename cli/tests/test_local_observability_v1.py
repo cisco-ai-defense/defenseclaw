@@ -382,7 +382,8 @@ def test_bundle_parity_covers_collector_rules_and_stateful_config(
 
     errors = compat._bundle_parity_errors()
 
-    assert errors == ["local-observability packaged file differs: otel-collector/config.yaml"]
+    relative = Path("otel-collector") / "config.yaml"
+    assert errors == [f"local-observability packaged file differs: {relative}"]
 
 
 def test_live_audit_fails_fast_when_one_of_five_services_is_unready(monkeypatch) -> None:

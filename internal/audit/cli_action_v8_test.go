@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
@@ -15,6 +16,8 @@ func TestLogCLIActionPreservesCLIOriginAndCanonicalRuntimeOwnership(t *testing.T
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
+	gatewaylog.SetProcessRunID("sidecar-process-run")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
 	ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{RunID: "python-run"})
 	if err := logger.LogCLIAction(
 		ctx, string(ActionPolicyReload), "default", "owner=alice@example.com",

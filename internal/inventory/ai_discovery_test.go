@@ -32,6 +32,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
+	t.Helper()
+	t.Cleanup(func() {
+		if closed, err := svc.CloseIfNeverStarted(); err != nil || !closed {
+			t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+		}
+	})
+}
+
 func TestContinuousDiscoveryServiceRunClosesInventoryStoreAcrossRestarts(t *testing.T) {
 	dataDir := t.TempDir()
 	homeDir := t.TempDir()
@@ -368,6 +377,7 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 	if svc == nil {
 		t.Fatal("service nil")
 	}
+	cleanupPreparedDiscoveryService(t, svc)
 	var found bool
 	for _, sig := range svc.catalog {
 		found = found || sig.ID == "custom-sidecar-ai"
@@ -400,6 +410,7 @@ func TestContinuousDiscoveryDetectsEnhancedSignalsWithoutRawEvidence(t *testing.
 		MaxFilesPerScan:         20,
 		MaxFileBytes:            64 * 1024,
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -437,6 +448,7 @@ detectors:
 		HomeDir:              filepath.Join(tmp, "home"),
 		ConfidencePolicyPath: policyPath,
 	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
 
 	policy := svc.ConfidenceParams().Policy
 	if got := policy.Detectors["package_manifest"].IdentityLR; got != 7 {
@@ -516,6 +528,7 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 		MaxFilesPerScan:     20,
 		MaxFileBytes:        64 * 1024,
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -582,6 +595,7 @@ func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 		DataDir: dataDir,
 		HomeDir: home,
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -624,6 +638,7 @@ func TestContinuousDiscoveryDetectsLoopbackEndpointWithoutRawURL(t *testing.T) {
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -672,6 +687,7 @@ func TestDetectLocalEndpoints_PrefersHEADToAvoidTriggeringInference(t *testing.T
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// Exercise the presence detector directly. A full scan now also runs the
 	// separate local-model inventory detector, which intentionally performs a
@@ -723,6 +739,7 @@ func TestDetectLocalEndpoints_LemonadeRequiresSuccessfulLive(t *testing.T) {
 			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 				Enabled: true, Mode: "enhanced", DataDir: t.TempDir(), HomeDir: t.TempDir(),
 			}, []AISignature{sig})
+			cleanupPreparedDiscoveryService(t, svc)
 
 			if got := len(svc.detectLocalEndpoints()); got != tc.want {
 				t.Fatalf("Lemonade endpoint signals = %d, want %d", got, tc.want)
@@ -764,6 +781,7 @@ func TestDetectLocalEndpoints_FallsBackToGETWhenHEADUnsupported(t *testing.T) {
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -811,6 +829,7 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
 	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
 		t.Fatalf("runScan: %v", err)
@@ -845,6 +864,7 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 		DataDir: filepath.Join(tmp, "data"),
 		HomeDir: filepath.Join(tmp, "home"),
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// CLI is sending us a forged report claiming the sidecar produced it.
 	report := AIDiscoveryReport{
@@ -881,6 +901,7 @@ func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
 		DataDir: t.TempDir(),
 		HomeDir: t.TempDir(),
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 	called := make(chan struct{}, 1)
 	svc.AddReportObserver(func(context.Context, AIDiscoveryReport) { called <- struct{}{} })
 	report := AIDiscoveryReport{
@@ -926,6 +947,7 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 		DataDir: dataDir,
 		HomeDir: home,
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// 1) Full scan: detect the config-path signal so it lands in
 	//    the persisted inventory.
@@ -1579,7 +1601,7 @@ func TestProjectRootForManifest_WalksPastDependencyCacheSegments(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := projectRootForManifest(tc.path)
-			if got != tc.want {
+			if filepath.ToSlash(filepath.Clean(got)) != filepath.ToSlash(filepath.Clean(tc.want)) {
 				t.Fatalf("projectRootForManifest(%q) = %q; want %q", tc.path, got, tc.want)
 			}
 		})
@@ -1621,6 +1643,7 @@ mainly_for_demo = "0.1"
 		MaxFilesPerScan: 100,
 		MaxFileBytes:    1 << 20,
 	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1699,6 +1722,7 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 		MaxFilesPerScan: 1000,
 		MaxFileBytes:    1 << 20,
 	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1769,6 +1793,7 @@ func TestRunScan_SingleFlight(t *testing.T) {
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// Spawn N concurrent runScan goroutines; if the mutex is wired
 	// correctly all of them should complete without races (a -race
@@ -1813,6 +1838,7 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 		MaxFilesPerScan: 1,
 		MaxFileBytes:    1024,
 	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

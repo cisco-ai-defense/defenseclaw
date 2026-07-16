@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestReadMCPFromCodexConfigTOML covers the bug fix where Codex's
@@ -136,7 +138,7 @@ func TestReadMCPServersCodex_MergesGlobalAndProjectLocal(t *testing.T) {
 	homeDir := t.TempDir()
 	cwdDir := t.TempDir()
 
-	t.Setenv("HOME", homeDir)
+	testenv.SetHome(t, homeDir)
 
 	chdir(t, cwdDir)
 

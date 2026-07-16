@@ -3304,9 +3304,14 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 }
 
 func classifyScanError(err error) string {
-	msg := err.Error()
+	if errors.Is(err, os.ErrNotExist) {
+		return "not_found"
+	}
+	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "not found") || strings.Contains(msg, "no such file") || strings.Contains(msg, "executable file not found"):
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "cannot find the file specified") ||
+		strings.Contains(msg, "cannot find the path specified"):
 		return "not_found"
 	case strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout"):
 		return "timeout"

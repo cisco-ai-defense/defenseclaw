@@ -113,8 +113,12 @@ func TestHandleCodeScan_NonexistentPath(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := testAPIServerWithConfig(t, "action")
 	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
-	body := `{"path": "/nonexistent/does/not/exist.py"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/scan/code", bytes.NewBufferString(body))
+	missingPath := filepath.Join(t.TempDir(), "does-not-exist.py")
+	body, err := json.Marshal(map[string]string{"path": missingPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scan/code", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.handleCodeScan(w, req)

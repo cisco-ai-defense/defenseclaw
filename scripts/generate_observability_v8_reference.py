@@ -846,7 +846,11 @@ def _check(outputs: Mapping[Path, bytes]) -> bool:
             )
             ok = False
             continue
-        if actual != expected:
+        # Git may materialize these generated UTF-8 text references with CRLF
+        # when core.autocrlf=true. Compare their canonical LF representation so
+        # Windows checkouts do not report drift while all content remains
+        # covered by the deterministic generator.
+        if actual.replace(b"\r\n", b"\n") != expected.replace(b"\r\n", b"\n"):
             print(
                 f"generate_observability_v8_reference: drift in {path.relative_to(ROOT)}; run with --write",
                 file=sys.stderr,

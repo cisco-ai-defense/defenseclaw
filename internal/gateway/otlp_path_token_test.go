@@ -5,12 +5,15 @@
 package gateway
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -344,7 +347,7 @@ func TestLookupOTLPPathToken_RejectsSymlinkReplacement(t *testing.T) {
 		t.Fatalf("remove token for symlink replacement: %v", err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		if os.IsPermission(err) {
+		if os.IsPermission(err) || (runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314))) {
 			t.Skipf("symlink creation unavailable: %v", err)
 		}
 		t.Fatalf("replace token with symlink: %v", err)

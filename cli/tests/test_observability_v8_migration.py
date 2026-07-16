@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 
 import defenseclaw.observability.v8_migration as migration_module
 import pytest
@@ -36,6 +37,7 @@ from defenseclaw.observability.v8_migration import (
 _GENERATED_COMPATIBILITY = json.loads(v7_exporter_selection_bytes())
 _TYPED_COMPATIBILITY = V7CompatibilitySelection.from_mapping(_GENERATED_COMPATIBILITY)
 _ALL_BUCKETS = list(BUCKETS)
+_TEST_DATA_DIR = str(Path(Path.cwd().anchor) / "var" / "lib" / "defenseclaw")
 _ALL_SPAN_EVENT_NAMES = [
     "span.admin.operation",
     "span.agent.invoke",
@@ -66,7 +68,7 @@ _ALL_SPAN_EVENT_NAMES = [
 
 
 def _convert(source: str | bytes, environment: Mapping[str, str] | None = None, **kwargs: object):
-    kwargs.setdefault("effective_data_dir", "/var/lib/defenseclaw")
+    kwargs.setdefault("effective_data_dir", _TEST_DATA_DIR)
     kwargs.setdefault("compatibility_selection", _TYPED_COMPATIBILITY)
     return convert_v7_observability_to_v8(source, environment or {}, **kwargs)
 
@@ -157,7 +159,7 @@ def test_v7_loads_packaged_compatibility_and_fails_closed_when_it_is_unavailable
     result = convert_v7_observability_to_v8(
         "config_version: 7\n",
         {},
-        effective_data_dir="/var/lib/defenseclaw",
+        effective_data_dir=_TEST_DATA_DIR,
     )
     assert result.summary.destination_version == 8
 
@@ -170,7 +172,7 @@ def test_v7_loads_packaged_compatibility_and_fails_closed_when_it_is_unavailable
         convert_v7_observability_to_v8(
             "config_version: 7\n",
             {},
-            effective_data_dir="/var/lib/defenseclaw",
+            effective_data_dir=_TEST_DATA_DIR,
         )
     assert unavailable.value.code == "compatibility_selection_unavailable"
 
@@ -179,7 +181,7 @@ def test_v7_loads_packaged_compatibility_and_fails_closed_when_it_is_unavailable
         convert_v7_observability_to_v8(
             "config_version: 7\n",
             {},
-            effective_data_dir="/var/lib/defenseclaw",
+            effective_data_dir=_TEST_DATA_DIR,
             compatibility_selection=malformed,
         )
     assert invalid.value.code == "compatibility_selection_invalid"
@@ -450,29 +452,31 @@ def test_absent_or_relative_data_dir_requires_explicit_absolute_effective_value(
         convert_v7_observability_to_v8("config_version: 7\n", {}, compatibility_selection=_TYPED_COMPATIBILITY)
     assert captured.value.code == "effective_data_dir_required"
 
+    effective_dir = Path(Path.cwd().anchor) / "srv" / "defenseclaw"
     result = convert_v7_observability_to_v8(
         "config_version: 7\ndata_dir: ~/.defenseclaw\n",
         {},
-        effective_data_dir="/srv/defenseclaw",
+        effective_data_dir=str(effective_dir),
         compatibility_selection=_TYPED_COMPATIBILITY,
     )
     jsonl = _destination(_document(result), "gateway-jsonl")
-    assert result.effective_data_dir == "/srv/defenseclaw"
-    assert jsonl["path"] == "/srv/defenseclaw/gateway.jsonl"
+    assert result.effective_data_dir == str(effective_dir)
+    assert jsonl["path"] == str(effective_dir / "gateway.jsonl")
     assert not str(jsonl["path"]).startswith("~")
     observability = _document(result)["observability"]
     assert observability["local"] == {
-        "path": "/srv/defenseclaw/audit.db",
-        "judge_bodies_path": "/srv/defenseclaw/judge_bodies.db",
+        "path": str(effective_dir / "audit.db"),
+        "judge_bodies_path": str(effective_dir / "judge_bodies.db"),
     }
 
+    normalized_dir = effective_dir.parent / "defenseclaw-v8"
     normalized = convert_v7_observability_to_v8(
         "config_version: 7\n",
         {},
-        effective_data_dir="/srv/defenseclaw/../defenseclaw-v8",
+        effective_data_dir=str(effective_dir / ".." / normalized_dir.name),
         compatibility_selection=_TYPED_COMPATIBILITY,
     )
-    assert normalized.effective_data_dir == "/srv/defenseclaw-v8"
+    assert normalized.effective_data_dir == str(normalized_dir)
 
 
 @pytest.mark.parametrize(

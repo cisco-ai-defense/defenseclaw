@@ -439,11 +439,14 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 		Actor:     actor,
 		Details:   details,
 		Severity:  severity,
-		RunID:     currentRunID(),
 		// Process-scoped identifier — never collapses onto
 		// agent_instance_id (per-session) per the three-tier contract.
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
+	// Apply caller-supplied correlation before stampAuditEventEnvelope fills
+	// any missing run ID from the process.  Initializing RunID eagerly from the
+	// sidecar made an authenticated CLI handoff silently discard its explicit
+	// per-command run ID in a real running gateway.
 	applyEnvelope(&event, env)
 	stampAuditEventEnvelope(&event)
 	disposition, emitErr := l.emitControlPlaneV8(ctx, event)

@@ -32,12 +32,14 @@ func TestStoreRetainsOpenedPathIdentityAcrossWorkingDirectoryChange(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	root := t.TempDir()
+	// Register this after TempDir so LIFO cleanup restores the process CWD
+	// before Windows attempts to remove the directory containing it.
 	t.Cleanup(func() {
 		if err := os.Chdir(original); err != nil {
 			t.Errorf("restore working directory: %v", err)
 		}
 	})
-	root := t.TempDir()
 	openedFrom := filepath.Join(root, "opened-from")
 	initializedFrom := filepath.Join(root, "initialized-from")
 	for _, directory := range []string{openedFrom, initializedFrom} {

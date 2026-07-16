@@ -16,11 +16,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -100,6 +102,11 @@ type caLoader struct {
 	bundles map[string][]byte
 	errors  map[string]error
 	calls   map[string]int
+}
+
+func absoluteDestinationTestPath(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), name)
 }
 
 func (loader *caLoader) LoadObservabilityCA(_ context.Context, path string) ([]byte, error) {
@@ -494,10 +501,11 @@ func cloneDestination(t *testing.T, source config.ObservabilityV8EffectiveDestin
 }
 
 func TestFactoryErrorsAreContentFreeAndAlwaysReturnCleanup(t *testing.T) {
+	caPath := absoluteDestinationTestPath(t, "tenant-ca.pem")
 	secrets := &secretResolver{values: map[string]string{}, calls: map[string]int{}}
 	loader := &caLoader{
 		bundles: map[string][]byte{},
-		errors:  map[string]error{"/secret/tenant-ca.pem": errors.New("read /secret/tenant-ca.pem: tenant-secret")},
+		errors:  map[string]error{caPath: fmt.Errorf("read %s: tenant-secret", caPath)},
 		calls:   map[string]int{},
 	}
 	factory := newTestFactory(t, io.Discard, secrets, loader, net.Dialer{}, nil)
@@ -532,19 +540,19 @@ func TestFactoryErrorsAreContentFreeAndAlwaysReturnCleanup(t *testing.T) {
 	caFailure := compileDestination(t, config.ObservabilityV8DestinationSource{
 		Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
 		Endpoint: "https://collector.example.test/events?credential=hidden",
-		TLS:      config.ObservabilityV8TLSSource{CACert: "/secret/tenant-ca.pem"},
+		TLS:      config.ObservabilityV8TLSSource{CACert: caPath},
 	})
 	adapter, cleanup, err = factory.PrepareDestination(context.Background(), caFailure, telemetry.V8ResourceContext{})
 	if adapter != nil || cleanup == nil || !IsError(err, ErrorCALoadFailed) {
 		t.Fatalf("CA failure adapter=%T cleanup=%v error=%v", adapter, cleanup != nil, err)
 	}
-	for _, forbidden := range []string{"/secret/tenant-ca.pem", "tenant-secret", "credential=hidden"} {
+	for _, forbidden := range []string{caPath, "tenant-secret", "credential=hidden"} {
 		if strings.Contains(err.Error(), forbidden) {
 			t.Fatalf("CA error disclosed %q: %v", forbidden, err)
 		}
 	}
-	if loader.callCount("/secret/tenant-ca.pem") != 1 {
-		t.Fatalf("CA load calls=%d", loader.callCount("/secret/tenant-ca.pem"))
+	if loader.callCount(caPath) != 1 {
+		t.Fatalf("CA load calls=%d", loader.callCount(caPath))
 	}
 	if err := cleanup(context.Background()); err != nil {
 		t.Fatal(err)
@@ -634,22 +642,23 @@ func TestFactoryLoadsCABundleOnceAndDoesNotRequestDuringPrepare(t *testing.T) {
 	}))
 	defer server.Close()
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	caPath := absoluteDestinationTestPath(t, "collector-ca.pem")
 	loader := &caLoader{
-		bundles: map[string][]byte{"/trusted/collector-ca.pem": certificate},
+		bundles: map[string][]byte{caPath: certificate},
 		errors:  map[string]error{}, calls: map[string]int{},
 	}
 	factory := newTestFactory(t, io.Discard, nil, loader, net.Dialer{}, nil)
 	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
 		Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
-		Endpoint: server.URL, TLS: config.ObservabilityV8TLSSource{CACert: "/trusted/collector-ca.pem"},
+		Endpoint: server.URL, TLS: config.ObservabilityV8TLSSource{CACert: caPath},
 		NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
 	})
 	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, telemetry.V8ResourceContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loader.callCount("/trusted/collector-ca.pem") != 1 || requests.Load() != 0 {
-		t.Fatalf("CA calls=%d prepare requests=%d", loader.callCount("/trusted/collector-ca.pem"), requests.Load())
+	if loader.callCount(caPath) != 1 || requests.Load() != 0 {
+		t.Fatalf("CA calls=%d prepare requests=%d", loader.callCount(caPath), requests.Load())
 	}
 	if counters := deliverOne(t, "archive", adapter, `{"record_id":"record"}`); counters.Delivered != 1 {
 		t.Fatalf("TLS counters=%+v", counters)
@@ -687,7 +696,7 @@ func TestFactoryPreparesHTTPOTLPLogsWithDetachedSecretsCAOverridesAndExactRetry(
 	}))
 	defer server.Close()
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-	const caPath = "/trusted/otlp-ca.pem"
+	caPath := absoluteDestinationTestPath(t, "otlp-ca.pem")
 	secrets := &secretResolver{values: map[string]string{"OTLP_AUTH": "Bearer resolved-once"}, calls: map[string]int{}}
 	loader := &caLoader{bundles: map[string][]byte{caPath: certificate}, errors: map[string]error{}, calls: map[string]int{}}
 	warnings := &warningCollector{}
@@ -878,7 +887,7 @@ func TestFactoryOTLPDefaultAllSignalsBuildsOnlyItsLogAdapter(t *testing.T) {
 }
 
 func TestFactoryRejectsInvalidOTLPCABundleAfterSingleResolution(t *testing.T) {
-	const caPath = "/trusted/invalid-otlp-ca.pem"
+	caPath := absoluteDestinationTestPath(t, "invalid-otlp-ca.pem")
 	loader := &caLoader{bundles: map[string][]byte{caPath: []byte("invalid certificate")}, errors: map[string]error{}, calls: map[string]int{}}
 	factory := newTestFactory(t, io.Discard, nil, loader, net.Dialer{}, nil)
 	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
@@ -1221,14 +1230,15 @@ func TestFactoryConsoleStreamChoiceAndPanickingCALoader(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	caPath := absoluteDestinationTestPath(t, "panicking-ca.pem")
 	caDestination := compileDestination(t, config.ObservabilityV8DestinationSource{
 		Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
 		Endpoint: "https://collector.example.test",
-		TLS:      config.ObservabilityV8TLSSource{CACert: "/trusted/ca.pem"},
+		TLS:      config.ObservabilityV8TLSSource{CACert: caPath},
 	})
 	adapter, cleanup, err = factory.PrepareDestination(context.Background(), caDestination, telemetry.V8ResourceContext{})
 	if adapter != nil || cleanup == nil || !IsError(err, ErrorCALoadFailed) ||
-		strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "/trusted") {
+		strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), caPath) {
 		t.Fatalf("panic masking adapter=%T cleanup=%v error=%v", adapter, cleanup != nil, err)
 	}
 

@@ -357,6 +357,7 @@ func TestSpanFamilyEventNamesMatchSpecCatalog(t *testing.T) {
 	inCatalog := false
 	var fromSpec []EventName
 	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		switch {
 		case line == "## 7. Span Family Catalog":
 			inCatalog = true

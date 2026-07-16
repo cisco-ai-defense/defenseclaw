@@ -6075,6 +6075,22 @@ def _private_file_snapshot_unchanged(before: os.stat_result, after: os.stat_resu
     )
 
 
+def _private_named_file_snapshot_unchanged(
+    opened: os.stat_result,
+    named: os.stat_result,
+) -> bool:
+    """Compare one file across descriptor/path views without Windows ctime drift."""
+
+    return (
+        os.path.samestat(opened, named)
+        and opened.st_mode == named.st_mode
+        and opened.st_size == named.st_size
+        and opened.st_mtime_ns == named.st_mtime_ns
+        and (os.name == "nt" or opened.st_ctime_ns == named.st_ctime_ns)
+        and getattr(opened, "st_uid", None) == getattr(named, "st_uid", None)
+    )
+
+
 def _read_bounded_bundle_rollback_json(path: Path) -> object:
     """Read exact private rollback authority from one no-follow descriptor."""
 
@@ -6092,7 +6108,12 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
     if os.name == "posix" and (named_before.st_uid != os.getuid() or stat.S_IMODE(named_before.st_mode) != 0o600):
         raise OSError("local observability rollback metadata must be owner-only")
 
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -6137,7 +6158,7 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
             or stat.S_ISLNK(named_after.st_mode)
             or getattr(named_after, "st_file_attributes", 0) & 0x00000400
             or not stat.S_ISREG(named_after.st_mode)
-            or not _private_file_snapshot_unchanged(opened_after, named_after)
+            or not _private_named_file_snapshot_unchanged(opened_after, named_after)
         ):
             raise OSError("local observability rollback metadata changed while reading")
         if os.name == "posix" and (opened_after.st_uid != os.getuid() or stat.S_IMODE(opened_after.st_mode) != 0o600):

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -51,6 +52,7 @@ type CanonicalMetricSink struct {
 	provider    *sdkmetric.MeterProvider
 	meter       metric.Meter
 	timeout     time.Duration
+	health      delivery.SnapshotSource
 
 	mu              sync.RWMutex
 	closed          bool
@@ -60,6 +62,8 @@ type CanonicalMetricSink struct {
 	instrumentMu    sync.Mutex
 	instruments     map[string]*canonicalMetricInstrument
 }
+
+var _ delivery.SnapshotSource = (*CanonicalMetricSink)(nil)
 
 type canonicalMetricInstrument struct {
 	descriptor telemetry.V8MetricDescriptor
@@ -115,6 +119,13 @@ func (factory *Factory) NewCanonicalMetricSink(
 		cancel()
 		return nil, newError(ErrorInitialization, nil)
 	}
+	health, err := reader.DeliveryHealthSource(options.Generation)
+	if err != nil {
+		cleanup, cancel := cleanupContext(ctx, factory.config.Timeout)
+		_ = reader.Shutdown(cleanup)
+		cancel()
+		return nil, err
+	}
 	provider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(options.Resource),
 		sdkmetric.WithReader(sdkReader),
@@ -132,8 +143,19 @@ func (factory *Factory) NewCanonicalMetricSink(
 		destination: options.Destination, generation: options.Generation,
 		selected: selected, provider: provider,
 		meter: provider.Meter(generatedMetricScope), timeout: timeout,
+		health:       health,
 		shutdownDone: make(chan struct{}), instruments: make(map[string]*canonicalMetricInstrument),
 	}, nil
+}
+
+// DeliveryHealthSnapshot reports the exporter that belongs to this generated
+// metric sink. The separate reader attached to the process-wide meter provider
+// may remain idle, so it cannot represent canonical metric delivery.
+func (sink *CanonicalMetricSink) DeliveryHealthSnapshot() delivery.HealthSnapshot {
+	if sink == nil || sink.health == nil {
+		return delivery.HealthSnapshot{State: delivery.HealthStopped}
+	}
+	return sink.health.DeliveryHealthSnapshot()
 }
 
 func (sink *CanonicalMetricSink) RecordMetric(ctx context.Context, projected telemetry.V8ProjectedMetric) error {

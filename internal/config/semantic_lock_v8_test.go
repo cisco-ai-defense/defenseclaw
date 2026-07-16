@@ -322,7 +322,10 @@ func TestObservabilityV8SemanticLockRejectsUnknownStructureAndMultipleDocuments(
 }
 
 func TestObservabilityV8SemanticRegistrySelectedProfileIsClosedAndSingleDocument(t *testing.T) {
-	canonical := publicschemas.TelemetryV8Registry()
+	// Embedded schema bytes follow the checkout's line endings. Normalize the
+	// fixture before byte-level mutation so the closed-schema assertions cover
+	// native Windows checkouts as well as LF-only checkouts.
+	canonical := bytes.ReplaceAll(publicschemas.TelemetryV8Registry(), []byte("\r\n"), []byte("\n"))
 	lock := publicschemas.TelemetryV8SemconvLock()
 	tests := []struct {
 		name      string

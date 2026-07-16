@@ -29,7 +29,7 @@ def test_observability_v8_reference_regeneration_is_byte_identical() -> None:
         generator.CANONICAL_YAML,
         generator.CANONICAL_MARKDOWN,
     ):
-        assert path.read_bytes() == outputs[path]
+        assert path.read_bytes().replace(b"\r\n", b"\n") == outputs[path].replace(b"\r\n", b"\n")
 
 
 def test_observability_v8_reference_validates_and_covers_source_surface() -> None:

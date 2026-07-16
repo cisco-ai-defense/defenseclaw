@@ -44,10 +44,16 @@ func aiUsageTestServer(t *testing.T, withDiscovery bool) *APIServer {
 	cfg.Gateway.Token = "test-token"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 	if withDiscovery {
-		api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
+		service := inventory.NewContinuousDiscoveryServiceWithOptions(
 			inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()},
 			nil,
-		))
+		)
+		t.Cleanup(func() {
+			if closed, err := service.CloseIfNeverStarted(); err != nil || !closed {
+				t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+			}
+		})
+		api.SetAIDiscoveryService(service)
 	}
 	return api
 }

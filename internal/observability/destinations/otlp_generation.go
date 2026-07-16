@@ -321,15 +321,7 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 				cancel()
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			healthSource, healthErr := reader.DeliveryHealthSource(generation)
-			if healthErr != nil {
-				cleanupContext, cancel := context.WithTimeout(context.Background(), generationPipelineCleanupTimeout)
-				_ = reader.Shutdown(cleanupContext)
-				cancel()
-				return fail(newError(ErrorAdapterPrepare))
-			}
 			pipelines.MetricReaders = append(pipelines.MetricReaders, sdkReader)
-			pipelines.HealthSources = append(pipelines.HealthSources, healthSource)
 			families := selectedMetricFamilies(candidate.metrics)
 			projection := telemetry.V8MetricProjectionCanonical
 			if candidate.local {

@@ -282,7 +282,7 @@ func TestOTLPGenerationAssemblerUsesUnmaskedRuntimeTransportAndDefaultAllSignals
 	server := httptest.NewTLSServer(http.HandlerFunc(capture.handler))
 	defer server.Close()
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-	const caPath = "/trusted/generation-ca.pem"
+	caPath := absoluteDestinationTestPath(t, "generation-ca.pem")
 	secrets := &secretResolver{values: map[string]string{"OTLP_AUTH": "Bearer resolved-secret"}, calls: map[string]int{}}
 	loader := &caLoader{bundles: map[string][]byte{caPath: certificate}, errors: map[string]error{}, calls: map[string]int{}}
 	factory := newTestFactory(t, io.Discard, secrets, loader, net.Dialer{}, nil)
@@ -301,7 +301,7 @@ func TestOTLPGenerationAssemblerUsesUnmaskedRuntimeTransportAndDefaultAllSignals
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pipelines.SpanPipelines) != 1 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 2 ||
+	if len(pipelines.SpanPipelines) != 1 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 1 ||
 		pipelines.CanaryAcknowledged == nil || secrets.callCount("OTLP_AUTH") != 1 || loader.callCount(caPath) != 1 {
 		t.Fatalf("pipelines=%d/%d secret=%d CA=%d", len(pipelines.SpanPipelines), len(pipelines.MetricReaders), secrets.callCount("OTLP_AUTH"), loader.callCount(caPath))
 	}
@@ -356,7 +356,7 @@ func TestOTLPGenerationAssemblerAppliesBucketRoutesAcrossMultipleDestinations(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pipelines.SpanPipelines) != 2 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 3 {
+	if len(pipelines.SpanPipelines) != 2 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 2 {
 		t.Fatalf("pipelines = %d/%d", len(pipelines.SpanPipelines), len(pipelines.MetricReaders))
 	}
 	if pipelines.SpanPipelines[0].Destination != "agent-traces" ||
@@ -432,7 +432,7 @@ func TestOTLPGenerationAssemblerAppliesMetricEventNameFirstMatchRoutes(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pipelines.SpanPipelines) != 0 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 1 {
+	if len(pipelines.SpanPipelines) != 0 || len(pipelines.MetricReaders) != 1 || len(pipelines.MetricPipelines) != 1 || len(pipelines.HealthSources) != 0 {
 		t.Fatalf("pipelines=%d/%d", len(pipelines.SpanPipelines), len(pipelines.MetricReaders))
 	}
 	if pipelines.CanaryAcknowledged != nil {
@@ -524,6 +524,28 @@ func TestGeneratedMetricOTLPSinksProjectGenericAndLocalLabelsWithExactResource(t
 		lease.Release()
 		t.Fatal(err)
 	}
+	health := component.DeliveryHealthSnapshots()
+	if len(health) != 2 {
+		lease.Release()
+		t.Fatalf("generated metric health sources=%d want=2: %+v", len(health), health)
+	}
+	wantDestinations := map[string]bool{"generic-metrics": false, localobservability.DestinationName: false}
+	for _, snapshot := range health {
+		if _, expected := wantDestinations[snapshot.Destination]; !expected ||
+			snapshot.Signal != string(observability.SignalMetrics) ||
+			snapshot.State != delivery.HealthHealthy || snapshot.LastSuccess.IsZero() ||
+			snapshot.Counters.Accepted == 0 || snapshot.Counters.Delivered == 0 {
+			lease.Release()
+			t.Fatalf("generated metric health did not follow the exporting sink: %+v", snapshot)
+		}
+		wantDestinations[snapshot.Destination] = true
+	}
+	for destination, observed := range wantDestinations {
+		if !observed {
+			lease.Release()
+			t.Fatalf("generated metric health missing destination %q: %+v", destination, health)
+		}
+	}
 	lease.Release()
 
 	_, genericRequests, _ := genericCapture.snapshot()
@@ -612,6 +634,24 @@ func TestGeneratedMetricOTLPSinkFailureDoesNotSuppressSiblingDestination(t *test
 	if err := component.Drain(flushContext); err == nil {
 		lease.Release()
 		t.Fatal("failed destination flush unexpectedly succeeded")
+	}
+	health := component.DeliveryHealthSnapshots()
+	if len(health) != 2 {
+		lease.Release()
+		t.Fatalf("failure-isolation metric health=%+v", health)
+	}
+	states := make(map[string]delivery.HealthSnapshot, len(health))
+	for _, snapshot := range health {
+		states[snapshot.Destination] = snapshot
+	}
+	failedHealth, failedOK := states["failed-metrics"]
+	goodHealth, goodOK := states["good-metrics"]
+	if !failedOK || failedHealth.State != delivery.HealthFailing ||
+		failedHealth.Counters.Rejected == 0 || failedHealth.LastFailure.IsZero() ||
+		!goodOK || goodHealth.State != delivery.HealthHealthy ||
+		goodHealth.Counters.Delivered == 0 || goodHealth.LastSuccess.IsZero() {
+		lease.Release()
+		t.Fatalf("failure-isolation metric health=%+v", health)
 	}
 	lease.Release()
 	_, requests, _ := goodCapture.snapshot()
@@ -1307,8 +1347,8 @@ func TestOTLPGenerationAssemblerCleansPartialFailureWithoutAffectingActiveGenera
 	server := httptest.NewTLSServer(http.HandlerFunc(capture.handler))
 	defer server.Close()
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-	const validCA = "/trusted/valid-generation-ca.pem"
-	const invalidCA = "/trusted/invalid-generation-ca.pem"
+	validCA := absoluteDestinationTestPath(t, "valid-generation-ca.pem")
+	invalidCA := absoluteDestinationTestPath(t, "invalid-generation-ca.pem")
 	loader := &caLoader{
 		bundles: map[string][]byte{validCA: certificate, invalidCA: []byte("not a certificate")},
 		errors:  map[string]error{}, calls: map[string]int{},

@@ -282,10 +282,26 @@ func emitRichHookModelV8(t *testing.T, api *APIServer) {
 	t.Helper()
 	meta := richHookModelV8Meta()
 	api.rememberHookLLMSpanPrompt(meta, "private prompt marker")
+	ageHookModelV8Prompt(t, api, meta, 125*time.Millisecond)
 	api.rememberHookLLMSpanUsage(meta, hookTokenUsage{
 		Model: "gpt-5", PromptTokens: 321, CompletionTokens: 45,
 	})
 	api.emitHookLLMSpan(t.Context(), meta, "private response marker")
+}
+
+func ageHookModelV8Prompt(t *testing.T, api *APIServer, meta llmEventMeta, age time.Duration) {
+	t.Helper()
+	api.llmPromptMu.Lock()
+	defer api.llmPromptMu.Unlock()
+	startedAt := time.Now().UTC().Add(-age)
+	for _, key := range hookLLMSpanPromptKeys(meta) {
+		snapshot, ok := api.hookLLMSpanPrompts[key]
+		if !ok {
+			t.Fatalf("prompt cache missing key %q", key)
+		}
+		snapshot.startedAt = startedAt
+		api.hookLLMSpanPrompts[key] = snapshot
+	}
 }
 
 func TestHookModelV8EmitsGeneratedAgentModelHierarchyAndAllLegacyMetrics(t *testing.T) {
@@ -533,6 +549,7 @@ func TestHookModelV8InvalidOptionalAgentIdentityCannotSuppressGenericMetrics(t *
 	meta.LifecycleID = "lifecycle id@example.com"
 	meta.ExecutionID = "execution id@example.com"
 	api.rememberHookLLMSpanPrompt(meta, "prompt")
+	ageHookModelV8Prompt(t, api, meta, 125*time.Millisecond)
 	api.rememberHookLLMSpanUsage(meta, hookTokenUsage{Model: meta.Model, PromptTokens: 3, CompletionTokens: 2})
 	api.emitHookLLMSpan(t.Context(), meta, "response")
 	deadline := time.Now().Add(3 * time.Second)

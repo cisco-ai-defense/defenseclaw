@@ -12,13 +12,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from defenseclaw import windows_acl
 from defenseclaw.config import RegistrySource
 from defenseclaw.db import Store
 from defenseclaw.models import Counts, Event
@@ -71,6 +74,19 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
+
+
+def _assert_sensitive_export_is_owner_only(path: Path) -> None:
+    """Check the platform-native owner-only file contract."""
+
+    if os.name != "nt":
+        assert (path.stat().st_mode & 0o777) == 0o600
+        return
+
+    security = windows_acl.capture_path(str(path))
+    windows_acl.assert_trusted_owner(security)
+    windows_acl.assert_not_broadly_writable(security)
+    windows_acl.assert_not_broadly_readable(security)
 
 
 def _v8_destination(
@@ -1751,8 +1767,8 @@ async def test_audit_export_writes_json_without_command_preview(tmp_path) -> Non
         assert exported.exists()
         assert "skill://alpha" in exported.read_text(encoding="utf-8")
         # F-0781: audit exports can carry sensitive identifiers, so the file
-        # must be owner-only rather than world-readable under the umask.
-        assert (exported.stat().st_mode & 0o777) == 0o600
+        # must satisfy the platform-native owner-only contract.
+        _assert_sensitive_export_is_owner_only(exported)
         assert "Audit exported" in app.status_text
         assert app.screen_stack[-1].__class__.__name__ != "CommandPreviewScreen"
 
@@ -2590,8 +2606,8 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "checking docker daemon" in contents
         assert "ok" in contents
         # F-0782: activity output frequently contains tokens/secrets, so the
-        # saved file must be owner-only (0600), not world-readable.
-        assert (saved[0].stat().st_mode & 0o777) == 0o600
+        # saved file must satisfy the platform-native owner-only contract.
+        _assert_sensitive_export_is_owner_only(saved[0])
 
 
 # ---------------------------------------------------------------------------

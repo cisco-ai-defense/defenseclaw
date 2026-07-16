@@ -106,10 +106,16 @@ func TestAPIServerAIDiscoveryConcurrentSwapAndUsage(t *testing.T) {
 
 func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
-	api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
 		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()},
 		nil,
-	))
+	)
+	t.Cleanup(func() {
+		if closed, err := service.CloseIfNeverStarted(); err != nil || !closed {
+			t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+		}
+	})
+	api.SetAIDiscoveryService(service)
 	body := `{
 	  "summary": {"scan_id":"scan-1"},
 	  "signals": [{"category":"ai_cli","state":"new","basenames":["/tmp/raw"]}]

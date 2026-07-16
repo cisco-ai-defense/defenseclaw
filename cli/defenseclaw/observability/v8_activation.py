@@ -951,7 +951,14 @@ def _snapshot_regular_file(path: str, *, required: bool) -> _FileSnapshot:
     if link_stat.st_size > _MAX_SNAPSHOT_BYTES:
         raise V8ActivationError("source_too_large", "snapshot", target_path=path)
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    # Migration digests bind exact on-disk bytes. Native Windows CRT
+    # descriptors otherwise default to text mode and translate CRLF to LF.
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -1824,7 +1831,12 @@ def _snapshot_regular_file_at(
         raise V8ActivationError("regular_file_required", "snapshot", target_path=display_path)
     if link_stat.st_size > _MAX_SNAPSHOT_BYTES:
         raise V8ActivationError("source_too_large", "snapshot", target_path=display_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     try:
         opened_stat = os.fstat(descriptor)

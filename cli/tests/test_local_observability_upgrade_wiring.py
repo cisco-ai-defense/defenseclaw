@@ -74,7 +74,7 @@ def test_target_interpreter_returns_validated_refresh_result(tmp_path: Path) -> 
         return Mock(returncode=0, stdout="", stderr="")
 
     with (
-        patch.dict(os.environ, {"HOME": str(home)}),
+        patch.dict(os.environ, {"DEFENSECLAW_HOME": str(home / ".defenseclaw")}),
         patch("defenseclaw.commands.cmd_upgrade.subprocess.run", side_effect=child) as run,
     ):
         result = _run_installed_local_observability_bundle_upgrade(

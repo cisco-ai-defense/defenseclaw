@@ -86,7 +86,9 @@ type V8GenerationPipelines struct {
 	MetricReaders []sdkmetric.Reader
 	// HealthSources are non-owning read-only views over children already owned
 	// by SpanPipelines or MetricReaders/MetricPipelines. They add no cleanup
-	// authority and must identify the exact candidate generation.
+	// authority and must identify the exact candidate generation. A materialized
+	// metric sink that implements delivery.SnapshotSource is enrolled
+	// automatically and therefore must not also be listed here.
 	HealthSources []delivery.SnapshotSource
 	// MetricPipelines is separate from MetricReaders because one SDK
 	// MeterProvider cannot project different label names per reader.
@@ -598,6 +600,13 @@ func newProviderV8Inactive(
 			pipelines.MetricPipelines, pipelineErr = materializeV8MetricPipelines(
 				ctx, resourceContext, pipelines.MetricPipelines,
 			)
+			if pipelineErr == nil {
+				for _, pipeline := range pipelines.MetricPipelines {
+					if source, ok := pipeline.Sink.(delivery.SnapshotSource); ok {
+						pipelines.HealthSources = append(pipelines.HealthSources, source)
+					}
+				}
+			}
 		}
 		preparedReaders = append(preparedReaders, pipelines.MetricReaders...)
 		if pipelineErr != nil || !validV8GenerationPipelines(pipelines, len(traceCollect) > 0, len(metricCollect) > 0) {

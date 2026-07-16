@@ -76,10 +76,11 @@ func TestCompileObservabilityV8RetentionDaysBoundaries(t *testing.T) {
 }
 
 func TestObservabilityV8MinimalEffectivePlanGolden(t *testing.T) {
+	defaultDataDir := "/var/lib/defenseclaw"
 	compiled, err := ParseCompileObservabilityV8(
 		"golden.yaml",
 		[]byte("config_version: 8\nobservability: {}\n"),
-		ObservabilityV8CompileOptions{DefaultDataDir: "/var/lib/defenseclaw"},
+		ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +88,21 @@ func TestObservabilityV8MinimalEffectivePlanGolden(t *testing.T) {
 	want, err := os.ReadFile(filepath.Join("testdata", "observability_v8", "minimal_effective_plan.json"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	normalizedDataDir, err := normalizeObservabilityV8FilePath("data_dir", defaultDataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{DefaultAuditDBName, DefaultJudgeBodiesDBName} {
+		portable, err := json.Marshal(filepath.ToSlash(filepath.Join(defaultDataDir, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		native, err := json.Marshal(filepath.Join(normalizedDataDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = bytes.ReplaceAll(want, portable, native)
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, want); err != nil {

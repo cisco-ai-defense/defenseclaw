@@ -967,7 +967,9 @@ def _activate_local_observability_manifest(
             target_entry = target_by_path.get(relative)
             expected_digest = target.sha256 if target_entry is None else target_entry.sha256
             expected_mode = 0o600 if target_entry is None else target_entry.mode
-            if old_sha256[relative] != expected_digest or old_modes[relative] != expected_mode:
+            if old_sha256[relative] != expected_digest or (
+                os.name == "posix" and old_modes[relative] != expected_mode
+            ):
                 changed.append(relative)
             if fault_injector:
                 fault_injector("before_activate", relative)
@@ -1350,7 +1352,12 @@ def _restore_rollback_file_at(
 ) -> None:
     """Atomically restore, flush, and verify one file below a trusted dirfd."""
 
-    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         source_descriptor = os.open(
             backup_name,
@@ -1508,6 +1515,22 @@ def _rollback_source_snapshot_unchanged(
     )
 
 
+def _rollback_named_snapshot_unchanged(
+    opened: os.stat_result,
+    named: os.stat_result,
+) -> bool:
+    """Compare descriptor/path views while tolerating Windows ctime skew."""
+
+    return (
+        os.path.samestat(opened, named)
+        and opened.st_mode == named.st_mode
+        and opened.st_size == named.st_size
+        and opened.st_mtime_ns == named.st_mtime_ns
+        and (os.name == "nt" or opened.st_ctime_ns == named.st_ctime_ns)
+        and getattr(opened, "st_uid", None) == getattr(named, "st_uid", None)
+    )
+
+
 def _restore_rollback_file_by_path(
     backup_path: Path,
     backup_parent_chain: list[tuple[Path, os.stat_result]],
@@ -1523,7 +1546,12 @@ def _restore_rollback_file_by_path(
     source_named_before = _rollback_file_info(backup_path, missing_ok=False)
     if source_named_before is None:
         raise OSError("backup member missing")
-    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         source_descriptor = os.open(backup_path, source_flags)
     except OSError as exc:
@@ -1684,7 +1712,12 @@ def _restore_windows_rollback_file_by_path(
         windows_acl.write_new_file(str(temporary_path), bytes(payload), security)
         created = True
         os.chmod(temporary_path, mode)
-        temporary_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        temporary_flags = (
+            os.O_RDWR
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         temporary_descriptor = os.open(temporary_path, temporary_flags)
         try:
             staged_info = os.fstat(temporary_descriptor)
@@ -2264,11 +2297,15 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
         prefix=".refresh-",
         dir=dest_dir,
     )
-    os.close(fd)
     try:
-        shutil.copy2(src_path, tmp_path)
-        with open(tmp_path, "rb") as temporary:
-            os.fsync(temporary.fileno())
+        try:
+            shutil.copy2(src_path, tmp_path)
+            # Keep the writable mkstemp descriptor across copy2. On Windows
+            # the copied metadata may set FILE_ATTRIBUTE_READONLY, which would
+            # prevent acquiring a new writable FlushFileBuffers handle.
+            _fsync_claimed_file(fd, Path(tmp_path))
+        finally:
+            os.close(fd)
         os.replace(tmp_path, dest_path)
         _fsync_directory(Path(dest_dir))
     except OSError:
@@ -2780,7 +2817,12 @@ def _restore_rollback_file_at(
 ) -> None:
     """Atomically restore, flush, and verify one file below a trusted dirfd."""
 
-    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         source_descriptor = os.open(
             backup_name,
@@ -2954,7 +2996,12 @@ def _restore_rollback_file_by_path(
     source_named_before = _rollback_file_info(backup_path, missing_ok=False)
     if source_named_before is None:
         raise OSError("backup member missing")
-    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         source_descriptor = os.open(backup_path, source_flags)
     except OSError as exc:
@@ -3131,7 +3178,12 @@ def _restore_windows_rollback_file_by_path(
             raise OSError("rollback temporary owner/DACL mismatch")
         # A POSIX mode cannot encode Windows ACE order or inheritance state.
         _ = mode
-        temporary_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        temporary_flags = (
+            os.O_RDWR
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         temporary_descriptor = os.open(temporary_path, temporary_flags)
         try:
             staged_info = os.fstat(temporary_descriptor)
@@ -3178,6 +3230,7 @@ def _restore_windows_rollback_file_by_path(
             raise OSError("restored member identity changed during publish")
         restored_flags = (
             os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0)
         )
@@ -3199,7 +3252,7 @@ def _restore_windows_rollback_file_by_path(
                 destination_path,
                 missing_ok=False,
             )
-            if restored_named_final is None or not _rollback_source_snapshot_unchanged(
+            if restored_named_final is None or not _rollback_named_snapshot_unchanged(
                 restored_after,
                 restored_named_final,
             ):
@@ -3438,7 +3491,7 @@ def _restore_raced_retirement_at(
         if (
             restored_named is None
             or not _rollback_source_snapshot_unchanged(restored_before, restored_after)
-            or not _rollback_source_snapshot_unchanged(restored_after, restored_named)
+            or not _rollback_named_snapshot_unchanged(restored_after, restored_named)
         ):
             raise OSError("raced target-created replacement changed during restore")
         os.fsync(retired_parent_descriptor)
@@ -3816,18 +3869,47 @@ def _sha256_descriptor(descriptor: int) -> str:
 
 
 def _fsync_file(path: Path) -> None:
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
+    if os.name == "nt":
+        from defenseclaw import windows_acl
+
+        descriptor = windows_acl.open_regular_flush_fd(str(path))
+    else:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
     try:
-        info = os.fstat(descriptor)
-        named = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode) or not os.path.samestat(info, named):
-            raise OSError("rollback custody member changed while syncing")
-        os.fsync(descriptor)
+        _fsync_claimed_file(descriptor, path)
     finally:
         os.close(descriptor)
+
+
+def _fsync_claimed_file(descriptor: int, path: Path) -> None:
+    """Flush and revalidate one already-open exact regular-file claim."""
+
+    before = os.fstat(descriptor)
+    named_before = os.lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or not stat.S_ISREG(named_before.st_mode)
+        or getattr(named_before, "st_file_attributes", 0) & 0x00000400
+        or not os.path.samestat(before, named_before)
+    ):
+        raise OSError("rollback custody member changed while syncing")
+    os.fsync(descriptor)
+    after = os.fstat(descriptor)
+    named_after = os.lstat(path)
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or not stat.S_ISREG(named_after.st_mode)
+        or getattr(named_after, "st_file_attributes", 0) & 0x00000400
+        or not os.path.samestat(before, after)
+        or not os.path.samestat(after, named_after)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+    ):
+        raise OSError("rollback custody member changed while syncing")
 
 
 def _fsync_directory_chain(path: Path, *, stop: Path) -> None:

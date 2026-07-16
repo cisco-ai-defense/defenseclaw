@@ -438,7 +438,14 @@ class _CtypesWindowsApi:
         )
         if handle == _INVALID_HANDLE_VALUE:
             self._raise_last_error("CreateFileW(exclusive lease)")
-        return int(handle)
+        try:
+            attributes = self._file_information(int(handle)).file_attributes
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WindowsAclError("Windows exclusive lease target is not a real regular file")
+            return int(handle)
+        except BaseException:
+            self.close_handle(int(handle))
+            raise
 
     def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int:
         """Bind a directory while denying rename/delete sharing to peers.
@@ -890,6 +897,23 @@ def open_regular_mutation_fd(path: str) -> int:
     api = _get_api()
     handle = api._open_regular_mutator_exclusive(path)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        api.close_handle(handle)
+        raise
+
+
+def open_regular_flush_fd(path: str) -> int:
+    """Return a writable binary descriptor with an exclusive file lease."""
+
+    if os.name != "nt":
+        raise WindowsAclError("exclusive CRT flush handles require Windows")
+    import msvcrt
+
+    api = _get_api()
+    handle = api.open_exclusive_file(path)
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
     try:
         return msvcrt.open_osfhandle(handle, flags)
     except BaseException:
@@ -1525,6 +1549,7 @@ __all__ = [
     "hold_phase_two_mutator_lease",
     "move_file_no_replace",
     "move_regular_fd_no_replace",
+    "open_regular_flush_fd",
     "open_regular_mutation_fd",
     "open_regular_read_fd_shared_delete",
     "private_security_for_directory",

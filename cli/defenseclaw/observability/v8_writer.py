@@ -144,7 +144,7 @@ def _stage_candidate(path: str, candidate: bytes) -> str:
 
 
 def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     try:
         descriptor = os.open(path, flags)
