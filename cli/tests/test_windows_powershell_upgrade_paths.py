@@ -1276,6 +1276,84 @@ def test_windows_release_authentication_output_cannot_pollute_manifest_return() 
     assert "$candidateReleaseOutput" not in source
 
 
+def test_windows_unpublished_runtime_gate_executes_sealed_resolver_without_mutation() -> None:
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    policy_start = source.index("function Assert-UnpublishedWindowsCandidatePolicy")
+    policy = source[policy_start : source.index("function Cleanup")]
+    refusal = source[
+        source.index("function Test-UnpublishedWindowsResolverRefusal") : source.index(
+            "function Test-ProtectedMaterializationCollision"
+        )
+    ]
+    main = _main_body(source)
+
+    assert "[switch]$UnpublishedWindowsRefusalOnly" in source
+    assert "@($windows.Value).Count -ne 0" in policy
+    assert '$platformNames -notcontains "windows"' in policy
+    assert "truthful hard cut with an unpublished Windows bridge" in policy
+    assert "Get-CandidateResolverPath" in refusal
+    assert '"-LatestVersionOverride", $TargetVersion' in refusal
+    assert "Start-RefusalSentinel" in refusal
+    assert "Assert-SnapshotsEqual" in refusal
+    assert "Assert-NoSucceededReceipt" in refusal
+    assert "persistent user PATH" in refusal
+    assert "unsupported by the signed release policy" in refusal
+    assert "was not published for Windows" in refusal
+    assert "No changes were made" in refusal
+    branch = main.index("if ($UnpublishedWindowsRefusalOnly)")
+    candidate_copy = main.index("[void](Copy-CandidateRelease)")
+    candidate_policy = main.index("Assert-UnpublishedWindowsCandidatePolicy", branch)
+    resolver_refusal = main.index("Test-UnpublishedWindowsResolverRefusal", branch)
+    ordinary_matrix = main.index("$hardCut = Assert-CandidatePolicy", branch)
+    assert candidate_copy < branch < candidate_policy < resolver_refusal < ordinary_matrix
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_unpublished_runtime_policy_accepts_only_an_empty_matrix(
+    tmp_path: Path,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    start = source.index("function Assert-UnpublishedWindowsCandidatePolicy")
+    helper = source[start : source.index("function Cleanup", start)]
+    prelude = (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "function Fail { param([string]$Message) throw $Message }\n"
+        "function Compare-Version { param([string]$Left,[string]$Right) "
+        "return ([version]$Left).CompareTo([version]$Right) }\n"
+        "function Get-Property { param([object]$Object,[string]$Name) "
+        "if($null -eq $Object){return $null}; return $Object.PSObject.Properties[$Name] }\n"
+        "$script:HardCutVersion='0.8.5'\n"
+        "$script:BridgeVersion='0.8.4'\n"
+        "$TargetVersion='0.8.5'\n"
+        + helper
+        + "\n$raw=Get-Content -Raw -LiteralPath $env:MANIFEST | ConvertFrom-Json\n"
+        "Assert-UnpublishedWindowsCandidatePolicy -Manifest $raw\n"
+    )
+    manifest = tmp_path / "upgrade-manifest.json"
+
+    for windows_sources, should_pass in (([], True), (["0.8.3"], False)):
+        manifest.write_text(json.dumps(_hard_cut_manifest(windows_sources)), encoding="utf-8")
+        completed = subprocess.run(
+            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", prelude],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={
+                **os.environ,
+                "POWERSHELL_TELEMETRY_OPTOUT": "1",
+                "MANIFEST": str(manifest),
+            },
+        )
+        assert (completed.returncode == 0) is should_pass, completed.stdout + completed.stderr
+
+
 def test_windows_release_snapshot_accumulators_accept_their_initial_empty_list() -> None:
     source = RELEASE_HARNESS.read_text(encoding="utf-8")
     snapshot_path = source[

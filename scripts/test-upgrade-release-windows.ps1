@@ -40,6 +40,11 @@
     in release/upgrade-baselines.json. If omitted, the newest published
     pre-bridge baseline is used for local compatibility; release CI should pass
     every pre-bridge baseline through a job matrix.
+.PARAMETER UnpublishedWindowsRefusalOnly
+    Authenticate the exact sealed candidate and prove that its release-owned
+    resolver refuses a hard cut whose signed Windows source matrix is empty.
+    The isolated published source process, installed bytes, ACLs, config,
+    receipts, PID custody, and persistent user PATH must remain unchanged.
 #>
 
 [CmdletBinding()]
@@ -57,6 +62,8 @@ param(
 
     [ValidateRange(1, 600)]
     [int]$HealthTimeout = 60,
+
+    [switch]$UnpublishedWindowsRefusalOnly,
 
     [switch]$KeepWorkDir
 )
@@ -1223,6 +1230,61 @@ function Test-HardCutExplicitRefusal {
         Stop-RefusalSentinel -Case $Case -Sentinel $sentinel
     }
     Write-Ok "Explicit hard-cut request left PID, service, config, cursor, ACLs, CLI, and gateway unchanged"
+}
+
+function Test-UnpublishedWindowsResolverRefusal {
+    param([Parameter(Mandatory = $true)][object]$Case)
+
+    Write-Step "Proving sealed latest resolver refuses unpublished Windows runtime before mutation"
+    Set-CaseEnvironment -Case $Case
+    $sentinel = Start-RefusalSentinel -Case $Case
+    $before = Join-Path $Case.Root "unpublished-windows-refusal.before.json"
+    $after = Join-Path $Case.Root "unpublished-windows-refusal.after.json"
+    $log = Join-Path $Case.Root "unpublished-windows-refusal.log"
+    $userPathBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+    try {
+        Write-InstalledStateSnapshot -Case $Case -Output $before
+        $arguments = @(
+            "-NoProfile", "-NonInteractive", "-File", (Get-CandidateResolverPath),
+            "-Yes", "-HealthTimeout", [string]$HealthTimeout,
+            "-ReleaseBaseUrl", $script:ServerBaseUrl, "-TestMode",
+            "-LatestVersionOverride", $TargetVersion
+        )
+        $status = Invoke-ExternalLogged -Command $script:Commandpwsh -Arguments $arguments -LogPath $log
+        if ($status -eq 0) {
+            Show-LogTail $log
+            Fail "Unpublished Windows hard cut unexpectedly succeeded"
+        }
+        if ($sentinel.HasExited -or -not (Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue)) {
+            Fail "Unpublished Windows refusal crossed the service-stop boundary"
+        }
+        $pidText = (Get-Content -LiteralPath (Join-Path $Case.Data "gateway.pid") -Raw).Trim()
+        if ($pidText -ne [string]$sentinel.Id) {
+            Fail "Unpublished Windows refusal changed gateway.pid"
+        }
+        Write-InstalledStateSnapshot -Case $Case -Output $after
+        Assert-SnapshotsEqual -Before $before -After $after -Label "unpublished Windows refusal"
+        if ([Environment]::GetEnvironmentVariable("Path", "User") -ne $userPathBefore) {
+            Fail "Unpublished Windows refusal changed the persistent user PATH"
+        }
+        Assert-NoSucceededReceipt -Case $Case
+        Assert-CommandVersion -Command $Case.Cli -Expected $script:OldBaseline -Label "refused CLI"
+        Assert-CommandVersion -Command $Case.Gateway -Expected $script:OldBaseline -Label "refused gateway"
+        $text = Get-Content -LiteralPath $log -Raw -Encoding UTF8
+        foreach ($required in @(
+            "Windows upgrades to $TargetVersion are unsupported by the signed release policy",
+            "Required bridge $($script:BridgeVersion) was not published for Windows",
+            "No changes were made"
+        )) {
+            if ($text -notmatch [regex]::Escape($required)) {
+                Show-LogTail $log
+                Fail "Unpublished Windows refusal did not report: $required"
+            }
+        }
+    } finally {
+        Stop-RefusalSentinel -Case $Case -Sentinel $sentinel
+    }
+    Write-Ok "Sealed resolver refused unpublished Windows runtime without changing source state"
 }
 
 function Test-ProtectedMaterializationCollision {
@@ -2603,6 +2665,38 @@ function Assert-CandidatePolicy {
     return $false
 }
 
+function Assert-UnpublishedWindowsCandidatePolicy {
+    param([Parameter(Mandatory = $true)][object]$Manifest)
+
+    if ((Compare-Version $TargetVersion $script:HardCutVersion) -lt 0) {
+        Fail "Unpublished-Windows refusal requires a hard-cut candidate"
+    }
+    $schema = Get-Property $Manifest "schema_version"
+    $minProtocol = Get-Property $Manifest "min_upgrade_protocol"
+    $minimum = Get-Property $Manifest "minimum_source_version"
+    $bridge = Get-Property $Manifest "required_bridge_version"
+    $automatic = Get-Property $Manifest "auto_bridge_from"
+    $platformTested = Get-Property $Manifest "platform_tested_source_versions"
+    $windows = if ($platformTested) {
+        Get-Property $platformTested.Value "windows"
+    } else {
+        $null
+    }
+    $platformNames = @()
+    if ($platformTested) {
+        $platformNames = @($platformTested.Value.PSObject.Properties.Name)
+    }
+    if (-not $schema -or [int]$schema.Value -ne 2 -or
+        -not $minProtocol -or [int]$minProtocol.Value -lt 2 -or
+        -not $minimum -or [string]$minimum.Value -ne $script:BridgeVersion -or
+        -not $bridge -or [string]$bridge.Value -ne $script:BridgeVersion -or
+        -not $automatic -or -not $platformTested -or -not $windows -or
+        $platformNames.Count -ne 1 -or $platformNames -notcontains "windows" -or
+        @($windows.Value).Count -ne 0) {
+        Fail "Candidate is not a truthful hard cut with an unpublished Windows bridge"
+    }
+}
+
 function Cleanup {
     foreach ($case in $script:Cases) { Stop-CaseGateway -Case $case }
     foreach ($sentinel in $script:Sentinels) {
@@ -2656,6 +2750,18 @@ function Main {
     if ($candidateManifest -isnot [pscustomobject]) {
         Fail "Authenticated sealed candidate manifest is not one JSON object"
     }
+    if ($UnpublishedWindowsRefusalOnly) {
+        Assert-UnpublishedWindowsCandidatePolicy -Manifest $candidateManifest
+        [void](Ensure-PublishedRelease -Version $script:OldBaseline)
+        Clear-UpgradeTestEnvironment
+        Start-ReleaseServer
+        $refusal = New-UpgradeCase -Name "unpublished-windows-refusal" -BaselineVersion $script:OldBaseline
+        Test-UnpublishedWindowsResolverRefusal -Case $refusal
+        Stop-CaseGateway -Case $refusal
+        Write-Ok "Native unpublished-Windows sealed-resolver refusal passed"
+        return
+    }
+
     $hardCut = Assert-CandidatePolicy -Manifest $candidateManifest
     [void](Ensure-PublishedRelease -Version $script:OldBaseline)
     if ($hardCut) {

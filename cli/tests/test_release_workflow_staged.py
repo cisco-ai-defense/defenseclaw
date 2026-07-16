@@ -156,6 +156,7 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
         "macos-upgrade",
         "historical-baseline-canary",
         "windows-upgrade",
+        "windows-unpublished-refusal",
         "live-continuity",
     }
     assert publish["environment"] == "release"
@@ -179,6 +180,7 @@ def test_windows_release_binaries_are_disabled_and_omitted() -> None:
         "linux-upgrade",
         "macos-upgrade",
         "historical-baseline-canary",
+        "windows-unpublished-refusal",
         "live-continuity",
     ):
         assert f"needs.{required}.result == 'success'" in publish_condition
@@ -225,6 +227,7 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         "macos-upgrade",
         "historical-baseline-canary",
         "windows-upgrade",
+        "windows-unpublished-refusal",
         "posix-fresh-install",
         "windows-fresh-install",
         "live-continuity",
@@ -233,6 +236,27 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         rendered = str(jobs[name])
         assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
         assert "scripts/release_candidate.py verify" in rendered
+
+
+def test_unpublished_windows_runtime_requires_sealed_native_refusal() -> None:
+    jobs = _workflow()["jobs"]
+    job = jobs["windows-unpublished-refusal"]
+    rendered = str(job)
+
+    assert job["runs-on"] == "windows-latest"
+    assert job["if"] == (
+        "${{ needs.assemble-release-candidate.outputs."
+        "windows_prebridge_baselines == '[]' }}"
+    )
+    assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
+    assert "scripts/release_candidate.py verify" in rendered
+    assert "cosign verify-blob" in rendered
+    assert "scripts/test-upgrade-release-windows.ps1" in rendered
+    assert "-UnpublishedWindowsRefusalOnly" in rendered
+    assert (
+        "needs.windows-unpublished-refusal.result == 'success'"
+        in jobs["publish-release"]["if"]
+    )
 
 
 def test_release_certificate_is_canonicalized_and_authenticated_before_seal() -> None:

@@ -1181,6 +1181,56 @@ jobs:
             -SourceVersion "$env:BASELINE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  windows-unpublished-refusal:
+    name: Windows unpublished-runtime refusal
+    needs: [release-preflight, assemble-release-candidate]
+    if: ${{ needs.assemble-release-candidate.outputs.windows_prebridge_baselines == '[]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify sealed candidate and Sigstore identity
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          python scripts/release_candidate.py verify `
+            --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cosign verify-blob `
+            --certificate release-candidate/dist/checksums.txt.pem `
+            --signature release-candidate/dist/checksums.txt.sig `
+            --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
+            release-candidate/dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prove the sealed Windows resolver refuses before mutation
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          pwsh -NoProfile -File scripts/test-upgrade-release-windows.ps1 `
+            -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
+            -TargetVersion "$env:RELEASE_TAG" `
+            -UnpublishedWindowsRefusalOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   live-continuity:
     name: Live bridge-to-target history continuity
     needs: [release-preflight, assemble-release-candidate]
@@ -1257,6 +1307,7 @@ jobs:
       - macos-upgrade
       - historical-baseline-canary
       - windows-upgrade
+      - windows-unpublished-refusal
       - live-continuity
     if: >-
       ${{
@@ -1267,6 +1318,7 @@ jobs:
         needs.linux-upgrade.result == 'success' &&
         needs.macos-upgrade.result == 'success' &&
         needs.historical-baseline-canary.result == 'success' &&
+        needs.windows-unpublished-refusal.result == 'success' &&
         needs.live-continuity.result == 'success' &&
         needs.windows-fresh-install.result == 'skipped' &&
         needs.windows-upgrade.result == 'skipped'
