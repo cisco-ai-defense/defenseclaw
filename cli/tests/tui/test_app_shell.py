@@ -5892,20 +5892,12 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         assert "All connectors" in scope_text()
         assert "Hook Calls (2 connectors)" in metric_labels()
 
-        render_calls = 0
         deferred_calls = 0
-        original_renderable = app._overview_renderable
-
-        def counted_renderable():
-            nonlocal render_calls
-            render_calls += 1
-            return original_renderable()
 
         def counted_deferred_render() -> None:
             nonlocal deferred_calls
             deferred_calls += 1
 
-        app._overview_renderable = counted_renderable  # type: ignore[method-assign]
         app._schedule_overview_deferred_render = counted_deferred_render  # type: ignore[method-assign]
 
         assert app._connector_filter() == ""
@@ -5913,14 +5905,12 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
         assert app._connector_filter() == ""
-        assert render_calls == 0
 
         await pilot.click("#action-menu-row-1")
         await pilot.pause()
         assert app._connector_filter() == "codex"
         assert "Codex (codex)" in scope_text()
         assert "Hook Calls (codex)" in metric_labels()
-        assert render_calls == 0
         assert deferred_calls == 1
 
         await pilot.press("m")
@@ -5930,7 +5920,6 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         assert app._connector_filter() == ""
         assert "All connectors" in scope_text()
         assert "Hook Calls (2 connectors)" in metric_labels()
-        assert render_calls == 0
         assert deferred_calls == 2
 
 

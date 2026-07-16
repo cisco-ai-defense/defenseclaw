@@ -1035,6 +1035,16 @@ def test_release_certificate_same_api_timestamp_change_is_rejected(
         b"\xef\xbb\xbf" + TEST_CERTIFICATE_PEM,
         b"A" * (release_candidate.MAX_RELEASE_CERTIFICATE_BYTES + 1),
     ],
+    ids=(
+        "empty",
+        "trailing-newline",
+        "base64-pem",
+        "base64-multiple-pem",
+        "multiple-pem",
+        "crlf",
+        "bom",
+        "oversized",
+    ),
 )
 def test_certificate_canonicalization_rejects_noncanonical_or_ambiguous_input(
     tmp_path: Path,
