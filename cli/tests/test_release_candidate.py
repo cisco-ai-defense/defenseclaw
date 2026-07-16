@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import io
 import json
 import os
@@ -138,6 +139,25 @@ def _activate_local_observability_manifest(*, was_running: bool):
 """
 
 
+def _legacy_cosign_bundle_bytes() -> bytes:
+    return json.dumps(
+        {
+            "base64Signature": base64.b64encode(b"sigstore signature").decode("ascii"),
+            "cert": TEST_CERTIFICATE_PEM.decode("ascii"),
+            "rekorBundle": {
+                "SignedEntryTimestamp": base64.b64encode(b"signed entry timestamp").decode("ascii"),
+                "Payload": {
+                    "body": base64.b64encode(b'{"kind":"hashedrekord"}').decode("ascii"),
+                    "integratedTime": 1,
+                    "logIndex": 2,
+                    "logID": "3" * 64,
+                },
+            },
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _bridge_fixture_uses_bridge_source_identity(
     monkeypatch: pytest.MonkeyPatch,
@@ -188,13 +208,13 @@ def test_release_progression_requires_target_newer_than_reviewed_and_published(
         ],
     )
 
-    assert release_candidate.validate_release_progression("0.8.5", releases) == (
-        "0.8.4",
+    assert release_candidate.validate_release_progression("0.8.6", releases) == (
+        "0.8.5",
         "0.8.3",
     )
 
     with pytest.raises(release_candidate.CandidateError, match="strictly newer"):
-        release_candidate.validate_release_progression("0.8.4", releases)
+        release_candidate.validate_release_progression("0.8.5", releases)
 
 
 def test_release_progression_uses_published_stable_max_even_when_policy_lags(
@@ -533,6 +553,41 @@ def _windows_setup_dir(
             ],
         },
     }
+    gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+    payload_files = {
+        gateway_archive: "5" * 64,
+        wheel: "8" * 64,
+        release_candidate.WINDOWS_PYTHON_EMBED_NAME: release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+        release_candidate.WINDOWS_YARA_COMPAT_WHEEL: "a" * 64,
+        "site-packages.zip": "9" * 64,
+        "defenseclaw-launcher.exe": "d" * 64,
+        "defenseclaw-startup.exe": "e" * 64,
+        "cosign.exe": release_candidate.WINDOWS_COSIGN_SHA256,
+        "requirements-release.txt": "f" * 64,
+        "upgrade-manifest.json": "0" * 64,
+    }
+    provenance_inputs = {
+        "gateway_archive": gateway_archive,
+        "gateway_archive_sha256": "6" * 64,
+        "embedded_gateway_archive_sha256": payload_files[gateway_archive],
+        "embedded_payload_sha256": "7" * 64,
+        "product_executables_authenticode_signed": True,
+        "wheel": wheel,
+        "wheel_sha256": payload_files[wheel],
+        "python_embed": release_candidate.WINDOWS_PYTHON_EMBED_NAME,
+        "python_embed_sha256": release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+        "site_packages_sha256": payload_files["site-packages.zip"],
+        "yara_compat_wheel": release_candidate.WINDOWS_YARA_COMPAT_WHEEL,
+        "yara_compat_wheel_sha256": payload_files[release_candidate.WINDOWS_YARA_COMPAT_WHEEL],
+        "cosign_sha256": release_candidate.WINDOWS_COSIGN_SHA256,
+        "payload_manifest_sha256": "b" * 64,
+        "go_component_inventory_sha256": "c" * 64,
+        "payload_files": payload_files,
+        "windows_resource_policy": release_candidate.WINDOWS_RESOURCE_POLICY,
+        "windows_resource_icon": release_candidate.WINDOWS_RESOURCE_ICON,
+        "windows_resource_icon_sha256": release_candidate.WINDOWS_RESOURCE_ICON_SHA256,
+    }
     provenance = {
         "schema_version": 1,
         "artifact": setup.name,
@@ -546,8 +601,24 @@ def _windows_setup_dir(
             "schema_version": 1,
             "files": {setup.name: authenticode_evidence},
         },
-        "inputs": {},
-        "toolchain": {},
+        "inputs": provenance_inputs,
+        "toolchain": {
+            "go": "go version go1.25.5 windows/amd64",
+            "uv": "uv 0.9.26 (test fixture)",
+            "python_embed_url": release_candidate.WINDOWS_PYTHON_EMBED_URL,
+            "python_embed_sha256": release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+            "python_runtime_review_deadline_utc": (
+                release_candidate.WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE
+            ),
+            "yara_compat_sha256": payload_files[release_candidate.WINDOWS_YARA_COMPAT_WHEEL],
+            "win_unicode_console_source_url": release_candidate.WINDOWS_WIN_UNICODE_SOURCE_URL,
+            "win_unicode_console_source_sha256": (
+                release_candidate.WINDOWS_WIN_UNICODE_SOURCE_SHA256
+            ),
+            "cosign_version": release_candidate.WINDOWS_COSIGN_VERSION,
+            "cosign_url": release_candidate.WINDOWS_COSIGN_URL,
+            "cosign_sha256": release_candidate.WINDOWS_COSIGN_SHA256,
+        },
     }
     (windows / f"{setup.name}.provenance.json").write_text(
         json.dumps(provenance),
@@ -555,48 +626,130 @@ def _windows_setup_dir(
     )
     package_id = "SPDXRef-Package-DefenseClaw-Windows-Setup"
     file_id = "SPDXRef-File-DefenseClawSetup-x64.exe"
+    embedded_package_id = "SPDXRef-Package-Embedded-Payload"
+    embedded_file_id = "SPDXRef-File-Embedded-Payload"
+    packages = [
+        {
+            "name": "DefenseClaw Windows Setup",
+            "SPDXID": package_id,
+            "versionInfo": version,
+            "packageFileName": setup.name,
+            "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
+            "externalRefs": [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator": f"pkg:github/cisco-ai-defense/defenseclaw@{version}",
+                }
+            ],
+        },
+        {
+            "name": "DefenseClaw embedded installer payload",
+            "SPDXID": embedded_package_id,
+            "versionInfo": version,
+            "packageFileName": "installer-payload.zip",
+            "checksums": [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": provenance_inputs["embedded_payload_sha256"],
+                }
+            ],
+        },
+    ]
+    files = [
+        {
+            "fileName": f"./{setup.name}",
+            "SPDXID": file_id,
+            "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
+        },
+        {
+            "fileName": "./embedded/installer-payload.zip",
+            "SPDXID": embedded_file_id,
+            "checksums": [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": provenance_inputs["embedded_payload_sha256"],
+                }
+            ],
+        },
+    ]
+    relationships = [
+        {
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": package_id,
+        },
+        {
+            "spdxElementId": package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": file_id,
+        },
+        {
+            "spdxElementId": package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": embedded_package_id,
+        },
+        {
+            "spdxElementId": embedded_package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": embedded_file_id,
+        },
+    ]
+    sbom_payload_files = {
+        **payload_files,
+        "manifest.json": provenance_inputs["payload_manifest_sha256"],
+    }
+    for index, (name, digest) in enumerate(sorted(sbom_payload_files.items())):
+        component_package_id = f"SPDXRef-Package-Payload-{index}"
+        component_file_id = f"SPDXRef-File-Payload-{index}"
+        packages.append(
+            {
+                "name": f"DefenseClaw payload component {name}",
+                "SPDXID": component_package_id,
+                "packageFileName": name,
+                "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            }
+        )
+        files.append(
+            {
+                "fileName": f"./payload/{name}",
+                "SPDXID": component_file_id,
+                "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            }
+        )
+        relationships.extend(
+            [
+                {
+                    "spdxElementId": component_package_id,
+                    "relationshipType": "CONTAINS",
+                    "relatedSpdxElement": component_file_id,
+                },
+                {
+                    "spdxElementId": embedded_package_id,
+                    "relationshipType": "CONTAINS",
+                    "relatedSpdxElement": component_package_id,
+                },
+            ]
+        )
     sbom = {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"{setup.name}-{version}",
         "documentNamespace": (f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_hash}"),
         "comment": f"DefenseClaw source commit: {commit}",
+        "creationInfo": {
+            "created": "2026-07-15T01:02:03Z",
+            "creators": [
+                "Organization: Cisco Systems, Inc.",
+                "Tool: DefenseClaw Windows installer SBOM generator",
+            ],
+            "licenseListVersion": "3.25",
+        },
         "documentDescribes": [package_id],
-        "packages": [
-            {
-                "name": "DefenseClaw Windows Setup",
-                "SPDXID": package_id,
-                "versionInfo": version,
-                "packageFileName": setup.name,
-                "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
-                "externalRefs": [
-                    {
-                        "referenceCategory": "PACKAGE-MANAGER",
-                        "referenceType": "purl",
-                        "referenceLocator": (f"pkg:github/cisco-ai-defense/defenseclaw@{version}"),
-                    }
-                ],
-            }
-        ],
-        "files": [
-            {
-                "fileName": f"./{setup.name}",
-                "SPDXID": file_id,
-                "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
-            }
-        ],
-        "relationships": [
-            {
-                "spdxElementId": "SPDXRef-DOCUMENT",
-                "relationshipType": "DESCRIBES",
-                "relatedSpdxElement": package_id,
-            },
-            {
-                "spdxElementId": package_id,
-                "relationshipType": "CONTAINS",
-                "relatedSpdxElement": file_id,
-            },
-        ],
+        "packages": packages,
+        "files": files,
+        "relationships": relationships,
     }
     (windows / f"{setup.name}.sbom.json").write_text(
         json.dumps(sbom),
@@ -1066,6 +1219,104 @@ def test_windows_setup_metadata_tampering_fails_closed(
         )
 
 
+def test_windows_setup_provenance_rejects_open_or_unpinned_build_inputs(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["inputs"].pop("cosign_sha256")
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="closed field set"):
+        release_candidate._validate_windows_installer_assets(
+            windows, WINDOWS_SETUP_VERSION, COMMIT
+        )
+
+    unpinned = tmp_path / "unpinned"
+    unpinned.mkdir()
+    windows = _windows_setup_dir(unpinned)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["toolchain"]["cosign_version"] = "2.6.1"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="reviewed pin"):
+        release_candidate._validate_windows_installer_assets(
+            windows, WINDOWS_SETUP_VERSION, COMMIT
+        )
+
+
+def test_windows_setup_provenance_rejects_inconsistent_payload_digest(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["inputs"]["payload_files"][document["inputs"]["wheel"]] = "1" * 64
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="payload digests"):
+        release_candidate._validate_windows_installer_assets(
+            windows, WINDOWS_SETUP_VERSION, COMMIT
+        )
+
+
+def test_windows_setup_sbom_requires_every_payload_custody_relationship(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.sbom.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    manifest_package = next(
+        item["SPDXID"]
+        for item in document["packages"]
+        if item.get("packageFileName") == "manifest.json"
+    )
+    document["relationships"] = [
+        row
+        for row in document["relationships"]
+        if not (
+            row["relationshipType"] == "CONTAINS"
+            and row["relatedSpdxElement"] == manifest_package
+        )
+    ]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="custody relationships"):
+        release_candidate._validate_windows_installer_assets(
+            windows, WINDOWS_SETUP_VERSION, COMMIT
+        )
+
+
+def test_windows_setup_sbom_rejects_payload_digest_substitution(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.sbom.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    manifest_package = next(
+        item
+        for item in document["packages"]
+        if item.get("packageFileName") == "manifest.json"
+    )
+    manifest_package["checksums"] = [{"algorithm": "SHA256", "checksumValue": "1" * 64}]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="payload digest"):
+        release_candidate._validate_windows_installer_assets(
+            windows, WINDOWS_SETUP_VERSION, COMMIT
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not json",
+        json.dumps({"base64Signature": "c2ln", "cert": "missing Rekor"}).encode(),
+        _legacy_cosign_bundle_bytes().replace(b"c2lnc3RvcmUgc2lnbmF0dXJl", b"not-base64!"),
+    ],
+)
+def test_legacy_cosign_bundle_rejects_malformed_structure(tmp_path: Path, payload: bytes) -> None:
+    path = tmp_path / release_candidate.CHECKSUMS_BUNDLE_FILENAME
+    path.write_bytes(payload)
+    with pytest.raises(release_candidate.CandidateError):
+        release_candidate._validate_legacy_cosign_bundle(path)
+
+
+def test_legacy_cosign_bundle_accepts_cosign_262_structure(tmp_path: Path) -> None:
+    path = tmp_path / release_candidate.CHECKSUMS_BUNDLE_FILENAME
+    path.write_bytes(_legacy_cosign_bundle_bytes())
+    release_candidate._validate_legacy_cosign_bundle(path)
+
+
 @pytest.mark.parametrize(
     ("offset", "value", "match"),
     [
@@ -1197,6 +1448,11 @@ def test_086_assemble_seals_the_exact_windows_setup_bytes(
         "_expected_release_artifacts",
         lambda _version: {"wheel": "unused.dcwheel"},
     )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_windows_setup_runtime_inputs",
+        lambda *_args: None,
+    )
 
     release_candidate.assemble(
         runtime,
@@ -1215,7 +1471,7 @@ def test_086_assemble_seals_the_exact_windows_setup_bytes(
     assert release_candidate._parse_checksums(dist / "checksums.txt") == source_hashes
     (dist / "checksums.txt.sig").write_bytes(b"sigstore signature")
     (dist / "checksums.txt.pem").write_bytes(TEST_CERTIFICATE_PEM)
-    (dist / "checksums.txt.bundle").write_bytes(b"offline Sigstore bundle")
+    (dist / "checksums.txt.bundle").write_bytes(_legacy_cosign_bundle_bytes())
 
     release_candidate.seal(root, WINDOWS_SETUP_VERSION, COMMIT)
     release_candidate.verify(root, WINDOWS_SETUP_VERSION, COMMIT)
@@ -1231,6 +1487,47 @@ def test_086_assemble_seals_the_exact_windows_setup_bytes(
     setup.write_bytes(setup.read_bytes() + b"tampered")
     with pytest.raises(release_candidate.CandidateError):
         release_candidate.verify(root, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_provenance_binds_exact_runtime_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    provenance_path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    artifacts = release_candidate._expected_release_artifacts(WINDOWS_SETUP_VERSION)
+    gateway_path = runtime / artifacts["gateways"]["windows"]["amd64"]
+    wheel_path = runtime / artifacts["wheel"]
+    manifest_path = runtime / "upgrade-manifest.json"
+    gateway_payload = b"exact canonical gateway archive"
+    wheel_payload = b"exact canonical wheel"
+    manifest_payload = b'{"release_version":"0.8.6"}\n'
+    manifest_path.write_bytes(manifest_payload)
+    protected_payloads = {gateway_path: gateway_payload, wheel_path: wheel_payload}
+    monkeypatch.setattr(
+        release_candidate,
+        "_protected_payload",
+        lambda path: protected_payloads[path],
+    )
+    inputs = provenance["inputs"]
+    inputs["gateway_archive_sha256"] = hashlib.sha256(gateway_payload).hexdigest()
+    inputs["wheel_sha256"] = hashlib.sha256(wheel_payload).hexdigest()
+    inputs["payload_files"][inputs["wheel"]] = inputs["wheel_sha256"]
+    inputs["payload_files"]["upgrade-manifest.json"] = hashlib.sha256(
+        manifest_payload
+    ).hexdigest()
+
+    release_candidate._validate_windows_setup_runtime_inputs(
+        provenance, runtime, WINDOWS_SETUP_VERSION
+    )
+    manifest_path.write_bytes(b"substituted")
+    with pytest.raises(release_candidate.CandidateError, match="exact runtime candidate"):
+        release_candidate._validate_windows_setup_runtime_inputs(
+            provenance, runtime, WINDOWS_SETUP_VERSION
+        )
 
 
 def test_windows_installer_input_extractor_is_exclusive_and_canonical(
@@ -2947,6 +3244,7 @@ def test_hard_cut_rejects_protocol_one_schema_two_manifest_without_bridge(
     tmp_path: Path,
 ) -> None:
     configured, platforms = release_candidate._load_upgrade_baseline_policy()
+    configured = [version for version in configured if version != "0.8.5"]
     manifest_path = tmp_path / "upgrade-manifest.json"
     manifest_path.write_text(
         json.dumps(
