@@ -39,7 +39,7 @@ def test_no_wait_never_enables_otlp(tmp_path: Path) -> None:
 
     app = _app(tmp_path / "state")
     config_path = Path(app.cfg.data_dir) / "config.yaml"
-    original = b"config_version: 4\ncustom: keep-me\n"
+    original = b"config_version: 8\nobservability:\n  local:\n    retention_days: 37\n"
     config_path.write_bytes(original)
     controller = _controller(ready=False)
     with (
@@ -47,10 +47,7 @@ def test_no_wait_never_enables_otlp(tmp_path: Path) -> None:
             "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
             return_value=controller,
         ),
-        patch(
-            "defenseclaw.commands.cmd_setup_local_observability"
-            "._apply_local_observability_config_transaction"
-        ) as apply_config,
+        patch("defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config") as apply_config,
     ):
         result = CliRunner().invoke(
             local_observability,
@@ -68,7 +65,7 @@ def test_readiness_failure_leaves_config_hash_unchanged(tmp_path: Path) -> None:
 
     app = _app(tmp_path / "state")
     config_path = Path(app.cfg.data_dir) / "config.yaml"
-    original = b"config_version: 4\notel:\n  enabled: false\ncustom: keep-me\n"
+    original = b"config_version: 8\nobservability:\n  local:\n    retention_days: 37\n"
     config_path.write_bytes(original)
     before = hashlib.sha256(original).hexdigest()
     controller = _controller()
@@ -92,14 +89,7 @@ def test_transaction_validation_failure_preserves_exact_bytes(tmp_path: Path) ->
 
     app = _app(tmp_path / "state")
     config_path = Path(app.cfg.data_dir) / "config.yaml"
-    original = (
-        b"config_version: 4\r\n"
-        b"custom: keep-me\r\n"
-        b"audit_sinks:\r\n"
-        b"  - name: remote\r\n"
-        b"    kind: webhook\r\n"
-        b"    url: https://example.test/events\r\n"
-    )
+    original = b"config_version: 8\r\nobservability:\r\n  local:\r\n    retention_days: 37\r\n"
     config_path.write_bytes(original)
     controller = _controller()
 
@@ -109,8 +99,12 @@ def test_transaction_validation_failure_preserves_exact_bytes(tmp_path: Path) ->
             return_value=controller,
         ),
         patch(
-            "defenseclaw.observability.writer._apply_audit_sink_preset",
-            side_effect=ValueError("conflicting sink"),
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=object(),
+        ),
+        patch(
+            "defenseclaw.observability.v8_writer._validate_candidate",
+            side_effect=RuntimeError("candidate rejected"),
         ),
     ):
         result = CliRunner().invoke(
@@ -129,27 +123,41 @@ def test_success_preserves_unrelated_destination_semantics(tmp_path: Path) -> No
     app = _app(tmp_path / "state")
     config_path = Path(app.cfg.data_dir) / "config.yaml"
     config_path.write_text(
-        """config_version: 4
-otel:
+        """config_version: 8
+observability:
+  local:
+    retention_days: 37
   destinations:
     - name: remote-otlp
       kind: otlp
       enabled: true
-      endpoint: collector.example.test:4317
+      endpoint: https://collector.example.test
       protocol: grpc
-      signals: [traces]
-audit_sinks:
-  - name: remote-webhook
-    kind: webhook
-    enabled: true
-    url: https://example.test/events
+      send:
+        signals: [traces]
+        buckets: ['*']
+    - name: remote-webhook
+      kind: http_jsonl
+      enabled: true
+      endpoint: https://example.test/events
+      method: POST
 """,
         encoding="utf-8",
     )
     controller = _controller()
-    with patch(
-        "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
-        return_value=controller,
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+            return_value=controller,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=object(),
+        ),
+        patch(
+            "defenseclaw.observability.v8_writer._validate_candidate",
+            return_value=None,
+        ),
     ):
         result = CliRunner().invoke(
             local_observability,
@@ -158,9 +166,14 @@ audit_sinks:
         )
     assert result.exit_code == 0, result.output
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    destinations = {item["name"]: item for item in raw["otel"]["destinations"]}
-    sinks = {item["name"]: item for item in raw["audit_sinks"]}
-    assert destinations["remote-otlp"]["endpoint"] == "collector.example.test:4317"
+    destinations = {item["name"]: item for item in raw["observability"]["destinations"]}
+    assert destinations["remote-otlp"]["endpoint"] == "https://collector.example.test"
     assert destinations["local-observability"]["enabled"] is True
-    assert sinks["remote-webhook"]["url"] == "https://example.test/events"
-    assert sinks["local-otlp-logs"]["enabled"] is True
+    assert destinations["remote-webhook"]["endpoint"] == "https://example.test/events"
+    assert destinations["local-observability"]["send"]["signals"] == [
+        "traces",
+        "metrics",
+        "logs",
+    ]
+    assert raw["observability"]["local"]["retention_days"] == 37
+    assert raw["observability"]["resource"]["attributes"]["service.name"] == "defenseclaw"

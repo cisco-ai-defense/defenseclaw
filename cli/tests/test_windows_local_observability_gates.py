@@ -51,11 +51,15 @@ def test_local_otlp_preset_is_available_on_windows(tmp_path: Path) -> None:
     app = _app(tmp_path / "preset state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._add_v8_destination",
+            return_value=(SimpleNamespace(changed=True), []),
+        ) as add_destination,
     ):
         result = CliRunner().invoke(observability, ["add", "local-otlp", "--non-interactive"], obj=app)
     assert result.exit_code == 0, result.output
-    apply_preset.assert_called_once()
+    add_destination.assert_called_once()
 
 
 def test_local_splunk_routes_to_setup_on_windows(tmp_path: Path) -> None:
@@ -115,7 +119,11 @@ def test_loopback_splunk_hec_preset_is_available(tmp_path: Path) -> None:
     app = _app(tmp_path / "hec state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._add_v8_destination",
+            return_value=(SimpleNamespace(changed=True), []),
+        ) as add_destination,
     ):
         result = CliRunner().invoke(
             observability,
@@ -131,7 +139,7 @@ def test_loopback_splunk_hec_preset_is_available(tmp_path: Path) -> None:
             obj=app,
         )
     assert result.exit_code == 0, result.output
-    apply_preset.assert_called_once()
+    add_destination.assert_called_once()
 
 
 def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
@@ -140,7 +148,11 @@ def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
     app = _app(tmp_path / "remote state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._add_v8_destination",
+            return_value=(SimpleNamespace(changed=True), []),
+        ) as add_destination,
     ):
         result = CliRunner().invoke(
             observability,
@@ -156,7 +168,7 @@ def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
             obj=app,
         )
     assert result.exit_code == 0, result.output
-    apply_preset.assert_called_once()
+    add_destination.assert_called_once()
 
 
 def test_local_splunk_defaults_are_resolved_before_an_unavailable_stack_gate(
@@ -171,7 +183,8 @@ def test_local_splunk_defaults_are_resolved_before_an_unavailable_stack_gate(
             "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=False,
         ),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status"),
+        patch("defenseclaw.commands.cmd_setup_observability._add_v8_destination") as add_destination,
     ):
         result = CliRunner().invoke(
             observability,
@@ -181,7 +194,7 @@ def test_local_splunk_defaults_are_resolved_before_an_unavailable_stack_gate(
 
     assert result.exit_code != 0
     assert LOCAL_SPLUNK_UNSUPPORTED_REASON in result.output
-    apply_preset.assert_not_called()
+    add_destination.assert_not_called()
 
 
 def test_splunk_enterprise_loopback_is_not_the_bundled_local_stack(tmp_path: Path) -> None:
@@ -193,7 +206,11 @@ def test_splunk_enterprise_loopback_is_not_the_bundled_local_stack(tmp_path: Pat
             "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=False,
         ),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._add_v8_destination",
+            return_value=(SimpleNamespace(changed=True), []),
+        ) as add_destination,
     ):
         result = CliRunner().invoke(
             observability,
@@ -210,7 +227,7 @@ def test_splunk_enterprise_loopback_is_not_the_bundled_local_stack(tmp_path: Pat
         )
 
     assert result.exit_code == 0, result.output
-    apply_preset.assert_called_once()
+    add_destination.assert_called_once()
 
 
 def test_destination_classifier_keeps_loopback_enterprise_remote() -> None:
@@ -238,33 +255,40 @@ def test_json_status_marks_both_local_stacks_supported(
     app = _app(tmp_path / "json state")
     local = SimpleNamespace(
         name="local-observability",
-        preset_id="local-otlp",
         kind="otlp",
-        target="otel",
         enabled=True,
-        signals={"traces": True},
+        generated=False,
+        selected_signals=("traces",),
+        capabilities=("traces", "metrics", "logs"),
+        policy_form="capability_default",
+        buckets=("compliance.activity",),
+        redaction_label="unredacted (none)",
         endpoint="127.0.0.1:4317",
-        protocol="grpc",
-        scope="global",
-        connector="",
+        preset="local-otlp",
     )
     splunk = SimpleNamespace(
         name="local-splunk",
-        preset_id="splunk-hec",
         kind="splunk_hec",
-        target="audit_sinks",
         enabled=True,
-        signals={},
+        generated=False,
+        selected_signals=("logs",),
+        capabilities=("logs",),
+        policy_form="capability_default",
+        buckets=("compliance.activity",),
+        redaction_label="unredacted (none)",
         endpoint="http://127.0.0.1:8088/services/collector/event",
-        protocol="http",
-        scope="global",
-        connector="",
+        preset="splunk-hec",
+    )
+    status = SimpleNamespace(
+        destinations=(local, splunk),
+        retention_days=90,
+        plan_digest="a" * 64,
     )
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
         patch(
-            "defenseclaw.commands.cmd_setup_observability.list_destinations",
-            return_value=[local, splunk],
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=status,
         ),
     ):
         result = CliRunner().invoke(observability, ["list", "--json"], obj=app)
@@ -294,7 +318,11 @@ def test_tui_capabilities_are_split_on_windows() -> None:
     assert "local-otlp" in preset.options
 
 
-def test_overview_state_marks_both_local_stacks_enabled() -> None:
+def test_overview_state_uses_canonical_v8_status_for_both_local_stacks() -> None:
+    from defenseclaw.observability.v8_status import (
+        V8DestinationStatus,
+        V8OperatorStatus,
+    )
     from defenseclaw.tui.services.overview_state import (
         HealthSnapshot,
         OverviewConfig,
@@ -303,20 +331,56 @@ def test_overview_state_marks_both_local_stacks_enabled() -> None:
     )
 
     model = OverviewPanelModel(OverviewConfig(data_dir="C:/temp"), version="test")
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="C:/temp/config.yaml",
+            data_dir="C:/temp",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=90,
+            local_path="C:/temp/audit.db",
+            judge_bodies_path="C:/temp/judge.db",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-observability",
+                    kind="otlp",
+                    enabled=True,
+                    generated=False,
+                    capabilities=("logs", "traces", "metrics"),
+                    selected_signals=("logs", "traces", "metrics"),
+                    policy_form="capability_default",
+                    endpoint="127.0.0.1:4317",
+                    route_count=1,
+                    buckets=("compliance.activity",),
+                    redaction_profiles=("none",),
+                    preset="local-otlp",
+                ),
+                V8DestinationStatus(
+                    name="local-splunk",
+                    kind="splunk_hec",
+                    enabled=True,
+                    generated=False,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="capability_default",
+                    endpoint="http://127.0.0.1:8088/services/collector/event",
+                    route_count=1,
+                    buckets=("compliance.activity",),
+                    redaction_profiles=("none",),
+                    preset="splunk-hec",
+                ),
+            ),
+            buckets=(),
+            warnings=(),
+        )
+    )
     model.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
-                details={"destinations": [{"name": "local-observability", "preset": "local-otlp", "enabled": True}]}
-            ),
-            sinks=SubsystemHealth(
                 details={
-                    "sinks": [
-                        {
-                            "name": "local-splunk",
-                            "kind": "splunk_hec",
-                            "enabled": True,
-                            "endpoint": "http://127.0.0.1:8088/services/collector/event",
-                        }
+                    "destinations": [
+                        {"name": "local-observability", "state": "healthy"},
+                        {"name": "local-splunk", "state": "healthy"},
                     ]
                 }
             ),
@@ -324,7 +388,7 @@ def test_overview_state_marks_both_local_stacks_enabled() -> None:
     )
     with patch("defenseclaw.platform_support.host_os", return_value="windows"):
         states = {row.name: row.state for row in model.observability_destination_rows()}
-    assert states == {"local-observability": "enabled", "local-splunk": "enabled"}
+    assert states == {"local-observability": "healthy", "local-splunk": "healthy"}
 
 
 def test_platform_capability_truth_table() -> None:

@@ -915,11 +915,6 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         self.store = store
         self.connector = connector
 
-    def set_store(self, store: object | None) -> None:
-        """Rebind the audit store after a config/data-directory refresh."""
-
-        self.store = store
-
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
             label="tool list --json",

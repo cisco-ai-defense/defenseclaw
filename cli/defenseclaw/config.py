@@ -134,6 +134,10 @@ def require_v8_config(*, path: str | None = None, allow_missing: bool = False) -
     version = source_config_version(path=path)
     if version is None and allow_missing:
         return
+    if version is None:
+        raise ConfigVersionError(
+            "DefenseClaw is not initialized — run 'defenseclaw init' first."
+        )
     if version != 8:
         raise ConfigVersionError(
             "Configuration schema v8 is required — run 'defenseclaw upgrade' first."

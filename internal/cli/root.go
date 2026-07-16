@@ -30,7 +30,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -38,7 +37,6 @@ var (
 	cfg                          *config.Config
 	auditStore                   *audit.Store
 	auditLog                     *audit.Logger
-	otelProvider                 *telemetry.Provider // deprecated schema-v7 lifecycle seam
 	appVersion                   string
 	appCommit                    string
 	appBuildDate                 string

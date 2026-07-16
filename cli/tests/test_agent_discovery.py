@@ -390,7 +390,7 @@ def test_hermes_native_windows_venv_is_discovered_without_path(
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
-        lambda name, path, _args: (
+        lambda name, path, _args, **_kwargs: (
             ("Hermes Agent v0.17.0", "")
             if name == "hermes" and ad._path_key(path) == ad._path_key(str(binary))
             else ("", "bad")

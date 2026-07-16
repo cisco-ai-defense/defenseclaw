@@ -958,6 +958,12 @@ class TestSetupSplunkCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
+        self.addCleanup(self._native_local_splunk.stop)
         self._write_v8_destinations([])
         self._v8_validator = patch(
             "defenseclaw.observability.v8_writer._validate_candidate"

@@ -31,6 +31,7 @@ from typing import Any
 
 import defenseclaw.observability.v8_activation as activation_module
 import pytest
+from defenseclaw import windows_acl
 from defenseclaw.observability.v8_activation import (
     V8ActivationError,
     V8ActivationRollbackError,
@@ -43,6 +44,15 @@ from defenseclaw.observability.v8_migration import (
     EnvironmentReference,
     V8MigrationResult,
     V8MigrationSummary,
+)
+
+POSIX_PERMISSION_CONTRACT = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX uid/gid/mode contract; native Windows owner/DACL coverage lives in the Windows activation suites",
+)
+POSIX_TRANSACTION_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="injects the POSIX descriptor/rename transaction; native Windows transaction coverage is separate",
 )
 
 
@@ -212,6 +222,12 @@ def test_activation_preserves_custom_paths_modes_crlf_and_creates_private_backup
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
+    config_mode = stat.S_IMODE(fixture["config_path"].stat().st_mode)
+    environment_mode = stat.S_IMODE(fixture["environment_path"].stat().st_mode)
+    config_security = windows_acl.capture_path(str(fixture["config_path"])) if os.name == "nt" else None
+    environment_security = (
+        windows_acl.capture_path(str(fixture["environment_path"])) if os.name == "nt" else None
+    )
     result = activate_v8_migration(
         fixture["migration"],
         validator=_validator(fixture["candidate"], fixture["secret"]),
@@ -224,16 +240,24 @@ def test_activation_preserves_custom_paths_modes_crlf_and_creates_private_backup
     assert result.config_path == str(fixture["config_path"])
     assert result.environment_path == str(fixture["environment_path"])
     assert fixture["config_path"].read_bytes() == fixture["candidate"]
-    assert stat.S_IMODE(fixture["config_path"].stat().st_mode) == 0o640
+    assert stat.S_IMODE(fixture["config_path"].stat().st_mode) == config_mode
     environment = fixture["environment_path"].read_bytes()
     assert environment.startswith(fixture["environment"])
     assert b"\r\nDEFENSECLAW_MIGRATED_HEADER='" in environment
     assert environment.endswith(b"'\r\n")
-    assert stat.S_IMODE(fixture["environment_path"].stat().st_mode) == 0o600
+    assert stat.S_IMODE(fixture["environment_path"].stat().st_mode) == environment_mode
+    if os.name == "nt":
+        assert windows_acl.capture_path(str(fixture["config_path"])) == config_security
+        assert windows_acl.capture_path(str(fixture["environment_path"])) == environment_security
 
     backup = Path(result.backup_directory or "")
     assert backup.is_dir()
-    assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+    if os.name == "nt":
+        backup_security = windows_acl.capture_path(str(backup), directory=True)
+        windows_acl.assert_not_broadly_readable(backup_security)
+        windows_acl.assert_not_broadly_writable(backup_security)
+    else:
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o700
     assert (backup / "config.source").read_bytes() == fixture["source"]
     assert (backup / "environment.source").read_bytes() == fixture["environment"]
     manifest_bytes = (backup / "manifest.json").read_bytes()
@@ -241,8 +265,8 @@ def test_activation_preserves_custom_paths_modes_crlf_and_creates_private_backup
     manifest = json.loads(manifest_bytes)
     assert manifest["source_sha256"] == _sha256(fixture["source"])
     assert manifest["candidate_sha256"] == _sha256(fixture["candidate"])
-    assert manifest["files"][0]["mode"] == "0640"
-    assert manifest["files"][1]["mode"] == "0600"
+    assert manifest["files"][0]["mode"] == f"{config_mode:04o}"
+    assert manifest["files"][1]["mode"] == f"{environment_mode:04o}"
     assert manifest["files"][0]["target_path"] == str(fixture["config_path"])
     assert manifest["files"][1]["target_path"] == str(fixture["environment_path"])
     if hasattr(os, "getuid"):
@@ -288,7 +312,12 @@ def test_absent_environment_is_created_private_and_manifest_records_absence(tmp_
     )
 
     assert fixture["environment_path"].is_file()
-    assert stat.S_IMODE(fixture["environment_path"].stat().st_mode) == 0o600
+    if os.name == "nt":
+        environment_security = windows_acl.capture_path(str(fixture["environment_path"]))
+        windows_acl.assert_not_broadly_readable(environment_security)
+        windows_acl.assert_not_broadly_writable(environment_security)
+    else:
+        assert stat.S_IMODE(fixture["environment_path"].stat().st_mode) == 0o600
     assert fixture["environment_path"].read_bytes().startswith(b"DEFENSECLAW_MIGRATED_HEADER='")
     backup = Path(result.backup_directory or "")
     assert not (backup / "environment.source").exists()
@@ -326,6 +355,8 @@ def test_already_v8_is_validated_without_backup_or_write(tmp_path: Path) -> None
     source = b"config_version: 8\nobservability: {}\n"
     config.write_bytes(source)
     os.chmod(config, 0o640)
+    original_mode = stat.S_IMODE(config.stat().st_mode)
+    original_security = windows_acl.capture_path(str(config)) if os.name == "nt" else None
     migration = _migration(source, source, already_v8=True, effective_data_dir=str(data_dir))
     calls: list[bytes] = []
 
@@ -340,7 +371,9 @@ def test_already_v8_is_validated_without_backup_or_write(tmp_path: Path) -> None
     assert result.already_v8
     assert result.backup_directory is None
     assert config.read_bytes() == source
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert stat.S_IMODE(config.stat().st_mode) == original_mode
+    if os.name == "nt":
+        assert windows_acl.capture_path(str(config)) == original_security
     assert not (data_dir / "backups").exists()
 
 
@@ -357,6 +390,10 @@ def test_already_v8_noop_does_not_tighten_backup_or_require_write_authority(
     backup_root = data_dir / "backups"
     backup_root.mkdir()
     os.chmod(backup_root, 0o755)
+    original_mode = stat.S_IMODE(backup_root.stat().st_mode)
+    original_security = (
+        windows_acl.capture_path(str(backup_root), directory=True) if os.name == "nt" else None
+    )
     migration = _migration(source, source, already_v8=True, effective_data_dir=str(data_dir))
     monkeypatch.setattr(activation_module, "_is_admin_process", lambda: False)
 
@@ -370,7 +407,9 @@ def test_already_v8_noop_does_not_tighten_backup_or_require_write_authority(
 
     assert result.already_v8 is True
     assert result.activated is False
-    assert stat.S_IMODE(backup_root.stat().st_mode) == 0o755
+    assert stat.S_IMODE(backup_root.stat().st_mode) == original_mode
+    if os.name == "nt":
+        assert windows_acl.capture_path(str(backup_root), directory=True) == original_security
 
 
 def test_changed_false_non_v8_result_cannot_be_marked_as_successful(tmp_path: Path) -> None:
@@ -416,7 +455,12 @@ def test_rejects_symlink_and_non_regular_targets(
     if kind == "symlink":
         outside = tmp_path / f"outside-{target}"
         outside.write_text("outside")
-        path.symlink_to(outside)
+        try:
+            path.symlink_to(outside)
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires Developer Mode or SeCreateSymbolicLinkPrivilege")
+            raise
     else:
         path.mkdir()
 
@@ -524,6 +568,7 @@ def test_permission_preflight_failure_occurs_before_backup_or_mutation(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_refuses_to_append_promoted_secret_to_world_readable_environment(
     tmp_path: Path,
 ) -> None:
@@ -595,6 +640,7 @@ def test_inheritable_read_acl_cannot_expose_staged_or_backup_secrets(
 
 
 @pytest.mark.parametrize("target", ["config", "environment"])
+@POSIX_PERMISSION_CONTRACT
 def test_untrusted_existing_leaf_uid_is_rejected_before_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -623,6 +669,7 @@ def test_untrusted_existing_leaf_uid_is_rejected_before_validation(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_inherited_group_is_accepted_only_for_fully_private_trusted_uid() -> None:
     uid = os.getuid()
     gid = os.getgid()
@@ -635,6 +682,7 @@ def test_inherited_group_is_accepted_only_for_fully_private_trusted_uid() -> Non
     assert not activation_module._trusted_private_owner(uid + 1, inherited_gid, 0o600, trusted)
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_group_readable_leaf_with_inherited_group_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -661,6 +709,7 @@ def test_group_readable_leaf_with_inherited_group_is_rejected(
     assert captured.value.code == "leaf_owner_untrusted"
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_group_writable_config_is_rejected_before_validation(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     os.chmod(fixture["config_path"], 0o660)
@@ -1044,6 +1093,7 @@ def test_rollback_refuses_to_clobber_an_external_post_activation_change(
     assert fixture["environment_path"].read_bytes() == external
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_rollback_refuses_to_clobber_an_external_metadata_only_change(
     tmp_path: Path,
 ) -> None:
@@ -1070,6 +1120,7 @@ def test_rollback_refuses_to_clobber_an_external_metadata_only_change(
 
 
 @pytest.mark.parametrize("target", ["config", "environment"])
+@POSIX_PERMISSION_CONTRACT
 def test_final_verification_rejects_metadata_drift(
     tmp_path: Path,
     target: str,
@@ -1095,6 +1146,7 @@ def test_final_verification_rejects_metadata_drift(
     assert stat.S_IMODE(path.stat().st_mode) == changed_mode
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_partial_backup_failure_is_cleaned_without_mutating_live_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1123,6 +1175,7 @@ def test_partial_backup_failure_is_cleaned_without_mutating_live_files(
     assert list(backup_root.iterdir()) == []
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_keyboard_interrupt_cleans_partial_backup_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1189,6 +1242,7 @@ def test_matching_environment_edit_is_idempotent_and_not_duplicated(tmp_path: Pa
     assert fixture["environment_path"].read_bytes().count(b"DEFENSECLAW_MIGRATED_HEADER=") == 1
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_matching_environment_edit_still_requires_private_dotenv_permissions(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     existing = fixture["environment"] + b"DEFENSECLAW_MIGRATED_HEADER='" + fixture["secret"].encode() + b"'\r\n"
@@ -1368,6 +1422,7 @@ def test_environment_dependency_change_during_commit_rolls_back_both_files(
     assert fixture["environment_path"].read_bytes() == fixture["environment"]
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_cooperative_cas_rejects_stale_config_without_candidate_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1403,6 +1458,7 @@ def test_cooperative_cas_rejects_stale_config_without_candidate_publication(
     assert config_replacements == []
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_stale_environment_cas_never_publishes_secret_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1440,6 +1496,7 @@ def test_stale_environment_cas_never_publishes_secret_candidate(
     assert environment_replacements == []
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_parent_directory_swap_is_detected_without_writing_replacement_tree(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     displaced = tmp_path / "displaced-data"
@@ -1617,6 +1674,7 @@ def test_replacement_preserves_exact_extended_attributes(tmp_path: Path) -> None
     assert dict(environment.xattrs)[attribute] == b"environment-metadata"
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_existing_backup_root_must_be_private(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     backup_root = fixture["data_dir"] / "backups"
@@ -1635,6 +1693,7 @@ def test_existing_backup_root_must_be_private(tmp_path: Path) -> None:
     assert fixture["config_path"].read_bytes() == fixture["source"]
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_upgrade_may_tighten_trusted_legacy_backup_root(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     backup_root = fixture["data_dir"] / "backups"
@@ -1654,6 +1713,7 @@ def test_upgrade_may_tighten_trusted_legacy_backup_root(tmp_path: Path) -> None:
     assert Path(result.backup_directory or "").parent == backup_root
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_upgrade_never_tightens_writable_legacy_backup_root(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     backup_root = fixture["data_dir"] / "backups"
@@ -1866,9 +1926,19 @@ def test_first_backup_root_creation_uses_private_durable_hierarchy(tmp_path: Pat
     )
 
     assert Path(directory).parent == backup_root
-    assert stat.S_IMODE(backup_root.stat().st_mode) == 0o700
-    assert stat.S_IMODE(Path(directory).stat().st_mode) == 0o700
-    assert stat.S_IMODE((Path(directory) / "manifest.json").stat().st_mode) == 0o600
+    if os.name == "nt":
+        for path, is_directory in (
+            (backup_root, True),
+            (Path(directory), True),
+            (Path(directory) / "manifest.json", False),
+        ):
+            security = windows_acl.capture_path(str(path), directory=is_directory)
+            windows_acl.assert_not_broadly_readable(security)
+            windows_acl.assert_not_broadly_writable(security)
+    else:
+        assert stat.S_IMODE(backup_root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(directory).stat().st_mode) == 0o700
+        assert stat.S_IMODE((Path(directory) / "manifest.json").stat().st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX exchange recovery regression")

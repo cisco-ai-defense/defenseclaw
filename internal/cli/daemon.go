@@ -621,10 +621,10 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 	requirements := daemonReadinessRequirements{
 		guardrailEnabled: cfg.Guardrail.Enabled,
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
-		// Schema v8 clears the legacy cfg.OTel projection, but its canonical
-		// observability runtime always binds the sidecar telemetry health source.
+		// The canonical schema-v8 observability runtime always binds the
+		// sidecar telemetry health source.
 		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion || cfg.OTel.Enabled,
+		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,
 		listenerHost:     gatewayBindHost(cfg),

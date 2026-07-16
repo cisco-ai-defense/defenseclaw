@@ -327,7 +327,8 @@ func TestHardenedAuditSQLiteRejectsLeafReplacementDuringOpen(t *testing.T) {
 		t.Skipf("symlinks are unavailable: %v", symlinkErr)
 	}
 	if err == nil || (!strings.Contains(err.Error(), "symbolic link") &&
-		!strings.Contains(err.Error(), "changed during secure open")) {
+		!strings.Contains(err.Error(), "changed during secure open") &&
+		!strings.Contains(err.Error(), "Windows reparse point")) {
 		t.Fatalf("replacement race error = %v", err)
 	}
 }

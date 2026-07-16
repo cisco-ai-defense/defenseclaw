@@ -636,10 +636,30 @@ function Set-IsolatedGatewayPort {
 
     $configPath = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
     $config = [IO.File]::ReadAllText($configPath)
-    $pattern = '(?m)^(?<indent>\s*)api_port:\s*\d+\s*$'
+    $newline = if ($config.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $pattern = '(?m)^(?<indent>[ \t]*)api_port:[ \t]*\d+[ \t]*(?=\r?$)'
     $matches = [regex]::Matches($config, $pattern)
-    if ($matches.Count -ne 1) { throw "expected one gateway api_port in $configPath, found $($matches.Count)" }
-    $updated = [regex]::Replace($config, $pattern, "`${indent}api_port: $port")
+    if ($matches.Count -gt 1) { throw "expected at most one gateway api_port in $configPath, found $($matches.Count)" }
+    if ($matches.Count -eq 1) {
+        $updated = [regex]::Replace($config, $pattern, "`${indent}api_port: $port")
+    } else {
+        # Fresh v8 configs omit default-valued fields, including
+        # gateway.api_port. Add the field to an existing gateway block or
+        # create that block without falling back to the shared default port.
+        $gatewayPattern = '(?m)^gateway:[ \t]*(?:#[^\r\n]*)?(?=\r?$)'
+        $gatewayMatches = [regex]::Matches($config, $gatewayPattern)
+        if ($gatewayMatches.Count -gt 1) {
+            throw "expected at most one gateway block in $configPath, found $($gatewayMatches.Count)"
+        }
+        if ($gatewayMatches.Count -eq 1) {
+            $gateway = $gatewayMatches[0]
+            $updated = $config.Insert($gateway.Index + $gateway.Length, "${newline}  api_port: $port")
+        } else {
+            $trimmed = $config.TrimEnd([char[]]"`r`n")
+            $prefix = if ($trimmed.Length -gt 0) { $trimmed + $newline } else { '' }
+            $updated = $prefix + "gateway:${newline}  api_port: $port${newline}"
+        }
+    }
     [IO.File]::WriteAllText($configPath, $updated, [Text.UTF8Encoding]::new($false))
     Write-Result gateway-port pass "isolated loopback port $port"
 }

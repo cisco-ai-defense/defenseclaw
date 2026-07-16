@@ -151,6 +151,26 @@ def test_write_new_file_protects_exact_acl_before_first_payload_byte(monkeypatch
     assert api.security[api.paths["candidate.tmp"]] == requested.staging_copy()
 
 
+def test_staging_copy_converts_only_inherited_ace_markers_to_explicit() -> None:
+    inherited = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x13, 0x001F01FF, OWNER),
+            (0, 0x10, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+
+    staged = inherited.staging_copy()
+
+    assert staged.dacl_protected is True
+    assert staged.dacl == _dacl(
+        (0, 0x03, 0x001F01FF, OWNER),
+        (0, 0x00, 0x00020089, SYSTEM),
+    )
+    assert inherited.dacl != staged.dacl
+
+
 def test_write_new_file_fails_closed_when_acl_changes_during_write(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _FakeApi()
     api.change_after_write = True

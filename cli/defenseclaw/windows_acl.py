@@ -94,6 +94,7 @@ _ACCESS_DENIED_ACE_TYPE = 1
 _OBJECT_INHERIT_ACE = 0x01
 _CONTAINER_INHERIT_ACE = 0x02
 _INHERIT_ONLY_ACE = 0x08
+_INHERITED_ACE = 0x10
 
 _FILE_WRITE_DATA = 0x00000002
 _FILE_APPEND_DATA = 0x00000004
@@ -148,7 +149,7 @@ class WindowsFileSecurity:
 
         return WindowsFileSecurity(
             self.owner,
-            self.dacl,
+            _protected_dacl_copy(self.dacl),
             True,
             self.mandatory_label,
             self.sacl_protected,
@@ -201,6 +202,37 @@ class _WindowsApi(Protocol):
 
 class WindowsAclError(OSError):
     """A native security operation was unavailable, unsafe, or failed."""
+
+
+def _protected_dacl_copy(dacl: bytes) -> bytes:
+    """Return the exact explicit-ACE form Windows stores on a protected DACL.
+
+    An ACE cannot remain *inherited* once inheritance is disabled.  Windows
+    therefore clears ``INHERITED_ACE`` while applying a protected descriptor,
+    even though the SID, access mask, order, and all inheritance-propagation
+    flags remain unchanged.  Normalize that one kernel-defined transition
+    before creating a staged file so later byte-for-byte verification still
+    rejects every authorization-relevant drift.
+    """
+
+    if len(dacl) < 8:
+        raise WindowsAclError("DACL header is truncated")
+    _revision, _reserved, acl_size, ace_count, _reserved2 = struct.unpack_from("<BBHHH", dacl, 0)
+    if acl_size != len(dacl):
+        raise WindowsAclError("DACL size does not match its binary representation")
+    normalized = bytearray(dacl)
+    cursor = 8
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            raise WindowsAclError("DACL ACE header is truncated")
+        ace_size = struct.unpack_from("<H", dacl, cursor + 2)[0]
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            raise WindowsAclError("DACL ACE has an invalid binary representation")
+        normalized[cursor + 1] &= ~_INHERITED_ACE
+        cursor += ace_size
+    if cursor != acl_size:
+        raise WindowsAclError("DACL contains trailing data outside its ACE inventory")
+    return bytes(normalized)
 
 
 @dataclass(frozen=True)
