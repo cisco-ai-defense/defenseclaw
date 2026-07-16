@@ -124,7 +124,10 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - run: make plugin
+      # extensions = plugin + sync-openclaw-extension. go-test-other includes
+      # internal/gateway/connector, whose Setup test requires dist/index.js in
+      # the //go:embed tree (make plugin alone leaves a stale/partial embed).
+      - run: make extensions
       - name: Run remaining Go race/coverage suite once
         run: |
           set -euo pipefail
