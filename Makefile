@@ -49,7 +49,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check check-grafana-dashboards check-observability-v8-hard-cut check-observability-v8-spec check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
-        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
+        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
         _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
@@ -872,6 +872,9 @@ upgrade-smoke-matrix:
 	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" --refusal-contract-only $(ARGS)
 
 upgrade-refusal-contract-matrix: upgrade-smoke-matrix
+
+upgrade-developer-activation:
+	@scripts/test-developer-target-activation.sh $(ARGS)
 
 upgrade-legacy-smoke:
 	@scripts/test-upgrade-release.sh $(ARGS)

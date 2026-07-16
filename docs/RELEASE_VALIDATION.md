@@ -8,8 +8,8 @@ observability, Docker, or provenance defects for the first time.
 
 | Layer | Trigger | Required scope | Candidate custody |
 |---|---|---|---|
-| Pull request | Every PR, with a path-filtered selective upgrade job for release-sensitive changes | Fast deterministic release regressions; risky PRs add current stable, previous stable, the `0.8.4` bridge boundary, an explicit direct-skip refusal, and the oldest-supported smoke/refusal | Unsigned PR candidate; success is not release certification |
-| Main smoke | Every merge to `main` | Medium candidate smoke for the exact merged SHA and at least one representative published upgrade canary | Exact merged SHA; no publication |
+| Pull request | Every PR, with a path-filtered selective upgrade job for release-sensitive changes | Fast deterministic release regressions; risky PRs add current stable, previous stable, the `0.8.4` bridge boundary, an explicit direct-skip refusal, and the oldest-supported smoke/refusal | Unsigned PR candidate; direct target activation plus production pre-mutation refusal, never release certification |
+| Main smoke | Every merge to `main` | Medium candidate smoke for the exact merged SHA and at least one representative published target-activation canary | Exact merged SHA; no publication or provenance claim |
 | Pre-release certification | Nightly schedule or manual dispatch for a selected ref and candidate version | Signed candidate; behavior-class historical matrix; live migration and rollback/recovery; Docker/local observability continuity; native platform checks; bounded-retry provenance verification | One signed candidate artifact plus one certification receipt |
 | Release | Manual version input on protected `main` | Verify a recent receipt for the exact SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; then publish those same bytes | Reuse certified bytes without rebuilding |
 
@@ -39,7 +39,10 @@ of taking an arbitrary number of versions:
 - explicitly reviewed protocol/installer boundaries.
 
 Duplicate versions are collapsed while all of their behavior classes remain in
-the selection metadata. Routine newly published stables enter dynamically.
+the selection metadata. PR cases that resolve to the same version, mode, and
+expected result also execute once with all covered classes attached; a success
+and refusal for the same version remain separate cases. Routine newly published
+stables enter dynamically.
 Expanding the historical support floor or moving a protocol, installer, schema,
 or artifact-authentication boundary still requires a reviewed policy change.
 
@@ -186,3 +189,26 @@ Tests must enforce both directions of this boundary: ordinary PR and Release
 must not contain the full signed live matrix, while nightly/manual
 certification must retain signed candidates, rollback/recovery, live
 observability continuity, behavior-class baselines, and provenance checks.
+
+Unsigned PR and main success cases use
+`scripts/test-developer-target-activation.sh`. It authenticates the published
+baseline, creates a private throwaway `HOME`, checksum-binds the exact-SHA
+candidate, installs it directly, and proves target-owned migration, required
+migration cursors, exact CLI and gateway versions, fresh-process health, and
+SQLite integrity. For pre-v8 sources it additionally proves config/secret
+conversion and recovery digests. For an authenticated config-v8 source it
+instead requires byte-exact config/environment continuity and proves that the
+one-time v7-to-v8 activation is not replayed. Fixture selection is keyed by the
+authenticated source config family and fails closed for a future unreviewed
+family; it is never inferred only from the target version. It intentionally
+does not call the production updater and cannot claim signed provenance, the
+`0.8.4` controller handoff, production receipts, rollback/recovery, or
+Docker/local-observability continuity. The separate unsigned refusal case
+continues to prove that the production path fails before mutation. All omitted
+positive guarantees remain mandatory in nightly/manual signed certification.
+
+Signed certification seeds native-v8 continuity from the authenticated
+baseline wheel's own managed observability bundle and ownership manifest, then
+requires the target to replace managed bytes while preserving operator-owned
+files. This keeps the dynamic `0.8.5 -> 0.8.6` canary representative after
+0.8.5 becomes the current stable release.

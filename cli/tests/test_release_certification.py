@@ -58,20 +58,28 @@ def _metadata(tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path, Pat
     return metadata, selection, root, workflow
 
 
-def test_pr_selection_has_exactly_five_required_risk_classes() -> None:
+def test_pr_selection_covers_five_risk_classes_without_duplicate_execution() -> None:
     selection = release_certification.select_cases("0.8.5", "pr")
 
-    assert [item["class"] for item in selection["cases"]] == [
+    covered = {
+        behavior_class
+        for item in selection["cases"]
+        for behavior_class in item["classes"]
+    }
+    assert covered == {
         "latest_stable",
         "previous_stable",
         "bridge_boundary",
         "explicit_skip_refusal",
         "oldest_supported",
-    ]
+    }
+    assert len(selection["cases"]) == 4
+    assert selection["cases"][0]["classes"] == ["latest_stable", "bridge_boundary"]
     assert _versions(selection) == ["0.8.4", "0.8.3", "0.4.0"]
-    refusal = selection["cases"][3]
+    refusal = selection["cases"][2]
     assert refusal == {
         "class": "explicit_skip_refusal",
+        "classes": ["explicit_skip_refusal"],
         "baseline": "0.8.3",
         "mode": "explicit-direct-target",
         "expected": "refusal-before-mutation",
@@ -117,6 +125,9 @@ def test_live_latest_stable_is_used_before_lagging_reviewed_inventory() -> None:
     assert classes["0.8.5"] == {"latest_stable"}
     assert classes["0.8.4"] == {"previous_stable", "bridge_boundary"}
     assert classes["0.8.3"] == {"explicit_skip_refusal"}
+    assert len(selection["cases"]) == 4
+    previous = next(item for item in selection["cases"] if item["baseline"] == "0.8.4")
+    assert previous["classes"] == ["previous_stable", "bridge_boundary"]
 
 
 def test_selector_rejects_stale_or_nonpreceding_latest_stable_claim() -> None:
@@ -340,7 +351,18 @@ def test_cli_outputs_github_matrices_version_and_policy_identity(tmp_path: Path)
     assert selected.returncode == 0, selected.stderr
     outputs = dict(line.split("=", 1) for line in selection_output.read_text().splitlines())
     matrix = json.loads(outputs["matrix"])
-    assert len(matrix["include"]) == 5
+    assert len(matrix["include"]) == 4
+    assert {
+        behavior_class
+        for item in matrix["include"]
+        for behavior_class in item["classes"]
+    } == {
+        "latest_stable",
+        "previous_stable",
+        "bridge_boundary",
+        "explicit_skip_refusal",
+        "oldest_supported",
+    }
     assert outputs["workflow_version"].startswith("sha256:")
 
 
@@ -381,6 +403,54 @@ def test_path_classification_does_not_require_release_network_inputs(
         "matrix": '{"include":[]}',
         "versions": "[]",
     }
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "cli/defenseclaw/migration_state.py",
+        "cli/defenseclaw/upgrade_receipt.py",
+        "cli/defenseclaw/observability/v8_activation.py",
+        "cli/defenseclaw/observability/v8_config.py",
+        "internal/config/observability_v8_types.go",
+        "internal/cli/status.go",
+        "bundles/local_observability_stack/docker-compose.yml",
+        "schemas/config/v8/defenseclaw-config.schema.json",
+    ],
+)
+def test_paths_command_classifies_every_upgrade_runtime_boundary_as_sensitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    changed_path: str,
+) -> None:
+    monkeypatch.setattr(
+        release_certification,
+        "_changed_paths",
+        lambda _base, _head: [changed_path],
+    )
+    output = tmp_path / "github-output"
+
+    assert (
+        release_certification.main(
+            [
+                "paths",
+                "--base",
+                "base",
+                "--head",
+                "head",
+                "--github-output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "paths": [changed_path],
+        "sensitive": True,
+    }
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["sensitive"] == "true"
 
 
 def test_changed_paths_keeps_deletions_and_both_rename_sides(

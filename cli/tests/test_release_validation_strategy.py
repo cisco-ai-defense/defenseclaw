@@ -45,15 +45,23 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     assert "fromJSON(needs.release-validation-plan.outputs.pr_matrix)" in _render(selective["strategy"])
     rendered_selective = _render(selective)
     assert rendered_selective.count('--target-version "$CANDIDATE_VERSION"') == 2
+    assert rendered_selective.count("scripts/test-developer-target-activation.sh") == 1
+    assert rendered_selective.count("scripts/test-upgrade-protocol-release.sh") == 1
+    assert "--scope full" not in text
     assert "unsigned-upgrade-candidate" in selective["needs"]
     pr = release_certification.select_cases("0.8.6", "pr", latest_stable="0.8.5")
-    assert [item["class"] for item in pr["cases"]] == [
+    assert {
+        behavior_class
+        for item in pr["cases"]
+        for behavior_class in item["classes"]
+    } == {
         "latest_stable",
         "previous_stable",
         "bridge_boundary",
         "explicit_skip_refusal",
         "oldest_supported",
-    ]
+    }
+    assert len(pr["cases"]) == 4
 
     # A PR may exercise deterministic resolver models, but it may not construct,
     # sign, or run the expensive live certification candidate.
@@ -70,15 +78,65 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "pyproject.toml",
         "uv.lock",
         "cli/defenseclaw/__init__.py",
+        "cli/defenseclaw/migration_state.py",
+        "cli/defenseclaw/upgrade_receipt.py",
+        "cli/defenseclaw/observability/v8_activation.py",
+        "cli/defenseclaw/observability/v8_config.py",
+        "internal/config/**",
+        "internal/cli/**",
+        "bundles/local_observability_stack/**",
+        "schemas/config/v8/**",
         "extensions/defenseclaw/package.json",
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
         "scripts/resolve_upgrade_baselines.py",
         "scripts/generate-upgrade-manifest.py",
         "scripts/verify-sigstore-blob.py",
+        "scripts/test-developer-target-activation.sh",
         "scripts/test-fresh-install-release.sh",
         "scripts/build-macos-app-release.sh",
+        ".github/workflows/macos-app.yml",
+        "scripts/export-uv-overrides.py",
     }.issubset(sensitive)
+
+
+def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None:
+    pull_request_workflows: list[Path] = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        workflow = _workflow(path)
+        triggers = workflow.get("on", {})
+        if isinstance(triggers, dict):
+            trigger_names = set(triggers)
+        elif isinstance(triggers, list):
+            trigger_names = set(triggers)
+        elif isinstance(triggers, str):
+            trigger_names = {triggers}
+        else:
+            trigger_names = set()
+        if {
+            "pull_request",
+            "pull_request_target",
+        }.intersection(trigger_names):
+            pull_request_workflows.append(path)
+
+    assert pull_request_workflows
+    forbidden = (
+        "uses: ./.github/workflows/pre-release-certification.yml",
+        "--scope full",
+        "scripts/test-observability-v8-upgrade-continuity.sh",
+        "cosign sign-blob",
+        "historical-dependency-canary:",
+    )
+    for path in pull_request_workflows:
+        text = path.read_text(encoding="utf-8")
+        for contract in forbidden:
+            assert contract not in text, (path, contract)
+
+        for job in (_workflow(path).get("jobs") or {}).values():
+            for step in job.get("steps", []):
+                rendered = _render(step)
+                if "scripts/test-upgrade-protocol-release.sh" in rendered:
+                    assert "--refusal-contract-only" in rendered, path
 
 
 def test_main_smoke_is_bound_to_exact_sha_and_runs_representative_canary() -> None:
@@ -95,6 +153,8 @@ def test_main_smoke_is_bound_to_exact_sha_and_runs_representative_canary() -> No
     assert "--baseline-dependencies published" in rendered
     assert '--target-version "$CANDIDATE_VERSION"' in rendered
     assert 'release-root "$GITHUB_WORKSPACE/unsigned-candidate"' in rendered
+    assert "scripts/test-developer-target-activation.sh" in rendered
+    assert "scripts/test-upgrade-release.sh" not in rendered
     assert "unsigned-upgrade-candidate" in main["needs"]
     assert "--refusal-contract-only" not in rendered
 
@@ -122,6 +182,7 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "--workflow-file executed-pre-release-certification.yml" in lookup
     assert "git cat-file -e" in lookup
     assert "git fetch" not in lookup
+    assert 'if [[ "$RELEASE_OPERATION" != "release" ]]; then' in lookup
     assert jobs["lookup-certification"]["steps"][0]["with"]["fetch-depth"] == "0"
     full = jobs["full-certification"]
     assert full["uses"] == "./.github/workflows/pre-release-certification.yml"
@@ -158,6 +219,7 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert text.count("uses: ./.github/workflows/pre-release-certification.yml") == 1
     assert "scripts/test-observability-v8-upgrade-continuity.sh" not in text
     assert "scripts/test-upgrade-protocol-release.sh" not in text
+    assert "scripts/test-developer-target-activation.sh" not in text
 
 
 def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None:
@@ -176,6 +238,7 @@ def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None
         "certification-complete",
     }.issubset(jobs)
     assert "scripts/test-upgrade-protocol-release.sh" in text
+    assert "scripts/test-developer-target-activation.sh" not in text
     assert "--baseline-dependencies published" in text
     assert "scripts/test-observability-v8-upgrade-continuity.sh" in text
     assert "scripts/test-upgrade-release-windows.ps1" in text

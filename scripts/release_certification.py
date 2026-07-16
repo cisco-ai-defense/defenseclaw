@@ -415,6 +415,7 @@ def select_cases(
     ]
     if scope == "pr":
         cases = []
+        case_by_behavior: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
         for name in requested:
             versions = class_versions[name]
             if not versions:
@@ -427,15 +428,22 @@ def select_cases(
             elif name == "oldest_supported":
                 mode = "oldest-smoke-and-refusal"
                 expected = "success-and-refusal"
-            cases.append(
-                {
-                    "class": name,
-                    "baseline": versions[0],
-                    "mode": mode,
-                    "expected": expected,
-                    "start_source_gateway": name == "oldest_supported",
-                }
-            )
+            start_source_gateway = name == "oldest_supported"
+            behavior = (versions[0], mode, expected, start_source_gateway)
+            existing = case_by_behavior.get(behavior)
+            if existing is not None:
+                existing["classes"].append(name)
+                continue
+            case = {
+                "class": name,
+                "classes": [name],
+                "baseline": versions[0],
+                "mode": mode,
+                "expected": expected,
+                "start_source_gateway": start_source_gateway,
+            }
+            case_by_behavior[behavior] = case
+            cases.append(case)
     else:
         cases = [
             {

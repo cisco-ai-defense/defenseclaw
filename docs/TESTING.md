@@ -19,6 +19,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make lint` | Ruff, Go formatting/linting, and Python compile check |
 | `make upgrade-smoke` | Build an unsigned schema-2 candidate and prove an old controller refuses it before mutation |
 | `make upgrade-smoke-matrix` | Run that unsigned-candidate refusal contract across all supported historical baselines |
+| `make upgrade-developer-activation` | In a throwaway `HOME`, directly activate an unsigned exact-SHA candidate and prove target migration/runtime health without claiming resolver provenance |
 | `make upgrade-signed-protocol-matrix` | Run the full resolver success/refusal policy against an already signed candidate (release gate only) |
 
 ## Focused Tests
@@ -73,6 +74,10 @@ make upgrade-smoke ARGS="--from-version 0.7.2"
 # Ordinary PR CI uses a smaller path-sensitive behavior-class selection.
 make upgrade-smoke-matrix
 
+# Fast positive target-owned migration/health check for an unsigned local
+# candidate. This never calls or weakens the production upgrade resolver.
+make upgrade-developer-activation ARGS="--release-root /path/to/candidate-root --target-version 0.8.5 --from-version 0.8.4 --baseline-mode seed"
+
 # Full positive protocol matrix. This requires the sealed, release-workflow-
 # signed candidate; it must not be pointed at unsigned local artifacts.
 make upgrade-signed-protocol-matrix \
@@ -83,15 +88,26 @@ make upgrade-legacy-smoke-matrix \
   ARGS="--target-version 0.8.3 --release-root /path/to/published-release-root --baseline-mode seed"
 ```
 
-For a Linux host without the repo's Go toolchain, prepare candidate artifacts on a machine that can cross-build, copy the printed release root to Linux, then run the same smoke there:
+For a Linux host without the repo's Go toolchain, prepare candidate artifacts
+on a machine that can cross-build and copy the printed release root plus the
+reviewed test scripts to Linux. Run target activation and production refusal as
+separate claims:
 
 ```bash
 scripts/test-upgrade-release.sh --prepare-only --platform linux/arm64 --keep-workdir
 scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:/tmp/
-ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --from-versions "0.8.4,0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed'
+ssh openclaw-vineeth 'scripts/test-developer-target-activation.sh --release-root /tmp/candidate-release --target-version 0.8.5 --from-version 0.8.4 --baseline-mode seed'
+ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --target-version 0.8.5 --from-version 0.8.3 --baseline-mode seed --refusal-contract-only'
 ```
 
 The default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Its single source is `release/upgrade-baselines.json`; the Make target and smoke-contract tests must match that reviewed data exactly. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so neither is eligible for automatic staging. The `0.8.4` entry deliberately makes the `0.8.5` gate fail until that bridge has actually been published with its complete signed POSIX asset set. Targets before `0.8.5` retain schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff for every listed older POSIX source, and full v7-to-v8 observability, private-secret, rollback, local-bundle, SQLite, and fresh-process health checks from the bridge.
+
+After 0.8.5 is published, the effective baseline resolver adds it dynamically
+as config version 8. The harness then seeds canonical v8 config, migration
+cursor, and baseline-owned bundle state; it requires later targets to preserve
+config/environment bytes, avoid replaying the one-time v8 activation, refresh
+managed bundle bytes, and retain operator files. Unknown future config families
+fail closed until their fixture and verifier are reviewed.
 
 Nightly/manual certification seals one candidate, then runs
 `scripts/test-upgrade-protocol-release.sh` for the selected behavior-class
@@ -138,6 +154,8 @@ make rego-test
 make check
 ```
 
-For a release-sensitive change, also run `make upgrade-smoke` locally. The
-signed live historical matrix is deliberately owned by nightly/manual
-pre-release certification rather than ordinary PR validation.
+For a release-sensitive change, run `make upgrade-smoke` locally and use
+`make upgrade-developer-activation` with an unsigned candidate root when the
+target migration/runtime changed. Neither test claims a signed bridge handoff.
+The signed live historical, rollback, and Docker matrix is deliberately owned
+by nightly/manual pre-release certification rather than ordinary PR validation.

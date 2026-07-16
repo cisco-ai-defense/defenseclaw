@@ -52,6 +52,8 @@ def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
 
     assert "upgrade-refusal-contract-matrix: upgrade-smoke-matrix" in text
+    assert "upgrade-developer-activation:" in text
+    assert "scripts/test-developer-target-activation.sh $(ARGS)" in text
     assert (
         'scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" '
         "--refusal-contract-only $(ARGS)"
@@ -227,7 +229,7 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
     start = smoke.index("seed_pre_v8_otel_fixture() {")
-    end = smoke.index("\n}\n\nseed_v8_observability_fixture()", start)
+    end = smoke.index("\n}\n\nfinalize_observability_upgrade_fixture()", start)
     fixture = smoke[start:end]
 
     assert "guardrail:\n  enabled: false" in fixture
@@ -258,7 +260,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
 def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> None:
     smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
     start = smoke.index("seed_v8_observability_fixture() {")
-    end = smoke.index("\n}\n\nseed_upgrade_fixture()", start)
+    end = smoke.index("\n}\n\nseed_native_v8_observability_fixture()", start)
     fixture = smoke[start:end]
 
     assert 'local openclaw_home="${SMOKE_HOME}/.openclaw"' in fixture

@@ -27,9 +27,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from defenseclaw.migrations import run_migrations
+from defenseclaw.observability.v8_config import load_validate_v8
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
+DEVELOPER_ACTIVATION_SCRIPT = ROOT / "scripts" / "test-developer-target-activation.sh"
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 MAKEFILE = ROOT / "Makefile"
@@ -50,6 +53,104 @@ def test_posix_install_upgrade_and_smoke_pin_private_umask() -> None:
     for path in (INSTALL_SCRIPT, UPGRADE_SCRIPT, SCRIPT):
         text = path.read_text(encoding="utf-8")
         assert re.search(r"^set -euo pipefail\n(?:.*\n){0,8}umask 077$", text, re.MULTILINE), path
+
+
+def test_developer_activation_is_isolated_from_every_production_upgrade_surface() -> None:
+    source = DEVELOPER_ACTIVATION_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'source "${ROOT}/scripts/test-upgrade-release.sh"' in source
+    assert "run_migrations(" in source
+    assert "upgrade_handles_local_bundle=True" in source
+    assert "_poll_health(configuration" in source
+    assert '[[ -n "${RELEASE_ROOT}" ]]' in source
+    assert '[[ "${BASELINE_MODE}" == "seed" ]]' in source
+    assert '[[ "${CANDIDATE_SCHEMA_VERSION}" == "2" ]]' in source
+    assert '-e "${release_dir}/checksums.txt.sig" || -L "${release_dir}/checksums.txt.sig"' in source
+    assert '-e "${release_dir}/checksums.txt.pem" || -L "${release_dir}/checksums.txt.pem"' in source
+    assert "developer activation HOME escaped its private workdir" in source
+    assert "select_private_api_port" in source
+    assert 'gateway.get("api_port") != developer_api_port' in source
+    assert "must not claim a production upgrade receipt" in source
+    assert "No production resolver, provenance, bridge, receipt, or rollback success was claimed" in source
+
+    production_paths = (
+        ROOT / "scripts/install.sh",
+        ROOT / "scripts/install.ps1",
+        ROOT / "scripts/upgrade.sh",
+        ROOT / "scripts/upgrade.ps1",
+        ROOT / "cli/defenseclaw/commands/cmd_upgrade.py",
+    )
+    for path in production_paths:
+        assert DEVELOPER_ACTIVATION_SCRIPT.name not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--baseline-mode", "seed"], "requires --release-root"),
+        (["--release-root", "/tmp/does-not-exist"], "requires --baseline-mode seed"),
+    ],
+)
+def test_developer_activation_rejects_nonisolated_invocations_before_network(
+    arguments: list[str],
+    message: str,
+) -> None:
+    completed = subprocess.run(
+        [str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_developer_activation_removes_ambient_runtime_overrides() -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; '
+            "export DEFENSECLAW_DISABLE_REDACTION=true "
+            "DEFENSECLAW_GATEWAY_BIN=/ambient/gateway "
+            "OPENCLAW_HOME=/ambient/openclaw DOCKER_HOST=tcp://ambient:2375 "
+            "PYTHONPATH=/ambient/python VIRTUAL_ENV=/ambient/venv; "
+            "sanitize_developer_activation_environment; "
+            "for name in DEFENSECLAW_DISABLE_REDACTION DEFENSECLAW_GATEWAY_BIN "
+            "OPENCLAW_HOME DOCKER_HOST PYTHONPATH VIRTUAL_ENV; do "
+            '[[ -z "${!name+x}" ]] || exit 19; done',
+            "developer-environment-contract",
+            str(DEVELOPER_ACTIVATION_SCRIPT),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected_success"),
+    [
+        ("defenseclaw, version 0.8.5", True),
+        ("defenseclaw, version 0.8.50", False),
+        ("defenseclaw 0.8.5 (dependency 0.8.5)", False),
+    ],
+)
+def test_version_canary_requires_one_exact_semver_token(
+    reported: str,
+    expected_success: bool,
+) -> None:
+    completed = _source_script(
+        'assert_exact_reported_version "fixture" "0.8.5" "$2"',
+        reported,
+    )
+
+    assert (completed.returncode == 0) is expected_success, completed.stderr
 
 
 def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
@@ -317,6 +418,131 @@ def test_materialized_policy_accepts_config_8_but_not_newer_than_candidate(
     assert "no newer than the candidate runtime" in rejected.stderr
 
 
+def _policy_with_baseline(
+    tmp_path: Path,
+    version: str,
+    config_version: int,
+) -> Path:
+    effective = json.loads(BASELINE_POLICY.read_text(encoding="utf-8"))
+    effective["published_baselines"].insert(0, version)
+    effective["published_baseline_config_versions"][version] = config_version
+    policy = tmp_path / f"effective-{version}.json"
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+    return policy
+
+
+@pytest.mark.parametrize(
+    ("source_version", "source_config", "expected_fixture"),
+    [("0.8.4", 7, "legacy"), ("0.8.5", 8, "native-v8")],
+)
+def test_future_candidate_dispatches_fixture_by_authenticated_source_family(
+    tmp_path: Path,
+    source_version: str,
+    source_config: int,
+    expected_fixture: str,
+) -> None:
+    policy = (
+        BASELINE_POLICY
+        if source_version == "0.8.4"
+        else _policy_with_baseline(tmp_path, source_version, source_config)
+    )
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'TARGET_VERSION=0.8.6; FROM_VERSION="$3"; '
+        'seed_v8_observability_fixture() { printf "legacy\\n"; }; '
+        'seed_native_v8_observability_fixture() { printf "native-v8\\n"; }; '
+        "seed_upgrade_fixture",
+        str(policy),
+        source_version,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected_fixture
+
+
+def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
+    tmp_path: Path,
+) -> None:
+    policy = _policy_with_baseline(tmp_path, "0.8.6", 9)
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=9; '
+        'TARGET_VERSION=0.8.7; FROM_VERSION=0.8.6; '
+        'seed_v8_observability_fixture() { exit 91; }; '
+        'seed_native_v8_observability_fixture() { exit 92; }; '
+        "seed_upgrade_fixture",
+        str(policy),
+    )
+
+    assert completed.returncode != 0
+    assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
+
+
+def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy_with_baseline(tmp_path, "0.8.5", 8)
+    home = tmp_path / "home"
+    baseline_python = home / ".defenseclaw/.venv/bin/python"
+    baseline_python.parent.mkdir(parents=True)
+    baseline_python.write_text(
+        f"""#!/bin/sh
+exec "{ROOT / '.venv/bin/python'}" "$@"
+""",
+        encoding="utf-8",
+    )
+    baseline_python.chmod(0o700)
+
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'TARGET_VERSION=0.8.6; FROM_VERSION=0.8.5; SMOKE_HOME="$3"; '
+        "seed_native_v8_observability_fixture",
+        str(policy),
+        str(home),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    data_dir = home / ".defenseclaw"
+    config_path = data_dir / "config.yaml"
+    environment_path = data_dir / ".env"
+    config_before = config_path.read_bytes()
+    environment_before = environment_path.read_bytes()
+    source = load_validate_v8(config_before, source_name=str(config_path)).source
+    assert source["config_version"] == 8
+    assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
+    destinations = {
+        item["name"]: item for item in source["observability"]["destinations"]
+    }
+    assert set(destinations) == {"existing-otlp", "v8-http-protected"}
+    assert destinations["existing-otlp"]["headers"] == {
+        "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
+    }
+    assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
+    assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_before
+    assert (home / "fixture-evidence/environment.historical.source").read_bytes() == environment_before
+    baseline_bundle_manifest = json.loads(
+        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert baseline_bundle_manifest["bundle_version"] == "0.8.5"
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    count = run_migrations(
+        "0.8.5",
+        "0.8.6",
+        str(home / ".openclaw"),
+        str(data_dir),
+        upgrade_handles_local_bundle=True,
+    )
+    assert count == 0
+    assert config_path.read_bytes() == config_before
+    assert environment_path.read_bytes() == environment_before
+    assert not list((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+    cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
+    assert "0.8.5" in cursor["applied"]
+
+
 def test_harnesses_accept_one_materialized_policy_snapshot() -> None:
     posix = SCRIPT.read_text(encoding="utf-8")
     windows = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
@@ -401,22 +627,23 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
-    lines = script.splitlines()
-    programs: list[str] = []
-    index = 0
-    while index < len(lines):
-        if re.search(r"<<'PY'\s*$", lines[index]):
-            end = index + 1
-            while end < len(lines) and lines[end] != "PY":
-                end += 1
-            assert end < len(lines), f"unterminated Python heredoc after line {index + 1}"
-            programs.append("\n".join(lines[index + 1 : end]) + "\n")
-            index = end
-        index += 1
+    for path in (SCRIPT, DEVELOPER_ACTIVATION_SCRIPT):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        programs: list[str] = []
+        index = 0
+        while index < len(lines):
+            if re.search(r"<<'PY'\s*$", lines[index]):
+                end = index + 1
+                while end < len(lines) and lines[end] != "PY":
+                    end += 1
+                assert end < len(lines), f"unterminated Python heredoc after line {index + 1}"
+                programs.append("\n".join(lines[index + 1 : end]) + "\n")
+                index = end
+            index += 1
 
-    assert programs
-    for program in programs:
-        compile(program, str(SCRIPT), "exec")
+        assert programs
+        for program in programs:
+            compile(program, str(path), "exec")
     for verifier_contract in (
         'config.get("config_version") != 8',
         'for legacy in ("otel", "audit_sinks", "privacy")',
@@ -428,8 +655,15 @@ def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> 
         "prepare_isolated_docker_path",
         "upgrade smoke docker isolation forbids mutating operations",
         "tail_v8_upgrade_log_secret_safe",
+        "config_v8_native_fixture=byte_exact",
+        "native-v8 source unexpectedly ran the v7-to-v8 activation",
     ):
         assert verifier_contract in script
+
+    developer = DEVELOPER_ACTIVATION_SCRIPT.read_text(encoding="utf-8")
+    assert "legacy_source = source_config_version < 8" in developer
+    assert "native-v8 source unexpectedly ran the v7-to-v8 activation" in developer
+    assert "developer_target_native_v8_continuity=" in developer
 
 
 def test_prepare_only_windows_candidate_validates_zip_and_plain_refusal_envelope() -> None:

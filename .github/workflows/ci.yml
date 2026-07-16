@@ -644,17 +644,16 @@ jobs:
         run: |
           set -euo pipefail
           echo "Selected release risk class: $RISK_CLASS ($VALIDATION_MODE → $EXPECTED_RESULT)"
-          # The direct-controller harness is the supported developer path for
-          # exercising real migrations against an unsigned exact-SHA build.
-          # The production protocol harness remains fail-closed and proves the
-          # explicit direct-target request refuses before mutation.
+          # An unsigned PR cannot prove production resolver success. Exercise
+          # the target-owned migration and fresh-process health in a throwaway
+          # HOME, while the production protocol harness proves pre-mutation
+          # refusal. Signed resolver/handoff success belongs to certification.
           if [[ "$EXPECTED_RESULT" == *success* ]]; then
-            scripts/test-upgrade-release.sh \
+            scripts/test-developer-target-activation.sh \
               --from-version "$BASELINE" \
               --target-version "$CANDIDATE_VERSION" \
               --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
               --baseline-mode seed \
-              --success-path-only \
               --health-timeout 60
           fi
           if [[ "$EXPECTED_RESULT" == *refusal* ]]; then
@@ -704,13 +703,12 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           make check-upgrade-manifest
-          scripts/test-upgrade-release.sh \
+          scripts/test-developer-target-activation.sh \
             --from-version "$BASELINE" \
             --target-version "$CANDIDATE_VERSION" \
             --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
             --baseline-mode seed \
             --baseline-dependencies published \
-            --success-path-only \
             --health-timeout 60
 
   connector-matrix:
