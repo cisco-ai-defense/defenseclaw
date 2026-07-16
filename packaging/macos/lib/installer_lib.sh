@@ -341,13 +341,19 @@ render_targets_manifest() {
     for c in "${connectors[@]}"; do
       is_supported_connector "${c}" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
+      # data_dir is intentionally omitted from each target block: the
+      # guardian's validateUserDataDir requires the data_dir to be inside
+      # the target user's home (internal/enterprisehooks/installer.go),
+      # but ${runtime_dir} is machine-wide root storage under SUPPORT_DIR.
+      # Letting the Install() layer default to ~/.defenseclaw per user is
+      # correct — that is where the connector's hook script and scoped
+      # token per-user artifacts live.
       cat <<EOF
   - user: "${name}"
     user_home: "${home}"
     uid: ${uid}
     gid: ${gid}
     connector: "${c}"
-    data_dir: "${runtime_dir}"
     agent_version: "${ver}"
     enabled: true
 EOF

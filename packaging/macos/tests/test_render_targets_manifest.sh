@@ -29,7 +29,11 @@ bob:502:20:/Users/bob"
   assert_contains "${out}" 'user_home: "/Users/bob"'   "bob home"
   assert_contains "${out}" 'connector: "codex"'      "codex connector"
   assert_contains "${out}" 'connector: "claudecode"' "claudecode connector"
-  assert_contains "${out}" "data_dir: \"${TEST_RUNTIME}\"" "data_dir under support"
+  # data_dir is deliberately NOT emitted per-target: the guardian's
+  # validateUserDataDir requires data_dir to be inside the target user's
+  # home, but SUPPORT_DIR/runtime is machine-wide root storage. Letting
+  # Install() default per-user to ~/.defenseclaw is correct.
+  assert_not_contains "${out}" "data_dir:" "data_dir intentionally absent (per-user Install default is used)"
   # Rough sanity: expect at least 4 `- user:` block markers.
   local count
   count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
@@ -114,18 +118,31 @@ print(json.dumps({"users": users, "connectors": conns, "count": len(targets)}))
   assert_contains "${parsed}" '"count": 4'   "4 targets total (2 users × 2 connectors)"
 }
 
-t_rows_pin_data_dir_and_enabled() {
-  # Every emitted target must set data_dir (so the enterprise hooks
-  # installer knows where to write) and enabled: true (the guardian
-  # will skip enabled:false rows, and an omitted field defaults to
-  # true — but rendering it explicitly is defensive).
+t_rows_pin_enabled_and_int_uid_gid() {
+  # Every emitted target must set enabled: true (the guardian will skip
+  # enabled:false rows, and an omitted field defaults to true — but
+  # rendering it explicitly is defensive) and integer uid/gid.
   local users="alice:501:20:/Users/alice"
   local out
   out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "${users}")"
-  assert_contains "${out}" "data_dir: \"${TEST_RUNTIME}\"" "data_dir emitted"
-  assert_contains "${out}" "enabled: true"                 "enabled: true emitted"
-  assert_contains "${out}" "uid: 501"                       "uid emitted as int"
-  assert_contains "${out}" "gid: 20"                        "gid emitted as int"
+  assert_contains "${out}" "enabled: true"    "enabled: true emitted"
+  assert_contains "${out}" "uid: 501"         "uid emitted as int"
+  assert_contains "${out}" "gid: 20"          "gid emitted as int"
+}
+
+t_rows_omit_data_dir() {
+  # Regression guard for the multi-user-hook-wiring fix. The guardian's
+  # per-target Install runs validateUserDataDir which refuses any data_dir
+  # outside the target user's home. Emitting SUPPORT_DIR/runtime (which
+  # is machine-wide root storage) would produce
+  #   "refusing data dir outside user home: ..."
+  # for every target. Instead we omit data_dir entirely and let Install()
+  # default to ~/.defenseclaw per user. If a future edit re-adds a
+  # machine-wide data_dir here, this test flags it.
+  local users="alice:501:20:/Users/alice"
+  local out
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "${users}")"
+  assert_not_contains "${out}" "data_dir:" "data_dir must be omitted from targets.yaml"
 }
 
 run_case "multi-user × multi-connector cross-product"           t_multi_user_multi_connector_produces_cross_product
@@ -133,4 +150,5 @@ run_case "unsupported connectors dropped"                       t_unsupported_co
 run_case "empty user list still emits valid manifest"           t_empty_users_still_emits_valid_manifest
 run_case "empty connector list still emits valid manifest"      t_empty_connectors_still_emits_valid_manifest
 run_case "rendered targets.yaml parses (schema round-trip)"     t_rendered_yaml_parses
-run_case "rows pin data_dir + enabled + int uid/gid"            t_rows_pin_data_dir_and_enabled
+run_case "rows pin enabled + int uid/gid"                       t_rows_pin_enabled_and_int_uid_gid
+run_case "rows omit data_dir (per-user Install default is used)" t_rows_omit_data_dir
