@@ -2051,7 +2051,7 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
-	"quarantine_records":                  true,
+	"quarantine_records":                true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {
