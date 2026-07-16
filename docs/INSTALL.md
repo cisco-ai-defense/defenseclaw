@@ -328,6 +328,17 @@ artifacts, runs the native upgrade gates, and creates the remote tag and GitHub
 release together only after protected release approval. This ordering keeps
 Immutable Releases from stranding half-built assets.
 
+The workflow input is the published-version authority. It stamps the requested
+version into its isolated build checkout before producing the CLI, gateway,
+plugin, wheel, macOS app, manifests, checksums, or attestations, so a separate
+version-bump PR is not required. The checked-in version remains a synchronized
+local-development default.
+
+GitHub's automatic “Source code” ZIP/tarball is a snapshot of the reviewed tag
+commit and is not an installer input. When the requested release differs from
+the checked-in development default, the workflow emits a warning; the signed,
+checksummed release assets still carry the requested version everywhere.
+
 Preferred — from the Actions UI:
 
 ```

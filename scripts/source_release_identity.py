@@ -289,6 +289,34 @@ def validate_source_tree(
     return identity
 
 
+def release_identity_for_version(
+    version: str,
+    root: Path = ROOT,
+) -> dict[str, int | str]:
+    """Project a validated source tree's compatibility identity onto a release version.
+
+    The checked-in version is development metadata. Manually dispatched releases
+    stamp their validated version into isolated build checkouts, while later
+    verification jobs intentionally use a pristine checkout of the reviewed
+    commit. This helper keeps those jobs on the same compatibility epoch without
+    making the development version a release gate.
+    """
+
+    reviewed = validate_source_tree(root)
+    projected = {
+        **reviewed,
+        "source_release": version,
+    }
+    identity = _validate_identity_payload(projected)
+    source_runtime = runtime_config_version(root, source_release=version)
+    if identity["runtime_config_version"] != source_runtime:
+        raise SourceIdentityError(
+            "release identity runtime_config_version does not match gateway source: "
+            f"identity={identity['runtime_config_version']}, source={source_runtime}"
+        )
+    return identity
+
+
 def _read_opened_marker(path: Path) -> tuple[bytes, str]:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:

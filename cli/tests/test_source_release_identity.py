@@ -127,6 +127,18 @@ def test_reviewed_source_identity_binds_every_canonical_version_source() -> None
     assert release_candidate._reviewed_source_install_identity("0.8.5") == identity
 
 
+def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
+    identity = source_release_identity.release_identity_for_version("9.8.7", ROOT)
+
+    assert identity == {
+        "schema_version": 1,
+        "source_release": "9.8.7",
+        "source_install_compatibility_epoch": 2,
+        "runtime_config_version": 8,
+    }
+    assert release_candidate._reviewed_source_install_identity("9.8.7") == identity
+
+
 def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
     identity_path = repo / "release/source-install-identity.json"
@@ -142,7 +154,7 @@ def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
         source_release_identity.validate_source_tree(repo)
 
 
-def test_release_stamp_is_provably_noop_for_reviewed_source(tmp_path: Path) -> None:
+def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
     stamp = repo / "scripts/stamp-version.sh"
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
@@ -159,6 +171,33 @@ def test_release_stamp_is_provably_noop_for_reviewed_source(tmp_path: Path) -> N
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS} == before
+
+
+def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
+    tmp_path: Path,
+) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    stamp = repo / "scripts/stamp-version.sh"
+    shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
+
+    completed = subprocess.run(
+        ["/bin/bash", str(stamp), "9.8.7"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert set(source_release_identity.checked_in_version_sources(repo).values()) == {
+        "9.8.7"
+    }
+    identity = source_release_identity.validate_source_tree(
+        repo,
+        expected_release="9.8.7",
+    )
+    assert identity["source_release"] == "9.8.7"
 
 
 def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> None:
@@ -215,18 +254,19 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
         source_release_identity.validate_source_tree(repo, expected_release="0.8.5")
 
 
-def test_release_workflow_rejects_unstamped_source_before_publish_and_tags_reviewed_commit() -> None:
+def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
     tracked = workflow.index("git ls-files --error-unmatch --")
-    preflight = workflow.index("python3 scripts/source_release_identity.py check")
-    expected = workflow.index('--expected-release "$RELEASE_TAG"', preflight)
-    stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', preflight)
-    no_op_proof = workflow.index("git diff --exit-code --", stamp)
+    stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', tracked)
+    build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', stamp + 1)
+    expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
     publish = workflow.index('gh release create "$RELEASE_TAG"')
 
-    assert tracked < preflight < expected < stamp < no_op_proof < publish
+    assert tracked < stamp < build_stamp < expected < publish
     for relative in VERSION_PATHS:
-        assert relative in workflow[tracked:preflight]
+        assert relative in workflow[tracked:stamp]
+    assert "Require reviewed source release identity" not in workflow
+    assert "git diff --exit-code --" not in workflow[tracked:expected]
     assert '--target "$RELEASE_COMMIT"' in workflow[publish:]
     assert 'test "$remote_commit" = "$RELEASE_COMMIT"' in workflow[publish:]
 

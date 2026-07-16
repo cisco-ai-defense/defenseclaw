@@ -47,9 +47,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
-    from scripts.source_release_identity import SourceIdentityError, validate_source_tree
+    from scripts.source_release_identity import (
+        SourceIdentityError,
+        release_identity_for_version,
+    )
 except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
-    from source_release_identity import SourceIdentityError, validate_source_tree
+    from source_release_identity import SourceIdentityError, release_identity_for_version
 
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
@@ -89,10 +92,10 @@ class CandidateError(RuntimeError):
 
 
 def _reviewed_source_install_identity(version: str) -> dict[str, int | str]:
-    """Bind candidate custody to the reviewed source/tag compatibility identity."""
+    """Bind candidate custody to reviewed compatibility plus the dispatch version."""
 
     try:
-        return validate_source_tree(ROOT, expected_release=version)
+        return release_identity_for_version(version, ROOT)
     except SourceIdentityError as exc:
         raise CandidateError(f"reviewed source-install identity is invalid: {exc}") from exc
 

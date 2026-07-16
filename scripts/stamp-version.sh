@@ -18,11 +18,10 @@
 #
 # Stamp a single semver across every in-repo version source.
 #
-# The reviewed commit is the source of truth for releases. The release workflow
-# accepts only a requested tag that already matches every source below, invokes
-# this legacy helper as an idempotence check, and proves its diff is empty before
-# building. That keeps GitHub's tag archive byte-for-byte aligned with the
-# wheel, plugin, gateway, and macOS artifacts built from the same commit.
+# The manually dispatched release workflow's validated version input is the
+# source of truth for published artifacts. It invokes this helper in each
+# isolated build checkout before building, so every release-owned package and
+# manifest receives the same version without requiring a version-only PR.
 #
 # Sources kept in lock-step:
 #   1. Makefile                                 (VERSION := X.Y.Z)

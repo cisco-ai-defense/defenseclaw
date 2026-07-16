@@ -80,12 +80,11 @@ help:
 # ---------------------------------------------------------------------------
 # Version stamping
 # ---------------------------------------------------------------------------
-# The manually dispatched release workflow owns the candidate version and
-# creates the remote tag only after every native gate and the protected release
-# approval succeed. The reviewed main commit must already be stamped; the
-# workflow invokes `scripts/stamp-version.sh "$TAG"` only to prove it is a no-op.
-# Local devs who want to pre-stage a version (e.g. for a manual smoke test of
-# `make dist`) can use this target as a friendly wrapper.
+# The manually dispatched release workflow owns the candidate version, stamps
+# it into an isolated build checkout, and creates the remote tag only after
+# every native gate and the protected release approval succeed. A version-only
+# PR is not required. Local devs who want to stage a version for a manual smoke
+# test of `make dist` can use this target as a friendly wrapper.
 #
 #   make set-version VERSION=0.4.1
 #
@@ -941,8 +940,8 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "  The protected release workflow wraps, signs, seals, and tests these inputs."
 	@echo ""
 	@echo "Cut a release (the protected workflow creates the tag + assets atomically):"
-	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter $(VERSION)"
-	@echo "  Or from the CLI: gh workflow run release.yaml --ref main -f version=$(VERSION)"
+	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter X.Y.Z"
+	@echo "  Or from the CLI: gh workflow run release.yaml --ref main -f version=X.Y.Z"
 	@echo ""
 	@echo "  NOTE: version must be bare X.Y.Z, no 'v' prefix — the release"
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
