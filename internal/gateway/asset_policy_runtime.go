@@ -89,6 +89,33 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
 	targetType := slashCommandAssetType(req.CommandSource)
 	name := normalizeSkillRuntimeName(req.CommandName)
+	rawName := ""
+	toolName := strings.TrimSpace(req.CommandName)
+	if targetType == "plugin" {
+		var valid bool
+		name, valid = claudeCodePluginPolicyIdentity(req.CommandName)
+		if !valid {
+			// command_source=plugin is an authenticated client classification:
+			// allowing an ambiguous identity here would turn parser rejection
+			// into the same policy bypass as an unparsed namespaced command. Block
+			// with static sink values so attacker-controlled malformed input,
+			// prompt text, and command arguments never reach audit or telemetry.
+			probe := skillRuntimeProbe{
+				TargetType: targetType,
+				SkillName:  "invalid-plugin-command",
+				ToolName:   "invalid-plugin-command",
+				SourcePath: "plugin",
+				Surface:    "prompt_expansion",
+				Matched:    true,
+			}
+			decision := invalidClaudeCodePluginIdentityDecision()
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, "claudecode", req.HookEventName, probe)
+			return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
+		}
+		if name != req.CommandName {
+			rawName = req.CommandName
+		}
+	}
 	if targetType == "" {
 		var known bool
 		name, known = a.claudeCodeSettingsSkillIdentity(req.CommandSource, req.CommandName, req.CWD)
@@ -103,8 +130,9 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 	probe := skillRuntimeProbe{
 		TargetType: targetType,
 		SkillName:  name,
-		ToolName:   strings.TrimSpace(req.CommandName),
+		ToolName:   toolName,
 		SourcePath: strings.TrimSpace(req.CommandSource),
+		RawName:    rawName,
 		Surface:    "prompt_expansion",
 		Matched:    true,
 	}
@@ -112,6 +140,76 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
 	}
 	return nil
+}
+
+// claudeCodePluginPolicyIdentity maps Claude Code's plugin slash-command
+// identity to the bare plugin ID used by DefenseClaw policy records. Claude
+// Code 2.1.211 emits "plugin-id:command-id" for command_source=plugin. The
+// bare form remains accepted for the pre-existing compatibility contract
+// pinned by TestClaudeCodeSlashCommandPluginRuntimeDisable.
+//
+// Both components follow the Agent Skills name grammar: 1-64 lowercase ASCII
+// letters/digits/hyphens, no leading/trailing hyphen, and no consecutive
+// hyphens. Requiring exactly one separator for the current client form keeps
+// paths, quotes, whitespace mutations, traversal, controls, and ambiguous
+// multi-component names out of every runtime-disable and asset-policy lookup.
+func claudeCodePluginPolicyIdentity(commandName string) (string, bool) {
+	if commandName == "" || commandName != strings.TrimSpace(commandName) {
+		return "", false
+	}
+	separatorCount := strings.Count(commandName, ":")
+	if separatorCount == 0 {
+		if validClaudeCodePluginIdentityComponent(commandName) {
+			return commandName, true
+		}
+		return "", false
+	}
+	if separatorCount != 1 {
+		return "", false
+	}
+	parts := strings.SplitN(commandName, ":", 2)
+	if !validClaudeCodePluginIdentityComponent(parts[0]) ||
+		!validClaudeCodePluginIdentityComponent(parts[1]) {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func validClaudeCodePluginIdentityComponent(value string) bool {
+	if len(value) == 0 || len(value) > 64 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	previousHyphen := false
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9':
+			previousHyphen = false
+		case ch == '-' && !previousHyphen:
+			previousHyphen = true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func invalidClaudeCodePluginIdentityDecision() config.AssetPolicyDecision {
+	return config.AssetPolicyDecision{
+		Enabled:            true,
+		Mode:               config.AssetPolicyModeAction,
+		Action:             "block",
+		RawAction:          "block",
+		WouldBlock:         true,
+		Reason:             "invalid Claude Code plugin command identity - failing closed",
+		Source:             "plugin-identity-invalid",
+		RegistryStatus:     "invalid",
+		RegistryConfigured: false,
+		TargetType:         "plugin",
+		TargetName:         "invalid-plugin-command",
+		Connector:          "claudecode",
+		RuntimeSurface:     "prompt_expansion",
+	}
 }
 
 func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
@@ -182,7 +280,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
 			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
 		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details)
+		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details, "")
 	}
 	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
@@ -311,7 +409,16 @@ func (a *APIServer) emitRuntimeSkillAssetPolicyDecision(ctx context.Context, dec
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
 			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
 		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, connector, targetType+":"+decision.TargetName, details)
+		auditToolName := ""
+		if targetType == "plugin" {
+			// Plugin prompt-expansion tool identity has passed the strict
+			// plugin-id:command-id parser (or is the static invalid sentinel).
+			// Persist it in the dedicated audit column; free-form Details still
+			// goes through global sink redaction and must not become an escape
+			// hatch for arbitrary command text or arguments.
+			auditToolName = probe.ToolName
+		}
+		a.logAssetPolicyAudit(ctx, connector, targetType+":"+decision.TargetName, details, auditToolName)
 	}
 	a.dispatchAssetPolicyNotification(decision, targetType, connector, hookEvent, evalCtx)
 }

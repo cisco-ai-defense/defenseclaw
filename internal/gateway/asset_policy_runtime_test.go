@@ -144,6 +144,52 @@ func TestEvaluateRuntimeSkillAssetPolicyDisableLookupErrorFailsClosed(t *testing
 	}
 }
 
+func TestClaudeCodePluginPolicyIdentity(t *testing.T) {
+	maxComponent := strings.Repeat("a", 64)
+	tests := []struct {
+		name       string
+		command    string
+		wantPlugin string
+		wantValid  bool
+	}{
+		{name: "real namespaced", command: "plugin-id:command-id", wantPlugin: "plugin-id", wantValid: true},
+		{name: "bare compatibility", command: "legacy-plugin", wantPlugin: "legacy-plugin", wantValid: true},
+		{name: "digits", command: "plugin2:command3", wantPlugin: "plugin2", wantValid: true},
+		{name: "component max length", command: maxComponent + ":x", wantPlugin: maxComponent, wantValid: true},
+		{name: "empty"},
+		{name: "empty plugin", command: ":command"},
+		{name: "empty command", command: "plugin:"},
+		{name: "extra separator", command: "plugin:command:peer"},
+		{name: "leading whitespace", command: " plugin:command"},
+		{name: "trailing whitespace", command: "plugin:command "},
+		{name: "inner whitespace", command: "plugin:command id"},
+		{name: "tab", command: "plugin:\tcommand"},
+		{name: "newline", command: "plugin:command\npeer"},
+		{name: "control", command: "plugin:command\x00peer"},
+		{name: "forward path", command: "folder/plugin:command"},
+		{name: "back path", command: `folder\plugin:command`},
+		{name: "traversal plugin", command: "..:command"},
+		{name: "traversal command", command: "plugin:.."},
+		{name: "quoted", command: `"plugin:command"`},
+		{name: "single quoted", command: `'plugin:command'`},
+		{name: "uppercase", command: "Plugin:command"},
+		{name: "underscore", command: "plugin_id:command"},
+		{name: "leading hyphen", command: "-plugin:command"},
+		{name: "trailing hyphen", command: "plugin-:command"},
+		{name: "consecutive hyphen", command: "plugin--id:command"},
+		{name: "unicode", command: "plüg-in:command"},
+		{name: "component too long", command: maxComponent + "a:command"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPlugin, gotValid := claudeCodePluginPolicyIdentity(tc.command)
+			if gotPlugin != tc.wantPlugin || gotValid != tc.wantValid {
+				t.Fatalf("identity=(%q,%v), want (%q,%v)", gotPlugin, gotValid, tc.wantPlugin, tc.wantValid)
+			}
+		})
+	}
+}
+
 func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	enablePluginRuntimeDetection(cfg)
@@ -153,22 +199,53 @@ func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
 	}
 	api := &APIServer{scannerCfg: cfg, store: store}
 
+	for _, commandName := range []string{"disabled-plugin:run-check", "disabled-plugin"} {
+		t.Run(commandName, func(t *testing.T) {
+			decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
+				HookEventName: "UserPromptExpansion",
+				ExpansionType: "slash_command",
+				CommandName:   commandName,
+				CommandSource: "plugin",
+			})
+
+			if len(decisions) != 1 {
+				t.Fatalf("decisions=%v, want one plugin runtime-disable decision", decisions)
+			}
+			got := decisions[0]
+			if got.targetType != "plugin" {
+				t.Fatalf("targetType=%q, want plugin", got.targetType)
+			}
+			if got.decision.TargetType != "plugin" || got.decision.TargetName != "disabled-plugin" ||
+				got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
+				t.Fatalf("decision=%+v, want bare plugin runtime-disable block", got.decision)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeSlashCommandMalformedPluginIdentityFailsClosed(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
 	decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
 		HookEventName: "UserPromptExpansion",
 		ExpansionType: "slash_command",
-		CommandName:   "disabled-plugin",
+		CommandName:   "plugin:command:peer",
+		CommandArgs:   "private arguments must not reach evidence",
 		CommandSource: "plugin",
 	})
-
 	if len(decisions) != 1 {
-		t.Fatalf("decisions=%v, want one plugin runtime-disable decision", decisions)
+		t.Fatalf("decisions=%v, want fail-closed plugin identity decision", decisions)
 	}
-	got := decisions[0]
-	if got.targetType != "plugin" {
-		t.Fatalf("targetType=%q, want plugin", got.targetType)
+	decision := decisions[0].decision
+	if decision.Action != "block" || decision.RawAction != "block" ||
+		decision.Source != "plugin-identity-invalid" || decision.TargetName != "invalid-plugin-command" {
+		t.Fatalf("decision=%+v, want static invalid-identity block", decision)
 	}
-	if got.decision.TargetType != "plugin" || got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
-		t.Fatalf("decision=%+v, want plugin runtime-disable block", got.decision)
+	if strings.Contains(decision.Reason, "private arguments") || strings.Contains(decision.Reason, "plugin:command:peer") {
+		t.Fatalf("invalid identity decision leaked untrusted fields: %q", decision.Reason)
 	}
 }
 

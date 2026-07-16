@@ -13,10 +13,12 @@ param(
     [string]$ArtifactPath = '',
     [string]$AgentPath = '',
     [string]$ExpectedAgentVersion = '',
+    [string]$ClaudeAuthConfigDir = '',
     [ValidateRange(1, 1800)][int]$CommandTimeoutSeconds = 180,
     [ValidateSet('run', 'capture', 'cleanup')][string]$Operation = 'run',
     [switch]$AllowNativeDataRoot,
     [switch]$ReleaseCertification,
+    [switch]$PluginRuntimeOnly,
     [switch]$NoRun
 )
 
@@ -353,7 +355,8 @@ function Invoke-NativeProcess {
         [string]$InputPath = '',
         [int]$TimeoutSeconds = 180,
         [int[]]$AllowedExitCodes = @(0),
-        [string]$LogPath = ''
+        [string]$LogPath = '',
+        [string]$WorkingDirectory = ''
     )
     $inputText = $null
     if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
@@ -373,6 +376,15 @@ function Invoke-NativeProcess {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.RedirectStandardInput = $null -ne $inputText
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $resolvedWorkingDirectory = (
+            Resolve-Path -LiteralPath $WorkingDirectory -ErrorAction Stop
+        ).Path
+        if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) {
+            throw "native process working directory is not a directory: $resolvedWorkingDirectory"
+        }
+        $start.WorkingDirectory = $resolvedWorkingDirectory
+    }
     foreach ($argument in $ArgumentList) { [void]$start.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
@@ -591,7 +603,7 @@ function Write-Result([string]$EventName, [string]$Status, [string]$Detail = '')
 }
 
 function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$InputPath = '', [int]$Timeout = $CommandTimeoutSeconds) {
-    $file = (Get-Command $Name -ErrorAction Stop).Source
+    $file = @(Get-Command $Name -CommandType Application -ErrorAction Stop)[0].Source
     $log = Join-Path $script:LogRoot (("{0:D3}-{1}.log" -f (++$script:CommandIndex), ($Name -replace '[^A-Za-z0-9.-]', '_')))
     return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $InputPath -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
 }
@@ -1274,6 +1286,29 @@ function Install-Agent {
         return
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($AgentPath)) {
+        $script:AgentPath = (Resolve-Path -LiteralPath $AgentPath -ErrorAction Stop).Path
+        $version = Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList @('--version') `
+            -TimeoutSeconds 30 -LogPath (Join-Path $script:LogRoot 'agent-version.log')
+        $script:AgentVersion = ($version.StdOut + $version.StdErr).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedAgentVersion)) {
+            if ($ExpectedAgentVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+                throw "live validation requires an exact numeric client version, got: $ExpectedAgentVersion"
+            }
+            $observedVersions = [regex]::Matches(
+                $script:AgentVersion,
+                '(?<![0-9A-Za-z.+-])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![0-9A-Za-z.+-])'
+            )
+            if ($observedVersions.Count -ne 1 -or
+                $observedVersions[0].Value -cne $ExpectedAgentVersion) {
+                throw "$Connector client version output '$($script:AgentVersion)' does not prove exact pin $ExpectedAgentVersion"
+            }
+        }
+        $env:PATH = (Split-Path -Parent $script:AgentPath) + ';' + $env:PATH
+        Write-Result install pass "preinstalled=true exact=$ExpectedAgentVersion output=$($script:AgentVersion)"
+        return
+    }
+
     [IO.Directory]::CreateDirectory($script:ToolRoot) | Out-Null
     $package = if ($Connector -eq 'codex') { '@openai/codex@' + ($env:CODEX_VERSION ?? 'latest') } else { '@anthropic-ai/claude-code@' + ($env:CLAUDE_VERSION ?? 'latest') }
     Invoke-Tool 'npm.cmd' @('install', '--no-audit', '--no-fund', '--prefix', $script:ToolRoot, $package) -Timeout 300 | Out-Null
@@ -1855,7 +1890,9 @@ function Invoke-Agent(
     [string]$Prompt,
     [int[]]$AllowedExitCodes = @(0),
     [string]$CodexSkillName = '',
-    [string]$CodexSkillPath = ''
+    [string]$CodexSkillPath = '',
+    [string]$ClaudePluginDir = '',
+    [switch]$NoSessionPersistence
 ) {
     if ($Connector -eq 'codex') {
         return Invoke-CodexFreshTurn `
@@ -1869,7 +1906,46 @@ function Invoke-Agent(
         '--allowedTools', 'Bash', 'Write',
         '--add-dir', $StateRoot
     )
-    return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $agentArgs -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log")
+    if ($NoSessionPersistence) {
+        $agentArgs += '--no-session-persistence'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ClaudePluginDir)) {
+        $pluginRoot = Assert-DisposableFixturePath $ClaudePluginDir
+        if (-not (Test-Path -LiteralPath $pluginRoot -PathType Container)) {
+            throw "Claude plugin fixture root does not exist: $pluginRoot"
+        }
+        $agentArgs += @('--plugin-dir', $pluginRoot)
+    }
+    $originalClaudeConfigDir = $env:CLAUDE_CONFIG_DIR
+    $originalUserProfile = $env:USERPROFILE
+    $originalHome = $env:HOME
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($ClaudeAuthConfigDir)) {
+            $disposableSettings = Get-EffectiveConnectorConfigPath 'claudecode'
+            if (-not (Test-Path -LiteralPath $disposableSettings -PathType Leaf)) {
+                throw "disposable Claude settings do not exist: $disposableSettings"
+            }
+            $agentArgs += @(
+                '--settings', $disposableSettings,
+                '--setting-sources', 'local'
+            )
+            # Claude's default signed-in layout spans profile-root
+            # .claude.json plus the sibling .claude directory. Setting
+            # CLAUDE_CONFIG_DIR to that directory relocates the former and
+            # makes an otherwise valid account appear logged out. Keep the
+            # default layout for authentication while explicit --settings and
+            # --setting-sources isolate all connector configuration.
+            $authProfile = Split-Path -Parent $ClaudeAuthConfigDir
+            $env:CLAUDE_CONFIG_DIR = $null
+            $env:USERPROFILE = $authProfile
+            $env:HOME = $authProfile
+        }
+        return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $agentArgs -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log") -WorkingDirectory $StateRoot
+    } finally {
+        $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
+        $env:USERPROFILE = $originalUserProfile
+        $env:HOME = $originalHome
+    }
 }
 
 function Test-RuntimeSkillBlockEvidence(
@@ -1964,6 +2040,278 @@ Do not run tools or write files. Reply with exactly: $Marker
         [Text.UTF8Encoding]::new($false)
     )
     return $skillRoot
+}
+
+function New-InertClaudePlugin(
+    [string]$Name,
+    [string]$CommandName,
+    [string]$Marker,
+    [switch]$Discoverable
+) {
+    foreach ($identity in @($Name, $CommandName)) {
+        if ($identity -notmatch '^[a-z0-9](?:[a-z0-9]|-(?!-)){0,62}[a-z0-9]$') {
+            throw "Claude plugin fixture identity is not strict-valid: $identity"
+        }
+    }
+    if ($Marker -notmatch '^[A-Z0-9_]{1,96}$') {
+        throw 'Claude plugin fixture marker is not a bounded inert token'
+    }
+
+    $pluginsRoot = if ($Discoverable) {
+        $claudeHome = Assert-DisposableFixturePath (
+            Resolve-EffectiveConnectorHome 'claudecode'
+        )
+        Assert-DisposableFixturePath (Join-Path $claudeHome 'plugins')
+    } else {
+        Assert-DisposableFixturePath (Join-Path $HomeRoot 'claude-plugin-fixtures')
+    }
+    [IO.Directory]::CreateDirectory($pluginsRoot) | Out-Null
+    $pluginsRoot = Assert-DisposableFixturePath $pluginsRoot
+    $pluginRoot = Assert-DisposableFixturePath (Join-Path $pluginsRoot $Name)
+    if (Test-Path -LiteralPath $pluginRoot) {
+        throw "refusing to overwrite an existing plugin fixture path: $pluginRoot"
+    }
+    $manifestRoot = Join-Path $pluginRoot '.claude-plugin'
+    $skillRoot = Join-Path (Join-Path $pluginRoot 'skills') $CommandName
+    [IO.Directory]::CreateDirectory($manifestRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($skillRoot) | Out-Null
+    $pluginRoot = Assert-DisposableFixturePath $pluginRoot
+    [IO.File]::WriteAllText(
+        (Join-Path $manifestRoot 'plugin.json'),
+        ([ordered]@{
+            name = $Name
+            version = '1.0.0'
+            description = 'Inert DefenseClaw namespaced plugin acceptance fixture.'
+        } | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $skill = @"
+---
+name: $CommandName
+description: Inert explicit-only DefenseClaw plugin command fixture.
+disable-model-invocation: true
+---
+
+Do not run tools or write files. Reply with exactly: $Marker
+"@
+    [IO.File]::WriteAllText(
+        (Join-Path $skillRoot 'SKILL.md'),
+        $skill,
+        [Text.UTF8Encoding]::new($false)
+    )
+    return $pluginRoot
+}
+
+function Set-InertClaudePluginPolicy(
+    [string]$AllowedPlugin,
+    [string]$DeniedPlugin
+) {
+    $configPath = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
+    Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
+    $update = @'
+import os
+import sys
+import tempfile
+
+import yaml
+
+config_path, allowed_plugin, denied_plugin = sys.argv[1:]
+with open(config_path, "r", encoding="utf-8") as stream:
+    config = yaml.safe_load(stream) or {}
+if not isinstance(config, dict):
+    raise TypeError("DefenseClaw config root must be a mapping")
+asset_policy = config.setdefault("asset_policy", {})
+if not isinstance(asset_policy, dict):
+    raise TypeError("asset_policy must be a mapping")
+asset_policy["enabled"] = True
+asset_policy["mode"] = "action"
+plugin = asset_policy.setdefault("plugin", {})
+if not isinstance(plugin, dict):
+    raise TypeError("asset_policy.plugin must be a mapping")
+runtime_detection = plugin.setdefault("runtime_detection", {})
+if not isinstance(runtime_detection, dict):
+    raise TypeError("asset_policy.plugin.runtime_detection must be a mapping")
+runtime_detection["enabled"] = True
+plugin["allowed"] = [{"name": allowed_plugin, "connector": "claudecode"}]
+plugin["denied"] = [{"name": denied_plugin, "connector": "claudecode"}]
+
+temporary = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        prefix=".config-plugin-policy-",
+        suffix=".tmp",
+        dir=os.path.dirname(config_path),
+        delete=False,
+    ) as stream:
+        temporary = stream.name
+        yaml.safe_dump(config, stream, sort_keys=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, config_path)
+    temporary = None
+finally:
+    if temporary is not None:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+'@
+    Invoke-Tool 'python.exe' @(
+        '-c', $update, $configPath, $AllowedPlugin, $DeniedPlugin
+    ) | Out-Null
+    try {
+        $env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'
+        Invoke-Tool 'defenseclaw-gateway' @('start') -Timeout 90 | Out-Null
+    } finally {
+        Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
+    }
+    Wait-Gateway
+    Write-Result plugin-runtime:policy-config pass 'strict bare-ID allow and deny rules loaded with plugin runtime detection enabled'
+}
+
+function Test-ClaudePluginBlockEvidence(
+    [string]$Path,
+    [int]$Since,
+    [string]$PluginName,
+    [string]$CommandName,
+    [ValidateSet('runtime-disable', 'admin-deny')][string]$Source
+) {
+    $lines = @(Get-EventLines $Path)
+    if ($Since -ge $lines.Count) { return $false }
+    $fullCommand = $PluginName + ':' + $CommandName
+    $requiredReasonFields = @(
+        "source=$Source",
+        'asset_type=plugin',
+        "asset_name=$PluginName",
+        'connector=claudecode',
+        'surface=prompt_expansion'
+    )
+    foreach ($line in $lines[$Since..($lines.Count - 1)]) {
+        try {
+            $eventRecord = $line | ConvertFrom-Json
+            $decision = $eventRecord.hook_decision
+            if ($eventRecord.event_type -ne 'hook_decision' -or $null -eq $decision) { continue }
+            if ([string]$eventRecord.tool_name -cne $fullCommand -or
+                [string]$decision.connector -cne 'claudecode' -or
+                [string]$decision.event -cne 'UserPromptExpansion') { continue }
+            if ([string]$decision.action -ne 'block' -or
+                [string]$decision.raw_action -ne 'block' -or
+                -not [bool]$decision.enforced) { continue }
+            $reasonTokens = @(([string]$decision.reason) -split ' ' | Where-Object { $_ })
+            if (@($requiredReasonFields | Where-Object { $reasonTokens -notcontains $_ }).Count -eq 0) {
+                return $true
+            }
+        } catch { continue }
+    }
+    return $false
+}
+
+function Assert-RealClaudePluginRuntimeEnforcement {
+    if ($Connector -ne 'claudecode') { return }
+    $commandName = 'greet'
+    $allowedName = 'dc-allowed-plugin'
+    $runtimeName = 'dc-runtime-plugin'
+    $deniedName = 'dc-denied-plugin'
+    $allowedMarker = 'DC_ALLOWED_PLUGIN_EXECUTED'
+    $runtimeMarker = 'DC_RUNTIME_PLUGIN_EXECUTED'
+    $deniedMarker = 'DC_DENIED_PLUGIN_EXECUTED'
+    $fixtureRoots = [Collections.Generic.List[string]]::new()
+    $runtimeDisabled = $false
+
+    try {
+        $allowedRoot = New-InertClaudePlugin $allowedName $commandName $allowedMarker
+        $fixtureRoots.Add($allowedRoot)
+        $runtimeRoot = New-InertClaudePlugin `
+            $runtimeName $commandName $runtimeMarker -Discoverable
+        $fixtureRoots.Add($runtimeRoot)
+        $deniedRoot = New-InertClaudePlugin $deniedName $commandName $deniedMarker
+        $fixtureRoots.Add($deniedRoot)
+
+        $allowedResult = Invoke-Agent `
+            -Label 'plugin-allowed' `
+            -Prompt ('/' + $allowedName + ':' + $commandName) `
+            -ClaudePluginDir $allowedRoot `
+            -NoSessionPersistence
+        if ($allowedResult.StdOut -notmatch [regex]::Escape($allowedMarker)) {
+            throw 'real Claude Code client did not execute the explicitly allowed namespaced plugin command'
+        }
+        Write-Result plugin-runtime:allowed pass 'real namespaced --plugin-dir command returned the inert allowed marker'
+
+        $runtimeBeforeDisable = Invoke-Agent `
+            -Label 'plugin-runtime-before-disable' `
+            -Prompt ('/' + $runtimeName + ':' + $commandName) `
+            -ClaudePluginDir $runtimeRoot `
+            -NoSessionPersistence
+        if ($runtimeBeforeDisable.StdOut -notmatch [regex]::Escape($runtimeMarker)) {
+            throw 'real Claude Code client did not execute the runtime target before disable'
+        }
+        Write-Result plugin-runtime:pre-disable pass 'runtime target executed before its connector-scoped policy changed'
+
+        Invoke-Tool 'defenseclaw' @(
+            'plugin', 'disable', $runtimeName,
+            '--connector', 'claudecode',
+            '--reason', 'WIN-AUD-074 inert namespaced-plugin acceptance'
+        ) | Out-Null
+        $runtimeDisabled = $true
+        $beforeRuntime = @(Get-EventLines $script:GatewayJsonl).Count
+        $runtimeBlocked = Invoke-Agent `
+            -Label 'plugin-runtime-disabled' `
+            -Prompt ('/' + $runtimeName + ':' + $commandName) `
+            -AllowedExitCodes @(0, 1) `
+            -ClaudePluginDir $runtimeRoot `
+            -NoSessionPersistence
+        Start-Sleep -Milliseconds 800
+        if ($runtimeBlocked.StdOut -match [regex]::Escape($runtimeMarker)) {
+            throw 'real Claude Code client executed a runtime-disabled namespaced plugin command'
+        }
+        if (-not (Test-ClaudePluginBlockEvidence `
+            $script:GatewayJsonl $beforeRuntime $runtimeName $commandName 'runtime-disable')) {
+            throw 'runtime-disabled namespaced plugin invocation has no exact bare-policy/full-command block evidence'
+        }
+        Write-Result plugin-runtime:disabled-block pass "fixture body absent with exact runtime-disable evidence (exit=$($runtimeBlocked.ExitCode))"
+
+        Invoke-Tool 'defenseclaw' @(
+            'plugin', 'enable', $runtimeName, '--connector', 'claudecode'
+        ) | Out-Null
+        $runtimeDisabled = $false
+
+        $beforeDenied = @(Get-EventLines $script:GatewayJsonl).Count
+        $deniedResult = Invoke-Agent `
+            -Label 'plugin-policy-denied' `
+            -Prompt ('/' + $deniedName + ':' + $commandName) `
+            -AllowedExitCodes @(0, 1) `
+            -ClaudePluginDir $deniedRoot `
+            -NoSessionPersistence
+        Start-Sleep -Milliseconds 800
+        if ($deniedResult.StdOut -match [regex]::Escape($deniedMarker)) {
+            throw 'real Claude Code client executed an asset-policy-denied namespaced plugin command'
+        }
+        if (-not (Test-ClaudePluginBlockEvidence `
+            $script:GatewayJsonl $beforeDenied $deniedName $commandName 'admin-deny')) {
+            throw 'asset-policy-denied namespaced plugin invocation has no exact bare-policy/full-command block evidence'
+        }
+        Write-Result plugin-runtime:policy-block pass "fixture body absent with exact admin-deny evidence (exit=$($deniedResult.ExitCode))"
+    } finally {
+        if ($runtimeDisabled) {
+            try {
+                Invoke-Tool 'defenseclaw' @(
+                    'plugin', 'enable', $runtimeName, '--connector', 'claudecode'
+                ) @(0, 1) | Out-Null
+            } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
+        }
+        foreach ($fixtureRoot in $fixtureRoots) {
+            try {
+                if (Test-Path -LiteralPath $fixtureRoot) {
+                    Remove-DisposableFixtureTree $fixtureRoot
+                }
+            } catch {
+                Write-Warning (Protect-LogText "plugin fixture cleanup refused: $($_.Exception.Message)")
+            }
+        }
+    }
 }
 
 function Get-ClaudeSessionId([string]$Json) {
@@ -2327,6 +2675,9 @@ function Invoke-LiveRun {
     Set-IsolatedGatewayPort
     Invoke-Setup action
     Assert-DoctorWindowsHookRegistration
+    if ($Connector -eq 'claudecode') {
+        Set-InertClaudePluginPolicy 'dc-allowed-plugin' 'dc-denied-plugin'
+    }
     if ($Connector -eq 'codex') {
         # Real official package probes belong to the manual release/live-client
         # certification layer. The mandatory deterministic contract stays
@@ -2339,12 +2690,20 @@ function Invoke-LiveRun {
             Write-Result codex:auto-trust pass 'hooks/list verified every setup-created handler enabled and trusted without manual approval'
         }
     }
+    if ($PluginRuntimeOnly) {
+        $start = @(Get-EventLines $script:GatewayJsonl).Count
+        Assert-RealClaudePluginRuntimeEnforcement
+        Assert-Evidence $start
+        Write-Result plugin-runtime:focused-live pass 'exact real-client allowed, runtime-disabled, and admin-denied cases completed'
+        return
+    }
     $start = @(Get-EventLines $script:GatewayJsonl).Count
     Invoke-Agent lifecycle 'Reply with only the word ready. Do not use tools.' | Out-Null
     Start-Sleep -Seconds 1
     if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $start)) { throw 'lifecycle hooks did not fire' }
     Write-Result lifecycle:fires pass
     Assert-RealSkillRuntimeEnforcement
+    Assert-RealClaudePluginRuntimeEnforcement
     $sentinelRoot = Join-Path $StateRoot 'sentinels'; [IO.Directory]::CreateDirectory($sentinelRoot) | Out-Null
     $allow = Join-Path $sentinelRoot 'allow.marker'
     $allowPrompt = if ($Connector -eq 'claudecode') {
@@ -2524,6 +2883,20 @@ if (-not $NoRun) {
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'only native Windows x64 is certifying' }
     $StateRoot = [IO.Path]::GetFullPath($StateRoot)
     if ($StateRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw 'StateRoot must not be the real user profile' }
+    if ($PluginRuntimeOnly -and ($Layer -ne 'live' -or $Connector -ne 'claudecode')) {
+        throw 'PluginRuntimeOnly is restricted to the Claude Code live-client layer'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ClaudeAuthConfigDir)) {
+        if (-not $PluginRuntimeOnly) {
+            throw 'ClaudeAuthConfigDir is restricted to focused non-persistent plugin validation'
+        }
+        $ClaudeAuthConfigDir = (
+            Resolve-Path -LiteralPath $ClaudeAuthConfigDir -ErrorAction Stop
+        ).Path
+        if (-not (Test-Path -LiteralPath $ClaudeAuthConfigDir -PathType Container)) {
+            throw 'ClaudeAuthConfigDir must resolve to an existing directory'
+        }
+    }
     $useHomeDataRoot = -not [string]::IsNullOrWhiteSpace($HomeRoot)
     if ($ReleaseCertification) {
         if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {

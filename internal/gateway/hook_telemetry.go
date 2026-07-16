@@ -132,7 +132,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	})
 }
 
-func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, details string) {
+func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, details, toolName string) {
 	if a.logger == nil {
 		return
 	}
@@ -145,6 +145,7 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, 
 		Target:    target,
 		Details:   details,
 		Connector: connector,
+		ToolName:  toolName,
 	})
 }
 

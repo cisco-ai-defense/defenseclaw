@@ -293,6 +293,244 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 	}
 }
 
+func TestEvaluateClaudeCodeHook_RealNamespacedPluginExpansionRuntimeDisable(t *testing.T) {
+	const (
+		pluginID   = "dc-runtime-plugin"
+		commandID  = "greet"
+		command    = pluginID + ":" + commandID
+		privateArg = "private-inert-argument"
+	)
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, logger := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("plugin", pluginID, "claudecode", "runtime", "disable", "WIN-AUD-074 acceptance"); err != nil {
+		t.Fatalf("seed Claude plugin runtime disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+
+	// The identity-bearing fields are captured from the signed Claude Code
+	// 2.1.211 client invoking an inert --plugin-dir fixture. In particular,
+	// command_source is "plugin" and command_name is the namespaced identity;
+	// neither the prompt nor command_args is policy identity.
+	var req claudeCodeHookRequest
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"28d91d40-1505-47f9-b43a-f8f43ae185d8",
+		"transcript_path":"C:\\temp\\claude-plugin-transcript.jsonl",
+		"cwd":"C:\\temp",
+		"permission_mode":"acceptEdits",
+		"hook_event_name":"UserPromptExpansion",
+		"expansion_type":"slash_command",
+		"command_name":"dc-runtime-plugin:greet",
+		"command_args":"private-inert-argument",
+		"command_source":"plugin",
+		"prompt":"/dc-runtime-plugin:greet private-inert-argument"
+	}`), &req); err != nil {
+		t.Fatalf("decode captured Claude Code 2.1.211 plugin payload: %v", err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want enforced block/block", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output=%+v, want UserPromptExpansion decision=block", resp.ClaudeCodeOutput)
+	}
+	for _, want := range []string{
+		"reason_code=runtime-disable", "source=runtime-disable", "asset_type=plugin",
+		"asset_name=" + pluginID, "connector=claudecode", "surface=prompt_expansion",
+	} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+	if strings.Contains(resp.Reason, command) || strings.Contains(resp.Reason, privateArg) || strings.Contains(resp.Reason, req.Prompt) {
+		t.Fatalf("reason leaked namespaced command arguments or prompt: %q", resp.Reason)
+	}
+
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatalf("list plugin audit events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Target != "plugin:"+pluginID {
+			continue
+		}
+		found = true
+		if event.Connector != "claudecode" || event.ToolName != command ||
+			!strings.Contains(event.Details, "source=runtime-disable") ||
+			!strings.Contains(event.Details, "surface=prompt_expansion") {
+			t.Fatalf("plugin audit did not preserve bare target plus raw command: connector=%q details=%q", event.Connector, event.Details)
+		}
+		if strings.Contains(event.Details, privateArg) || strings.Contains(event.Details, req.Prompt) {
+			t.Fatalf("plugin audit leaked prompt or command arguments: %q", event.Details)
+		}
+	}
+	if !found {
+		t.Fatal("runtime-disabled namespaced plugin command produced no bare-ID audit target")
+	}
+}
+
+func TestEvaluateClaudeCodeHook_NamespacedPluginPolicyUsesBareID(t *testing.T) {
+	request := func(pluginID string) claudeCodeHookRequest {
+		return claudeCodeHookRequest{
+			HookEventName: "UserPromptExpansion",
+			ExpansionType: "slash_command",
+			CommandName:   pluginID + ":run-check",
+			CommandSource: "plugin",
+			CommandArgs:   "private-inert-argument",
+			Prompt:        "/" + pluginID + ":run-check private-inert-argument",
+		}
+	}
+	newConfig := func() *config.Config {
+		cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.Connector = "claudecode"
+		cfg.AssetPolicy.Enabled = true
+		cfg.AssetPolicy.Mode = "action"
+		enablePluginRuntimeDetection(cfg)
+		return cfg
+	}
+
+	t.Run("denied", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "policy-plugin"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin"))
+		if resp.Action != "block" || !strings.Contains(resp.Reason, "source=admin-deny") ||
+			!strings.Contains(resp.Reason, "asset_name=policy-plugin") {
+			t.Fatalf("denied namespaced plugin response=%+v", resp)
+		}
+	})
+
+	t.Run("allowed overrides default deny", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.Default = "deny"
+		cfg.AssetPolicy.Plugin.Allowed = []config.AssetPolicyRule{{Name: "policy-plugin"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin"))
+		if resp.Action != "allow" || resp.RawAction != "allow" || containsString(resp.Findings, "ASSET-POLICY-PLUGIN") {
+			t.Fatalf("allowed namespaced plugin response=%+v", resp)
+		}
+	})
+
+	t.Run("registered", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.RegistryRequired = true
+		cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "policy-plugin"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin"))
+		if resp.Action != "allow" || resp.RawAction != "allow" {
+			t.Fatalf("registered namespaced plugin response=%+v", resp)
+		}
+	})
+
+	t.Run("unregistered", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.RegistryRequired = true
+		cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "registered-peer"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin"))
+		if resp.Action != "block" || !strings.Contains(resp.Reason, "source=registry-required") ||
+			!strings.Contains(resp.Reason, "asset_name=policy-plugin") {
+			t.Fatalf("unregistered namespaced plugin response=%+v", resp)
+		}
+	})
+
+	t.Run("prefix peer does not collide", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "policy-plugin"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin-peer"))
+		if resp.Action != "allow" || resp.RawAction != "allow" {
+			t.Fatalf("peer plugin inherited prefix policy: %+v", resp)
+		}
+	})
+
+	t.Run("other connector rule does not collide", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "policy-plugin", Connector: "codex"}}
+		resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), request("policy-plugin"))
+		if resp.Action != "allow" || resp.RawAction != "allow" {
+			t.Fatalf("Codex-scoped plugin rule leaked into Claude: %+v", resp)
+		}
+	})
+}
+
+func TestEvaluateClaudeCodeHook_NamespacedPluginRuntimeDisableScopeAndObserve(t *testing.T) {
+	const pluginID = "scoped-plugin"
+	request := claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   pluginID + ":run-check",
+		CommandSource: "plugin",
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "claudecode"
+	store, _ := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	if err := store.SetActionFieldForConnector("plugin", pluginID, "codex", "runtime", "disable", "other connector"); err != nil {
+		t.Fatal(err)
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), request)
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("Codex-scoped runtime disable leaked into Claude: %+v", resp)
+	}
+
+	if err := store.SetActionFieldForConnector("plugin", pluginID, "claudecode", "runtime", "disable", "Claude connector"); err != nil {
+		t.Fatal(err)
+	}
+	resp = api.evaluateClaudeCodeHook(context.Background(), request)
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("Claude runtime disable became advisory in Observe mode: %+v", resp)
+	}
+
+	if err := store.SetActionField("plugin", "global-plugin", "runtime", "disable", "global"); err != nil {
+		t.Fatal(err)
+	}
+	request.CommandName = "global-plugin:run-check"
+	resp = api.evaluateClaudeCodeHook(context.Background(), request)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("global runtime disable did not block namespaced Claude plugin: %+v", resp)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_MalformedPluginExpansionFailsClosedWithoutLeak(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	const private = "private-inert-argument"
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "plugin:command:peer",
+		CommandArgs:   private,
+		CommandSource: "plugin",
+		Prompt:        "/plugin:command:peer " + private,
+	})
+	if resp.Action != "block" || resp.RawAction != "block" || resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("malformed plugin identity was not denied: %+v", resp)
+	}
+	if !strings.Contains(resp.Reason, "source=plugin-identity-invalid") ||
+		strings.Contains(resp.Reason, private) || strings.Contains(resp.Reason, "plugin:command:peer") {
+		t.Fatalf("malformed response was not static and sink-safe: %q", resp.Reason)
+	}
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Target != "plugin:invalid-plugin-command" {
+			continue
+		}
+		if strings.Contains(event.Details, private) || strings.Contains(event.Details, "plugin:command:peer") {
+			t.Fatalf("malformed plugin audit leaked untrusted input: %q", event.Details)
+		}
+		return
+	}
+	t.Fatal("malformed plugin block produced no static audit event")
+}
+
 func TestEvaluateClaudeCodeHook_RealUserSettingsSkillExpansionRuntimeDisable(t *testing.T) {
 	claudeHome := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
