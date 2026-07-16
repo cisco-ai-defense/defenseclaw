@@ -112,6 +112,32 @@ class WindowsHookDoctorTests(unittest.TestCase):
         path.write_bytes(body)
         return path
 
+    @staticmethod
+    def _encoded_powershell_command(script: str) -> str:
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
+            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        )
+
+    @staticmethod
+    def _synchronous_encoded_hook_script(runtime: Path, connector: str = "codex") -> str:
+        target = str(runtime).replace("'", "''")
+        return (
+            "$ErrorActionPreference='Stop'; "
+            "$ProgressPreference='SilentlyContinue'; "
+            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+            "$defenseclawHookStartInfo=[System.Diagnostics.ProcessStartInfo]::new(); "
+            f"$defenseclawHookStartInfo.FileName='{target}'; "
+            f"$defenseclawHookStartInfo.Arguments='hook --connector {connector}'; "
+            "$defenseclawHookStartInfo.UseShellExecute=$false; "
+            "$defenseclawHookProcess=[System.Diagnostics.Process]::Start($defenseclawHookStartInfo); "
+            "$defenseclawHookProcess.WaitForExit(); "
+            "$defenseclawHookExitCode=$defenseclawHookProcess.ExitCode; "
+            "$defenseclawHookProcess.Dispose(); "
+            "exit $defenseclawHookExitCode"
+        )
+
     def _lock(
         self,
         connector: str,
@@ -782,6 +808,72 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.state, "malformed")
         self.assertIn("explicitly disabled", raised.exception.detail)
+
+    def test_codex_synchronous_encoded_invocation_is_healthy_with_inert_path_characters(self) -> None:
+        runtime = self.install / "Unicode Ω and 'quoted' path" / "defenseclaw-hook.exe"
+        runtime.parent.mkdir()
+        runtime.write_bytes(b"MZfixture")
+        script = self._synchronous_encoded_hook_script(runtime)
+        command = self._encoded_powershell_command(script)
+        config = self._config("codex", command, windows_command=command)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.raw_target), os.path.normcase(str(runtime)))
+        self.assertIn("Windows-native executable", check.detail)
+
+    def test_codex_legacy_encoded_invocation_is_owned_but_stale(self) -> None:
+        runtime = self._runtime()
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+            f"& '{runtime}' hook --connector codex; exit $LASTEXITCODE"
+        )
+        command = self._encoded_powershell_command(script)
+        config = self._config("codex", command, windows_command=command)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertEqual(os.path.normcase(check.raw_target), os.path.normcase(str(runtime)))
+        self.assertIn("legacy asynchronous GUI launch form", check.detail)
+        self.assertIn("setup codex", check.detail)
+
+    def test_codex_legacy_encoded_foreign_same_basename_is_not_claimed_as_stale(self) -> None:
+        runtime = self.root / "Foreign Product" / "defenseclaw-hook.exe"
+        runtime.parent.mkdir()
+        runtime.write_bytes(b"MZfixture")
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+            f"& '{runtime}' hook --connector codex; exit $LASTEXITCODE"
+        )
+        command = self._encoded_powershell_command(script)
+        config = self._config("codex", command, windows_command=command)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "foreign", check.detail)
+        self.assertNotIn("legacy asynchronous GUI launch form", check.detail)
+
+    def test_codex_synchronous_encoded_invocation_rejects_script_body_drift(self) -> None:
+        runtime = self._runtime()
+        script = self._synchronous_encoded_hook_script(runtime)
+        mutations = {
+            "appended-statement": script + "; Write-Output 'ignored'",
+            "shell-execute": script.replace("UseShellExecute=$false", "UseShellExecute=$true"),
+            "missing-progress-suppression": script.replace("$ProgressPreference='SilentlyContinue'; ", ""),
+            "wrong-connector": script.replace("hook --connector codex", "hook --connector claudecode"),
+        }
+
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                command = self._encoded_powershell_command(mutated)
+                with self.assertRaises(_InspectionError) as raised:
+                    doctor_hooks._command_target(command, "codex")
+                self.assertEqual(raised.exception.state, "malformed")
+                self.assertIn("unsupported script body", raised.exception.detail)
 
     def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:
         runtime = self._runtime()

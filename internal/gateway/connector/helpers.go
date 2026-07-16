@@ -451,6 +451,41 @@ func windowsNativePowerShellHookCommand(connector string) string {
 }
 
 func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " +
+		powershellEncodedCommand(windowsNativePowerShellHookScriptForBinary(connector, hookBinary))
+}
+
+// windowsNativePowerShellHookScriptForBinary waits on the exact hook process
+// through System.Diagnostics instead of PowerShell's native call operator.
+// Release hooks use the Windows GUI subsystem to avoid allocating a transient
+// console; Windows PowerShell 5.1 otherwise backgrounds that process and leaves
+// $LASTEXITCODE stale. ProcessStartInfo keeps the executable path separate from
+// fixed arguments, while leaving all standard handles inherited and unmodified.
+// Do not replace WaitForExit with Start-Process -Wait: that cmdlet waits for the
+// whole descendant tree and could block on a gateway recovered by the hook.
+func windowsNativePowerShellHookScriptForBinary(connector, hookBinary string) string {
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$ProgressPreference='SilentlyContinue'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$defenseclawHookStartInfo=[System.Diagnostics.ProcessStartInfo]::new()",
+		"$defenseclawHookStartInfo.FileName=" + powershellQuoteLiteral(hookBinary),
+		"$defenseclawHookStartInfo.Arguments=" + powershellQuoteLiteral(nativeHookFlag+connector),
+		"$defenseclawHookStartInfo.UseShellExecute=$false",
+		"$defenseclawHookProcess=[System.Diagnostics.Process]::Start($defenseclawHookStartInfo)",
+		"$defenseclawHookProcess.WaitForExit()",
+		"$defenseclawHookExitCode=$defenseclawHookProcess.ExitCode",
+		"$defenseclawHookProcess.Dispose()",
+		"exit $defenseclawHookExitCode",
+	}, "; ")
+	return script
+}
+
+// legacyWindowsNativePowerShellHookCommandForBinary returns the exact encoded
+// command written before native Windows GUI hook launches waited on the child
+// process object. It is retained only for narrowly scoped teardown ownership;
+// new registrations must use windowsNativePowerShellHookCommandForBinary.
+func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -484,8 +519,9 @@ func isNativeHookCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
 	// Current Codex and Antigravity registrations use a system PowerShell
 	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
-	// without shell interpolation. Compare against the exact commands we emit;
-	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
+	// without shell interpolation. Compare against the exact current and legacy
+	// commands we emitted; accepting arbitrary encoded scripts would let teardown
+	// claim foreign hooks.
 	hookBinaries := []string{defenseclawHookBinary()}
 	if runtime.GOOS == "windows" {
 		// A Setup-owned maintenance gateway runs outside the installed layout,
@@ -502,7 +538,8 @@ func isNativeHookCommand(cmd string) bool {
 	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
+			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
+				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
 				return true
 			}
 		}

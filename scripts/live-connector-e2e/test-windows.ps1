@@ -146,29 +146,26 @@ try {
         $preToolSpec[0].TimeoutSec -eq 30) 'Codex PreToolUse metadata requires broad matching and a 30s budget'
     Assert-True ($stopSpec.Count -eq 1 -and $null -eq $stopSpec[0].Matcher -and
         $stopSpec[0].TimeoutSec -eq 90) 'Codex Stop metadata requires no matcher and a 90s budget'
-    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-managed_config.toml'))
+    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-config.toml'))
     $metadataCommand = 'managed-codex-hook-command'
     $healthyMetadata = [pscustomobject]@{
         eventName = 'preToolUse'
         sourcePath = $metadataConfig
         handlerType = 'command'
         enabled = $true
-        isManaged = $true
-        source = 'legacyManagedConfigFile'
+        isManaged = $false
+        source = 'user'
         command = $metadataCommand
         matcher = '*'
         timeoutSec = 30
         statusMessage = $null
         key = $metadataConfig + ':pre_tool_use:0:0'
-        trustStatus = 'managed'
+        trustStatus = 'trusted'
         currentHash = 'sha256:' + ('a' * 64)
     }
     Assert-CodexHookMetadata $healthyMetadata $preToolSpec[0] $metadataCommand $metadataConfig 'fixture' `
         ([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
     foreach ($mutation in @(
-        [pscustomobject]@{ Name = 'unmanaged hook'; Property = 'isManaged'; Value = $false },
-        [pscustomobject]@{ Name = 'user source'; Property = 'source'; Value = 'user' },
-        [pscustomobject]@{ Name = 'private trust state'; Property = 'trustStatus'; Value = 'trusted' },
         [pscustomobject]@{ Name = 'narrow matcher'; Property = 'matcher'; Value = 'Bash' },
         [pscustomobject]@{ Name = 'short timeout'; Property = 'timeoutSec'; Value = 1 },
         [pscustomobject]@{ Name = 'status override'; Property = 'statusMessage'; Value = 'tampered' }
@@ -1042,21 +1039,16 @@ try {
         'Connector Live Windows radar remains manual-only'
     $releaseCertificationJob = [regex]::Match(
         $releaseWorkflowText,
-        '(?ms)^  windows-real-client-certification:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
+        '(?s)  windows-real-client-certification:.*?(?=\r?\n  publish:)'
     ).Value
-    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release-preflight,\s*windows-installer\]' -and
+    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release,\s*windows-installer\]' -and
         $releaseCertificationJob -match '-Operation release-certification' -and
         $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
         $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
         $releaseCertificationJob -notmatch 'continue-on-error') `
         'production release has a required provider-backed Windows real-client gate'
-    $releaseAssemblyJob = [regex]::Match(
-        $releaseWorkflowText,
-        '(?ms)^  assemble-release-candidate:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
-    Assert-True ($releaseAssemblyJob -match 'windows-real-client-certification' -and
-        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-real-client-certification\.outputs\.artifact_id \}\}' -and
-        $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
+    Assert-True ($releaseWorkflowText -match 'needs: \[release, windows-real-client-certification\]' -and
+        $releaseWorkflowText -match 'name: release-dist-windows-certified') `
         'immutable release publication consumes only the certified Windows artifact bundle'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
@@ -1076,7 +1068,28 @@ try {
         'native enterprise hooks require elevation in the standard-user connector contract'
     Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
+    $expectedCodexHook = [regex]::Match($harnessText, '(?s)function Get-ExpectedCodexWindowsHookScript\b.*?\n\}').Value
+    Assert-True ($expectedCodexHook -match 'ProcessStartInfo' -and
+        $expectedCodexHook -match '\.FileName=' -and
+        $expectedCodexHook -match 'UseShellExecute=\$false' -and
+        $expectedCodexHook -match '\.WaitForExit\(\)' -and
+        $expectedCodexHook -match 'exit \$defenseclawHookExitCode' -and
+        $expectedCodexHook -notmatch 'LASTEXITCODE') `
+        'Codex registration assertion pins the synchronous exact-child Windows process contract'
+    $outageContract = [regex]::Match($harnessText, '(?s)function Invoke-WithTrustedGatewayUnavailable\b.*?\n\}').Value
+    Assert-True ($harnessText -match 'schema_version -ne 2' -and
+        $harnessText -match 'gateway_sha256' -and
+        $outageContract -match 'Move-Item -LiteralPath \$trusted\.GatewayPath' -and
+        $outageContract -match '(?s)finally\s*\{.*?Move-Item -LiteralPath \$disabledPath -Destination \$trusted\.GatewayPath' -and
+        $outageContract -match 'restored trusted gateway digest') `
+        'gateway outage fixture binds trusted activation state and restores the exact executable in finally'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
+    Assert-True ([regex]::Matches($contractRun, 'Assert-RegisteredHookOutageContract').Count -eq 2 -and
+        $contractRun -match 'Assert-RegisteredHookOutageContract observe' -and
+        $contractRun -match 'Assert-RegisteredHookOutageContract action' -and
+        $harnessText -match 'exact registered \$Connector hook outage exit=' -and
+        $harnessText -match 'empty protocol body') `
+        'contract exercises exact registered fail-open and fail-closed gateway outage behavior'
     Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
         'unversioned fixture override is removed before Doctor tamper validation'
     $liveRun = [regex]::Match($harnessText, '(?s)function Invoke-LiveRun\b.*?\n\}').Value
@@ -1085,15 +1098,13 @@ try {
         'official npm trust probes stay in manual live-client certification, not mandatory deterministic CI'
     Assert-True ($harnessText -match "@\('0\.129\.0', '0\.133\.0', '0\.144\.3'\)" -and
         $harnessText -match "method = 'hooks/list'" -and
-        $harnessText -match "trustStatus -cne 'managed'" -and
-        $harnessText -match "source -cne 'legacyManagedConfigFile'" -and
-        $harnessText -match "managed_config\.toml" -and
+        $harnessText -match "trustStatus -cne 'trusted'" -and
         $harnessText -match '\$hook\.command -cne \$expectedCommand' -and
         $harnessText -match "Properties\['matcher'\]" -and
         $harnessText -match "Properties\['timeoutSec'\]" -and
         $harnessText -match "Properties\['statusMessage'\]" -and
         $harnessText -match '\^sha256:\[0-9a-f\]\{64\}\$') `
-        'Codex trust matrix pins transition/current clients and validates exact managed app-server command/shape/trust evidence'
+        'Codex trust matrix pins transition/current clients and validates exact app-server command/shape/trust evidence'
     Assert-True ($harnessText -notmatch '(?i)dangerously-bypass-hook-trust|bypass-hook-trust') `
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
@@ -1173,14 +1184,19 @@ try {
         $nativeHarnessText -match 'connector contract wrote to the unrelated agent home' -and
         $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
         $harnessText -match '\$fileName = if \(\$ConnectorName -eq ''codex''\) \{ ''managed_config\.toml'' \}' -and
-        [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 3 -and
+        [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 4 -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.codex\\config\.toml''' -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.claude\\settings\.json''') `
-        'contract setup, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
+        'contract setup, exact invocation, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
     Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
     Assert-True ($nativeHarnessText -match '\.codex\\managed_config\.toml' -and
         $nativeHarnessText -match 'unrelated Codex managed config byte-for-byte') `
         'release certification inventories and exactly preserves unrelated Codex managed config'
+    Assert-True ($liveRun -match 'Assert-LiveClientFailClosedOutage' -and
+        $harnessText -match 'tool-fail-closed:enforced' -and
+        $harnessText -match 'fail-closed-outage\.marker' -and
+        $nativeHarnessText -match "'tool-fail-closed:enforced', 'tool-fail-closed:trusted-cold-start'") `
+        'release live-client gate requires a harmless marker to remain absent during fail-closed outage'
     $workflowText = $nativeWorkflowText + "`n" + $liveWorkflowText
     Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
     $checkoutCount = [regex]::Matches($workflowText, 'uses:\s*actions/checkout@').Count
