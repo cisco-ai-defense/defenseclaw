@@ -44,58 +44,71 @@ die() { printf '[hook-enumerator] ERROR: %s\n' "$*" >&2; exit 1; }
 # when present; fall back to the primary. Keep this tiny and side-effect
 # free — Python is available on every macOS box we ship to.
 extract_connectors() {
+  # Regex-only scanner over the shape render_config emits. Deliberately
+  # avoids importing PyYAML: it isn't part of macOS's system Python and
+  # is often installed only in a user's Library/Python/*/site-packages,
+  # invisible to a root-launched daemon. render_config's output is stable
+  # and simple enough (two-space indent, keys on their own lines) that a
+  # regex scan is more portable than a YAML dependency.
+  #
+  # render_config emits BOTH:
+  #   guardrail:
+  #     connector: <primary>              <-- the single-scalar form
+  #     connectors:                       <-- the multi-connector map
+  #       codex:
+  #       claudecode:
+  #       cursor:
+  # So we prefer the map when present (returns every connector) and fall
+  # back to the scalar (primary only) when the map is absent. Duplicates
+  # are dropped preserving first-seen order.
   /usr/bin/python3 - "${CONFIG_PATH}" <<'PY'
 import re, sys
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
 
-# Try to parse via PyYAML if available; otherwise use a permissive regex
-# scanner sufficient for the shape render_config produces.
-def with_yaml():
-    try:
-        import yaml
-    except Exception:
-        return None
-    try:
-        doc = yaml.safe_load(text) or {}
-    except Exception:
-        return None
-    guard = doc.get("guardrail") or {}
-    m = guard.get("connectors") or {}
-    if isinstance(m, dict) and m:
-        return [k for k in m.keys()]
-    v = guard.get("connector")
-    if isinstance(v, str) and v.strip():
-        return [v.strip()]
-    return []
+primary = None
+connectors_map = []
+in_guardrail = False
+in_connectors = False
+for line in text.splitlines():
+    if re.match(r"^guardrail:\s*$", line):
+        in_guardrail = True
+        in_connectors = False
+        continue
+    if in_guardrail and line and not line.startswith(" "):
+        # Left the guardrail: block.
+        in_guardrail = False
+        in_connectors = False
+        continue
+    if not in_guardrail:
+        continue
+    if not in_connectors:
+        if re.match(r"^  connectors:\s*$", line):
+            in_connectors = True
+            continue
+        m = re.match(r"^  connector:\s*(\S+)\s*$", line)
+        if m and primary is None:
+            primary = m.group(1)
+    else:
+        m = re.match(r"^    ([a-z0-9][a-z0-9_-]*):\s*$", line)
+        if m:
+            connectors_map.append(m.group(1))
+            continue
+        if line and not line.startswith("      ") and not line.startswith("    "):
+            in_connectors = False
 
-def without_yaml():
-    # Match the shape render_config emits (two-space indent, keys on their
-    # own lines). If the connectors: map is present, list its immediate
-    # children; else fall back to the single `connector:` scalar.
-    out = []
-    in_connectors = False
-    for line in text.splitlines():
-        if not in_connectors:
-            if re.match(r"^  connectors:\s*$", line):
-                in_connectors = True
-                continue
-            m = re.match(r"^  connector:\s*(\S+)\s*$", line)
-            if m and not out:
-                out.append(m.group(1))
-        else:
-            if re.match(r"^    ([a-z0-9][a-z0-9_-]*):\s*$", line):
-                out.append(re.match(r"^    (\S+):", line).group(1))
-                continue
-            if line and not line.startswith("      ") and not line.startswith("    "):
-                break
-    return out
-
-result = with_yaml()
-if result is None:
-    result = without_yaml()
+# Prefer the map when populated; fall back to the primary scalar.
+result = connectors_map if connectors_map else ([primary] if primary else [])
+# Dedupe preserving first-seen order (defence-in-depth against future edits
+# to render_config that might list the same connector under both forms).
+seen = set()
+deduped = []
 for c in result:
+    if c and c not in seen:
+        seen.add(c)
+        deduped.append(c)
+for c in deduped:
     print(c)
 PY
 }
