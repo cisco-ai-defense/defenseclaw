@@ -170,9 +170,7 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
     assert observed["connector"] == "codex"
 
 
-def test_windows_resolver_reports_effective_mixed_modes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     with (
@@ -224,9 +222,7 @@ def test_cli_status_reports_effective_mixed_modes_without_drift(
     assert "runtime fail-mode drift" not in result.output
 
 
-def test_stale_persisted_closed_runtime_open_is_not_current(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_persisted_closed_runtime_open_is_not_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     with (
@@ -240,9 +236,7 @@ def test_stale_persisted_closed_runtime_open_is_not_current(
     assert "claude-env-open" in state.drift
 
 
-def test_stale_closed_never_reports_already_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     app = AppContext()
@@ -355,9 +349,7 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert "restored" in result.output
 
 
-def test_truthful_noop_requires_current_runtime(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     app = AppContext()
@@ -381,9 +373,7 @@ def test_truthful_noop_requires_current_runtime(
     cfg.save.assert_not_called()
 
 
-def test_stale_registered_script_digest_rejects_noop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_registered_script_digest_rejects_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (Path(cfg.data_dir) / "hooks" / "claude-code-hook.sh").write_text("stale launcher", encoding="utf-8")
@@ -396,9 +386,7 @@ def test_stale_registered_script_digest_rejects_noop(
     assert "registration-digest-stale" in state.drift
 
 
-def test_stale_windows_launcher_digest_rejects_noop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_windows_launcher_digest_rejects_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (home / ".local" / "bin" / "defenseclaw-hook.exe").write_bytes(b"MZstale-launcher")
@@ -458,9 +446,7 @@ def test_divergent_v1_shared_digests_require_controlled_migration(
     assert "registration-shared-digest-divergent" in codex.drift
 
 
-def test_single_connector_v1_shared_digests_remain_compatible(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_single_connector_v1_shared_digests_remain_compatible(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
@@ -477,9 +463,7 @@ def test_single_connector_v1_shared_digests_remain_compatible(
     assert state.current
 
 
-def test_single_connector_v1_missing_shared_digests_is_stale(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_single_connector_v1_missing_shared_digests_is_stale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
