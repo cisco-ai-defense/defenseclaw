@@ -113,6 +113,15 @@ const (
 	SubsystemCorrelation    Subsystem = "correlation"
 	SubsystemStream         Subsystem = "stream"
 	SubsystemCiscoInspect   Subsystem = "cisco-inspect"
+	// SubsystemCiscoAIDExport marks failures in the managed
+	// Cisco AI Defense telemetry (log) exporter path — the
+	// custom OTel LogExporter that POSTs to
+	// /api/v1/defenseclaw/events/ingest with a CMID bearer.
+	// Paired with ErrCodeExportFailed. Distinct from the
+	// generic "telemetry" subsystem so operators can alert
+	// specifically on managed-sink breakage (auth vs
+	// network vs ingest 5xx).
+	SubsystemCiscoAIDExport Subsystem = "cisco-aid-export"
 	SubsystemOpenShell      Subsystem = "openshell"
 	SubsystemWebhook        Subsystem = "webhook"
 	SubsystemQuarantine     Subsystem = "quarantine"

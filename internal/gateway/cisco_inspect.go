@@ -105,11 +105,21 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, err := json.Marshal(call.payload)
 		if err != nil {
+			// Should be unreachable — payload is a map[string]interface{}
+			// of plain scalars/slices — but emit rather than silent-nil
+			// so the surface stays honest if a future edit changes the
+			// payload shape into something un-marshalable.
+			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: marshal request: %v\n", err)
+			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse,
+				"marshal request: "+err.Error())
 			return nil
 		}
 
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
+			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: build request %s: %v\n", url, err)
+			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeUpstreamError,
+				fmt.Sprintf("build request %s: %v", url, err))
 			return nil
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -171,24 +181,50 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 401, refreshed credentials and retrying\n")
 				continue
 			}
+			// onUnauthorized ran but refused the retry (token refresh
+			// failed / same token minted again). This is a real terminal
+			// auth failure — surface as AUTH_INVALID_TOKEN so operators
+			// can distinguish it from a 5xx or 400.
+			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
+			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP 401 and no fresh token available: %s\n",
+				redaction.MessageContent(bodySnippet))
+			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeAuthInvalidToken,
+				fmt.Sprintf("HTTP 401 and no fresh token available: %s",
+					redaction.MessageContent(bodySnippet)))
+			return nil
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
+			// Choose the code by status class so log consumers can filter:
+			// 401/403 -> AUTH_INVALID_TOKEN; others -> INVALID_RESPONSE.
+			code := gatewaylog.ErrCodeInvalidResponse
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				code = gatewaylog.ErrCodeAuthInvalidToken
+			}
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP %d: %s\n",
 				resp.StatusCode, redaction.MessageContent(bodySnippet))
-			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse,
+			EmitCiscoError(ctx, call.tel, code,
 				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, redaction.MessageContent(bodySnippet)))
 			return nil
 		}
 
 		var data map[string]interface{}
 		if err := json.Unmarshal(respBody, &data); err != nil {
-			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse, "json: "+err.Error())
+			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: parse response: %v\n", err)
+			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse, "parse response: "+err.Error())
 			return nil
 		}
 		return normalizeCiscoResponse(data)
 	}
+	// The retry loop exhausted without producing a verdict. Every branch
+	// inside the loop that reached `continue` (400-rules-retry, 401 with
+	// refresh accepted) already logged its own reason for retrying; if we
+	// end up here it means the retry itself didn't complete. Emit a
+	// terminal error so this path never silently fails-open.
+	fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: exhausted %d retry attempt(s) without a usable verdict\n", maxAttempts)
+	EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeUpstreamError,
+		fmt.Sprintf("exhausted %d retry attempt(s) without a usable verdict", maxAttempts))
 	return nil
 }
 

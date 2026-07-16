@@ -28,12 +28,10 @@ func (w *metricExporterProbe) Aggregation(k sdkmetric.InstrumentKind) sdkmetric.
 func (w *metricExporterProbe) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
 	err := w.inner.Export(ctx, rm)
 	if w.p != nil {
-		ctx2 := context.Background()
-		if err != nil {
-			w.p.RecordExporterHealth(ctx2, "otlp_metrics", ExporterHealthFailure)
-		} else {
-			w.p.RecordExporterHealth(ctx2, "otlp_metrics", ExporterHealthSuccess)
-		}
+		// Thread the underlying error into the export-failure emit so
+		// operators see WHY (401 vs network vs 5xx), not just a generic
+		// "export failed".
+		w.p.RecordExporterHealthErr(context.Background(), "otlp_metrics", err)
 	}
 	return err
 }
