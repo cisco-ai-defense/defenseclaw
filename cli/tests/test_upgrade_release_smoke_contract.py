@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -64,6 +65,7 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert "did not reach version-bound health" in canary
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     tmp_path: Path,
 ) -> None:
@@ -90,6 +92,7 @@ def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     assert destination.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_rejects_checksum_mismatch_without_output(
     tmp_path: Path,
 ) -> None:
@@ -290,8 +293,9 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
     baselines = policy["published_baselines"]
 
     assert policy["schema_version"] == 2
-    assert baselines[0] == "0.8.4"
+    assert baselines[0] == "0.8.5"
     assert policy["published_baseline_config_versions"] == {
+        "0.8.5": 8,
         "0.8.4": 7,
         "0.8.3": 7,
         "0.8.2": 6,

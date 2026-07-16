@@ -259,11 +259,32 @@ class TestReleaseInvariants(unittest.TestCase):
         )
         self.assertEqual(manifest["migration_failure_policy"], "fail")
         self.assertIn("0.8.5", manifest["required_cli_migrations"])
+        self.assertNotIn("windows_installer", manifest)
+
+    def test_windows_installer_policy_starts_with_0_8_6(self):
+        """0.8.5 did not publish native Setup and must not advertise it."""
+        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
+        build_manifest = generator["build_manifest"]
+        with patch.dict(build_manifest.__globals__, {"current_version": lambda: "0.8.6"}):
+            manifest = build_manifest()
+        self.assertEqual(
+            manifest["windows_installer"],
+            {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": True,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        )
 
     def test_upgrade_baselines_are_single_strictly_descending_support_matrix(self):
         generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
         baselines = generator["published_upgrade_baselines"]()
-        self.assertEqual(baselines[0], "0.8.4")
+        self.assertEqual(baselines[0], "0.8.5")
         self.assertIn("0.8.3", baselines)
         self.assertEqual(baselines[-1], "0.4.0")
         self.assertEqual(baselines, sorted(set(baselines), key=_ver_tuple, reverse=True))

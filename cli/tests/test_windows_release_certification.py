@@ -122,9 +122,16 @@ def test_release_uninstall_preserves_unrelated_codex_hooks_and_checks_all_source
     clean = _function("Assert-WindowsReleaseCleanUninstall")
     assert "'.codex\\hooks.json'" in gate
     assert "cmd.exe /d /c exit 0" in gate
-    assert "$connectorConfigs = @($codexConfigPath, $codexHooksPath, $claudeConfigPath)" in gate
+    for path in (
+        "$codexConfigPath",
+        "$codexManagedConfigPath",
+        "$codexHooksPath",
+        "$claudeConfigPath",
+    ):
+        assert path in gate
     assert "Assert-NoDefenseClawRegistration $ConnectorConfigs" in clean
     assert "release uninstall did not preserve the unrelated Codex hook byte-for-byte" in clean
+    assert "release uninstall did not preserve the unrelated Codex managed config byte-for-byte" in clean
 
 
 def test_release_gate_fails_closed_without_secrets_or_exact_clients() -> None:

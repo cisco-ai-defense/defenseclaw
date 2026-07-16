@@ -1,7 +1,7 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.5
+VERSION     := 0.8.6
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
@@ -14,7 +14,7 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
-UPGRADE_SMOKE_FROM ?= 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
+UPGRADE_SMOKE_FROM ?= 0.8.5 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe

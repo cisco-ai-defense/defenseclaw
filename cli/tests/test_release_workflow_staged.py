@@ -21,6 +21,12 @@ WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
+DIGEST_CAPABLE_UPLOAD_ACTION = (
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+)
+COSIGN_INSTALLER_ACTION = (
+    "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
+)
 
 
 def _workflow() -> dict[str, object]:
@@ -41,6 +47,7 @@ def test_upgrade_refusal_contract_installs_cosign_before_historical_authenticati
     )
 
     assert steps[cosign]["uses"] == ("sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da")
+    assert steps[cosign]["with"] == {"cosign-release": "v2.6.2"}
     assert cosign < smoke
 
     job = _ci_workflow()["jobs"]["upgrade-smoke"]
@@ -74,6 +81,20 @@ def test_release_is_manual_and_default_permissions_are_read_only() -> None:
         }
     }
     assert workflow["permissions"] == {"contents": "read"}
+
+
+def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
+    jobs = _workflow()["jobs"]
+    installers = [
+        step
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("sigstore/cosign-installer@")
+    ]
+
+    assert len(installers) == 9
+    assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
+    assert all(step.get("with") == {"cosign-release": "v2.6.2"} for step in installers)
 
 
 def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
@@ -203,6 +224,15 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     installer = jobs["windows-installer"]
     certification = jobs["windows-real-client-certification"]
     assemble = jobs["assemble-release-candidate"]
+    fresh = jobs["windows-fresh-install"]
+
+    upload_actions = {
+        step["uses"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    }
+    assert upload_actions == {DIGEST_CAPABLE_UPLOAD_ACTION}
 
     assert runtime["outputs"]["artifact_id"] == ("${{ steps.runtime-artifact.outputs.artifact-id }}")
     assert runtime["outputs"]["artifact_digest"] == ("${{ steps.runtime-artifact.outputs.artifact-digest }}")
@@ -268,6 +298,29 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assert "^(sha256:)?[0-9a-f]{64}$" in custody_step["run"]
     assemble_step = next(step for step in assemble["steps"] if "release_candidate.py assemble" in step.get("run", ""))
     assert "--windows-dir candidate-input/windows" in assemble_step["run"]
+
+    fresh_setup = next(
+        step
+        for step in fresh["steps"]
+        if step.get("name") == "Verify and exercise the exact sealed Setup on a fresh host"
+    )["run"]
+    assert any(
+        step.get("uses")
+        == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+        for step in fresh["steps"]
+    )
+    assert "defenseclaw-sealed-setup-inputs" in fresh_setup
+    assert "Get-FileHash -LiteralPath $sealedSetup -Algorithm SHA256" in fresh_setup
+    assert "Get-FileHash -LiteralPath $acceptanceSetup -Algorithm SHA256" in fresh_setup
+    assert "./internal/tools/windowsresources" in fresh_setup
+    for helper in (
+        "DefenseClawWindowsResourceVerifier-x64.exe",
+        "DefenseClawWindowsResourceIcon.png",
+        "DefenseClawWindowsResourceVersion.txt",
+    ):
+        assert helper in fresh_setup
+        assert all(helper not in path for path in certified_upload["with"]["path"].splitlines())
+    assert "-ArtifactRoot $acceptanceRoot" in fresh_setup
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:

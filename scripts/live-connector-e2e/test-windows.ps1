@@ -1042,16 +1042,21 @@ try {
         'Connector Live Windows radar remains manual-only'
     $releaseCertificationJob = [regex]::Match(
         $releaseWorkflowText,
-        '(?s)  windows-real-client-certification:.*?(?=\r?\n  publish:)'
+        '(?ms)^  windows-real-client-certification:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release,\s*windows-installer\]' -and
+    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release-preflight,\s*windows-installer\]' -and
         $releaseCertificationJob -match '-Operation release-certification' -and
         $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
         $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
         $releaseCertificationJob -notmatch 'continue-on-error') `
         'production release has a required provider-backed Windows real-client gate'
-    Assert-True ($releaseWorkflowText -match 'needs: \[release, windows-real-client-certification\]' -and
-        $releaseWorkflowText -match 'name: release-dist-windows-certified') `
+    $releaseAssemblyJob = [regex]::Match(
+        $releaseWorkflowText,
+        '(?ms)^  assemble-release-candidate:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
+    ).Value
+    Assert-True ($releaseAssemblyJob -match 'windows-real-client-certification' -and
+        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-real-client-certification\.outputs\.artifact_id \}\}' -and
+        $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
         'immutable release publication consumes only the certified Windows artifact bundle'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
@@ -1080,13 +1085,15 @@ try {
         'official npm trust probes stay in manual live-client certification, not mandatory deterministic CI'
     Assert-True ($harnessText -match "@\('0\.129\.0', '0\.133\.0', '0\.144\.3'\)" -and
         $harnessText -match "method = 'hooks/list'" -and
-        $harnessText -match "trustStatus -cne 'trusted'" -and
+        $harnessText -match "trustStatus -cne 'managed'" -and
+        $harnessText -match "source -cne 'legacyManagedConfigFile'" -and
+        $harnessText -match "managed_config\.toml" -and
         $harnessText -match '\$hook\.command -cne \$expectedCommand' -and
         $harnessText -match "Properties\['matcher'\]" -and
         $harnessText -match "Properties\['timeoutSec'\]" -and
         $harnessText -match "Properties\['statusMessage'\]" -and
         $harnessText -match '\^sha256:\[0-9a-f\]\{64\}\$') `
-        'Codex trust matrix pins transition/current clients and validates exact app-server command/shape/trust evidence'
+        'Codex trust matrix pins transition/current clients and validates exact managed app-server command/shape/trust evidence'
     Assert-True ($harnessText -notmatch '(?i)dangerously-bypass-hook-trust|bypass-hook-trust') `
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
@@ -1165,7 +1172,7 @@ try {
     Assert-True ($nativeHarnessText -match 'connector contract wrote to the default agent home' -and
         $nativeHarnessText -match 'connector contract wrote to the unrelated agent home' -and
         $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
-        $harnessText -match "\$fileName = if \(\$ConnectorName -eq 'codex'\) \{ 'managed_config\.toml' \}" -and
+        $harnessText -match '\$fileName = if \(\$ConnectorName -eq ''codex''\) \{ ''managed_config\.toml'' \}' -and
         [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 3 -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.codex\\config\.toml''' -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.claude\\settings\.json''') `

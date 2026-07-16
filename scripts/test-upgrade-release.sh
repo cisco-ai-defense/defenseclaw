@@ -364,8 +364,8 @@ if type(config_versions) is not dict or set(config_versions) != set(versions):
     fail("published_baseline_config_versions keys must exactly match published_baselines")
 for published_version in versions:
     value = config_versions[published_version]
-    if type(value) is not int or value not in {5, 6, 7}:
-        fail(f"{published_version} has no reviewed config version in {{5,6,7}}")
+    if type(value) is not int or value not in {5, 6, 7, 8}:
+        fail(f"{published_version} has no reviewed config version in {{5,6,7,8}}")
 
 platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
