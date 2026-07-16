@@ -434,7 +434,7 @@ validate_inputs() {
         if ! config_version="$(published_baseline_config_version "${version}")"; then
             die "could not resolve the reviewed config version for baseline ${version}"
         fi
-        [[ "${config_version}" =~ ^[567]$ ]] \
+        [[ "${config_version}" =~ ^[5678]$ ]] \
             || die "published baseline ${version} resolved to an invalid config version"
     done
     case "${BASELINE_MODE}" in
@@ -1099,7 +1099,7 @@ resolve_baseline_config_version() {
     if ! FROM_CONFIG_VERSION="$(published_baseline_config_version "${FROM_VERSION}")"; then
         die "could not resolve the reviewed config version for baseline ${FROM_VERSION}"
     fi
-    [[ "${FROM_CONFIG_VERSION}" =~ ^[567]$ ]] \
+    [[ "${FROM_CONFIG_VERSION}" =~ ^[5678]$ ]] \
         || die "published baseline ${FROM_VERSION} resolved to an invalid config version"
 }
 
