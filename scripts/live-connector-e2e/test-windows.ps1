@@ -146,26 +146,29 @@ try {
         $preToolSpec[0].TimeoutSec -eq 30) 'Codex PreToolUse metadata requires broad matching and a 30s budget'
     Assert-True ($stopSpec.Count -eq 1 -and $null -eq $stopSpec[0].Matcher -and
         $stopSpec[0].TimeoutSec -eq 90) 'Codex Stop metadata requires no matcher and a 90s budget'
-    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-config.toml'))
+    $metadataConfig = [IO.Path]::GetFullPath((Join-Path $temp 'codex-metadata-managed_config.toml'))
     $metadataCommand = 'managed-codex-hook-command'
     $healthyMetadata = [pscustomobject]@{
         eventName = 'preToolUse'
         sourcePath = $metadataConfig
         handlerType = 'command'
         enabled = $true
-        isManaged = $false
-        source = 'user'
+        isManaged = $true
+        source = 'legacyManagedConfigFile'
         command = $metadataCommand
         matcher = '*'
         timeoutSec = 30
         statusMessage = $null
         key = $metadataConfig + ':pre_tool_use:0:0'
-        trustStatus = 'trusted'
+        trustStatus = 'managed'
         currentHash = 'sha256:' + ('a' * 64)
     }
     Assert-CodexHookMetadata $healthyMetadata $preToolSpec[0] $metadataCommand $metadataConfig 'fixture' `
         ([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
     foreach ($mutation in @(
+        [pscustomobject]@{ Name = 'unmanaged hook'; Property = 'isManaged'; Value = $false },
+        [pscustomobject]@{ Name = 'user source'; Property = 'source'; Value = 'user' },
+        [pscustomobject]@{ Name = 'private trust state'; Property = 'trustStatus'; Value = 'trusted' },
         [pscustomobject]@{ Name = 'narrow matcher'; Property = 'matcher'; Value = 'Bash' },
         [pscustomobject]@{ Name = 'short timeout'; Property = 'timeoutSec'; Value = 1 },
         [pscustomobject]@{ Name = 'status override'; Property = 'statusMessage'; Value = 'tampered' }
@@ -1162,11 +1165,15 @@ try {
     Assert-True ($nativeHarnessText -match 'connector contract wrote to the default agent home' -and
         $nativeHarnessText -match 'connector contract wrote to the unrelated agent home' -and
         $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
+        $harnessText -match "\$fileName = if \(\$ConnectorName -eq 'codex'\) \{ 'managed_config\.toml' \}" -and
         [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 3 -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.codex\\config\.toml''' -and
         $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.claude\\settings\.json''') `
         'contract setup, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
     Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
+    Assert-True ($nativeHarnessText -match '\.codex\\managed_config\.toml' -and
+        $nativeHarnessText -match 'unrelated Codex managed config byte-for-byte') `
+        'release certification inventories and exactly preserves unrelated Codex managed config'
     $workflowText = $nativeWorkflowText + "`n" + $liveWorkflowText
     Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
     $checkoutCount = [regex]::Matches($workflowText, 'uses:\s*actions/checkout@').Count

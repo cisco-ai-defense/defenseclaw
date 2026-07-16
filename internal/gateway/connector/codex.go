@@ -1625,11 +1625,6 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	if err := ensureCodexConfigDir(filepath.Dir(configPath)); err != nil {
 		return fmt.Errorf("prepare Codex config directory for restore: %w", err)
 	}
-	if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "[codex] managed config restore skipped: %v\n", err)
-	} else if restored {
-		return c.cleanupCodexRestoreArtifacts(opts)
-	}
 	managedBackup, err := loadManagedFileBackupForTransform(
 		opts.DataDir,
 		c.Name(),
@@ -1643,6 +1638,20 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	var transformed atomicTransformResult
 	render := func(raw []byte, exists bool) error {
 		if exact, ok := managedFileBackupTransform(managedBackup, raw, exists); ok {
+			if !exact.Remove {
+				cleaned, changed, err := removeOwnedCodexHooksFromTOML(
+					exact.Data,
+					configPath,
+					filepath.Join(opts.DataDir, "hooks"),
+				)
+				if err != nil {
+					return fmt.Errorf("clean exact-restored Codex hooks: %w", err)
+				}
+				if changed {
+					exact.Data = cleaned
+					exact.Remove = len(cleaned) == 0
+				}
+			}
 			transformed = exact
 			return nil
 		}
@@ -1889,7 +1898,9 @@ func removeOwnedCodexHooksAndState(hooks map[string]interface{}, configPath, hoo
 			return false, fmt.Errorf("hooks.%s has unsupported type %T", eventType, value)
 		}
 		before := codexHookEntryCount(value)
-		remaining := removeOwnedHooks(value, hooksDir)
+		remaining := removeMatchingHookHandlers(value, func(rawHook interface{}) bool {
+			return isOwnedCodexHookHandler(rawHook, hooksDir)
+		})
 		if before != len(remaining) || !codexValueMatches(value, remaining) {
 			changed = true
 		}
@@ -1900,6 +1911,53 @@ func removeOwnedCodexHooksAndState(hooks map[string]interface{}, configPath, hoo
 		}
 	}
 	return changed, nil
+}
+
+// removeOwnedCodexHooksFromTOML removes only DefenseClaw-owned handlers and
+// their matching positional trust records from one Codex TOML document. The
+// original bytes are returned unchanged when there is nothing to remove so an
+// exact backup restore remains byte-for-byte exact for operator-only files.
+//
+// Setup intentionally strips legacy user-scoped registrations while moving the
+// active matrix to managed_config.toml on Windows. A pristine backup captured
+// before that migration may therefore contain an older DefenseClaw matrix. Any
+// exact restore must apply this ownership filter before publishing the restored
+// bytes or uninstall would resurrect a dangling hook.
+func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]byte, bool, error) {
+	cfg := map[string]interface{}{}
+	if len(raw) > 0 {
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			return nil, false, fmt.Errorf("parse Codex config: %w", err)
+		}
+	}
+	rawHooks, present := cfg["hooks"]
+	if !present {
+		return raw, false, nil
+	}
+	hooks, ok := rawHooks.(map[string]interface{})
+	if !ok {
+		return nil, false, fmt.Errorf("hooks has unsupported type %T", rawHooks)
+	}
+	changed, err := removeOwnedCodexHooksAndState(hooks, configPath, hooksDir)
+	if err != nil {
+		return nil, false, err
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	if len(hooks) == 0 {
+		delete(cfg, "hooks")
+	} else {
+		cfg["hooks"] = hooks
+	}
+	if len(cfg) == 0 {
+		return nil, true, nil
+	}
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal restored Codex config: %w", err)
+	}
+	return out, true, nil
 }
 
 func mergeOwnedCodexHooks(
