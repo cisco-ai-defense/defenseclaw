@@ -188,7 +188,7 @@ func extractAllUploadEndpoints(text string) []string {
 	for _, host := range extractCurlUploadHosts(text) {
 		out = append(out, host)
 	}
-	if host := extractWgetPostHost(text); host != "" {
+	for _, host := range extractWgetPostHosts(text) {
 		out = append(out, host)
 	}
 	if host := extractSCPHost(text); host != "" {
@@ -218,12 +218,25 @@ func extractHTTPHost(text string) string {
 }
 
 func extractCurlUploadHosts(text string) []string {
-	seg := curlSegmentRe.FindString(text)
-	if seg == "" || !isCurlUploadSegment(seg) {
+	segments := curlSegmentRe.FindAllString(text, -1)
+	if len(segments) == 0 {
 		return nil
 	}
-	args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "curl"
-	return curlDestinationHosts(args)
+	var hosts []string
+	seen := map[string]bool{}
+	for _, seg := range segments {
+		if !isCurlUploadSegment(seg) {
+			continue
+		}
+		args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "curl"
+		for _, host := range curlDestinationHosts(args) {
+			if !seen[host] {
+				seen[host] = true
+				hosts = append(hosts, host)
+			}
+		}
+	}
+	return hosts
 }
 
 func isCurlUploadSegment(seg string) bool {
@@ -281,30 +294,31 @@ func extractWgetPostHost(text string) string {
 }
 
 func extractWgetPostHosts(text string) []string {
-	seg := wgetSegmentRe.FindString(text)
-	if seg == "" || !strings.Contains(strings.ToLower(seg), "--post-file") {
-		return nil
-	}
-	args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "wget"
 	var hosts []string
 	seen := map[string]bool{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			if host := hostFromURLToken(arg); host != "" && !seen[host] {
-				seen[host] = true
-				hosts = append(hosts, host)
-			}
+	for _, seg := range wgetSegmentRe.FindAllString(text, -1) {
+		if !strings.Contains(strings.ToLower(seg), "--post-file") {
 			continue
 		}
-		if strings.HasPrefix(arg, "--") {
-			name, _, hasValue := splitLongFlag(arg)
-			if wgetLongFlagsWithArg[name] {
-				if !hasValue && i+1 < len(args) {
-					i++
+		args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "wget"
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if !strings.HasPrefix(arg, "-") {
+				if host := hostFromURLToken(arg); host != "" && !seen[host] {
+					seen[host] = true
+					hosts = append(hosts, host)
 				}
+				continue
 			}
-			continue
+			if strings.HasPrefix(arg, "--") {
+				name, _, hasValue := splitLongFlag(arg)
+				if wgetLongFlagsWithArg[name] {
+					if !hasValue && i+1 < len(args) {
+						i++
+					}
+				}
+				continue
+			}
 		}
 	}
 	return hosts
