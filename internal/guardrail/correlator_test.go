@@ -250,6 +250,50 @@ func TestRepoArchiveExfil_FiresOnArchiveThenEgress(t *testing.T) {
 	}
 }
 
+func TestRepoArchiveExfil_FiresOnArchiveThenScpUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-SCP-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	contributing := pattern.Match(window)
+	if len(contributing) != 2 {
+		t.Fatalf("expected 2 contributing findings, got %d: %+v", len(contributing), contributing)
+	}
+}
+
+func TestRepoArchiveExfil_FiresOnArchiveThenRsyncUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-RSYNC-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	contributing := pattern.Match(window)
+	if len(contributing) != 2 {
+		t.Fatalf("expected 2 contributing findings, got %d: %+v", len(contributing), contributing)
+	}
+}
+
+func TestRepoArchiveExfil_DoesNotFireOnDowngradedAllowlistedUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-CURL-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	if got := pattern.Match(window); got != nil {
+		t.Errorf("downgraded MEDIUM upload should not satisfy min_severity HIGH, got %+v", got)
+	}
+}
+
 func TestRepoArchiveExfil_DoesNotFireWithoutEgress(t *testing.T) {
 	set, _ := DefaultCorrelationPatterns()
 	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")

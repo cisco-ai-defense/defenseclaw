@@ -249,10 +249,12 @@ var ruleAxes = map[string][]DataAxis{
 	// Command rules that open an outbound channel (curl/wget upload,
 	// pipe-to-shell from the network). These read no secret on their
 	// own but provide the egress leg of an exfil flow.
-	"CMD-CURL-UPLOAD": {AxisEgressExternal},
-	"CMD-WGET-POST":   {AxisEgressExternal},
-	"CMD-PIPE-CURL":   {AxisEgressExternal},
-	"CMD-PIPE-WGET":   {AxisEgressExternal},
+	"CMD-CURL-UPLOAD":  {AxisEgressExternal},
+	"CMD-WGET-POST":    {AxisEgressExternal},
+	"CMD-SCP-UPLOAD":   {AxisEgressExternal},
+	"CMD-RSYNC-UPLOAD": {AxisEgressExternal},
+	"CMD-PIPE-CURL":    {AxisEgressExternal},
+	"CMD-PIPE-WGET":    {AxisEgressExternal},
 
 	// Command rules that read workspace or environment secrets.
 	"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},

@@ -101,7 +101,9 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-INJ-INSTRUCT":   {AxisIngressUntrusted},
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
 		// Command rules that open an egress channel
-		"CMD-CURL-UPLOAD": {AxisEgressExternal},
+		"CMD-CURL-UPLOAD":  {AxisEgressExternal},
+		"CMD-SCP-UPLOAD":   {AxisEgressExternal},
+		"CMD-RSYNC-UPLOAD": {AxisEgressExternal},
 		// Command rules that read workspace or environment secrets
 		"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
 		"CMD-ENV-DUMP":          {AxisSensitiveAccess},
@@ -172,6 +174,8 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
 		"CMD-CURL-UPLOAD":   CapNetworkFetch,
+		"CMD-SCP-UPLOAD":    CapNetworkFetch,
+		"CMD-RSYNC-UPLOAD":  CapNetworkFetch,
 		"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
 		"CMD-ENCODE-EXFIL":  CapNetworkFetch,
 		"SRC-FETCH":         CapNetworkFetch,

@@ -117,6 +117,18 @@
       ]
     },
     {
+      "id": "CMD-RSYNC-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-SCP-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
       "id": "CMD-WGET-POST",
       "axes": [
         "egress_external"

@@ -75,4 +75,6 @@ patterns:
           - CMD-CURL-UPLOAD
           - CMD-WGET-POST
           - CMD-ARCHIVE-EXFIL
+          - CMD-SCP-UPLOAD
+          - CMD-RSYNC-UPLOAD
         min_severity: HIGH

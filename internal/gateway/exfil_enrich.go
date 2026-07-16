@@ -24,8 +24,12 @@ import (
 
 const artifactEvidencePrefix = "artifact:"
 
+// workspaceArchivePattern matches workspace-scoped recursive archive creation
+// (zip -r/-qr, tar -czf/-czvf, tar czf, git bundle --all).
+const workspaceArchivePattern = `(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b))`
+
 var (
-	archiveArtifactRe    = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-r\b\s+(\S+)\s+\.|\btar\b\s+(?:-[a-zA-Z]+\s+)*-(?:czf|cz|c[jJ]f)\b\s+(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
+	archiveArtifactRe    = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+(\S+)\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
 	curlUploadArtifactRe = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*(?:--upload-file|-T)\s+(\S+)`)
 	curlDataAtRe         = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*--data\s+@(\S+)`)
 	wgetPostArtifactRe   = regexp.MustCompile(`(?i)\bwget\b[^;&|]*--post-file=(\S+)`)
@@ -71,24 +75,21 @@ var wgetLongFlagsWithArg = map[string]bool{
 	"ca-certificate": true, "ca-directory": true,
 }
 
-// allowedExfilEndpointHosts lists known artifact-store hosts. Matching
-// uses exact host or registrable suffix (host == allowed or
-// host.HasSuffix("."+allowed)) to avoid substring spoofing.
-var allowedExfilEndpointHosts = []string{
-	"s3.amazonaws.com",
-	"storage.googleapis.com",
-	"blob.core.windows.net",
-	"github.com",
-	"api.github.com",
-	"gitlab.com",
-	"registry.npmjs.org",
-	"registry.yarnpkg.com",
-}
+// allowedExfilEndpointHosts lists operator-configured artifact-store hosts.
+// Empty by default so broad public hosts (GitHub, GitLab, registries) do not
+// downgrade exfil without explicit tenant policy. Matching uses exact host or
+// registrable suffix (host == allowed or host.HasSuffix("."+allowed)).
+var allowedExfilEndpointHosts []string
 
-// allowedExfilS3Buckets lists CI artifact buckets that may downgrade
-// chained exfil findings when used as explicit upload destinations.
-var allowedExfilS3Buckets = []string{
-	"my-ci-bucket",
+// allowedExfilS3Buckets lists operator-configured CI artifact buckets that
+// may downgrade chained exfil when every upload destination is trusted.
+var allowedExfilS3Buckets []string
+
+// SetExfilAllowlists replaces the operator-trusted upload destinations used
+// for exfil severity downgrades. Call from tenant policy wiring.
+func SetExfilAllowlists(hosts, s3Buckets []string) {
+	allowedExfilEndpointHosts = append([]string(nil), hosts...)
+	allowedExfilS3Buckets = append([]string(nil), s3Buckets...)
 }
 
 // enrichExfilFinding attaches correlator-friendly artifact evidence and
@@ -102,7 +103,7 @@ func enrichExfilFinding(f RuleFinding, text string) RuleFinding {
 		if f.RuleID == "CMD-ARCHIVE-EXFIL" || f.RuleID == "CMD-ENCODE-EXFIL" {
 			f = applyUploadEnrichment(f, text)
 		}
-	case "CMD-CURL-UPLOAD", "CMD-WGET-POST":
+	case "CMD-CURL-UPLOAD", "CMD-WGET-POST", "CMD-SCP-UPLOAD", "CMD-RSYNC-UPLOAD":
 		f = applyUploadEnrichment(f, text)
 	}
 	return f
@@ -116,12 +117,22 @@ func applyUploadEnrichment(f RuleFinding, text string) RuleFinding {
 	}
 	if ep := primaryUploadEndpoint(text); ep != "" {
 		f.ExternalEndpoint = ep
-		if allUploadDestinationsAllowlisted(text) &&
-			(f.RuleID == "CMD-ARCHIVE-EXFIL" || f.RuleID == "CMD-ENCODE-EXFIL") {
+		if allUploadDestinationsAllowlisted(text) && shouldDowngradeAllowlistedExfil(f.RuleID, f.Evidence) {
 			f.Severity = "MEDIUM"
 		}
 	}
 	return f
+}
+
+func shouldDowngradeAllowlistedExfil(ruleID, evidence string) bool {
+	switch ruleID {
+	case "CMD-ARCHIVE-EXFIL", "CMD-ENCODE-EXFIL":
+		return true
+	case "CMD-CURL-UPLOAD", "CMD-WGET-POST", "CMD-SCP-UPLOAD", "CMD-RSYNC-UPLOAD":
+		return strings.HasPrefix(evidence, artifactEvidencePrefix)
+	default:
+		return false
+	}
 }
 
 func extractArchiveArtifact(text string) string {
@@ -194,6 +205,9 @@ func extractAllUploadEndpoints(text string) []string {
 	if host := extractSCPHost(text); host != "" {
 		out = append(out, host)
 	}
+	if host := extractRsyncHost(text); host != "" {
+		out = append(out, host)
+	}
 	return out
 }
 
@@ -218,12 +232,21 @@ func extractHTTPHost(text string) string {
 }
 
 func extractCurlUploadHosts(text string) []string {
-	seg := curlSegmentRe.FindString(text)
-	if seg == "" || !isCurlUploadSegment(seg) {
-		return nil
+	var hosts []string
+	seen := map[string]bool{}
+	for _, seg := range curlSegmentRe.FindAllString(text, -1) {
+		if !isCurlUploadSegment(seg) {
+			continue
+		}
+		args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "curl"
+		for _, host := range curlDestinationHosts(args) {
+			if !seen[host] {
+				seen[host] = true
+				hosts = append(hosts, host)
+			}
+		}
 	}
-	args := tokenizeShellArgs(strings.TrimSpace(seg[4:])) // skip "curl"
-	return curlDestinationHosts(args)
+	return hosts
 }
 
 func isCurlUploadSegment(seg string) bool {
@@ -335,7 +358,14 @@ func hostFromURLToken(token string) string {
 }
 
 func extractSCPHost(text string) string {
-	dest := extractSCPDestination(text)
+	return remoteHostFromTarget(extractSCPDestination(text))
+}
+
+func extractRsyncHost(text string) string {
+	return remoteHostFromTarget(extractRsyncDestination(text))
+}
+
+func remoteHostFromTarget(dest string) string {
 	if dest == "" {
 		return ""
 	}
@@ -347,6 +377,20 @@ func extractSCPHost(text string) string {
 		target = target[:colon]
 	}
 	return strings.ToLower(target)
+}
+
+func extractRsyncDestination(text string) string {
+	args := rsyncArgs(text)
+	if len(args) == 0 {
+		return ""
+	}
+	start := skipRsyncFlags(args)
+	for j := len(args) - 1; j >= start; j-- {
+		if isRemoteTarget(args[j]) {
+			return args[j]
+		}
+	}
+	return ""
 }
 
 func extractSCPDestination(text string) string {

@@ -115,6 +115,8 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	// Outbound network fetch / listener.
 	"CMD-CURL-UPLOAD":   CapNetworkFetch,
 	"CMD-WGET-POST":     CapNetworkFetch,
+	"CMD-SCP-UPLOAD":    CapNetworkFetch,
+	"CMD-RSYNC-UPLOAD":  CapNetworkFetch,
 	"CMD-PIPE-CURL":     CapNetworkFetch,
 	"CMD-PIPE-WGET":     CapNetworkFetch,
 	"CMD-ARCHIVE-EXFIL": CapNetworkFetch,
