@@ -140,6 +140,13 @@ observability: {}
 	if err := verifyGatewayRuntimeIdentity(status, managedPID, home); err != nil {
 		t.Fatal(err)
 	}
+	if data, err := os.ReadFile(filepath.Join(home, ".env")); err == nil {
+		if strings.Contains(string(data), "DEFENSECLAW_GATEWAY_TOKEN=") || strings.Contains(string(data), "OPENCLAW_GATEWAY_TOKEN=") {
+			t.Fatal("inline-token startup unexpectedly persisted a divergent gateway token in .env")
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("inspect inline-token startup dotenv: %v", err)
+	}
 	repeatOutput, repeatExit := runGatewayExecutablePowerShell(t, binary, home, "start")
 	if repeatExit != 0 || !strings.Contains(repeatOutput, "already running") {
 		t.Fatalf("authenticated repeated start = exit %d; output:\n%s", repeatExit, repeatOutput)

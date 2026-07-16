@@ -706,20 +706,17 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 		})
 		finished <- applyErr
 	}()
-	select {
-	case err := <-finished:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("unsigned health reporter deadlocked while closing the alert store")
-	}
+	// First wait until the callback has actually started. On a saturated
+	// Windows runner the Apply goroutine may not be scheduled within the
+	// deadlock budget; measuring from this signal keeps the assertion focused
+	// on whether Close can acquire lifecycle ownership after the writer released
+	// it, rather than on unrelated scheduler latency.
 	select {
 	case code := <-reporter.codes:
 		if code != EventHistoryHealthUnsigned {
 			t.Fatalf("health code = %q", code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for unsigned health report")
 	}
 	select {
@@ -728,7 +725,15 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 			t.Fatalf("reentrant close: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for reentrant close result")
+		t.Fatal("unsigned health reporter deadlocked while closing the alert store")
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("alert acknowledgement did not return after the reporter completed")
 	}
 }
 

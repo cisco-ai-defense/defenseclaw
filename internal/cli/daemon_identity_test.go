@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -341,6 +342,56 @@ func TestDaemonGatewayTokenReadsDisposableHome(t *testing.T) {
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	if got := daemonGatewayToken(cfg); got != "disposable" {
 		t.Fatalf("token = %q, want disposable home token", got)
+	}
+}
+
+func TestDaemonGatewayTokenMatchesChildDotenvPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=installed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "stale-parent")
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Token = "stale-inline"
+
+	if got := daemonGatewayToken(cfg); got != "installed" {
+		t.Fatalf("token = %q, want child dotenv token", got)
+	}
+}
+
+func TestDaemonGatewayTokenPreservesCustomEnvironmentPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=installed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUSTOM_GATEWAY_TOKEN", "managed-override")
+	cfg := config.DefaultConfig()
+	cfg.Gateway.TokenEnv = "CUSTOM_GATEWAY_TOKEN"
+	cfg.Gateway.Token = "stale-inline"
+
+	if got := daemonGatewayToken(cfg); got != "managed-override" {
+		t.Fatalf("token = %q, want custom environment token", got)
+	}
+}
+
+func TestDaemonGatewayTokenMatchesWindowsCaseInsensitiveChildPrecedence(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment names are case-insensitive")
+	}
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("defenseclaw_gateway_token=installed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DeFeNsEcLaW_GaTeWaY_ToKeN", "stale-parent")
+	cfg := config.DefaultConfig()
+	cfg.Gateway.TokenEnv = "dEfEnSeClAw_GaTeWaY_tOkEn"
+	cfg.Gateway.Token = "stale-inline"
+
+	if got := daemonGatewayToken(cfg); got != "installed" {
+		t.Fatalf("token = %q, want mixed-case child dotenv token", got)
 	}
 }
 

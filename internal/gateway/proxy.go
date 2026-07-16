@@ -337,6 +337,7 @@ func NewGuardrailProxy(
 	health *SidecarHealth,
 	store *audit.Store,
 	dataDir string,
+	gatewayToken string,
 	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
@@ -374,15 +375,13 @@ func NewGuardrailProxy(
 
 	masterKey := deriveMasterKey(dataDir)
 
-	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
-	// set. The previous "warn and trust loopback" path was a local-IDOR
-	// risk — any process on the host could relay through the proxy.
-	// EnsureGatewayToken is idempotent: the second call returns the
-	// same value, so subsequent boots and the API server's parallel
-	// init see identical tokens.
-	gatewayToken, err := EnsureGatewayToken(dotenvPath)
-	if err != nil {
-		return nil, fmt.Errorf("gateway token: %w", err)
+	// Sidecar resolves or synthesizes the gateway token synchronously before
+	// starting the API and guardrail runtimes. Reuse that exact credential
+	// here. Independently calling EnsureGatewayToken would generate a dotenv
+	// token when the configured credential was inline, causing the proxy and
+	// daemon readiness/status clients to diverge from the already-running API.
+	if strings.TrimSpace(gatewayToken) == "" {
+		return nil, errors.New("gateway token is unavailable")
 	}
 
 	// Inject credentials into the connector so its Authenticate() method

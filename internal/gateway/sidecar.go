@@ -2516,6 +2516,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.health,
 		s.store,
 		s.currentConfig().DataDir,
+		apiToken,
 		s.currentConfig().PolicyDir,
 		s.notify,
 		rp,

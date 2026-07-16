@@ -2839,7 +2839,11 @@ class TestUpgradeWheelInstall(unittest.TestCase):
 
             _install_wheel("/tmp/defenseclaw.whl")
 
-        pip_call = run_mock.call_args_list[-1].args[0]
+        pip_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][:4] == ["/usr/bin/uv", "--no-config", "pip", "install"]
+        )
         self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertEqual(pip_call[5], venv_python)
 
@@ -2860,7 +2864,11 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                 exact_environment=True,
             )
 
-        args = run_mock.call_args.args[0]
+        args = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][:4] == ["/usr/bin/uv", "--no-config", "pip", "install"]
+        )
         self.assertIn("--offline", args)
         self.assertIn("--no-deps", args)
         self.assertIn("--reinstall", args)
@@ -4476,6 +4484,29 @@ class TestChecksumVerification(unittest.TestCase):
                 result,
                 {"defenseclaw_9.9.9_darwin_arm64.tar.gz": sha},
             )
+
+    def test_download_checksums_forwards_native_embedded_verifier_requirement(self):
+        with (
+            TemporaryDirectory() as tmp,
+            patch("defenseclaw.commands.cmd_upgrade.requests.get") as get_mock,
+            patch("defenseclaw.commands.cmd_upgrade._verify_checksums_sigstore") as verify_sigstore,
+        ):
+            sha = "a" * 64
+            get_mock.return_value = Mock(
+                status_code=200,
+                content=f"{sha}  DefenseClawSetup-x64.exe\n".encode(),
+            )
+
+            result = _download_checksums("9.9.9", tmp, require_sigstore=True)
+
+            verify_sigstore.assert_called_once_with(
+                "9.9.9",
+                tmp,
+                os.path.join(tmp, "checksums.txt"),
+                allow_unverified=False,
+                require_embedded_verifier=True,
+            )
+            self.assertEqual(result, {"DefenseClawSetup-x64.exe": sha})
 
     def test_download_checksums_normalizes_find_dot_prefix(self):
         """The Makefile-generated checksum manifest strips this now, but
