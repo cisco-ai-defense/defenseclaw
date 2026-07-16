@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
@@ -306,11 +307,25 @@ class NativeValidator:
                 raise PublicationError("native rule-pack validation failed; candidate was not published")
 
 
+def _is_loopback_host(host: str) -> bool:
+    candidate = (host or "").strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    if not candidate or candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
 class GatewayClient:
     def __init__(self, *, bind: str, port: int, token: str, timeout: float = 10.0) -> None:
         host = (bind or "127.0.0.1").strip()
         if host in {"0.0.0.0", "::", "[::]", "localhost"}:
             host = "127.0.0.1"
+        if token and not _is_loopback_host(host):
+            raise ActivationError("refusing to send gateway token to non-loopback api_bind")
         elif ":" in host and not host.startswith("["):
             host = f"[{host}]"
         self.base_url = f"http://{host}:{port}"

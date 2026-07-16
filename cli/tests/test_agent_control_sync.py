@@ -362,6 +362,12 @@ class ConfigTests(unittest.TestCase):
         client = GatewayClient(bind="::1", port=43123, token="test-token")
         self.assertEqual(client.base_url, "http://[::1]:43123")
 
+    def test_gateway_client_refuses_token_for_non_loopback_bind(self) -> None:
+        for bind in ("attacker.invalid", "10.0.0.8", "192.168.65.2"):
+            with self.subTest(bind=bind):
+                with self.assertRaisesRegex(ActivationError, "non-loopback api_bind"):
+                    GatewayClient(bind=bind, port=43123, token="test-token")
+
     def test_gateway_client_rejects_malformed_artifact_status(self) -> None:
         client = GatewayClient(bind="127.0.0.1", port=43123, token="test-token")
         client._request = lambda *_args: {}  # type: ignore[method-assign]
