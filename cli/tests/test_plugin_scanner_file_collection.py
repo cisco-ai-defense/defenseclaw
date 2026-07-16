@@ -19,12 +19,16 @@
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw.scanner.plugin_scanner.analyzers import scan_directory_structure
 from defenseclaw.scanner.plugin_scanner.helpers import collect_files
 from defenseclaw.scanner.plugin_scanner.scanner import _load_manifest, scan_plugin
 
@@ -57,7 +61,9 @@ class TestCollectFilesSymlinks(unittest.TestCase):
 
         escapes: list[str] = []
         files = collect_files(
-            self.plugin_dir, [".js"], _symlink_escapes=escapes,
+            self.plugin_dir,
+            [".js"],
+            _symlink_escapes=escapes,
         )
         # secret.js should NOT be collected
         basenames = [os.path.basename(f) for f in files]
@@ -108,8 +114,7 @@ class TestCollectFilesSymlinks(unittest.TestCase):
         # Cycle detection prevents unbounded growth — file count must be
         # finite and small (no more than a handful of the fixture files,
         # even if some are seen via the symlink before the cycle is caught).
-        self.assertLess(len(files), 20,
-                        "symlink cycle produced too many files — cycle detection may be broken")
+        self.assertLess(len(files), 20, "symlink cycle produced too many files — cycle detection may be broken")
 
 
 class TestCollectFilesDotDirs(unittest.TestCase):
@@ -179,7 +184,9 @@ class TestCollectFilesDepthLimit(unittest.TestCase):
         """With the old limit of 4, deep files would be missed."""
         truncations: list[str] = []
         files = collect_files(
-            self.plugin_dir, [".js"], max_depth=4,
+            self.plugin_dir,
+            [".js"],
+            max_depth=4,
             _depth_truncations=truncations,
         )
         basenames = [os.path.basename(f) for f in files]
@@ -191,7 +198,9 @@ class TestCollectFilesDepthLimit(unittest.TestCase):
         """When depth limit is hit, the directory path should be recorded."""
         truncations: list[str] = []
         collect_files(
-            self.plugin_dir, [".js"], max_depth=2,
+            self.plugin_dir,
+            [".js"],
+            max_depth=2,
             _depth_truncations=truncations,
         )
         self.assertTrue(len(truncations) > 0)
@@ -349,6 +358,253 @@ class TestLoadManifestCodexAndClaude(unittest.TestCase):
         )
 
 
+class TestStandardManifestDirectoryStructure(unittest.TestCase):
+    """Standard manifest directories are recognized without hiding payloads."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    @staticmethod
+    def _write_manifest_directory(root: str, directory_name: str) -> str:
+        manifest_dir = os.path.join(root, directory_name)
+        os.makedirs(manifest_dir)
+        with open(os.path.join(manifest_dir, "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "name": "inert-fixture-plugin",
+                    "description": "Inert plugin scanner fixture",
+                    "version": "1.0.0",
+                    "author": {"name": "Fixture Author"},
+                },
+                f,
+                indent=2,
+            )
+            f.write("\n")
+        commands = os.path.join(root, "commands")
+        os.makedirs(commands, exist_ok=True)
+        with open(os.path.join(commands, "inspect.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\ndescription: Inspect the inert fixture\n---\n\nDescribe the fixture without executing commands.\n"
+            )
+        return manifest_dir
+
+    @staticmethod
+    def _has_location(result, rule_id: str, suffix: str) -> bool:
+        normalized_suffix = suffix.replace("\\", "/")
+        return any(
+            finding.rule_id == rule_id and finding.location.replace("\\", "/").endswith(normalized_suffix)
+            for finding in result.findings
+        )
+
+    def test_standard_manifest_directories_load_without_hidden_finding(self):
+        for directory_name, source in (
+            (".claude-plugin", "claude.plugin.json"),
+            (".codex-plugin", "codex.plugin.json"),
+        ):
+            with self.subTest(directory_name=directory_name):
+                root = os.path.join(self.tmp, directory_name.removeprefix("."))
+                os.makedirs(root)
+                self._write_manifest_directory(root, directory_name)
+
+                manifest = _load_manifest(root)
+                self.assertIsNotNone(manifest)
+                self.assertEqual(manifest.source, source)
+
+                result = scan_plugin(root)
+                self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", f"/{directory_name}"))
+                self.assertNotIn("MANIFEST-MISSING", [finding.rule_id for finding in result.findings])
+
+    def test_regular_file_named_like_manifest_directory_remains_hidden(self):
+        root = os.path.join(self.tmp, "regular-file")
+        os.makedirs(root)
+        with open(os.path.join(root, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "fixture", "version": "1.0.0"}, f)
+        with open(os.path.join(root, ".claude-plugin"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+
+        result = scan_plugin(root)
+
+        self.assertTrue(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin"))
+
+    def test_root_hidden_and_lookalike_directories_remain_hidden(self):
+        root = os.path.join(self.tmp, "lookalikes")
+        os.makedirs(root)
+        with open(os.path.join(root, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "fixture", "version": "1.0.0"}, f)
+        os.makedirs(os.path.join(root, ".unexpected"))
+        os.makedirs(os.path.join(root, ".claude-plugins"))
+
+        result = scan_plugin(root)
+
+        self.assertTrue(self._has_location(result, "STRUCT-HIDDEN", "/.unexpected"))
+        self.assertTrue(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugins"))
+
+    def test_manifest_directory_direct_context_keeps_hidden_and_hazard_findings(self):
+        root = os.path.join(self.tmp, "hazards")
+        os.makedirs(root)
+        manifest_dir = self._write_manifest_directory(root, ".claude-plugin")
+        with open(os.path.join(manifest_dir, ".unexpected"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+        with open(os.path.join(manifest_dir, ".env"), "w", encoding="utf-8") as f:
+            f.write("INERT_FIXTURE=true\n")
+        nested = os.path.join(manifest_dir, "nested")
+        os.makedirs(nested)
+        with open(os.path.join(nested, ".unexpected"), "w", encoding="utf-8") as f:
+            f.write("inert nested fixture\n")
+        with open(os.path.join(nested, "fixture.exe"), "wb") as f:
+            f.write(b"inert binary fixture")
+        with open(os.path.join(nested, "inspect.sh"), "w", encoding="utf-8") as f:
+            f.write("# inert script fixture\n")
+        normally_skipped = os.path.join(manifest_dir, ".git")
+        os.makedirs(normally_skipped)
+        with open(os.path.join(normally_skipped, "concealed.exe"), "wb") as f:
+            f.write(b"inert concealed fixture")
+        ordinary_nested = os.path.join(root, "src")
+        os.makedirs(ordinary_nested)
+        with open(os.path.join(ordinary_nested, ".ordinary"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+
+        result = scan_plugin(root)
+
+        self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin"))
+        self.assertTrue(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin/.unexpected"))
+        self.assertTrue(self._has_location(result, "STRUCT-ENV-FILE", "/.claude-plugin/.env"))
+        self.assertTrue(self._has_location(result, "STRUCT-BINARY", "/.claude-plugin/nested/fixture.exe"))
+        self.assertTrue(self._has_location(result, "STRUCT-SCRIPT", "/.claude-plugin/nested/inspect.sh"))
+        self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin/nested/.unexpected"))
+        self.assertFalse(self._has_location(result, "STRUCT-BINARY", "/.claude-plugin/.git/concealed.exe"))
+        self.assertTrue(self._has_location(result, "STRUCT-NATIVE-IN-SKIPDIR", ".claude-plugin/.git/concealed.exe"))
+        self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", "/src/.ordinary"))
+        collected = collect_files(root, [".exe"])
+        self.assertNotIn(
+            os.path.normcase(os.path.abspath(os.path.join(normally_skipped, "concealed.exe"))),
+            {os.path.normcase(os.path.abspath(path)) for path in collected},
+        )
+
+    def test_missing_or_malformed_standard_manifest_keeps_manifest_failure(self):
+        for label, manifest_text in (("missing", None), ("malformed", "{ malformed fixture")):
+            with self.subTest(label=label):
+                root = os.path.join(self.tmp, label)
+                manifest_dir = os.path.join(root, ".claude-plugin")
+                os.makedirs(manifest_dir)
+                if manifest_text is not None:
+                    with open(os.path.join(manifest_dir, "plugin.json"), "w", encoding="utf-8") as f:
+                        f.write(manifest_text)
+
+                result = scan_plugin(root)
+
+                self.assertIn("MANIFEST-MISSING", [finding.rule_id for finding in result.findings])
+                self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin"))
+
+    @requires_symlink_privilege
+    def test_symlinked_standard_manifest_directory_is_not_loaded_or_followed(self):
+        root = os.path.join(self.tmp, "symlink")
+        target = os.path.join(root, "node_modules", "manifest-target")
+        os.makedirs(target)
+        with open(os.path.join(target, "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "linked-fixture", "version": "1.0.0"}, f)
+        with open(os.path.join(target, ".unexpected"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+        os.symlink(target, os.path.join(root, ".claude-plugin"), target_is_directory=True)
+
+        self.assertIsNone(_load_manifest(root))
+        result = scan_plugin(root)
+
+        self.assertIn("MANIFEST-MISSING", [finding.rule_id for finding in result.findings])
+        self.assertTrue(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin"))
+        self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", "/.claude-plugin/.unexpected"))
+
+    def test_reparse_standard_manifest_directory_is_not_loaded_or_followed(self):
+        root = os.path.join(self.tmp, "reparse")
+        os.makedirs(root)
+        manifest_dir = self._write_manifest_directory(root, ".claude-plugin")
+        with open(os.path.join(manifest_dir, ".unexpected"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+        original_lstat = os.lstat
+        manifest_key = os.path.normcase(os.path.abspath(manifest_dir))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+        def mocked_lstat(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if os.path.normcase(os.path.abspath(path)) == manifest_key:
+                return SimpleNamespace(
+                    st_mode=info.st_mode,
+                    st_file_attributes=reparse_flag,
+                )
+            return info
+
+        with patch("defenseclaw.scanner.plugin_scanner.helpers.os.lstat", side_effect=mocked_lstat):
+            self.assertIsNone(_load_manifest(root))
+            findings = []
+            scan_directory_structure(root, findings)
+
+        self.assertTrue(
+            any(
+                finding.rule_id == "STRUCT-HIDDEN" and finding.location.replace("\\", "/").endswith("/.claude-plugin")
+                for finding in findings
+            )
+        )
+        self.assertFalse(any(finding.location.replace("\\", "/").endswith("/.unexpected") for finding in findings))
+
+    def test_manifest_directory_lstat_failure_is_hidden_and_not_traversed(self):
+        root = os.path.join(self.tmp, "manifest-lstat-error")
+        os.makedirs(root)
+        manifest_dir = self._write_manifest_directory(root, ".claude-plugin")
+        with open(os.path.join(manifest_dir, ".unexpected"), "w", encoding="utf-8") as f:
+            f.write("inert fixture\n")
+        original_lstat = os.lstat
+        manifest_key = os.path.normcase(os.path.abspath(manifest_dir))
+
+        def mocked_lstat(path, *args, **kwargs):
+            if os.path.normcase(os.path.abspath(path)) == manifest_key:
+                raise PermissionError("inert lstat failure")
+            return original_lstat(path, *args, **kwargs)
+
+        with patch("defenseclaw.scanner.plugin_scanner.helpers.os.lstat", side_effect=mocked_lstat):
+            self.assertIsNone(_load_manifest(root))
+            findings = []
+            scan_directory_structure(root, findings)
+            collected = collect_files(root, [".json"])
+
+        self.assertTrue(
+            any(
+                finding.rule_id == "STRUCT-HIDDEN" and finding.location.replace("\\", "/").endswith("/.claude-plugin")
+                for finding in findings
+            )
+        )
+        self.assertFalse(any(finding.location.replace("\\", "/").endswith("/.unexpected") for finding in findings))
+        self.assertEqual(collected, [])
+
+    def test_nested_lstat_failure_is_not_traversed(self):
+        root = os.path.join(self.tmp, "nested-lstat-error")
+        os.makedirs(root)
+        manifest_dir = self._write_manifest_directory(root, ".claude-plugin")
+        blocked = os.path.join(manifest_dir, "blocked")
+        os.makedirs(blocked)
+        blocked_file = os.path.join(blocked, "blocked.py")
+        with open(blocked_file, "w", encoding="utf-8") as f:
+            f.write("# inert blocked fixture\n")
+        original_lstat = os.lstat
+        blocked_key = os.path.normcase(os.path.abspath(blocked))
+
+        def mocked_lstat(path, *args, **kwargs):
+            if os.path.normcase(os.path.abspath(path)) == blocked_key:
+                raise PermissionError("inert traversal lstat failure")
+            return original_lstat(path, *args, **kwargs)
+
+        with patch("defenseclaw.scanner.plugin_scanner.helpers.os.lstat", side_effect=mocked_lstat):
+            findings = []
+            scan_directory_structure(root, findings)
+            collected = collect_files(root, [".py"])
+
+        self.assertFalse(any("blocked.py" in finding.location for finding in findings))
+        self.assertNotIn(
+            os.path.normcase(os.path.abspath(blocked_file)),
+            {os.path.normcase(os.path.abspath(path)) for path in collected},
+        )
+
+
 class TestNoManifestStillScans(unittest.TestCase):
     """A plugin with no manifest at all should still get source-scanned."""
 
@@ -407,9 +663,7 @@ class TestNoManifestStillScans(unittest.TestCase):
             json.dump(
                 {
                     "id": "oc-json-plugin",
-                    "config": {
-                        "metadata_url": "http://169.254.169.254/latest/meta-data"
-                    },
+                    "config": {"metadata_url": "http://169.254.169.254/latest/meta-data"},
                 },
                 f,
             )
