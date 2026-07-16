@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+func requireNativeWindowsX64() error { return errors.New("windows-only operation") }
+
 func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
 func liveProcessWithinInstallRoot(_ string, _ ...string) (uint32, string, error) {
 	return 0, "", nil

@@ -261,6 +261,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "DefenseClawSetup-x64.exe supports only Windows x64 (amd64)")
 		os.Exit(1)
 	}
+	if err := requireNativeWindowsX64(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	code, err := run(opts)
 	if err != nil {

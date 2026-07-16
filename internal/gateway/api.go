@@ -1036,7 +1036,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		ToolInspectionMode string `json:"tool_inspection_mode"`
 		SubprocessPolicy   string `json:"subprocess_policy"`
 		PlatformStatus     string `json:"platform_status"`
-		PlatformReason     string `json:"platform_reason"`
+		PlatformReason     string `json:"platform_reason,omitempty"`
 		// LLMTrafficMode ("proxy" | "hooks-only") tells the CLI whether a
 		// custom provider bound to this connector is enforced on the
 		// agent's own model traffic or only configures DefenseClaw's
