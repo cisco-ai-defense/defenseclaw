@@ -123,8 +123,6 @@ func TestExfilJudge_AllFalseAllows(t *testing.T) {
 // TestExfilJudge_RepoArchiveExfiltrationBlocks verifies the third
 // exfil judge category is wired through exfilToVerdict.
 func TestExfilJudge_RepoArchiveExfiltrationBlocks(t *testing.T) {
-	_ = withCapturedEvents(t)
-
 	const repoJSON = `{
   "Sensitive File Access": {"reasoning": "No credential file read.", "label": false, "signal_strength": "weak_signal"},
   "Exfiltration Channel": {"reasoning": "No standalone channel.", "label": false, "signal_strength": "weak_signal"},
