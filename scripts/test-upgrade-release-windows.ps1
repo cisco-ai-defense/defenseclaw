@@ -166,13 +166,15 @@ function Read-UpgradeBaselinePolicy {
     foreach ($value in $values) {
         $property = Get-Property $configVersions.Value ([string]$value)
         if (-not $property -or -not (Test-Integer $property.Value)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
+            Fail "Published baseline $value has no reviewed config version in {5,6,7,8}"
         }
         $configVersion = [int64]$property.Value
-        if ($configVersion -notin @(5, 6, 7)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
+        if ($configVersion -notin @(5, 6, 7, 8)) {
+            Fail "Published baseline $value has no reviewed config version in {5,6,7,8}"
         }
-        $expectedConfigVersion = if ((Compare-Version ([string]$value) "0.8.3") -ge 0) {
+        $expectedConfigVersion = if ((Compare-Version ([string]$value) "0.8.5") -ge 0) {
+            8
+        } elseif ((Compare-Version ([string]$value) "0.8.3") -ge 0) {
             7
         } elseif ((Compare-Version ([string]$value) "0.7.1") -ge 0) {
             6

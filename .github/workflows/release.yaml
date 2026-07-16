@@ -198,10 +198,10 @@ jobs:
                   "published_baseline_config_versions keys must exactly match published baselines"
               )
           if any(
-              not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7}
+              not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7, 8}
               for value in config_versions.values()
           ):
-              raise SystemExit("published baseline config versions must be integers in {5, 6, 7}")
+              raise SystemExit("published baseline config versions must be integers in {5, 6, 7, 8}")
           platforms = document.get("platform_published_baselines")
           if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
               raise SystemExit("platform_published_baselines must contain exactly windows")
@@ -268,6 +268,8 @@ jobs:
       contents: read
     outputs:
       artifact_name: ${{ steps.names.outputs.runtime }}
+      artifact_id: ${{ steps.runtime-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.runtime-artifact.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -366,7 +368,8 @@ jobs:
             --output-dir runtime-candidate \
             --version "$RELEASE_TAG"
 
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: runtime-artifact
         with:
           name: ${{ steps.names.outputs.runtime }}
           path: runtime-candidate/
@@ -455,7 +458,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.names.outputs.macos }}
           path: macos-candidate/
@@ -463,9 +466,190 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  windows-installer:
+    name: Build and test signed native Windows Setup
+    needs: [release-preflight, build-runtime-candidate]
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-installer-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-installer-artifact.outputs.artifact-digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.14"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build-runtime-candidate.outputs.artifact_id }}
+          path: candidate-input/runtime
+          merge-multiple: true
+
+      - name: Extract authenticated Windows installer inputs
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ needs.build-runtime-candidate.outputs.artifact_digest }}
+        run: |
+          if ($env:RUNTIME_ARTIFACT_DIGEST -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') {
+            throw 'The protected runtime artifact has no immutable SHA-256 digest.'
+          }
+          python scripts/release_candidate.py extract-windows-installer-inputs `
+            --release-dir candidate-input/runtime `
+            --output-dir windows-installer-inputs `
+            --version "$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require real Authenticode release credentials
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            throw 'Authenticode credentials are required for DefenseClawSetup-x64.exe.'
+          }
+
+      - name: Build and Authenticode-sign native Setup
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: >-
+          ./scripts/build-windows-installer.ps1
+          -DistRoot windows-installer-inputs
+          -OutRoot windows-installer-output
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-windows-installer-build')
+          -Version $env:RELEASE_TAG
+          -DistributionFlavor oss
+
+      - name: Validate the exact signed Setup lifecycle as a standard user
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -ArtifactRoot windows-installer-output
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-acceptance')
+          -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-diagnostics')
+          -TimeoutSeconds 4500
+
+      - name: Upload exact signed Windows Setup metadata
+        id: windows-installer-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-installer-output/DefenseClawSetup-x64.exe
+            windows-installer-output/DefenseClawSetup-x64.exe.sha256
+            windows-installer-output/DefenseClawSetup-x64.exe.provenance.json
+            windows-installer-output/DefenseClawSetup-x64.exe.sbom.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-real-client-certification:
+    name: Certify signed Setup with real Windows clients
+    needs: [release-preflight, windows-installer]
+    runs-on: windows-latest
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-certified-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-certified-artifact.outputs.artifact-digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.14"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-installer.outputs.artifact_id }}
+          path: windows-certified
+          merge-multiple: true
+
+      - name: Require both real-client provider credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
+            throw 'OPENAI_API_KEY and ANTHROPIC_API_KEY are required for Windows release certification.'
+          }
+
+      - name: Certify the exact signed Setup with pinned Codex and Claude Code
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
+        run: >-
+          ./scripts/windows-native-ci.ps1
+          -Operation release-certification
+          -ArtifactRoot windows-certified
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-real-client-certification')
+
+      - name: Upload real-client diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-real-client-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/defenseclaw-real-client-certification/diagnostics/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/logs/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/real-client-results.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Upload certified native Windows Setup assets
+        id: windows-certified-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-certified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-certified/DefenseClawSetup-x64.exe
+            windows-certified/DefenseClawSetup-x64.exe.sha256
+            windows-certified/DefenseClawSetup-x64.exe.provenance.json
+            windows-certified/DefenseClawSetup-x64.exe.sbom.json
+            windows-certified/DefenseClawSetup-x64.exe.certification.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   assemble-release-candidate:
     name: Seal exact release candidate
-    needs: [release-preflight, build-runtime-candidate, macos-app]
+    needs: [release-preflight, build-runtime-candidate, macos-app, windows-real-client-certification]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -496,7 +680,25 @@ jobs:
           name: ${{ needs.macos-app.outputs.artifact_name }}
           path: candidate-input/macos
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-real-client-certification.outputs.artifact_id }}
+          path: candidate-input/windows
+          merge-multiple: true
+
+      - name: Require immutable certified Windows artifact identity
+        env:
+          WINDOWS_CERTIFIED_ARTIFACT_DIGEST: ${{ needs.windows-real-client-certification.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$WINDOWS_CERTIFIED_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
+            echo "::error title=Missing Windows custody digest::The certified Setup artifact has no immutable SHA-256 digest."
+            exit 1
+          }
+
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - name: Resolve immutable published bridge provenance
         id: bridge
@@ -669,6 +871,7 @@ jobs:
           python3 scripts/release_candidate.py assemble \
             --runtime-dir candidate-input/runtime \
             --macos-dir candidate-input/macos \
+            --windows-dir candidate-input/windows \
             --root release-candidate \
             --version "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
@@ -680,12 +883,15 @@ jobs:
           set -euo pipefail
           cosign sign-blob \
             --yes \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
             --output-certificate=release-candidate/dist/checksums.txt.pem \
             --output-signature=release-candidate/dist/checksums.txt.sig \
             release-candidate/dist/checksums.txt
           python3 scripts/release_candidate.py canonicalize-certificate \
             --certificate release-candidate/dist/checksums.txt.pem
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -842,7 +1048,7 @@ jobs:
               )
           PY
 
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
           name: ${{ steps.names.outputs.candidate }}
@@ -870,6 +1076,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -885,6 +1093,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -896,7 +1106,6 @@ jobs:
   windows-fresh-install:
     name: Fresh install sealed candidate (Windows)
     needs: [release-preflight, assemble-release-candidate]
-    if: ${{ false }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -904,18 +1113,24 @@ jobs:
           ref: ${{ needs.release-preflight.outputs.commit }}
           persist-credentials: false
 
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
           path: release-candidate
 
-      - name: Verify and install the exact sealed candidate on a fresh host
+      - name: Verify and exercise the exact sealed Setup on a fresh host
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
@@ -925,15 +1140,52 @@ jobs:
             --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cosign verify-blob `
+            --bundle=release-candidate/dist/checksums.txt.bundle `
+            --offline `
             --certificate release-candidate/dist/checksums.txt.pem `
             --signature release-candidate/dist/checksums.txt.sig `
             --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
             release-candidate/dist/checksums.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -NoProfile -File scripts/test-fresh-install-release-windows.ps1 `
-            -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
-            -TargetVersion "$env:RELEASE_TAG"
+
+          # The sealed public candidate intentionally contains only the five
+          # Setup custody assets. Build the three test-only PE resource probes
+          # from this exact reviewed checkout in RUNNER_TEMP, and prove the
+          # copied Setup remains byte-identical before launching acceptance.
+          $acceptanceRoot = Join-Path $env:RUNNER_TEMP 'defenseclaw-sealed-setup-inputs'
+          if (Test-Path -LiteralPath $acceptanceRoot) {
+            throw "sealed Setup acceptance root already exists: $acceptanceRoot"
+          }
+          [IO.Directory]::CreateDirectory($acceptanceRoot) | Out-Null
+          $sealedSetup = Join-Path $env:GITHUB_WORKSPACE 'release-candidate/dist/DefenseClawSetup-x64.exe'
+          $acceptanceSetup = Join-Path $acceptanceRoot 'DefenseClawSetup-x64.exe'
+          [IO.File]::Copy($sealedSetup, $acceptanceSetup, $false)
+          if ((Get-FileHash -LiteralPath $sealedSetup -Algorithm SHA256).Hash -cne
+              (Get-FileHash -LiteralPath $acceptanceSetup -Algorithm SHA256).Hash) {
+            throw 'sealed Setup changed while preparing test-only acceptance inputs'
+          }
+          go build -trimpath -buildvcs=false `
+            -ldflags "-s -w -buildid=defenseclaw-windows-resource-verifier-$env:RELEASE_COMMIT" `
+            -o (Join-Path $acceptanceRoot 'DefenseClawWindowsResourceVerifier-x64.exe') `
+            ./internal/tools/windowsresources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [IO.File]::Copy(
+            (Join-Path $env:GITHUB_WORKSPACE 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'),
+            (Join-Path $acceptanceRoot 'DefenseClawWindowsResourceIcon.png'),
+            $false
+          )
+          [IO.File]::WriteAllText(
+            (Join-Path $acceptanceRoot 'DefenseClawWindowsResourceVersion.txt'),
+            "$env:RELEASE_TAG`n",
+            [Text.UTF8Encoding]::new($false)
+          )
+          pwsh -NoProfile -File scripts/invoke-windows-setup-standard-user-ci.ps1 `
+            -Mode setup-acceptance `
+            -ArtifactRoot $acceptanceRoot `
+            -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-sealed-setup-acceptance') `
+            -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-sealed-setup-diagnostics') `
+            -TimeoutSeconds 4500
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux-upgrade:
@@ -956,6 +1208,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -971,6 +1225,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -1010,6 +1266,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1025,6 +1283,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -1066,6 +1326,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1084,6 +1346,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -1128,6 +1392,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1144,6 +1410,8 @@ jobs:
             --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cosign verify-blob `
+            --bundle=release-candidate/dist/checksums.txt.bundle `
+            --offline `
             --certificate release-candidate/dist/checksums.txt.pem `
             --signature release-candidate/dist/checksums.txt.sig `
             --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
@@ -1250,6 +1518,8 @@ jobs:
           python-version: "3.13"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1265,6 +1535,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -1300,6 +1572,7 @@ jobs:
     name: Publish tested candidate
     needs:
       - release-preflight
+      - windows-real-client-certification
       - assemble-release-candidate
       - posix-fresh-install
       - windows-fresh-install
@@ -1313,6 +1586,7 @@ jobs:
       ${{
         always() &&
         needs.release-preflight.result == 'success' &&
+        needs.windows-real-client-certification.result == 'success' &&
         needs.assemble-release-candidate.result == 'success' &&
         needs.posix-fresh-install.result == 'success' &&
         needs.linux-upgrade.result == 'success' &&
@@ -1320,7 +1594,7 @@ jobs:
         needs.historical-baseline-canary.result == 'success' &&
         needs.windows-unpublished-refusal.result == 'success' &&
         needs.live-continuity.result == 'success' &&
-        needs.windows-fresh-install.result == 'skipped' &&
+        needs.windows-fresh-install.result == 'success' &&
         needs.windows-upgrade.result == 'skipped'
       }}
     runs-on: ubuntu-latest
@@ -1335,6 +1609,8 @@ jobs:
           persist-credentials: false
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1350,6 +1626,8 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           cosign verify-blob \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --offline \
             --certificate release-candidate/dist/checksums.txt.pem \
             --signature release-candidate/dist/checksums.txt.sig \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
@@ -1381,7 +1659,7 @@ jobs:
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
-          echo "::warning title=POSIX-only release::Windows-specific binaries and SBOMs will not be published."
+          echo "::notice title=Native Windows Setup included::Legacy raw Windows archives remain omitted; the signed, certified DefenseClawSetup-x64.exe is published."
           mapfile -t names < <(
             python3 scripts/release_candidate.py list-assets \
               --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \

@@ -43,6 +43,7 @@ LEGACY_UPGRADE_PROTOCOL_VERSION = 1
 HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
 OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
+WINDOWS_INSTALLER_START_VERSION = "0.8.6"
 UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
 OBSERVABILITY_V8_CONFIG_PATH = (
@@ -285,10 +286,10 @@ def published_upgrade_baselines() -> list[str]:
             "published_baseline_config_versions keys must exactly match published_baselines"
         )
     if any(
-        not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7}
+        not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7, 8}
         for value in config_versions.values()
     ):
-        raise RuntimeError("published baseline config versions must be integers in {5, 6, 7}")
+        raise RuntimeError("published baseline config versions must be integers in {5, 6, 7, 8}")
     if (
         OBSERVABILITY_V8_BRIDGE_VERSION in config_versions
         and config_versions.get(OBSERVABILITY_V8_BRIDGE_VERSION) != 7
@@ -401,7 +402,10 @@ def build_manifest() -> dict[str, Any]:
         "controller_upgrade_protocol": controller_upgrade_protocol(),
         "migration_failure_policy": "fail" if required else "warn",
         "required_cli_migrations": required,
-        "windows_installer": {
+        "generated_by": "scripts/generate-upgrade-manifest.py",
+    }
+    if current_t >= _ver_tuple(WINDOWS_INSTALLER_START_VERSION):
+        manifest["windows_installer"] = {
             "asset": "DefenseClawSetup-x64.exe",
             "architectures": ["amd64"],
             "handoff_args": [
@@ -415,9 +419,7 @@ def build_manifest() -> dict[str, Any]:
                 "publisher": "Cisco Systems, Inc.",
             },
             "managed_policy": "respect",
-        },
-        "generated_by": "scripts/generate-upgrade-manifest.py",
-    }
+        }
     manifest.update(release_upgrade_policy(version))
     if manifest["schema_version"] == 2:
         compatibility_version = compatibility_config_version()

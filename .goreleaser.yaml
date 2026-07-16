@@ -18,9 +18,6 @@ builds:
     flags:
       - -trimpath
       - -buildvcs=false
-    ignore:
-      - goos: windows
-        goarch: arm64
     ldflags:
       - -s -w -buildid=defenseclaw-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
     hooks:

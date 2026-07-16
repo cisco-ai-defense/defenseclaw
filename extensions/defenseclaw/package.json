@@ -1,6 +1,6 @@
 {
   "name": "defenseclaw",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "OpenClaw plugin for DefenseClaw — scan skills/plugins/MCPs, enforce policy, monitor runtime",
   "type": "module",
   "main": "dist/index.js",

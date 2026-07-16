@@ -68,9 +68,11 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
         assert label in text
 
 
-def test_release_packaging_keeps_non_windows_arm64_but_not_windows_arm64() -> None:
+def test_release_runtime_custody_includes_arm64_without_certifying_arm64_setup() -> None:
     release = (ROOT / ".goreleaser.yaml").read_text(encoding="utf-8")
-    assert "ignore:\n      - goos: windows\n        goarch: arm64" in release
+    assert "goos:\n      - linux\n      - darwin\n      - windows" in release
+    assert "goarch:\n      - amd64\n      - arm64" in release
+    assert "ignore:\n      - goos: windows\n        goarch: arm64" not in release
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
     assert '"codex",\n    "claudecode",\n    "none"' in installer
@@ -78,8 +80,8 @@ def test_release_packaging_keeps_non_windows_arm64_but_not_windows_arm64() -> No
 
 def test_connector_matrix_preserves_macos_and_linux_support() -> None:
     text = (ROOT / "docs/CONNECTOR-MATRIX.md").read_text(encoding="utf-8")
-    assert "### WSL research" not in text
-    assert "WSL is unsupported" in text
+    assert "### WSL research (out of current Windows scope)" in text
+    assert "current Windows product scope is **native Windows only**" in text
     for connector in (
         "Codex",
         "Claude Code",
@@ -102,11 +104,15 @@ def test_connector_matrix_preserves_macos_and_linux_support() -> None:
 def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     text = (ROOT / "scripts/live-connector-e2e/run-windows.ps1").read_text(encoding="utf-8").lower()
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8").lower()
+    native_workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(
+        encoding="utf-8"
+    ).lower()
     assert "$agentargs =" in text
     assert "$eventrecord =" in text
     assert "[string]$eventname," in text
     assert "$args =" not in text
     assert "$event =" not in text
     assert "[string]$event," not in text
-    assert "$profile =" not in workflow
-    assert "windows-hook-path:" not in workflow
+    assert "$profile =" not in workflow + native_workflow
+    assert "windows-native-required:" in native_workflow
+    assert "name: windows native required" in native_workflow
