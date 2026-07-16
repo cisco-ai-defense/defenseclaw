@@ -9,7 +9,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -445,6 +447,7 @@ def _read_fixture_trace(path: Path) -> list[dict]:
 )
 def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Exercise the wheel and public .cmd entrypoint, not an internal adapter."""
 
@@ -536,12 +539,63 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
         "endlocal & exit /b %defenseclawExit%\r\n",
         encoding="ascii",
     )
+    # The installed CLI validates v8 through its release-paired Go helper.
+    # Keep this wheel-focused test independent of any older gateway installed
+    # on the host while preserving the exact versioned helper wire contract.
+    gateway = bin_dir / "defenseclaw-gateway.cmd"
+    gateway.write_text(
+        "@echo off\r\n"
+        'if /I "%~1 %~2"=="config-v8 validate" (\r\n'
+        '  echo {"wire_version":2,"kind":"validation","config_version":8,'
+        '"source":"fixture","data_dir":"fixture","gateway_api_port":18970,'
+        '"plan_digest":"fixture","network_validation":"offline","valid":true}\r\n'
+        "  exit /b 0\r\n"
+        ")\r\n"
+        'if /I "%~1"=="--version" (\r\n'
+        "  echo defenseclaw-gateway 0.0.0-test\r\n"
+        "  exit /b 0\r\n"
+        ")\r\n"
+        "exit /b 64\r\n",
+        encoding="ascii",
+    )
+
+    admitted: list[dict] = []
+
+    class GatewayHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            if (
+                self.path != "/api/v1/observability/cli"
+                or self.headers.get("Authorization") != "Bearer fixture-gateway-token"
+            ):
+                self.send_response(401)
+                self.end_headers()
+                return
+            admitted.append(json.loads(body))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    gateway_server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+    gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+    gateway_thread.start()
+
+    def stop_gateway() -> None:
+        gateway_server.shutdown()
+        gateway_server.server_close()
+        gateway_thread.join(timeout=2)
+
+    request.addfinalizer(stop_gateway)
 
     profile = tmp_path / "profile"
     dc_home = profile / ".defenseclaw"
     dc_home.mkdir(parents=True)
     config = dc_home / "config.yaml"
     config.write_text(
+        "config_version: 8\n"
         "guardrail:\n"
         "  enabled: true\n"
         "  connector: codex\n"
@@ -552,7 +606,12 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
         "      mode: observe\n"
         "scanners:\n"
         "  mcp_scanner:\n"
-        "    analyzers: yara\n",
+        "    analyzers: yara\n"
+        "gateway:\n"
+        "  api_bind: 127.0.0.1\n"
+        f"  api_port: {gateway_server.server_port}\n"
+        "  token_env: DEFENSECLAW_GATEWAY_TOKEN\n"
+        "observability: {}\n",
         encoding="utf-8",
     )
     fixture_root = tmp_path / "fixture packages with spaces"
@@ -594,6 +653,8 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
             "DEFENSECLAW_TRUSTED_BIN_PREFIXES": os.fspath(Path(HOST_UVX).parent),
             "DEFENSECLAW_HOME": os.fspath(dc_home),
             "DEFENSECLAW_CONFIG": os.fspath(config),
+            "DEFENSECLAW_GATEWAY_BIN": os.fspath(gateway),
+            "DEFENSECLAW_GATEWAY_TOKEN": "fixture-gateway-token",
             "PYTHONPATH": os.fspath(tmp_path / "hostile-python-path"),
             "PYTHONHOME": os.fspath(tmp_path / "hostile-python-home"),
             "WIN_AUD_064_TEST_API_KEY": "must-not-reach-fixture",
@@ -704,6 +765,7 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
         event for event in _read_fixture_trace(install_trace) if event["event"] == "tools_list_responded"
     ]
     assert install_responses == [{"event": "tools_list_responded", "tools": ["benign_echo"]}]
+    assert admitted
 
 
 @pytest.mark.parametrize(

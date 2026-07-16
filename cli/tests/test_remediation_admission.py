@@ -69,12 +69,13 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
 )
 from defenseclaw.models import ScanResult
+from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
 from tests.helpers import cleanup_app, make_app_context, make_temp_store
 
 
 def _bundled_rego_dir() -> str:
-    return os.path.join(os.path.dirname(defenseclaw.__file__), "_data", "policies", "rego")
+    return os.fspath(bundled_rego_dir())
 
 
 # ---------------------------------------------------------------------------
@@ -578,9 +579,7 @@ class TestF0421OwnerWritableTrustedBinary(unittest.TestCase):
 
 class TestOpenShellPolicyHardening(unittest.TestCase):
     def _openshell_dir(self):
-        return os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies", "openshell"
-        )
+        return os.fspath(bundled_policies_dir() / "openshell")
 
     def test_f0544_hostless_allowed_ips_requires_host_membership(self):
         rego = os.path.join(self._openshell_dir(), "default.rego")

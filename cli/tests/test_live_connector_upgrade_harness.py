@@ -9,12 +9,18 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "scripts" / "live-connector-e2e" / "upgrade-regression.sh"
 PERSIST = REPO / "scripts" / "live-connector-e2e" / "lib" / "persistent-macos.sh"
 REPORT = REPO / "scripts" / "live-connector-e2e" / "report.py"
 ANTIGRAVITY_DRIVER = REPO / "scripts" / "live-connector-e2e" / "drivers" / "antigravity.sh"
 DRIVER_COMMON = REPO / "scripts" / "live-connector-e2e" / "drivers" / "_driver_common.sh"
+MACOS_PERSISTENCE_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="persistent-macos.sh filesystem contracts require POSIX paths, modes, and symlinks",
+)
 
 
 def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -98,6 +104,7 @@ def test_harness_captures_quiescent_v8_canonical_evidence() -> None:
     assert cleanup.index("defenseclaw-gateway stop") < cleanup.index("dc_upgrade_copy_artifacts")
 
 
+@MACOS_PERSISTENCE_ONLY
 def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None:
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
@@ -125,6 +132,7 @@ def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
 
 
+@MACOS_PERSISTENCE_ONLY
 def test_snapshot_restore_removes_only_created_file_not_parent(tmp_path: Path) -> None:
     home = tmp_path / "home"
     parent = home / ".gemini" / "config"
@@ -149,6 +157,7 @@ def test_snapshot_restore_removes_only_created_file_not_parent(tmp_path: Path) -
     assert parent.is_dir()
 
 
+@MACOS_PERSISTENCE_ONLY
 def test_snapshot_rejects_symlinked_connector_config(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -173,6 +182,7 @@ def test_snapshot_rejects_symlinked_connector_config(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "secret"
 
 
+@MACOS_PERSISTENCE_ONLY
 def test_lock_release_refuses_another_process_owner(tmp_path: Path) -> None:
     lock = tmp_path / "active.lock"
     lock.mkdir()

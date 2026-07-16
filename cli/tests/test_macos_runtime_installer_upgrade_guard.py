@@ -11,6 +11,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -369,6 +370,7 @@ def test_mac_app_runtime_update_exposes_only_runnable_authenticated_command() ->
     assert 'summary: "Upgrade DefenseClaw"' not in registry
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS resolver validation requires /bin/bash")
 def test_mac_app_resolver_command_is_raw_canonical_semver_gated_and_bash_syntax_valid() -> None:
     source = _source()
     function_start = source.index(
@@ -411,6 +413,7 @@ def test_mac_app_resolver_command_is_raw_canonical_semver_gated_and_bash_syntax_
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS resolver execution requires /bin/bash")
 def test_mac_app_resolver_command_executes_the_verified_in_memory_bytes(tmp_path: Path) -> None:
     source = _source()
     function_start = source.index(

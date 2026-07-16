@@ -238,6 +238,21 @@ Equivalent raw invocations (same container outcome):
   need remote access. Before doing so, change Grafana's default
   `admin / admin` password and disable the anonymous Viewer role —
   loopback is the only thing keeping those credentials safe.
+
+  Raw Compose bypasses the managed controller's loopback enforcement,
+  so the bind address is entirely operator-controlled. For manual
+  startup with a specific interface, use:
+
+  ```bash
+  HOST_BIND=192.0.2.10 docker compose up -d
+  ```
+
+  The equivalent PowerShell commands are:
+
+  ```powershell
+  $env:HOST_BIND = "192.0.2.10"
+  docker compose up -d
+  ```
 - The collector's `debug` exporter is on for every pipeline. Tail
   `./run.sh logs otel-collector` to watch raw OTLP frames while
   iterating on the sidecar contract.

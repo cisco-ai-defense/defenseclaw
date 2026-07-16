@@ -485,10 +485,32 @@ function Get-EventLines([string]$Path) {
     } while ([DateTime]::UtcNow -lt $deadline)
 }
 
+function Get-JsonPropertyValue([AllowNull()][object]$Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Test-CanonicalConnectorRecord([AllowNull()][object]$Record, [string]$Name) {
+    if ($null -eq $Record) { return $false }
+    $schemaVersion = Get-JsonPropertyValue $Record 'schema_version'
+    $eventName = [string](Get-JsonPropertyValue $Record 'event_name')
+    $connector = [string](Get-JsonPropertyValue $Record 'connector')
+    return $schemaVersion -eq 1 -and
+        -not [string]::IsNullOrWhiteSpace($eventName) -and
+        [string]::Equals($connector, $Name, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $false }
-    return [bool]($lines[$Since..($lines.Count - 1)] | Where-Object { $_.ToLowerInvariant().Contains($Name.ToLowerInvariant()) } | Select-Object -First 1)
+    foreach ($line in $lines[$Since..($lines.Count - 1)]) {
+        try {
+            if (Test-CanonicalConnectorRecord ($line | ConvertFrom-Json) $Name) { return $true }
+        } catch { continue }
+    }
+    return $false
 }
 
 function Test-BlockVerdict([string]$Path, [int]$Since) {
@@ -497,8 +519,16 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
-            if ($eventRecord.event_type -eq 'verdict' -and $eventRecord.verdict.action -in @('block', 'deny')) { return $true }
-            if ($eventRecord.event_type -eq 'scan' -and $eventRecord.scan.verdict -in @('block', 'deny')) { return $true }
+            $eventName = [string](Get-JsonPropertyValue $eventRecord 'event_name')
+            if ($eventName -notin @('guardrail.evaluation.completed', 'guardrail.judge.completed')) { continue }
+            $body = Get-JsonPropertyValue $eventRecord 'body'
+            foreach ($field in @(
+                'defenseclaw.guardrail.decision',
+                'defenseclaw.guardrail.raw_action',
+                'defenseclaw.judge.action'
+            )) {
+                if ([string](Get-JsonPropertyValue $body $field) -in @('block', 'deny')) { return $true }
+            }
         } catch { continue }
     }
     return $false
@@ -532,9 +562,25 @@ function Get-LatestHookDecision([string]$Path, [string]$Name, [int]$Since) {
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
-            if ($eventRecord.event_type -ne 'hook_decision' -or $null -eq $eventRecord.hook_decision) { continue }
-            if (-not [string]::Equals([string]$eventRecord.hook_decision.connector, $Name, [StringComparison]::OrdinalIgnoreCase)) { continue }
-            $match = $eventRecord.hook_decision
+            if (-not (Test-CanonicalConnectorRecord $eventRecord $Name)) { continue }
+            if ([string](Get-JsonPropertyValue $eventRecord 'event_name') -cne 'hook_decision') { continue }
+            $body = Get-JsonPropertyValue $eventRecord 'body'
+            if ($null -eq $body) { continue }
+            $wouldBlock = $body.PSObject.Properties['defenseclaw.guardrail.would_block']
+            $enforced = $body.PSObject.Properties['defenseclaw.guardrail.enforced']
+            if ($null -eq $wouldBlock -or $null -eq $enforced) { continue }
+            $correlation = Get-JsonPropertyValue $eventRecord 'correlation'
+            $match = [pscustomobject][ordered]@{
+                connector = [string](Get-JsonPropertyValue $eventRecord 'connector')
+                action = [string](Get-JsonPropertyValue $body 'defenseclaw.guardrail.effective_action')
+                raw_action = [string](Get-JsonPropertyValue $body 'defenseclaw.guardrail.raw_action')
+                mode = [string](Get-JsonPropertyValue $body 'defenseclaw.guardrail.mode')
+                would_block = [bool]$wouldBlock.Value
+                enforced = [bool]$enforced.Value
+                rule_ids = @(Get-JsonPropertyValue $body 'defenseclaw.guardrail.rule_ids')
+                request_id = [string](Get-JsonPropertyValue $correlation 'request_id')
+                record_id = [string](Get-JsonPropertyValue $eventRecord 'record_id')
+            }
         } catch { continue }
     }
     return $match
@@ -546,7 +592,8 @@ function Test-OtlpEvent([string]$Path, [string]$Name, [int]$Since) {
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
-            if ($eventRecord.event_type -in @('tool_invocation', 'llm_prompt', 'llm_response') -and $line.ToLowerInvariant().Contains($Name.ToLowerInvariant())) { return $true }
+            if (-not (Test-CanonicalConnectorRecord $eventRecord $Name)) { continue }
+            if ([string](Get-JsonPropertyValue $eventRecord 'bucket') -in @('tool.activity', 'model.io')) { return $true }
         } catch { continue }
     }
     return $false
@@ -594,6 +641,32 @@ function Set-IsolatedGatewayPort {
     $configPath = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
     $config = [IO.File]::ReadAllText($configPath)
     $newline = if ($config.Contains("`r`n")) { "`r`n" } else { "`n" }
+
+    # Fresh v8 intentionally has no implicit gateway.jsonl side channel. The
+    # contract consumes canonical v8 records, so opt this isolated profile
+    # into an explicit, state-rooted JSONL destination before the gateway
+    # starts. Keep the mutation fail-closed against the fresh-v8 shape instead
+    # of accidentally changing an operator-authored destination graph.
+    $observabilityPattern = '(?m)^observability:[ \t]*\{\}[ \t]*(?=\r?$)'
+    $observabilityMatches = [regex]::Matches($config, $observabilityPattern)
+    if ($observabilityMatches.Count -ne 1) {
+        throw "expected one empty fresh-v8 observability block in $configPath, found $($observabilityMatches.Count)"
+    }
+    $jsonlPath = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
+    $jsonlLiteral = $jsonlPath | ConvertTo-Json -Compress
+    $observability = @(
+        'observability:'
+        '  destinations:'
+        '    - name: windows-contract-jsonl'
+        '      kind: jsonl'
+        "      path: $jsonlLiteral"
+    ) -join $newline
+    $observabilityMatch = $observabilityMatches[0]
+    $config = $config.Remove($observabilityMatch.Index, $observabilityMatch.Length).Insert(
+        $observabilityMatch.Index,
+        $observability
+    )
+
     $pattern = '(?m)^(?<indent>[ \t]*)api_port:[ \t]*\d+[ \t]*(?=\r?$)'
     $matches = [regex]::Matches($config, $pattern)
     if ($matches.Count -gt 1) { throw "expected at most one gateway api_port in $configPath, found $($matches.Count)" }
@@ -782,7 +855,8 @@ function Invoke-DangerousHook(
     if ($null -eq $decision) { throw "$Name did not emit a connector hook_decision" }
     if (-not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Name has no underlying gateway block verdict" }
     if ([string]$decision.raw_action -ne 'block') { throw "$Name raw_action=$($decision.raw_action), expected block" }
-    if ([string]$decision.mode -ne $Mode) { throw "$Name mode=$($decision.mode), expected $Mode" }
+    $telemetryMode = if ($Mode -eq 'action') { 'enforce' } else { 'observe' }
+    if ([string]$decision.mode -ne $telemetryMode) { throw "$Name mode=$($decision.mode), expected $telemetryMode" }
     if (@($decision.rule_ids) -notcontains $RuleID) { throw "$Name hook_decision is missing rule $RuleID" }
 
     if ($Mode -eq 'observe') {
@@ -1305,11 +1379,16 @@ function Invoke-Agent([string]$Label, [string]$Prompt, [int[]]$AllowedExitCodes 
 }
 
 function Assert-Evidence([int]$Since = 0) {
-    Invoke-Tool 'python.exe' @((Join-Path $WorkspaceRoot 'scripts\assert-gateway-jsonl.py'), $script:GatewayJsonl, '--min-events', '1') | Out-Null
+    Invoke-Tool 'python.exe' @(
+        (Join-Path $WorkspaceRoot 'scripts\assert-observability-v8-jsonl.py'),
+        $script:GatewayJsonl,
+        '--min-records', '1',
+        '--require-event-name', 'hook_decision'
+    ) | Out-Null
     Invoke-Tool 'python.exe' @((Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\assert-windows-evidence.py'), '--jsonl', $script:GatewayJsonl, '--audit-db', $script:AuditDb, '--connector', $Connector, '--since', "$Since") | Out-Null
     if (-not (Test-OtlpEvent $script:GatewayJsonl $Connector $Since)) { throw 'no connector-tagged telemetry event reached the gateway' }
-    Write-Result schema pass 'gateway JSONL schema valid'
-    Write-Result audit-correlation pass 'gateway request_id matched SQLite audit evidence'
+    Write-Result schema pass 'canonical observability-v8 JSONL schema valid'
+    Write-Result audit-correlation pass 'canonical correlation.request_id matched SQLite audit evidence'
     Write-Result telemetry pass 'connector-tagged OTLP event recorded'
 }
 

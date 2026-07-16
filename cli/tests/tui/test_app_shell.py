@@ -6443,6 +6443,11 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
     audit = AuditPanelModel()
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+    # Keep the mount-time two-second interval from racing the explicit refreshes
+    # below under full-suite coverage instrumentation. The saved bound method
+    # still exercises the production scheduling and repaint path deterministically.
+    periodic_refresh = app._periodic_refresh
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
@@ -6465,7 +6470,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         body.update = counted_update  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
 
-        app._periodic_refresh()
+        periodic_refresh()
         await _wait_for_panel_render(app, "overview")
         assert update_calls == 0
 
@@ -6482,7 +6487,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             ]
         )
 
-        app._periodic_refresh()
+        periodic_refresh()
         await _wait_for_panel_render(app, "overview")
 
         assert update_calls == 1

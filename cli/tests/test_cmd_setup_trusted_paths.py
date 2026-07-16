@@ -57,7 +57,6 @@ from defenseclaw.inventory import agent_discovery as ad
 from tests.permissions import grant_everyone
 
 
-
 def _make_app_context(data_dir: str) -> AppContext:
     cfg = Config(
         data_dir=data_dir,
@@ -116,8 +115,10 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(cfg_path))
             body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
             prefixes = body["ai_discovery"]["trusted_binary_prefixes"]
-            self.assertEqual(prefixes.count("/opt/tools"), 1)
-            self.assertIn("/opt/more", prefixes)
+            expected_tools, _ = ad.validate_trusted_prefix("/opt/tools")
+            expected_more, _ = ad.validate_trusted_prefix("/opt/more")
+            self.assertEqual(prefixes.count(expected_tools), 1)
+            self.assertIn(expected_more, prefixes)
 
     def test_embedded_newline_prefix_is_rejected_and_no_entry_injected(self):
         """F-1401: a trusted-path NAME with an embedded newline must not be
@@ -144,11 +145,12 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
             cfg_path = os.path.join(tmp, "config.yaml")
             body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
             self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
-            self.assertEqual(body["ai_discovery"]["trusted_binary_prefixes"], ["/opt/legit"])
+            expected_legit, _ = ad.validate_trusted_prefix("/opt/legit")
+            self.assertEqual(body["ai_discovery"]["trusted_binary_prefixes"], [expected_legit])
 
     def test_dotenv_writer_refuses_symlink_target(self):
         """Secret/trusted-prefix writes must not follow a symlinked .env."""
-        from defenseclaw.safety import SafetyError
+        from defenseclaw.file_permissions import UnsafePathError
 
         with tempfile.TemporaryDirectory() as tmp:
             target = os.path.join(tmp, "target")
@@ -160,7 +162,7 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
             except (OSError, NotImplementedError) as exc:
                 self.skipTest(f"symlink unavailable: {exc}")
 
-            with self.assertRaises(SafetyError):
+            with self.assertRaises(UnsafePathError):
                 cmd_setup._write_dotenv(dotenv, {"SAFE": "value"})
 
             with open(target, encoding="utf-8") as fh:

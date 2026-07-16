@@ -1491,7 +1491,7 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
             {
                 "schema_version": 2,
                 "checkout_root": str(ROOT.resolve()),
-                "source_release": "0.8.5",
+                "source_release": CURRENT_RELEASE,
                 "source_install_compatibility_epoch": 2,
                 "runtime_config_version": 8,
                 "gateway_sha256": gateway_digest,

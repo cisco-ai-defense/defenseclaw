@@ -145,6 +145,22 @@ try {
                 "$($case.Name) writes a valid isolated port"
             Assert-True ([regex]::Matches($updated, '(?m)^gateway:[ \t]*(?=\r?$)').Count -eq 1) `
                 "$($case.Name) preserves exactly one gateway block"
+            Assert-True ([regex]::Matches(
+                $updated,
+                '(?m)^[ \t]*-[ \t]+name:[ \t]+windows-contract-jsonl[ \t]*(?=\r?$)'
+            ).Count -eq 1) "$($case.Name) writes exactly one explicit contract JSONL destination"
+            Assert-True ([regex]::Matches(
+                $updated,
+                '(?m)^[ \t]+kind:[ \t]+jsonl[ \t]*(?=\r?$)'
+            ).Count -eq 1) "$($case.Name) writes a local JSONL destination"
+            $jsonlPath = [regex]::Match(
+                $updated,
+                '(?m)^[ \t]+path:[ \t]+(?<literal>"(?:\\.|[^"\\])*")[ \t]*(?=\r?$)'
+            )
+            Assert-True $jsonlPath.Success "$($case.Name) writes a JSON-quoted JSONL path"
+            Assert-True (($jsonlPath.Groups['literal'].Value | ConvertFrom-Json) -ceq (
+                Join-Path $caseRoot 'gateway.jsonl'
+            )) "$($case.Name) roots JSONL evidence in the isolated profile"
         }
     } finally {
         $env:DEFENSECLAW_HOME = $savedDefenseClawHome
@@ -604,29 +620,83 @@ try {
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()
+    $observedAt = [DateTime]::UtcNow.ToString('o')
+    $provenance = [ordered]@{
+        producer = 'defenseclaw'
+        binary_version = '0.8.6-test'
+        registry_schema_version = 1
+        config_generation = 1
+    }
     $fixtureEvents = @(
-        @{ connector = 'codex'; request_id = $requestId; event_type = 'verdict'; verdict = @{ action = 'block' } },
-        @{ connector = 'codex'; request_id = $requestId; event_type = 'hook_decision'; hook_decision = @{ connector = 'codex'; action = 'allow'; raw_action = 'block'; mode = 'observe'; would_block = $true; enforced = $false; rule_ids = @('CMD-WIN-REMOVE-ITEM-RF') } },
-        @{ connector = 'codex'; request_id = $requestId; event_type = 'tool_invocation' }
-    ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+        [ordered]@{
+            schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
+            record_id = 'windows-contract-verdict'; bucket = 'guardrail.evaluation'; signal = 'logs'
+            event_name = 'guardrail.evaluation.completed'; source = 'gateway'; connector = 'codex'
+            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            mandatory = $false
+            body = @{
+                'defenseclaw.guardrail.decision' = 'block'
+                'defenseclaw.guardrail.effective_action' = 'allow'
+                'defenseclaw.guardrail.raw_action' = 'block'
+            }
+        },
+        [ordered]@{
+            schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
+            record_id = 'windows-contract-hook-decision'; bucket = 'guardrail.evaluation'; signal = 'logs'
+            event_name = 'hook_decision'; source = 'connector'; connector = 'codex'
+            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            mandatory = $false
+            body = @{
+                'defenseclaw.guardrail.effective_action' = 'allow'
+                'defenseclaw.guardrail.raw_action' = 'block'
+                'defenseclaw.guardrail.mode' = 'observe'
+                'defenseclaw.guardrail.would_block' = $true
+                'defenseclaw.guardrail.enforced' = $false
+                'defenseclaw.guardrail.rule_ids' = @('CMD-WIN-REMOVE-ITEM-RF')
+            }
+        },
+        [ordered]@{
+            schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
+            record_id = 'windows-contract-tool'; bucket = 'tool.activity'; signal = 'logs'
+            event_name = 'tool.invocation.requested'; source = 'connector'; connector = 'codex'
+            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            mandatory = $false; body = @{}
+        },
+        [ordered]@{
+            schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
+            record_id = 'windows-contract-decoy'; bucket = 'diagnostic'; signal = 'logs'
+            event_name = 'event'; source = 'gateway'; connector = 'cursor'
+            correlation = @{}; provenance = $provenance; field_classes = @{}
+            mandatory = $false; body = @{ note = 'claudecode' }
+        }
+    ) | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
     $liveWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
     try {
         $sharedText = Read-SharedText $jsonl
         Assert-True ($sharedText -match 'hook_decision') 'diagnostics can read a live writer-owned JSONL'
-        Assert-True (@(Get-EventLines $jsonl).Count -eq 3) 'gateway JSONL remains readable while the gateway writer is open'
+        Assert-True (@(Get-EventLines $jsonl).Count -eq 4) 'gateway JSONL remains readable while the gateway writer is open'
     } finally {
         $liveWriter.Dispose()
     }
     $pythonCode = 'import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute("create table audit_events(request_id text)");c.execute("insert into audit_events(request_id) values (?)",(sys.argv[2],));c.commit();c.close()'
     & python.exe -c $pythonCode $database $requestId
     if ($LASTEXITCODE -ne 0) { throw 'failed to create disposable audit fixture' }
+    & python.exe (Join-Path $root 'scripts\assert-observability-v8-jsonl.py') $jsonl `
+        --min-records 4 --require-event-name hook_decision
+    Assert-True ($LASTEXITCODE -eq 0) 'mock canonical observability-v8 schema'
     & python.exe (Join-Path $PSScriptRoot 'assert-windows-evidence.py') --jsonl $jsonl --audit-db $database --connector codex
     Assert-True ($LASTEXITCODE -eq 0) 'mock audit correlation'
     Assert-True (Test-ConnectorEvent $jsonl 'codex' 0) 'connector event seam'
+    Assert-True (-not (Test-ConnectorEvent $jsonl 'claudecode' 0)) 'connector event seam ignores body-text false positives'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
+    Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam requires a canonical guardrail verdict record'
     $hookDecision = Get-LatestHookDecision $jsonl 'codex' 0
-    Assert-True ($null -ne $hookDecision -and $hookDecision.raw_action -eq 'block' -and $hookDecision.would_block) 'hook decision raw block and would-block seam'
+    Assert-True ($null -ne $hookDecision -and $hookDecision.action -eq 'allow' -and
+        $hookDecision.raw_action -eq 'block' -and $hookDecision.mode -eq 'observe' -and
+        $hookDecision.would_block -and -not $hookDecision.enforced -and
+        @($hookDecision.rule_ids) -contains 'CMD-WIN-REMOVE-ITEM-RF') `
+        'hook decision reads canonical dotted guardrail fields'
     Assert-True (Test-OtlpEvent $jsonl 'codex' 0) 'OTLP evidence seam'
 
     $nativeWorkflowText = [IO.File]::ReadAllText($nativeWorkflow)

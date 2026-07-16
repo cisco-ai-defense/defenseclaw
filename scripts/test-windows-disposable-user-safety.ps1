@@ -143,10 +143,19 @@ try {
         ([Security.AccessControl.FileSystemRights]::Modify) -InheritChildRights
     [IO.File]::WriteAllText((Join-Path $diagnostics 'processes.json'), '{}')
     [IO.File]::WriteAllText((Join-Path $diagnostics 'listeners.txt'), '')
+    [IO.File]::WriteAllText(
+        (Join-Path $diagnostics 'contract-diagnostics_results.jsonl'),
+        '{"connector":"codex","os":"windows","status":"fail"}'
+    )
     $handoff = Join-Path $base 'handoff'
     Copy-BoundedDisposableDiagnostics $diagnostics $handoff $sandbox $base
     if (-not (Test-Path -LiteralPath (Join-Path $handoff 'processes.json') -PathType Leaf)) {
         throw 'bounded diagnostic handoff did not copy the expected regular file'
+    }
+    if (-not (Test-Path -LiteralPath (
+            Join-Path $handoff 'contract-diagnostics_results.jsonl'
+        ) -PathType Leaf)) {
+        throw 'bounded diagnostic handoff rejected the contract JSONL result'
     }
 
     $results = Join-Path $sandbox 'results'

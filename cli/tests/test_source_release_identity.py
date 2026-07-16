@@ -159,7 +159,14 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     repo = _copy_source_fixture(tmp_path)
     stamp = repo / "scripts/stamp-version.sh"
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
-    before = {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS}
+
+    def reviewed_bytes(relative: str) -> bytes:
+        payload = (repo / relative).read_bytes()
+        # Native Windows helpers may preserve or emit CRLF while the POSIX
+        # stamper emits LF. Repository content is compared canonically.
+        return payload.replace(b"\r\n", b"\n") if os.name == "nt" else payload
+
+    before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
         [BASH, str(stamp), "0.8.6"],
@@ -171,7 +178,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS} == before
+    assert {relative: reviewed_bytes(relative) for relative in VERSION_PATHS} == before
 
 
 def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
@@ -379,10 +386,11 @@ def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
         dev_reclaim=True,
     )
     assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    current_release = source_release_identity.validate_source_tree(repo)["source_release"]
     validated = source_release_identity.validate_marker(
         marker,
         checkout_root=repo,
-        source_release="0.8.5",
+        source_release=str(current_release),
         compatibility_epoch=2,
         runtime_version=8,
     )

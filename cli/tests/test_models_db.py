@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -205,7 +206,10 @@ class ModelsDbTests(unittest.TestCase):
 
     def test_open_read_only_uses_ro_query_only_and_short_timeout(self):
         self.store.close()
-        with sqlite3.connect(self.tmp.name) as db:
+        # sqlite3.Connection's context manager commits/rolls back but does not
+        # close the handle. Explicitly close it so Windows can later delete the
+        # temporary database during teardown.
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             journal_mode = db.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
         self.assertEqual(journal_mode, "delete")
         os.chmod(self.tmp.name, 0o644)
@@ -216,7 +220,11 @@ class ModelsDbTests(unittest.TestCase):
             self.assertEqual(reader.db.execute("PRAGMA query_only").fetchone()[0], 1)
             self.assertEqual(reader.db.execute("PRAGMA busy_timeout").fetchone()[0], 50)
             self.assertEqual(reader.db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
-            self.assertEqual(os.stat(self.tmp.name).st_mode & 0o777, 0o644)
+            if os.name != "nt":
+                # Windows chmod only toggles the read-only file attribute and
+                # reports synthesized rw bits, so exact POSIX modes are not a
+                # portable part of this read-only connection contract.
+                self.assertEqual(os.stat(self.tmp.name).st_mode & 0o777, 0o644)
             self.assertGreater(
                 reader.db.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0],
                 0,

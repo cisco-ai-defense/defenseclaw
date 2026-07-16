@@ -43,9 +43,9 @@ from defenseclaw.commands import cmd_agent
 from defenseclaw.config import (
     AIDiscoveryConfig,
     ClawConfig,
-    Config,
     GuardrailConfig,
     PerConnectorGuardrailConfig,
+    load,
 )
 from defenseclaw.context import AppContext
 
@@ -428,21 +428,21 @@ class DiscoveryConnectorConfigRoundTripTests(unittest.TestCase):
         )
         for initially_enabled, command, args in cases:
             with self.subTest(command=command.name), tempfile.TemporaryDirectory() as td:
-                cfg = Config(
-                    data_dir=td,
-                    claw=ClawConfig(mode="claudecode"),
-                    guardrail=GuardrailConfig(
-                        enabled=True,
-                        connector="claudecode",
-                        connectors={
-                            "claudecode": PerConnectorGuardrailConfig(),
-                            "codex": PerConnectorGuardrailConfig(),
-                        },
-                    ),
-                    ai_discovery=AIDiscoveryConfig(enabled=initially_enabled),
-                )
-                cfg.save()
                 config_path = os.path.join(td, "config.yaml")
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    handle.write("config_version: 8\nobservability: {}\n")
+                cfg = load(data_dir=td)
+                cfg.claw = ClawConfig(mode="claudecode")
+                cfg.guardrail = GuardrailConfig(
+                    enabled=True,
+                    connector="claudecode",
+                    connectors={
+                        "claudecode": PerConnectorGuardrailConfig(),
+                        "codex": PerConnectorGuardrailConfig(),
+                    },
+                )
+                cfg.ai_discovery = AIDiscoveryConfig(enabled=initially_enabled)
+                cfg.save()
                 with open(config_path, encoding="utf-8") as handle:
                     before = yaml.safe_load(handle)
                 roster_before = cfg.active_connectors()

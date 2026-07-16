@@ -508,36 +508,36 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("remove Claude policy and hooks: %v", err)
 	}
-	deadline = time.Now().Add(3 * time.Second)
-	for {
-		present, presenceErr := connector.OwnedHooksPresent(conn, opts)
-		if presenceErr == nil && present {
-			break
-		}
-		if time.Now().After(deadline) {
-			data, _ := os.ReadFile(settingsPath)
-			guard.mu.Lock()
-			pending := len(guard.pending)
-			suppressedUntil := guard.suppressUntil
-			watchList := guard.fsw.WatchList()
-			started := guard.started
-			guard.mu.Unlock()
-			t.Fatalf(
-				"guard did not heal subsequent edit (err=%v started=%v pending=%d suppressedUntil=%s watches=%v settings=%s)",
-				presenceErr,
-				started,
-				pending,
-				suppressedUntil.Format(time.RFC3339Nano),
-				watchList,
-				data,
-			)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// The notifier is the guard's completion barrier: it fires only after
+	// Setup and the effective-policy verification both succeed. Polling
+	// OwnedHooksPresent here races those same reads against Setup's atomic
+	// replacement on Windows and can either starve the heal or observe the
+	// installed bytes before the notifier step has completed.
 	select {
 	case <-notified:
-	case <-time.After(2 * time.Second):
-		t.Fatal("guard did not report the subsequent successful repair")
+	case <-time.After(5 * time.Second):
+		present, presenceErr := connector.OwnedHooksPresent(conn, opts)
+		data, _ := os.ReadFile(settingsPath)
+		guard.mu.Lock()
+		pending := len(guard.pending)
+		suppressedUntil := guard.suppressUntil
+		watchList := guard.fsw.WatchList()
+		started := guard.started
+		guard.mu.Unlock()
+		t.Fatalf(
+			"guard did not report the subsequent successful repair (present=%v err=%v started=%v pending=%d suppressedUntil=%s watches=%v settings=%s)",
+			present,
+			presenceErr,
+			started,
+			pending,
+			suppressedUntil.Format(time.RFC3339Nano),
+			watchList,
+			data,
+		)
+	}
+	present, presenceErr := connector.OwnedHooksPresent(conn, opts)
+	if presenceErr != nil || !present {
+		t.Fatalf("guard reported repair without an effective hook contract (present=%v err=%v)", present, presenceErr)
 	}
 
 	guard.Stop()

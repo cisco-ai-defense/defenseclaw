@@ -4467,13 +4467,15 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
     selected by future ``defenseclaw setup guardrail`` invocations.
 
     The bound on contents is intentional: the file is one short word
-    (one of ``_CONNECTOR_NAMES``) and ``_read_picked_connector``
-    rejects anything outside ``_CONNECTOR_NAMES``, so even a corrupted
-    write can never escalate to remote code paths.
+    (one of ``_CONNECTOR_NAMES_FALLBACK``) and ``_read_picked_connector``
+    rejects anything outside the host's supported connector names, so even a
+    corrupted write can never escalate to remote code paths. Valid aliases
+    remain persistable when tests or a cross-platform installer deliberately
+    configure a connector that is filtered from the current host's menu.
     """
     if not data_dir:
         return
-    if connector not in _CONNECTOR_NAMES:
+    if connector not in _CONNECTOR_NAMES_FALLBACK:
         return
     try:
         os.makedirs(data_dir, exist_ok=True)
@@ -5038,11 +5040,6 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
     if os_name == "nt":
         click.echo("    • Watch decisions live: defenseclaw tui")
-        click.echo(
-            "      Or in PowerShell: Get-Content -LiteralPath "
-            "(Join-Path $HOME '.defenseclaw\\gateway.jsonl') -Wait | "
-            "ForEach-Object { $_ | ConvertFrom-Json }"
-        )
         click.echo(
             f"    • Recent alerts for this connector: "
             f"defenseclaw alerts --limit 25 --connector {connector}"
@@ -6432,9 +6429,8 @@ def _remove_connector(
       * Removing one of several connectors drops it from
         ``guardrail.connectors`` and repoints the singular
         ``guardrail.connector`` / ``claw.mode`` mirror at the new primary
-        (sorted-first remaining). When exactly one connector remains the
-        map is collapsed back to the legacy singular shape so a
-        single-connector install looks byte-identical to a pre-multi one.
+        (sorted-first remaining). The final map entry remains authoritative
+        so connector-specific policy is not discarded when one peer remains.
       * Removing the LAST connector is gated (WU8 D2=A): refused unless
         ``--force``, which fully unconfigures enforcement (clears the map
         and the singular mirror). ``defenseclaw uninstall`` remains the
@@ -6446,7 +6442,8 @@ def _remove_connector(
     exactly that connector's hooks. No per-connector teardown plumbing is
     added here.
 
-    Returns True on success, False on a no-op/refusal/persistence error.
+    Returns True on success (including an idempotent known-absent request),
+    and False on refusal or persistence error.
     """
     cfg = app.cfg
     gc = cfg.guardrail
@@ -6461,6 +6458,9 @@ def _remove_connector(
     # `claude-code`, or `open-hands` interchangeably.
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
+        if requested_norm in _CONNECTOR_META:
+            click.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
         click.echo(
             f"  ✗ {requested!r} is not a configured connector. Configured: {configured_label}",
@@ -6509,9 +6509,8 @@ def _remove_connector(
         gc.connector = ""
         cfg.claw.mode = ""
     elif len(remaining) == 1:
-        # Collapse to the legacy singular shape for parity with a
-        # pre-multi single-connector install.
-        gc.connectors = {}
+        # Keep the surviving map entry authoritative. Collapsing to the
+        # singular mirror here would silently discard per-connector policy.
         gc.connector = remaining[0]
         cfg.claw.mode = remaining[0]
     else:

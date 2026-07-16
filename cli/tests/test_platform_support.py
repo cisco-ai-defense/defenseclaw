@@ -232,7 +232,10 @@ def test_windows_sandbox_setup_rejects_every_connector_before_side_effects() -> 
 
 def test_linux_sandbox_setup_preserves_connector_guidance() -> None:
     app = AppContext()
-    app.cfg = SimpleNamespace(guardrail=SimpleNamespace(connector="codex"))
+    app.cfg = SimpleNamespace(
+        _source_config_version=8,
+        guardrail=SimpleNamespace(connector="codex"),
+    )
     app.store = object()
     app.logger = object()
 

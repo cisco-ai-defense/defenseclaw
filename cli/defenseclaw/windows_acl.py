@@ -235,6 +235,42 @@ def _protected_dacl_copy(dacl: bytes) -> bytes:
     return bytes(normalized)
 
 
+def _explicit_dacl_copy(dacl: bytes) -> bytes:
+    """Return only explicit ACEs for an unprotected ``SetSecurityInfo`` call.
+
+    When ``UNPROTECTED_DACL_SECURITY_INFORMATION`` is requested, Windows adds
+    the current parent's inheritable ACEs. Passing the snapshot's inherited
+    ACEs back in the input ACL would therefore duplicate them as explicit
+    entries. That is especially visible for an elevated user's inherited
+    Administrators ACE and makes exact rollback verification fail. Preserve
+    every explicit ACE byte-for-byte and let the kernel reconstruct the
+    inherited suffix; the caller still verifies the resulting full descriptor
+    against the original snapshot.
+    """
+
+    if len(dacl) < 8:
+        raise WindowsAclError("DACL header is truncated")
+    revision, reserved, acl_size, ace_count, reserved2 = struct.unpack_from("<BBHHH", dacl, 0)
+    if acl_size != len(dacl):
+        raise WindowsAclError("DACL size does not match its binary representation")
+    explicit: list[bytes] = []
+    cursor = 8
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            raise WindowsAclError("DACL ACE header is truncated")
+        ace_size = struct.unpack_from("<H", dacl, cursor + 2)[0]
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            raise WindowsAclError("DACL ACE has an invalid binary representation")
+        ace = dacl[cursor : cursor + ace_size]
+        if not ace[1] & _INHERITED_ACE:
+            explicit.append(ace)
+        cursor += ace_size
+    if cursor != acl_size:
+        raise WindowsAclError("DACL contains trailing data outside its ACE inventory")
+    explicit_size = 8 + sum(len(ace) for ace in explicit)
+    return struct.pack("<BBHHH", revision, reserved, explicit_size, len(explicit), reserved2) + b"".join(explicit)
+
+
 @dataclass(frozen=True)
 class _HeldPhaseTwoMutatorLease:
     path: str
@@ -583,7 +619,8 @@ class _CtypesWindowsApi:
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None:
         owner_buffer = ctypes.create_string_buffer(security.owner)
-        dacl_buffer = ctypes.create_string_buffer(security.dacl)
+        dacl = security.dacl if security.dacl_protected else _explicit_dacl_copy(security.dacl)
+        dacl_buffer = ctypes.create_string_buffer(dacl)
         label_buffer = (
             ctypes.create_string_buffer(security.mandatory_label) if security.mandatory_label is not None else None
         )

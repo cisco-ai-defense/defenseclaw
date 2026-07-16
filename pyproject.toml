@@ -260,6 +260,7 @@ markers = [
     "tui_property: marks Hypothesis-driven invariant tests",
     "allow_subprocess: opts test out of the autouse subprocess ban (use only for executor.py integration tests)",
     "agent_tty: marks tests that spawn an interactive agent under a PTY (legacy marker)",
+    "supported_connector_host: runs platform-neutral connector behavior on an explicitly supported host",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:textual.*",

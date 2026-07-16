@@ -493,7 +493,9 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         with open(custom, "w", encoding="utf-8") as handle:
             handle.write('{"title": "custom"}\n')
 
-        digest = hashlib.sha256(b'{"title": "retired"}\n').hexdigest()
+        # Text-mode writes use CRLF on Windows. Hash the exact bytes that the
+        # refresh code will inspect instead of assuming a POSIX newline.
+        digest = hashlib.sha256(Path(retired).read_bytes()).hexdigest()
         with patch.dict(
             "defenseclaw.bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256",
             {"grafana/dashboards/defenseclaw-reliability.json": frozenset({digest})},

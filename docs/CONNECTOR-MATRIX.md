@@ -189,7 +189,7 @@ Evidence checked 2026-06-30 against the current upstream documentation:
 [ZeptoClaw installation](https://zeptoclaw.com/docs/getting-started/installation/).
 
 Windows DefenseClaw is **hook-only**. Supported command-hook connectors invoke
-`defenseclaw hook --connector <name> --event <event>` natively, without Git
+`defenseclaw-gateway hook --connector <name> --event <event>` natively, without Git
 Bash, `jq`, shell shims, or WSL. OpenCode uses its JavaScript bridge directly.
 The Go registry and Python `platform_support` module mirror the same
 supported/preview/unsupported taxonomy and reasons, pinned by parity tests.

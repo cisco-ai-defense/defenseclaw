@@ -382,7 +382,8 @@ def _preserve_ownership(path: str):
     breaking sandbox user access. Skipped entirely for non-root
     callers since ``os.chown`` requires elevated privileges.
     """
-    if os.getuid() != 0:
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or getuid() != 0:
         yield
         return
 

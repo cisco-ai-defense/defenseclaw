@@ -363,6 +363,27 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
             snapshot = _observability_v8_upgrade_environment(self.environment_path)
         self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
 
+    def test_windows_ambient_names_outside_v8_grammar_are_ignored(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AMBIENT_ONLY": "present",
+                "PROGRAMFILES(X86)": r"C:\Program Files (x86)",
+                "COMMONPROGRAMFILES(X86)": r"C:\Program Files (x86)\Common Files",
+            },
+            clear=True,
+        ):
+            snapshot = _observability_v8_upgrade_environment(self.environment_path)
+
+        self.assertEqual(
+            snapshot,
+            {
+                "AMBIENT_ONLY": "present",
+                "DOTENV_ONLY": "dotenv-value",
+                "SHARED": "dotenv-loses",
+            },
+        )
+
     def test_malformed_environment_fails_without_exposing_value(self) -> None:
         secret = "malformed-secret-value"
         with open(self.environment_path, "w", encoding="utf-8") as environment_file:

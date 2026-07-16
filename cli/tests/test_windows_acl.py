@@ -171,6 +171,18 @@ def test_staging_copy_converts_only_inherited_ace_markers_to_explicit() -> None:
     assert inherited.dacl != staged.dacl
 
 
+def test_unprotected_set_security_input_omits_inherited_aces() -> None:
+    original = _dacl(
+        (0, 0x03, 0x001F01FF, OWNER),
+        (0, 0x10, 0x00020089, SYSTEM),
+        (0, 0x13, 0x001F01FF, ADMINISTRATORS),
+    )
+
+    assert windows_acl._explicit_dacl_copy(original) == _dacl(
+        (0, 0x03, 0x001F01FF, OWNER),
+    )
+
+
 def test_write_new_file_fails_closed_when_acl_changes_during_write(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _FakeApi()
     api.change_after_write = True

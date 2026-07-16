@@ -136,24 +136,17 @@ async def _cleanup(binary: Path, env: dict[str, str]) -> None:
 async def test_tui_gateway_and_watchdog_survive_parent_exit_and_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    current_windows_gateway: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
-    binary = tmp_path / "defenseclaw-gateway.exe"
-    build = await asyncio.to_thread(
-        subprocess.run,
-        ["go", "build", "-trimpath", "-o", str(binary), "./cmd/defenseclaw"],
-        cwd=repo_root,
-        capture_output=True,
-        check=False,
-        timeout=300,
-    )
-    assert build.returncode == 0, (build.stdout + build.stderr).decode(errors="replace")
+    binary = current_windows_gateway
 
     data_dir = tmp_path / "home"
     data_dir.mkdir()
     port = _reserve_port()
     (data_dir / "config.yaml").write_text(
-        f"""gateway:
+        f"""config_version: 8
+data_dir: {json.dumps(str(data_dir))}
+gateway:
   api_bind: 127.0.0.1
   api_port: {port}
   token: {_TOKEN}
@@ -166,8 +159,7 @@ async def test_tui_gateway_and_watchdog_survive_parent_exit_and_restart(
     debounce: 2
 guardrail:
   enabled: false
-otel:
-  enabled: false
+observability: {{}}
 """,
         encoding="utf-8",
     )

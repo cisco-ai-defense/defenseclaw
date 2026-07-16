@@ -764,6 +764,7 @@ def test_protocol_gate_treats_a_baseline_without_upgrade_module_as_no_schema_gat
     assert completed.stdout.strip() == "0"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="release protocol cleanup requires POSIX bash")
 def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
     completed = subprocess.run(
         [
@@ -782,6 +783,7 @@ def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="resolver asset validation requires POSIX bash")
 def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     tmp_path: Path,
 ) -> None:
@@ -814,6 +816,7 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     assert "UNREACHABLE" not in completed.stdout
 
 
+@pytest.mark.skipif(os.name == "nt", reason="release refusal contract requires POSIX bash")
 def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() -> None:
     completed = subprocess.run(
         [

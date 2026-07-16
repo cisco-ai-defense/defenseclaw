@@ -515,6 +515,22 @@ def test_f0001_version_probe_uses_configured_gateway(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _assert_observability_private_file(path: str, *, require_protected: bool = True) -> None:
+    """Assert the v8 private-file policy on the host running the test."""
+    if os.name != "nt":
+        assert_owner_only_file(path)
+        return
+
+    from defenseclaw import windows_acl
+
+    security = windows_acl.capture_path(path)
+    if require_protected:
+        assert security.dacl_protected is True
+    windows_acl.assert_trusted_owner(security)
+    windows_acl.assert_not_broadly_readable(security)
+    windows_acl.assert_not_broadly_writable(security)
+
+
 def test_f0442_existing_loose_dotenv_is_tightened(tmp_path):
     data_dir = str(tmp_path)
     with open(os.path.join(data_dir, "config.yaml"), "w") as f:
@@ -530,7 +546,9 @@ def test_f0442_existing_loose_dotenv_is_tightened(tmp_path):
 
     content = Path(dotenv_path).read_text(encoding="utf-8")
     # The pre-existing world/group-readable dotenv is tightened to 0600...
-    assert_owner_only_file(dotenv_path)
+    # Existing Windows authorization metadata is retained after it passes the
+    # no-broad-read gate; unlike a new secret, it need not be protected.
+    _assert_observability_private_file(dotenv_path, require_protected=False)
     # ...and still carries the freshly written secret.
     assert f"DD_API_KEY={secret}" in content
 
@@ -544,5 +562,5 @@ def test_f0442_fresh_dotenv_is_owner_only(tmp_path):
     apply_secret(data_dir, resolve_preset("datadog"), secret, dry_run=False)
 
     dotenv_path = os.path.join(data_dir, ".env")
-    assert_owner_only_file(dotenv_path)
+    _assert_observability_private_file(dotenv_path)
     assert f"DD_API_KEY={secret}" in Path(dotenv_path).read_text(encoding="utf-8")

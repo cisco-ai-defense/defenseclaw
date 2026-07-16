@@ -28,18 +28,28 @@ def main() -> int:
                 raise ValueError(f"JSONL line {line_number} is not an object")
             events.append(value)
 
-    connector = args.connector.lower()
-    matching = [event for event in events if connector in json.dumps(event).lower()]
+    connector = args.connector.casefold()
+    matching = [
+        event
+        for event in events
+        if isinstance(event.get("connector"), str)
+        and event["connector"].casefold() == connector
+        and event.get("schema_version") == 1
+        and isinstance(event.get("event_name"), str)
+        and bool(event["event_name"])
+    ]
     if not matching:
-        raise ValueError(f"no events correlated with connector {args.connector}")
+        raise ValueError(f"no canonical v8 events for connector {args.connector}")
 
     request_ids = {
         value
         for event in matching
-        if isinstance((value := event.get("request_id")), str) and value
+        if isinstance((correlation := event.get("correlation")), dict)
+        and isinstance((value := correlation.get("request_id")), str)
+        and value
     }
     if not request_ids:
-        raise ValueError("connector events contain no request_id for audit correlation")
+        raise ValueError("connector events contain no correlation.request_id for audit correlation")
     if not args.audit_db.is_file():
         raise ValueError(f"audit database is missing: {args.audit_db}")
 

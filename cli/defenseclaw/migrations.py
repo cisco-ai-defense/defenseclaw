@@ -62,6 +62,8 @@ from defenseclaw.file_permissions import (
     set_file_mode,
 )
 
+_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 # These target-wheel dependencies are resolved lazily. Older upgrade clients
 # can import the newly installed migrations module into a process that still
@@ -480,7 +482,12 @@ def _observability_v8_upgrade_environment(environment_path: str) -> dict[str, st
     """Return the active dotenv plus ambient overrides without mutation."""
 
     snapshot = _read_observability_v8_upgrade_dotenv(environment_path)
-    snapshot.update(os.environ)
+    # Standard Windows environments contain names such as ProgramFiles(x86)
+    # that cannot be referenced by the v8 environment grammar. They are
+    # unrelated to DefenseClaw and must not poison an otherwise valid upgrade.
+    snapshot.update(
+        (name, value) for name, value in os.environ.items() if _OBSERVABILITY_V8_ENVIRONMENT_NAME.fullmatch(name)
+    )
     return snapshot
 
 

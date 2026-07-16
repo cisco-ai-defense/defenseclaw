@@ -44,15 +44,16 @@ from defenseclaw.commands.cmd_upgrade import (
     _download_release_provenance,
     _download_upgrade_manifest,
     _enforce_upgrade_source_contract,
+    _enforce_windows_self_update_policy,
     _execute_hard_cut_rollback,
     _expected_release_artifacts,
-    _enforce_windows_self_update_policy,
     _fetch_release_asset_digests,
     _fill_missing_checksums_from_release_assets,
     _fsync_hard_cut_recovery_custody,
     _gateway_archive_name,
     _handoff_hard_cut_recovery_to_source_controller,
     _handoff_to_installed_upgrade,
+    _handoff_windows_setup_upgrade,
     _hard_cut_mutation_token,
     _hold_phase_two_lease_for_command_lifetime,
     _install_gateway,
@@ -62,7 +63,6 @@ from defenseclaw.commands.cmd_upgrade import (
     _mark_hard_cut_bundle_mutation_intent,
     _materialize_bridge_source_wheel_for_preflight,
     _materialize_protected_artifact,
-    _handoff_windows_setup_upgrade,
     _native_windows_install_state,
     _normalize_target_version,
     _parse_release_provenance,
@@ -80,14 +80,14 @@ from defenseclaw.commands.cmd_upgrade import (
     _release_download_base,
     _require_bridge_checksums_provenance,
     _require_hard_cut_dependency_contract,
-    _require_hard_cut_preexisting_jsonschema,
     _require_hard_cut_manifest_contract,
+    _require_hard_cut_preexisting_jsonschema,
     _require_release_owned_hard_cut_handoff,
     _require_target_phase_two_mutator_wrapper,
+    _resolve_upgrade_source_version,
     _restore_hard_cut_backup_root_contract,
     _restore_rollback_file,
     _restore_windows_rollback_file,
-    _resolve_upgrade_source_version,
     _RollbackFileSnapshot,
     _run_installed_local_observability_operation,
     _run_installed_migrations,
@@ -104,9 +104,9 @@ from defenseclaw.commands.cmd_upgrade import (
     _verify_macos_rollback_gateway_signature,
     _verify_restored_bridge_artifacts,
     _verify_sha256,
-    _write_hard_cut_recovery_journal,
     _verify_windows_setup_authenticode,
     _version_tuple,
+    _write_hard_cut_recovery_journal,
     upgrade,
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
@@ -257,7 +257,9 @@ class TestUpgradeVersionValidation(unittest.TestCase):
 
     def test_protected_artifact_requires_magic_xor_decode_and_exclusive_destination(self):
         with TemporaryDirectory() as root:
-            payload = b"PK\x03\x04private-wheel-bytes"
+            # Bare LF and DOS EOF catch accidental Windows CRT text-mode
+            # translation while decoding the binary envelope.
+            payload = b"PK\x03\x04private\nwheel\x1abytes"
             protected = Path(root, "artifact.dcwheel")
             destination = Path(root, "artifact.whl")
             protected.write_bytes(b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in payload))
@@ -324,10 +326,11 @@ class TestUpgradeVersionValidation(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
     def test_target_controller_source_override_requires_complete_exact_handoff(self):
+        staged_artifact_dir = os.path.abspath(os.path.join(os.sep, "private", "custody"))
         legacy_environment = {
             "DEFENSECLAW_STAGED_UPGRADE": "1",
             "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
-            "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": "/private/custody",
+            "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": staged_artifact_dir,
         }
         with patch.dict(os.environ, legacy_environment, clear=True):
             self.assertEqual(
@@ -667,7 +670,12 @@ class TestUpgradeBackup(unittest.TestCase):
         with TemporaryDirectory() as data_dir, TemporaryDirectory() as target:
             cfg.data_dir = data_dir
             cfg.claw.home_dir = os.path.join(data_dir, "openclaw")
-            os.symlink(target, os.path.join(data_dir, "backups"))
+            try:
+                os.symlink(target, os.path.join(data_dir, "backups"))
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
 
             with self.assertRaises(OSError):
                 _create_backup(cfg)
@@ -675,6 +683,7 @@ class TestUpgradeBackup(unittest.TestCase):
             self.assertEqual(os.listdir(target), [])
 
 
+@unittest.skipIf(os.name == "nt", "POSIX hard-cut rollback fixture")
 class TestHardCutRollbackTransaction(unittest.TestCase):
     def setUp(self) -> None:
         self._bridge_version = patch("defenseclaw.__version__", "0.8.4")
@@ -2802,6 +2811,7 @@ class TestTargetWheelMigrationCapabilities(unittest.TestCase):
 
 
 class TestUpgradeWheelInstall(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX managed-venv fixture")
     def test_install_wheel_uses_managed_venv_python_after_creating_venv(self):
         with (
             TemporaryDirectory() as home,
@@ -2833,6 +2843,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertEqual(pip_call[5], venv_python)
 
+    @unittest.skipIf(os.name == "nt", "POSIX managed-venv fixture")
     def test_hard_cut_install_is_offline_and_never_mutates_dependencies(self):
         with (
             TemporaryDirectory() as home,
@@ -3339,6 +3350,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
         install_wheel.assert_not_called()
         run_migrations.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "Darwin upgrade orchestration fixture")
     def test_required_migration_failure_leaves_target_services_stopped(self):
         runner = CliRunner()
         app = AppContext()
@@ -3435,6 +3447,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
         )
         poll_health.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "Darwin upgrade orchestration fixture")
     def test_upgrade_preflights_wheel_before_gateway_install(self):
         runner = CliRunner()
         app = AppContext()
@@ -4329,6 +4342,7 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
         self.assertIn("Run manually: openclaw gateway restart", result.output)
 
 
+@unittest.skipIf(os.name == "nt", "POSIX cosign custody fixture")
 class TestCosignBootstrap(unittest.TestCase):
     def test_downloads_pinned_verifier_into_private_temporary_custody(self):
         payload = b"authenticated temporary cosign"
@@ -5145,6 +5159,7 @@ class TestUpgradeManifest(unittest.TestCase):
             output,
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_bridge_source_can_proceed(self):
         _enforce_upgrade_source_contract(
             _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5"),
@@ -5173,6 +5188,7 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertIn("Required bridge 0.8.4 was not published for Windows", output)
         self.assertIn("No changes were made", output)
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_explicit_hard_cut_from_supported_old_source_has_exact_bridge_guidance(self):
         runner = CliRunner()
         manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
@@ -5202,6 +5218,7 @@ class TestUpgradeManifest(unittest.TestCase):
             output,
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_unsupported_source_fails_closed_with_supported_path(self):
         runner = CliRunner()
         manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
@@ -5223,6 +5240,7 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertNotIn("--version 0.7.1", output)
         self.assertIn("No changes were made", output)
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_unsupported_source_does_not_invent_a_nearest_later_hop(self):
         runner = CliRunner()
         manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
@@ -5382,6 +5400,7 @@ class TestUpgradeManifest(unittest.TestCase):
         backup.assert_not_called()
         services.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_component_drift_fails_before_target_network_backup_or_stop(self):
         runner = CliRunner()
         app = AppContext()
@@ -5433,6 +5452,7 @@ class TestUpgradeManifest(unittest.TestCase):
         backup.assert_not_called()
         services.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
     def test_v8_installed_state_requires_config_and_cursor_coherence(self):
         runner = CliRunner()
         with (
@@ -6007,6 +6027,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
     """Robustness: installing the new gateway must snapshot the old one
     so a failed health check has a documented rollback path."""
 
+    @unittest.skipIf(os.name == "nt", "POSIX gateway snapshot fixture")
     def test_snapshot_created_when_previous_binary_exists(self):
         with (
             TemporaryDirectory() as fake_home,
@@ -6037,6 +6058,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             with open(previous, "rb") as f:
                 self.assertEqual(f.read(), b"#!/bin/sh\necho new\n")
 
+    @unittest.skipIf(os.name == "nt", "POSIX gateway snapshot fixture")
     def test_no_snapshot_when_no_previous_binary(self):
         """A fresh install (no prior gateway) must not fail just because
         there's nothing to snapshot."""

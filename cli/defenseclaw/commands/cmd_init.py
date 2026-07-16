@@ -2599,9 +2599,12 @@ def _is_sidecar_running(pid_file: str) -> bool:
     pid = _read_pid(pid_file)
     if pid is None or pid <= 1:
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    # POSIX can probe with kill(pid, 0), but CPython maps that call to a
+    # console control event on Windows and can interrupt the calling process.
+    # The shared helper uses a real Win32 process handle there.
+    from defenseclaw.process_liveness import pid_alive
+
+    if not pid_alive(pid):
         return False
     return _pid_looks_like_gateway(pid)
 

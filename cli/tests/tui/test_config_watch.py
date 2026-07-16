@@ -21,8 +21,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +48,7 @@ def _config_payload(
     global_mode: str = "observe",
 ) -> dict[str, object]:
     return {
+        "config_version": 8,
         "data_dir": str(data_dir),
         "claw": {"mode": primary},
         "guardrail": {
@@ -441,6 +442,7 @@ async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
 async def test_native_windows_open_tui_observes_external_cli_mode_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    current_windows_gateway: Path,
 ) -> None:
     """Two-terminal acceptance: an open TUI observes setup CLI replacement."""
 
@@ -455,6 +457,7 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
 
     isolated_home = tmp_path / "user-home"
     isolated_home.mkdir()
+    repo_root = Path(__file__).resolve().parents[3]
     environment = os.environ.copy()
     environment.update(
         {
@@ -463,18 +466,16 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
             # must not fall back to observe when the CI host lacks Claude Code.
             "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1",
             "DEFENSECLAW_CONFIG": str(path),
+            "DEFENSECLAW_GATEWAY_BIN": str(current_windows_gateway),
             "DEFENSECLAW_HOME": str(tmp_path),
             "HOME": str(isolated_home),
             "USERPROFILE": str(isolated_home),
         }
     )
-    uv = shutil.which("uv")
-    assert uv is not None
     command = (
-        uv,
-        "run",
-        "--frozen",
-        "defenseclaw",
+        sys.executable,
+        "-m",
+        "defenseclaw.main",
         "setup",
         "claude-code",
         "--yes",
@@ -486,17 +487,19 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
     async with app.run_test(size=(140, 45)) as pilot:
         assert app.overview_model.cfg is not None
         assert app.overview_model.cfg.guardrail_mode == "observe"
-        result = await asyncio.to_thread(
-            subprocess.run,
-            command,
-            cwd=Path(__file__).resolve().parents[3],
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-        output = result.stdout + result.stderr
+        cli_log = tmp_path / "setup-cli.log"
+        with cli_log.open("wb") as output_stream:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                cwd=repo_root,
+                env=environment,
+                stdout=output_stream,
+                stderr=subprocess.STDOUT,
+                timeout=90,
+                check=False,
+            )
+        output = cli_log.read_text(encoding="utf-8", errors="replace")
         assert result.returncode == 0, output
         assert "Config saved" in output
         assert "Claude Code action setup" in output

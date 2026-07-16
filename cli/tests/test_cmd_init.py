@@ -1706,6 +1706,7 @@ class TestIsSidecarRunning(unittest.TestCase):
         self.assertEqual(_read_pid(pid_file), os.getpid())
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestDetectOpenclawHome(unittest.TestCase):
     """Tests for _detect_openclaw_home helper."""
 
@@ -1828,6 +1829,7 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         self.assertNotIn(filesystem_root, stat_paths)
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
     """Tests for _integrate_openclaw_home idempotency."""
 
@@ -1876,6 +1878,7 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
             self.assertFalse(result)
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestRestoreOpenclawOwnership(unittest.TestCase):
     """Tests for _restore_openclaw_ownership in cmd_setup."""
 

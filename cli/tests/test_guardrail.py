@@ -1050,7 +1050,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         self.app.cfg.claw.home_dir = self.tmp_dir
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
-        disc = SimpleNamespace(agents={"copilot": signal})
+        disc = SimpleNamespace(agents={"claudecode": signal})
 
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
@@ -1065,7 +1065,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                     "guardrail",
                     "--non-interactive",
                     "--connector",
-                    "copilot",
+                    "claudecode",
                     "--mode",
                     "action",
                     "--no-restart",
@@ -1074,9 +1074,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("GitHub Copilot CLI: connector was not detected locally", result.output)
-        self.assertIn("GitHub Copilot CLI: requested action mode was refused", result.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
+        self.assertIn("Claude Code: connector was not detected locally", result.output)
+        self.assertIn("Claude Code: requested action mode was refused", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "observe")
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
@@ -1109,12 +1109,12 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(
             setup,
             ["guardrail",
-             "--non-interactive", "--agent", "zeptoclaw",
+             "--non-interactive", "--agent", "codex",
              "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+        self.assertIn("Connector: Codex (codex)", result.output)
 
     def test_picked_connector_hint_invalid_value_is_ignored(self):
         """Garbage in picked_connector falls back to openclaw, not a crash."""
@@ -1136,10 +1136,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import setup
         with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
             f.write("codex\n")
-        # Operator previously ran `setup guardrail --connector zeptoclaw`
+        # Operator previously ran `setup guardrail --connector claudecode`
         # and saved it. The picked_connector hint must not silently
         # downgrade their explicit choice on the next bare re-run.
-        self.app.cfg.guardrail.connector = "zeptoclaw"
+        self.app.cfg.guardrail.connector = "claudecode"
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
@@ -1148,7 +1148,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+        self.assertIn("Connector: Claude Code (claudecode)", result.output)
 
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1217,7 +1217,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertEqual(
+            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1240,22 +1243,23 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertEqual(
+            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connector = "antigravity"
+        gc.connector = "codex"
         gc.connectors = {
-            "antigravity": PerConnectorGuardrailConfig(),
             "codex": PerConnectorGuardrailConfig(),
-            "hermes": PerConnectorGuardrailConfig(),
-            "opencode": PerConnectorGuardrailConfig(),
+            "claudecode": PerConnectorGuardrailConfig(),
         }
         gc.connectors["codex"].rule_pack_dir = "/tmp/old-codex-pack"
-        gc.connectors["hermes"].rule_pack_dir = "/tmp/old-hermes-pack"
+        gc.connectors["claudecode"].rule_pack_dir = "/tmp/old-claude-pack"
         self.app.cfg.claw.home_dir = self.tmp_dir
 
         result = self.runner.invoke(
@@ -1272,11 +1276,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertTrue(gc.rule_pack_dir.endswith("/policies/guardrail/strict"))
-        for connector in ("antigravity", "codex", "hermes", "opencode"):
+        self.assertEqual(
+            Path(gc.rule_pack_dir).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
+        for connector in ("codex", "claudecode"):
             self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
-            self.assertTrue(
-                gc.effective_rule_pack_dir(connector).endswith("/policies/guardrail/strict")
+            self.assertEqual(
+                Path(gc.effective_rule_pack_dir(connector)).parts[-3:],
+                ("policies", "guardrail", "strict"),
             )
 
     def test_scoped_rule_pack_updates_only_requested_connector(self):
@@ -1284,12 +1292,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connector = "antigravity"
+        gc.connector = "codex"
         gc.connectors = {
-            "antigravity": PerConnectorGuardrailConfig(),
             "codex": PerConnectorGuardrailConfig(),
-            "hermes": PerConnectorGuardrailConfig(),
-            "opencode": PerConnectorGuardrailConfig(),
+            "claudecode": PerConnectorGuardrailConfig(),
         }
         self.app.cfg.claw.home_dir = self.tmp_dir
 
@@ -1298,7 +1304,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             [
                 "guardrail",
                 "--connector",
-                "hermes",
+                "claudecode",
                 "--rule-pack",
                 "strict",
                 "--yes",
@@ -1310,10 +1316,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
 
         self.assertEqual(gc.rule_pack_dir, "")
-        self.assertEqual(gc.connectors["antigravity"].rule_pack_dir, "")
         self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
-        self.assertTrue(gc.connectors["hermes"].rule_pack_dir.endswith("/policies/guardrail/strict"))
-        self.assertEqual(gc.connectors["opencode"].rule_pack_dir, "")
+        self.assertEqual(
+            Path(gc.connectors["claudecode"].rule_pack_dir).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_rule_pack_dir_missing_is_rejected_before_save(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1384,6 +1391,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--block-message", result.output)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "guardrail proxy connectors are unsupported on native Windows",
+    )
     def test_interactive_action_mode_prompts_hilt_inline(self):
         """HILT is asked inline (not under advanced options) whenever
         the operator selects action mode, regardless of whether they
@@ -1451,6 +1462,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertNotIn("--disable-redaction", result.output)
         self.assertNotIn("--enable-redaction", result.output)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "guardrail proxy connectors are unsupported on native Windows",
+    )
     def test_interactive_observe_mode_skips_hilt_entirely(self):
         """In observe mode the HILT prompt is skipped entirely.
 

@@ -492,6 +492,10 @@ def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:
     assert script.count("config.yaml.pre-observability-migration.bak") == 1
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the isolated Docker shim exercises the POSIX upgrade harness",
+)
 def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path: Path) -> None:
     home = tmp_path / "home"
     completed = _source_script(

@@ -12,6 +12,26 @@ import pytest
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 
+def _bash_executable() -> str:
+    """Return Git Bash on Windows instead of the WindowsApps WSL alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX resolver syntax contract on Windows")
+
+
 def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None:
     output = authenticated_resolver_instructions("0.8.5")
 
@@ -54,7 +74,7 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
 
     posix = output.split("POSIX:\n", 1)[1].split("\nWindows PowerShell:", 1)[0]
     completed = subprocess.run(
-        ["bash", "-n"],
+        [_bash_executable(), "-n"],
         input=posix,
         capture_output=True,
         text=True,

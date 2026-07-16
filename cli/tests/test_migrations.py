@@ -20,7 +20,6 @@ import importlib
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -47,7 +46,7 @@ from defenseclaw.migrations import (
     run_migrations,
 )
 
-from tests.permissions import assert_owner_only_file
+from tests.permissions import assert_owner_only_file, grant_everyone
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -505,6 +504,7 @@ class TestRunMigrations(unittest.TestCase):
         self.assertEqual(refreshed_version, installed_version)
         self.assertEqual(refreshed_cmd_version, installed_version)
 
+    @unittest.skipIf(os.name == "nt", "legacy restart shim is POSIX-only")
     def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
         with (
             tempfile.TemporaryDirectory() as data_dir,
@@ -564,9 +564,7 @@ class TestMigrate040TokenBootstrap(unittest.TestCase):
         # 32 bytes hex == 64 chars
         self.assertEqual(len(token), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in token))
-        # File mode is 0o600.
-        mode = stat.S_IMODE(os.stat(env_path).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(env_path)
         # Change log contains the bootstrap entry.
         self.assertTrue(
             any("DEFENSECLAW_GATEWAY_TOKEN" in c for c in ctx.changes),
@@ -654,15 +652,22 @@ class TestMigrate040PermsTighten(unittest.TestCase):
         device_key = os.path.join(self.data_dir, "device.key")
         with open(device_key, "w") as f:
             f.write("secretkey")
-        os.chmod(device_key, 0o644)
+        if os.name == "nt":
+            grant_everyone(device_key)
+        else:
+            os.chmod(device_key, 0o644)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        mode = stat.S_IMODE(os.stat(device_key).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(device_key)
+        change_text = (
+            "tightened Windows DACL on device.key"
+            if os.name == "nt"
+            else "tightened perms on device.key"
+        )
         self.assertTrue(
-            any("tightened perms on device.key" in c for c in ctx.changes),
+            any(change_text in c for c in ctx.changes),
             msg=ctx.changes,
         )
 
@@ -690,15 +695,18 @@ class TestMigrate040PermsTighten(unittest.TestCase):
         os.makedirs(os.path.dirname(managed), exist_ok=True)
         with open(managed, "w") as f:
             f.write("{}")
-        os.chmod(managed, 0o644)
+        if os.name == "nt":
+            grant_everyone(managed)
+        else:
+            os.chmod(managed, 0o644)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        mode = stat.S_IMODE(os.stat(managed).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(managed)
+        relative = os.path.join("connector_backups", "codex", "config.toml.json")
         self.assertTrue(
-            any("connector_backups/codex/config.toml.json" in c for c in ctx.changes),
+            any(relative in c for c in ctx.changes),
             msg=ctx.changes,
         )
 
@@ -1096,13 +1104,13 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
             "  mode: action\n"
             '  block_message: "Blocked by DefenseClaw — see #sec-help"\n'
         )
-        with open(cfg_path, "w") as f:
+        with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(original)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        with open(cfg_path) as f:
+        with open(cfg_path, encoding="utf-8") as f:
             new = f.read()
 
         # All five comments survived byte-for-byte.

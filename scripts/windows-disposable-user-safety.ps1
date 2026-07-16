@@ -434,7 +434,7 @@ function Copy-BoundedDisposableDiagnostics {
     if ($entries.Count -gt $MaximumFiles) {
         throw "disposable diagnostics contains too many entries: $($entries.Count)"
     }
-    $expectedName = '^(?:processes\.json|listeners\.txt|[A-Za-z0-9_. -]{1,180}\.(?:json|txt|log))$'
+    $expectedName = '^(?:processes\.json|listeners\.txt|[A-Za-z0-9_. -]{1,180}\.(?:json|jsonl|txt|log))$'
     $total = 0L
     foreach ($entry in $entries) {
         if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or

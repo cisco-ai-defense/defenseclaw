@@ -1959,7 +1959,11 @@ def _materialize_protected_artifact(
         raise OSError("protected artifact materialization directory is unsafe")
     if os.path.lexists(destination):
         raise OSError("protected artifact materialization destination already exists")
-    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # The Windows CRT defaults raw descriptors to text mode.  Protected
+    # artifacts are arbitrary binary payloads, so a decoded LF byte must not
+    # be expanded to CRLF on write (which corrupts ZIP offsets and gzip data).
+    binary_flag = getattr(os, "O_BINARY", 0)
+    read_flags = os.O_RDONLY | binary_flag | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     source_fd = os.open(source, read_flags)
     try:
         opened = os.fstat(source_fd)
@@ -1969,7 +1973,14 @@ def _materialize_protected_artifact(
         if observed_magic != _PROTECTED_ARTIFACT_MAGIC:
             raise OSError("protected release artifact magic is invalid")
         consumed_digest = hashlib.sha256(observed_magic)
-        write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        write_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | binary_flag
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         destination_fd = os.open(destination, write_flags, 0o600)
         try:
             while True:
@@ -3937,7 +3948,13 @@ def _stage_upgrade_binary(source: str, install_dir: str, label: str) -> str:
     os.close(fd)
     try:
         shutil.copy2(source, staged)
-        descriptor = os.open(staged, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        # Windows' CRT rejects fsync/_commit on a read-only descriptor.  The
+        # staging file is private and owned by this process, so reopen it
+        # read/write solely to flush the copied bytes before publication.
+        descriptor = os.open(
+            staged,
+            os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
         try:
             os.fsync(descriptor)
         finally:
@@ -4103,7 +4120,7 @@ def _install_gateway(
                 )
             descriptor = os.open(
                 temporary,
-                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0),
             )
             try:
                 os.fsync(descriptor)
