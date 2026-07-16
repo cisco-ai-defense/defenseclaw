@@ -1212,7 +1212,9 @@ def _fixture_root(tmp_path: Path) -> Path:
                 target = root / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(source.read_bytes())
-                assert _sha256(target.read_bytes()) == digest
+                # A Windows checkout may materialize this pinned JSON with
+                # CRLF; the lock owns the canonical LF representation.
+                assert _sha256(target.read_bytes().replace(b"\r\n", b"\n")) == digest
                 structural_inputs.append({"upstream_path": upstream_path, "path": relative_path, "sha256": digest})
             lock_dependencies[-1]["structural_inputs"] = structural_inputs
     _write_yaml(
@@ -1643,6 +1645,107 @@ def _load_updater_module(name: str):
     return module
 
 
+def test_updater_help_imports_on_native_platform() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(UPDATER), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--archive DEPENDENCY=PATH" in completed.stdout
+
+
+def test_updater_repository_lock_serializes_processes_and_releases(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    driver = r"""
+import importlib.util
+import pathlib
+import sys
+import time
+
+script = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(script.parent))
+spec = importlib.util.spec_from_file_location("telemetry_updater_lock_driver", script)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+ready = pathlib.Path(sys.argv[3])
+acquired = pathlib.Path(sys.argv[4])
+release_arg = sys.argv[5]
+release = None if release_arg == "-" else pathlib.Path(release_arg)
+ready.write_text("ready\n", encoding="utf-8")
+with module._repository_update_lock(root):
+    acquired.write_text("acquired\n", encoding="utf-8")
+    while release is not None and not release.exists():
+        time.sleep(0.01)
+"""
+    first_ready = tmp_path / "first-ready"
+    first_acquired = tmp_path / "first-acquired"
+    first_release = tmp_path / "first-release"
+    second_ready = tmp_path / "second-ready"
+    second_acquired = tmp_path / "second-acquired"
+
+    def start(ready: Path, acquired: Path, release: Path | None) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                str(UPDATER),
+                str(root),
+                str(ready),
+                str(acquired),
+                "-" if release is None else str(release),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def wait_for(path: Path, process: subprocess.Popen[str], timeout: float = 15) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"lock helper exited before {path.name}: {stdout}{stderr}")
+            time.sleep(0.01)
+        pytest.fail(f"timed out waiting for {path.name}")
+
+    first = start(first_ready, first_acquired, first_release)
+    second: subprocess.Popen[str] | None = None
+    try:
+        wait_for(first_acquired, first)
+        second = start(second_ready, second_acquired, None)
+        wait_for(second_ready, second)
+        time.sleep(0.25)
+        assert not second_acquired.exists(), "second process entered while first held the lock"
+
+        first_release.write_text("release\n", encoding="utf-8")
+        wait_for(second_acquired, second)
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+        assert first.returncode == 0, first_stdout + first_stderr
+        assert second.returncode == 0, second_stdout + second_stderr
+
+        module = _load_updater_module("telemetry_updater_lock_release")
+        with module._repository_update_lock(root):
+            pass
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+
+
 def _install_synthetic_candidate_renderers(
     module: ModuleType,
     ir: Any,
@@ -1933,6 +2036,37 @@ def test_write_check_is_deterministic_and_offline(tmp_path: Path) -> None:
         document = json.loads(decoded)
         assert document["artifact"] == logical
         assert len(document["materialized_view_sha256"]) == 64
+
+
+def test_crlf_snapshot_checkout_preserves_pinned_digest_and_outputs(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    lock = yaml.safe_load(
+        (root / "schemas/telemetry/v8/semconv.lock.yaml").read_text(encoding="utf-8")
+    )
+    for dependency in lock["dependencies"]:
+        snapshot = root / dependency["snapshot"]["path"]
+        payload = snapshot.read_bytes()
+        assert b"\r\n" not in payload and b"\n" in payload
+        snapshot.write_bytes(payload.replace(b"\n", b"\r\n"))
+
+    generated = _run(root, "--write")
+
+    assert generated.returncode == 0, generated.stderr
+    assert _run(root, "--check").returncode == 0
+
+
+def test_generated_go_drift_check_accepts_crlf_but_not_content_drift(tmp_path: Path) -> None:
+    module = _load_generator_module("telemetry_registry_crlf_generated_go")
+    relative = module.GO_CANDIDATE_OUTPUT_PATHS[0]
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    expected = b"package observability\n\nconst generated = true\n"
+    target.write_bytes(expected.replace(b"\n", b"\r\n"))
+
+    assert module._drift(tmp_path, {relative: expected}) == []
+
+    target.write_bytes(target.read_bytes() + b"// changed\r\n")
+    assert module._drift(tmp_path, {relative: expected}) == [f"stale={relative}"]
 
 
 def test_snapshot_tampering_fails_without_partial_output(tmp_path: Path) -> None:

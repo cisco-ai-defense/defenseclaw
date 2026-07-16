@@ -270,16 +270,7 @@ func TestWindowsCommandFullHookAuditCorrelation(t *testing.T) {
 		for _, mode := range []string{"observe", "action"} {
 			for _, fixture := range fixtures {
 				t.Run(connector+"/"+mode+"/"+fixture.name, func(t *testing.T) {
-					store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
-					if err != nil {
-						t.Fatal(err)
-					}
-					t.Cleanup(func() { _ = store.Close() })
-					if err := store.Init(); err != nil {
-						t.Fatal(err)
-					}
-					logger := audit.NewLogger(store)
-					t.Cleanup(func() { logger.Close() })
+					store, logger := testStoreAndLogger(t)
 
 					cfg := &config.Config{}
 					cfg.Guardrail.Mode = mode

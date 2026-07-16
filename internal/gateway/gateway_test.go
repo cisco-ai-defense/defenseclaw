@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -4889,7 +4890,7 @@ func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat restored config: %v", err)
 	}
-	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+	if gotMode := info.Mode().Perm(); runtime.GOOS != "windows" && gotMode != 0o640 {
 		t.Fatalf("restored config mode = %o, want 640", gotMode)
 	}
 }

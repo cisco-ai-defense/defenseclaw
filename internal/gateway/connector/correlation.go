@@ -605,6 +605,16 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		}
 		return spec, ok
 	case "codex":
+		// The correlation field mapping is unchanged across the three reviewed
+		// Codex hook transports. Keep the selected transport contract exact so
+		// lifecycle events and version bounds come from that contract, while an
+		// unknown/future contract continues to fail closed.
+		correlationContractID := hookContractID
+		switch correlationContractID {
+		case "codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3":
+		default:
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetThread, ns, "thread", "thread_id", "threadId"),
 			reported(CorrelationTargetSession, ns, "session", "sessionId"),
@@ -625,7 +635,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetSourceEvent, ns, "item", "item.id", "codex.item.id"),
 			reported(CorrelationTargetTool, ns, "tool_invocation", "call_id"),
 		)
-		return makeSpec(CorrelationProfileCodexV1, "codex-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "Codex hooks do not report stable parent/depth lineage or a provider response ID"))
+		return makeSpec(CorrelationProfileCodexV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "Codex hooks do not report stable parent/depth lineage or a provider response ID"))
 	case "claudecode":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id"),

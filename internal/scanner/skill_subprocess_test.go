@@ -6,8 +6,6 @@ package scanner
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,11 +13,7 @@ import (
 )
 
 func TestSkillScanner_SubprocessExitEmptyStdoutFails(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fake-scanner.sh")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := buildScannerFixture(t, "", 7)
 	ss := NewSkillScanner(config.SkillScannerConfig{Binary: bin}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
 	_, err := ss.Scan(context.Background(), "/tmp/target")
 	if err == nil {

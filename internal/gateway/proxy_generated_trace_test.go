@@ -569,7 +569,7 @@ func TestHandleChatCompletionGeneratedModelMetricsSurviveTraceSamplingDrop(t *te
 			FinishReason: strPtr("stop"),
 		}},
 		Usage: &ChatUsage{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18},
-	}}
+	}, delay: 20 * time.Millisecond}
 	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil, ""), "action")
 	proxy.SetDefaultAgentName("openclaw")
 	proxy.bindObservabilityV8Trace(runtime)

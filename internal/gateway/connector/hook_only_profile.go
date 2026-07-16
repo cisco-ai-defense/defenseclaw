@@ -121,7 +121,7 @@ func cursorHookOutputForProfile(event, action, reason, additional string) map[st
 	event = canonicalHookEvent(event)
 	if event == "beforesubmitprompt" {
 		if action == "block" {
-			return map[string]interface{}{"continue": false, "user_message": reason}
+			return map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
 		}
 		return map[string]interface{}{"continue": true}
 	}

@@ -130,7 +130,7 @@ normal repeated-development command.
 ### Install with the release script
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail

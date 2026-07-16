@@ -124,19 +124,17 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if got, _ := otlp["protocol"].(string); got != "json" {
 			t.Errorf("%s.otlp-http.protocol = %q; want \"json\"", signal, got)
 		}
-		ep, _ := otlp["endpoint"].(string)
-		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
-			t.Errorf("%s.otlp-http.endpoint does not use configured API address", signal)
-		}
 		wantSignal := map[string]string{
 			"exporter":         "logs",
 			"trace_exporter":   "traces",
 			"metrics_exporter": "metrics",
 		}[signal]
-		if !strings.HasSuffix(ep, "/otlp/codex/"+pathToken+"/v1/"+wantSignal) {
-			t.Errorf("%s.otlp-http.endpoint does not use scoped Codex %s route", signal, wantSignal)
+		ep, _ := otlp["endpoint"].(string)
+		wantEndpoint := "http://" + opts.APIAddr + "/v1/" + wantSignal
+		if ep != wantEndpoint {
+			t.Errorf("%s.otlp-http.endpoint = %q; want %q", signal, ep, wantEndpoint)
 		}
-		if strings.Contains(ep, opts.OTLPPathToken) || strings.Contains(ep, "/otlp/codex/") {
+		if strings.Contains(ep, pathToken) || strings.Contains(ep, "/otlp/codex/") {
 			t.Errorf("%s.otlp-http.endpoint leaked scoped Codex credential: %q", signal, ep)
 		}
 		if !strings.Contains(ep, "/v1/") {
@@ -152,7 +150,7 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if hdrs["x-defenseclaw-client"] == "" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-client] missing (gateway CSRF gate would reject)", signal)
 		}
-		if got := hdrs["authorization"]; got != "Bearer "+opts.OTLPPathToken {
+		if got := hdrs["authorization"]; got != "Bearer "+pathToken {
 			t.Errorf("%s.otlp-http.headers[authorization] = %q; want connector-scoped bearer", signal, got)
 		}
 	}

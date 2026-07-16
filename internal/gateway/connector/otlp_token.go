@@ -132,6 +132,33 @@ func otlpPathTokenFileName(scope OTLPPathTokenScope) string {
 	return ".otlp-" + string(scope) + ".token"
 }
 
+func otlpPathTokenTempPrefix(tokenPath string) string {
+	return filepath.Base(tokenPath) + ".tmp-"
+}
+
+func otlpPathTokenOwnedTempPrefixes(tokenPath string) []string {
+	current := otlpPathTokenTempPrefix(tokenPath)
+	// Earlier unique-temp creators prepended an extra dot even though the token
+	// basename already begins with one. Teardown recognizes those crash orphans
+	// while new creators use the canonical single-dot prefix.
+	return []string{current, "." + current}
+}
+
+func otlpPathTokenTempSuffixIsOwned(suffix string) bool {
+	if len(suffix) == 0 || len(suffix) > 64 {
+		return false
+	}
+	for index := 0; index < len(suffix); index++ {
+		char := suffix[index]
+		if (char < '0' || char > '9') &&
+			(char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // OTLPPathTokenFilePath returns the absolute on-disk location of the
 // path-token for *scope* under *dataDir*. Exposed so the API server
 // can read the same path the connector setup writes.
@@ -283,50 +310,95 @@ func RemoveOTLPPathToken(dataDir string, scope OTLPPathTokenScope) error {
 		return err
 	}
 	return withOTLPPathTokenLock(path, func() error {
-		info, err := os.Lstat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
+		// Releases before unique same-directory staging used this predictable
+		// temporary name. Revoke it under the same validated directory and
+		// lifecycle lock, including when the primary token is already absent.
+		// os.Remove unlinks a reparse point itself rather than following it.
+		if err := os.Remove(path + ".tmp"); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove legacy OTLP path-token temp file: %w", err)
+		}
+		if err := removeOTLPPathTokenUniqueTemps(path); err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("OTLP path-token %s is a symlink", path)
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("OTLP path-token %s is not a regular file", path)
-		}
-		if err := otlpValidateRemovalOwner(path, info); err != nil {
-			return err
-		}
-		file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
-		if err != nil {
-			return err
-		}
-		openedInfo, statErr := file.Stat()
-		if statErr != nil {
-			_ = file.Close()
-			return statErr
-		}
-		currentInfo, pathErr := os.Lstat(path)
-		if pathErr != nil || !openedInfo.Mode().IsRegular() ||
-			currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.Mode().IsRegular() ||
-			!os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
-			_ = file.Close()
-			return fmt.Errorf("OTLP path-token %s changed identity during secure removal", path)
-		}
-		if err := otlpValidateRemovalOwner(path, openedInfo); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
+		return removeOwnedOTLPPathTokenFile(path)
 	})
+}
+
+func removeOTLPPathTokenUniqueTemps(tokenPath string) error {
+	directory := filepath.Dir(tokenPath)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("list OTLP path-token temp files: %w", err)
+	}
+	prefixes := otlpPathTokenOwnedTempPrefixes(tokenPath)
+	for _, entry := range entries {
+		name := entry.Name()
+		owned := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) &&
+				otlpPathTokenTempSuffixIsOwned(strings.TrimPrefix(name, prefix)) {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			continue
+		}
+		path := filepath.Join(directory, name)
+		if err := removeOwnedOTLPPathTokenFile(path); err != nil {
+			return fmt.Errorf("remove OTLP path-token crash temp %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func removeOwnedOTLPPathTokenFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("OTLP path-token %s is a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("OTLP path-token %s is not a regular file", path)
+	}
+	if err := otlpValidateRemovalOwner(path, info); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
+	if err != nil {
+		return err
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil {
+		_ = file.Close()
+		return statErr
+	}
+	currentInfo, pathErr := os.Lstat(path)
+	if pathErr != nil || !openedInfo.Mode().IsRegular() ||
+		currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.Mode().IsRegular() ||
+		!os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
+		_ = file.Close()
+		return fmt.Errorf("OTLP path-token %s changed identity during secure removal", path)
+	}
+	if err := otlpValidateRemovalOwner(path, openedInfo); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // LoadAllOTLPPathTokens loads every known scope into a single map.

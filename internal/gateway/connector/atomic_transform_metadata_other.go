@@ -7,6 +7,20 @@ package connector
 
 import "os"
 
+type atomicTransformBoundRenameProtection struct{}
+
+func captureAtomicTransformBoundRenameProtectionPlatform(
+	*os.File,
+) (atomicTransformBoundRenameProtection, error) {
+	return atomicTransformBoundRenameProtection{}, nil
+}
+
+func restoreAtomicTransformBoundRenameProtectionPlatform(
+	*os.File, atomicTransformBoundRenameProtection,
+) error {
+	return nil
+}
+
 func atomicTransformMetadataPlatform(*os.File) (atomicTransformPlatformMetadata, error) {
 	return atomicTransformPlatformMetadata{}, nil
 }

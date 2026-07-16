@@ -528,6 +528,42 @@ def test_shared_delete_claim_reader_closes_native_handle_when_crt_conversion_fai
     assert ("close", 79) in api.events
 
 
+def test_flush_descriptor_closes_native_handle_when_crt_conversion_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    api.open_exclusive_file = Mock(return_value=81)
+    fake_msvcrt = SimpleNamespace(
+        open_osfhandle=Mock(side_effect=OSError("conversion failed")),
+    )
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    with pytest.raises(OSError, match="conversion failed"):
+        windows_acl.open_regular_flush_fd(r"C:\state\backup.yaml")
+
+    api.open_exclusive_file.assert_called_once_with(r"C:\state\backup.yaml")
+    assert ("close", 81) in api.events
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows flush semantics")
+def test_native_flush_descriptor_preserves_raw_bytes(tmp_path) -> None:
+    backup = tmp_path / "backup.yaml"
+    payload = b"first: line\r\nsecond: line\r\n"
+    backup.write_bytes(payload)
+
+    descriptor = windows_acl.open_regular_flush_fd(str(backup))
+    try:
+        os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        assert os.read(descriptor, len(payload) + 1) == payload
+    finally:
+        os.close(descriptor)
+
+    assert backup.read_bytes() == payload
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
 def test_native_shared_delete_claim_allows_exact_hardlink_disposition(tmp_path) -> None:
     claim = tmp_path / "created.claim"

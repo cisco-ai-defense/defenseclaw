@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
@@ -55,7 +56,9 @@ func TestNativeWindowsExecutableForeignCollisionAndRecovery(t *testing.T) {
 	})
 
 	const token = "win-aud-029-executable-test-token"
-	configText := fmt.Sprintf(`gateway:
+	configText := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
   api_bind: 127.0.0.1
   api_port: %d
   token: %s
@@ -66,9 +69,9 @@ func TestNativeWindowsExecutableForeignCollisionAndRecovery(t *testing.T) {
     enabled: false
 guardrail:
   enabled: false
-otel:
-  enabled: false
-`, port, token)
+  connector: codex
+observability: {}
+`, home, port, token)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -255,18 +258,24 @@ func executableTestLogTail(home string) string {
 
 func countGatewayStopEvents(t *testing.T, home string) int {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(home, "gateway.jsonl"))
+	store, err := audit.NewStore(filepath.Join(home, config.DefaultAuditDBName))
 	if os.IsNotExist(err) {
 		return 0
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ListEvents(1000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	count := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, `"event_type":"lifecycle"`) &&
-			strings.Contains(line, `"subsystem":"gateway"`) &&
-			strings.Contains(line, `"transition":"stop"`) {
+	for _, event := range events {
+		if event.Action == string(audit.ActionSidecarStop) {
 			count++
 		}
 	}
@@ -278,7 +287,9 @@ func testExecutableStartingDeadline(t *testing.T, binary string) {
 	home := t.TempDir()
 	apiPort := reserveExecutableTestPort(t)
 	fleetPort := reserveExecutableTestPort(t)
-	configText := fmt.Sprintf(`gateway:
+	configText := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
   host: 127.0.0.1
   port: %d
   api_bind: 127.0.0.1
@@ -291,9 +302,8 @@ func testExecutableStartingDeadline(t *testing.T, binary string) {
     enabled: false
 guardrail:
   enabled: false
-otel:
-  enabled: false
-`, fleetPort, apiPort)
+observability: {}
+`, home, fleetPort, apiPort)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -384,8 +394,11 @@ exit 0`
 }
 
 func executableTestEnv(home, binary, command string) []string {
-	removed := []string{"DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_TEST_EXE", "DEFENSECLAW_TEST_COMMAND"}
-	env := make([]string, 0, len(os.Environ())+3)
+	removed := []string{
+		"DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_TEST_EXE", "DEFENSECLAW_TEST_COMMAND",
+		"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "CODEX_HOME", "PSModuleAnalysisCachePath",
+	}
+	env := make([]string, 0, len(os.Environ())+9)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
@@ -407,6 +420,12 @@ func executableTestEnv(home, binary, command string) []string {
 		"DEFENSECLAW_HOME="+home,
 		"DEFENSECLAW_TEST_EXE="+binary,
 		"DEFENSECLAW_TEST_COMMAND="+command,
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"CODEX_HOME="+filepath.Join(home, ".codex"),
+		"PSModuleAnalysisCachePath="+filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "PowerShell", "ModuleAnalysisCache"),
 	)
 }
 

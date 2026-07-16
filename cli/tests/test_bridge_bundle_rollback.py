@@ -410,6 +410,30 @@ def test_bundle_rollback_metadata_reader_revalidates_windows_security(
         cmd_upgrade._read_bounded_bundle_rollback_json(metadata)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows stat views")
+def test_bundle_rollback_metadata_reader_accepts_replaced_windows_file(
+    tmp_path: Path,
+) -> None:
+    metadata = tmp_path / "refresh-backup.json"
+    staged = tmp_path / "refresh-backup.staged"
+    staged.write_bytes(b'{"authority":"bridge"}\r\n')
+    os.replace(staged, metadata)
+    observed_flags: list[int] = []
+    real_open = cmd_upgrade.os.open
+
+    def capture_open_flags(path, flags, *args, **kwargs):
+        observed_flags.append(flags)
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch.object(cmd_upgrade.os, "open", side_effect=capture_open_flags):
+        assert cmd_upgrade._read_bounded_bundle_rollback_json(metadata) == {
+            "authority": "bridge"
+        }
+
+    assert observed_flags
+    assert observed_flags[0] & os.O_BINARY
+
+
 @pytest.mark.parametrize("size", [0, 4 * 1024 * 1024 + 1])
 def test_bundle_rollback_metadata_reader_enforces_serialized_size_bound(
     tmp_path: Path,

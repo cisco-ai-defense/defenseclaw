@@ -298,7 +298,8 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 		t.Fatalf("seed canonical Codex hook: %v", err)
 	}
 
-	raw, err := os.ReadFile(configPath)
+	managedPath := filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+	raw, err := os.ReadFile(managedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,14 +322,14 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, drifted, 0o600); err != nil {
+	if err := os.WriteFile(managedPath, drifted, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// A maintenance gateway has no packaged install layout, and this override
 	// simulates its ordinary repository/legacy fallback. Teardown must still
-	// recognize the exact canonical installed command already stored in Codex
-	// config even when that installed executable is now missing.
+	// recognize the exact canonical installed command already stored in Codex's
+	// managed config even when that installed executable is now missing.
 	defenseclawHookBinaryOverride = `C:\maintenance-temp\defenseclaw-hook.exe`
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("maintenance Codex teardown: %v", err)
@@ -336,13 +337,17 @@ func TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout(t *testing
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("maintenance Codex verify clean: %v", err)
 	}
-	restored, err := os.ReadFile(configPath)
+	restoredConfig, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(restored), "user-maintenance-policy.exe") ||
-		!strings.Contains(string(restored), "gpt-user-choice") {
-		t.Fatalf("maintenance teardown discarded unrelated Codex drift:\n%s", restored)
+	restoredManaged, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restoredManaged), "user-maintenance-policy.exe") ||
+		!strings.Contains(string(restoredConfig), "gpt-user-choice") {
+		t.Fatalf("maintenance teardown discarded unrelated Codex drift:\nconfig.toml:\n%s\nmanaged_config.toml:\n%s", restoredConfig, restoredManaged)
 	}
 }
 
