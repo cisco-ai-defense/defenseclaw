@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 import requests
+from urllib3.exceptions import NewConnectionError
 
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.models import ScanResult
@@ -84,8 +85,12 @@ class _GatewayConfigRecorder:
         )
         try:
             client.emit_cli_observability(payload)
-        except (requests.ConnectionError, requests.Timeout) as exc:
-            raise CanonicalObservabilityUnavailableError("canonical Observability v8 runtime is unavailable") from exc
+        except requests.RequestException as exc:
+            if _is_definite_preconnect_failure(exc):
+                raise CanonicalObservabilityUnavailableError(
+                    "canonical Observability v8 runtime is unavailable"
+                ) from exc
+            raise
         finally:
             client.close()
 
@@ -293,6 +298,39 @@ def _gateway_api_host(cfg: Any) -> str:
     if bind in {"", "0.0.0.0", "::", "[::]", "localhost"}:
         return "127.0.0.1"
     return bind
+
+
+def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
+    """Return true only when no request bytes could have reached the gateway.
+
+    Connect timeouts are explicitly safe to retry. Requests wraps DNS and
+    connection-refused failures in a ``ConnectionError`` whose nested urllib3
+    reason is ``NewConnectionError``. Read timeouts, resets, protocol errors,
+    and generic connection failures remain ambiguous because the gateway may
+    already have committed the canonical record.
+    """
+
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(current, NewConnectionError):
+            return True
+        for related in (
+            getattr(current, "reason", None),
+            current.__cause__,
+            current.__context__,
+            *current.args,
+        ):
+            if isinstance(related, BaseException):
+                pending.append(related)
+    return False
 
 
 def _current_run_id() -> str:

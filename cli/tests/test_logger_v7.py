@@ -24,6 +24,7 @@ from defenseclaw.logger import (
 )
 from defenseclaw.main import cli
 from defenseclaw.models import Finding, ScanResult
+from urllib3.exceptions import NewConnectionError
 
 
 class _Recorder:
@@ -252,8 +253,16 @@ def test_from_config_defers_missing_auth_failure_until_emit() -> None:
         logger.log_action("policy-reload", "default", "changed")
 
 
-@pytest.mark.parametrize("transport_error", [requests.ConnectionError, requests.Timeout])
-def test_from_config_classifies_only_unreachable_runtime_as_unavailable(transport_error: type[Exception]) -> None:
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        requests.ConnectTimeout("connect timed out"),
+        requests.ConnectionError(NewConnectionError(None, "connection refused")),
+    ],
+)
+def test_from_config_classifies_only_preconnect_failure_as_unavailable(
+    transport_error: requests.RequestException,
+) -> None:
     cfg = SimpleNamespace(
         config_version=8,
         gateway=SimpleNamespace(
@@ -267,7 +276,7 @@ def test_from_config_classifies_only_unreachable_runtime_as_unavailable(transpor
 
     class OfflineRecorder:
         def emit_cli_observability(self, _payload) -> None:
-            raise transport_error("private endpoint")
+            raise transport_error
 
         def close(self) -> None:
             return
@@ -278,6 +287,45 @@ def test_from_config_classifies_only_unreachable_runtime_as_unavailable(transpor
     ):
         Logger.from_config(cfg).log_action("setup-hook-connector", "config", "secret")
     assert "private endpoint" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        requests.ReadTimeout("private read timeout"),
+        requests.Timeout("private ambiguous timeout"),
+        requests.ConnectionError("private post-write reset"),
+    ],
+)
+def test_from_config_keeps_ambiguous_transport_failure_fail_closed(
+    transport_error: requests.RequestException,
+) -> None:
+    cfg = SimpleNamespace(
+        config_version=8,
+        gateway=SimpleNamespace(
+            api_bind="127.0.0.1",
+            api_port=18970,
+            resolved_token=lambda: "gateway-token",
+        ),
+        openshell=None,
+        guardrail=None,
+    )
+
+    class AmbiguousRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise transport_error
+
+        def close(self) -> None:
+            return
+
+    with (
+        patch("defenseclaw.logger.OrchestratorClient", return_value=AmbiguousRecorder()),
+        pytest.raises(CanonicalObservabilityError) as caught,
+    ):
+        Logger.from_config(cfg).log_action("setup-hook-connector", "config", "secret")
+    assert type(caught.value) is CanonicalObservabilityError
+    assert "private" not in str(caught.value)
     assert "secret" not in str(caught.value)
 
 
