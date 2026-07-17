@@ -145,7 +145,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
 def test_developer_activation_removes_ambient_runtime_overrides() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             'source "$1"; '
             "export DEFENSECLAW_DISABLE_REDACTION=true "

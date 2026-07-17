@@ -1883,12 +1883,21 @@ async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
     logs.filter_mode = ""
     logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
     app = DefenseClawTUI(logs_model=logs)
+    # The assertion measures one stable render generation.  Keep the
+    # independent two-second refresh timer from starting another generation
+    # while this test is slowed by full-suite coverage instrumentation.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         await _wait_for_background(lambda: table.row_count == 200)
+        # The responsive renderer yields after appending its final batch and
+        # only then publishes the generation signature.  Row count alone can
+        # therefore become observable one event-loop turn too early.
+        await _wait_for_panel_render(app, "logs")
+        await pilot.pause()
         row_objects = tuple(table.rows.values())
 
         logs.cursor["gateway"] = 1
