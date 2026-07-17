@@ -82,6 +82,128 @@ func authenticatedStatusServer(t *testing.T, token string, status gatewayStatusE
 	}))
 }
 
+func TestRotationStopReadinessAuthenticatesPIDDataDirAndListener(t *testing.T) {
+	token := strings.Repeat("r", 32)
+	cfg := startupTestConfig(t)
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_DATA_DIR", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", token)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Enabled = true
+	cfg.Gateway.Watcher.Enabled = false
+
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	if cfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
+		snap.Telemetry.State = gateway.StateRunning
+	}
+	status := gatewayStatusEnvelope{Health: snap}
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	server := authenticatedStatusServer(t, token, status)
+	defer server.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+
+	state := fakeStrongDaemonState{
+		fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		identityOK:      true,
+	}
+	if err := waitForRunningDaemonReadiness(
+		state,
+		42,
+		server.Client(),
+		cfg,
+		time.Second,
+		5*time.Millisecond,
+	); err != nil {
+		t.Fatalf("rotation stop readiness: %v", err)
+	}
+}
+
+func TestRotationStopReadinessTimeoutLeavesOldDaemonRunning(t *testing.T) {
+	token := strings.Repeat("r", 32)
+	cfg := startupTestConfig(t)
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_DATA_DIR", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", token)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Enabled = true
+	cfg.Gateway.Watcher.Enabled = false
+
+	snap := readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled)
+	status := gatewayStatusEnvelope{Health: snap}
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	server := authenticatedStatusServer(t, token, status)
+	defer server.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+
+	state := fakeStrongDaemonState{
+		fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		identityOK:      true,
+	}
+	err := waitForRunningDaemonReadiness(
+		state,
+		42,
+		server.Client(),
+		cfg,
+		25*time.Millisecond,
+		5*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), "STARTING") {
+		t.Fatalf("rotation stop timeout error = %v, want readiness timeout", err)
+	}
+	if running, pid := state.IsRunning(); !running || pid != 42 {
+		t.Fatalf("old daemon state changed after readiness timeout: running=%v pid=%d", running, pid)
+	}
+}
+
+func TestRotationCleanupAuthenticatesStartingPIDDataDirAndListener(t *testing.T) {
+	token := strings.Repeat("r", 32)
+	cfg := startupTestConfig(t)
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_DATA_DIR", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", token)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Enabled = true
+	cfg.Gateway.Watcher.Enabled = false
+
+	snap := readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled)
+	status := gatewayStatusEnvelope{Health: snap}
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	server := authenticatedStatusServer(t, token, status)
+	defer server.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+
+	state := fakeStrongDaemonState{
+		fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		identityOK:      true,
+	}
+	running, pid, err := inspectRotationStopTarget(
+		state,
+		cfg,
+		server.Client(),
+		true,
+		25*time.Millisecond,
+		5*time.Millisecond,
+	)
+	if err != nil || !running || pid != 42 {
+		t.Fatalf("rotation cleanup target: running=%v pid=%d error=%v", running, pid, err)
+	}
+}
+
 func TestInspectConfiguredListenerRejectsForeignCollisionAndStalePID(t *testing.T) {
 	cfg := startupTestConfig(t)
 	withStartupListenerInspector(t, func(string, int) (int, error) { return 9001, nil })

@@ -51,7 +51,7 @@ func TestNativeWindowsDisposableForeignCollisionPreflight(t *testing.T) {
 	}
 }
 
-func TestNativeWindowsDisposableStartAndRestartCollisionHaveNoSideEffects(t *testing.T) {
+func TestNativeWindowsDisposableLifecycleCollisionHasNoSideEffects(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +78,13 @@ func TestNativeWindowsDisposableStartAndRestartCollisionHaveNoSideEffects(t *tes
 		run  func() error
 	}{
 		{name: "start", run: func() error { return runStart(startCmd, nil) }},
+		{name: "rotation-stop", run: func() error {
+			if err := stopCmd.Flags().Set(rotationTransactionFlag, "true"); err != nil {
+				return err
+			}
+			defer stopCmd.Flags().Set(rotationTransactionFlag, "false") //nolint:errcheck -- test cleanup
+			return runStop(stopCmd, nil)
+		}},
 		{name: "restart", run: func() error { return runRestart(restartCmd, nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
