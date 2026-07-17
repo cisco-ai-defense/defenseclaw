@@ -12,8 +12,12 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +40,58 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	if defaultStartReadinessTimeout != 60*time.Second {
 		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	}
+}
+
+func TestLoadDaemonConfigMatchesGatewayDynamicConfigResolution(t *testing.T) {
+	defaultDataDir := t.TempDir()
+	resolvedDataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	const (
+		secretEnv = "DEFENSECLAW_TEST_DAEMON_DYNAMIC_AUTH"
+		secret    = "dynamic-daemon-fixture-secret"
+	)
+	t.Setenv("DEFENSECLAW_HOME", defaultDataDir)
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	t.Setenv(secretEnv, "")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiPort := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
+  api_bind: 127.0.0.1
+  api_port: %d
+observability:
+  destinations:
+    - name: dynamic-fixture
+      kind: otlp
+      endpoint: https://collector.example.test
+      headers:
+        Authorization: {env: %s}
+`, filepath.ToSlash(resolvedDataDir), apiPort, secretEnv)
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resolvedDataDir, ".env"), []byte(secretEnv+"="+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadDaemonConfig(nil)
+	if err != nil {
+		t.Fatalf("loadDaemonConfig() error = %v", err)
+	}
+	if cfg.Gateway.APIBind != "127.0.0.1" || cfg.Gateway.APIPort != apiPort {
+		t.Fatalf("daemon endpoint = %s:%d, want dynamic endpoint 127.0.0.1:%d", cfg.Gateway.APIBind, cfg.Gateway.APIPort, apiPort)
+	}
+	if got := os.Getenv(secretEnv); got != secret {
+		t.Fatalf("resolved daemon secret = %q, want dotenv value", got)
 	}
 }
 
