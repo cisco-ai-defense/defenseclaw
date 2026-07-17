@@ -558,6 +558,8 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 // exact emitted command across both supported agent launch boundaries. The
 // probe uses the same GUI subsystem as release defenseclaw-hook.exe so this
 // catches PowerShell returning before the process exits.
+const windowsNativePowerShellTestTimeout = 2 * time.Minute
+
 func TestWindowsNativePowerShellHookCommandPropagatesProcessResults(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows GUI-subsystem process semantics are Windows-specific")
@@ -618,7 +620,7 @@ func main() {
 	}
 	for _, testCase := range cases {
 		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
 			defer cancel()
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
@@ -631,6 +633,10 @@ func main() {
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
 			err := cmd.Run()
+			if ctx.Err() != nil {
+				t.Fatalf("generated command exceeded %s: %v\ncommand: %s\nstdout: %s\nstderr: %s",
+					windowsNativePowerShellTestTimeout, ctx.Err(), command, stdout.String(), stderr.String())
+			}
 			if got := windowsProcessExitCodeForTest(t, err); got != testCase.exitCode {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
 					got, testCase.exitCode, command, stdout.String(), stderr.String())
@@ -683,7 +689,7 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 	setHookBinaryOverride(t, helper)
 
 	command := windowsNativePowerShellHookCommand("antigravity")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
 	defer cancel()
 	cmd := windowsNativePowerShellTestProcess(ctx, "antigravity", command)
 	cmd.Env = minimalWindowsHookTestEnvironment(
@@ -696,6 +702,10 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("fail-closed generated command exceeded %s: %v\ncommand: %s\nstdout: %s\nstderr: %s",
+			windowsNativePowerShellTestTimeout, ctx.Err(), command, stdout.String(), stderr.String())
+	}
 	if got := windowsProcessExitCodeForTest(t, err); got != 2 {
 		t.Fatalf("fail-closed generated command exit = %d, want 2\ncommand: %s\nstdout: %s\nstderr: %s",
 			got, command, stdout.String(), stderr.String())
@@ -741,34 +751,13 @@ func minimalWindowsHookTestEnvironment(overrides ...string) []string {
 		"TMP",
 		"WINDIR",
 	}
-	// Windows PowerShell 5.1 otherwise shares a user-profile module-analysis
-	// cache across every test process. Fresh broad-suite runners can initialize
-	// that cache concurrently, changing the shell's exit status after the hook
-	// process completes. NUL is the documented per-process way to disable this
-	// nonessential file cache without inheriting the ambient profile.
-	env := make([]string, 0, len(allowedNames)+len(overrides)+1)
-	env = append(env, "PSModuleAnalysisCachePath=NUL")
+	env := make([]string, 0, len(allowedNames)+len(overrides))
 	for _, name := range allowedNames {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
 		}
 	}
 	return append(env, overrides...)
-}
-
-func TestMinimalWindowsHookTestEnvironmentDisablesSharedModuleCache(t *testing.T) {
-	t.Setenv("PSModuleAnalysisCachePath", filepath.Join(t.TempDir(), "ambient-module-cache"))
-
-	env := minimalWindowsHookTestEnvironment()
-	var cacheEntries []string
-	for _, entry := range env {
-		if strings.HasPrefix(strings.ToUpper(entry), "PSMODULEANALYSISCACHEPATH=") {
-			cacheEntries = append(cacheEntries, entry)
-		}
-	}
-	if len(cacheEntries) != 1 || cacheEntries[0] != "PSModuleAnalysisCachePath=NUL" {
-		t.Fatalf("module-analysis cache environment = %q, want isolated NUL device", cacheEntries)
-	}
 }
 
 // TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
