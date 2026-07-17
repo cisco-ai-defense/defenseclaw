@@ -171,8 +171,10 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             )
             output = (reset.stdout + reset.stderr).decode("utf-8")
             self.assertEqual(reset.returncode, 0, output)
-            self.assertIn("✓", output)
-            self.assertIn("Reset complete", output)
+            self.assertIn(
+                "Reset complete. Run 'defenseclaw quickstart' to reinstall.",
+                output,
+            )
             self.assertTrue(python.is_file())
             self.assertEqual({path.name for path in data_dir.iterdir()}, {".venv"})
 
