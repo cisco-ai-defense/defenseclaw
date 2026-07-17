@@ -661,8 +661,23 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 		t.Fatalf("create isolated hook home: %v", err)
 	}
 	helper := filepath.Join(root, "win-aud-069-real-hook.exe")
-	hookPackage := filepath.Join("..", "..", "..", "cmd", "defenseclaw-hook")
-	build := exec.Command("go", "build", "-ldflags", "-H=windowsgui", "-o", helper, hookPackage)
+	packageDir, getwdErr := os.Getwd()
+	if getwdErr != nil {
+		t.Fatalf("resolve connector package directory: %v", getwdErr)
+	}
+	repoRoot := packageDir
+	for i := 0; i < 3; i++ {
+		repoRoot = filepath.Dir(repoRoot)
+	}
+	moduleInfo, statErr := os.Stat(filepath.Join(repoRoot, "go.mod"))
+	if statErr != nil {
+		t.Fatalf("verify repository root: %v", statErr)
+	}
+	if moduleInfo.IsDir() {
+		t.Fatalf("repository root marker is a directory: %s", filepath.Join(repoRoot, "go.mod"))
+	}
+	build := exec.Command("go", "build", "-ldflags", "-H=windowsgui", "-o", helper, "./cmd/defenseclaw-hook")
+	build.Dir = repoRoot
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build real GUI hook launcher: %v\n%s", err, output)
 	}
