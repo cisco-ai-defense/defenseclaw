@@ -163,6 +163,91 @@ func TestClaudeNativePromptExpansionHonorsScopedRuntimeDisable(t *testing.T) {
 	}
 }
 
+func TestClaudeNativePromptExpansionFailsClosedWithoutProvenanceStore(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Mode = "action"
+	api := &APIServer{scannerCfg: cfg}
+
+	response := invokeNativeSkillHook(t, api, "claudecode", `{
+		"hook_event_name":"UserPromptExpansion",
+		"session_id":"fresh-claude-session",
+		"prompt":"/review-pr inspect this change",
+		"expansion_type":"slash_command",
+		"command_name":"review-pr",
+		"command_args":"inspect this change",
+		"command_source":"skill"
+	}`)
+	if response.Action != "block" || response.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q reason=%q", response.Action, response.RawAction, response.Reason)
+	}
+	if !strings.Contains(response.Reason, "reason_code=runtime-provenance-error") {
+		t.Fatalf("reason=%q, want runtime provenance failure", response.Reason)
+	}
+}
+
+func TestNativeSkillSelectionWriteFailureFailsClosedUnlessStrongerBlock(t *testing.T) {
+	tests := []struct {
+		name               string
+		disable            bool
+		wantSource         string
+		wantReasonContains string
+	}{
+		{
+			name:               "selection without stronger block",
+			wantSource:         "runtime-provenance-error",
+			wantReasonContains: "runtime provenance write failed",
+		},
+		{
+			name:       "existing runtime disable remains authoritative",
+			disable:    true,
+			wantSource: "runtime-disable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newNativeSkillRuntimeTestStore(t)
+			if test.disable {
+				if err := store.SetActionFieldForConnector(
+					"skill", "review-pr", "claudecode", "runtime", "disable", "fixture",
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			api := &APIServer{store: store}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			decision, matched := api.evaluateNativeRuntimeSkillSelection(
+				ctx, "claudecode", "write-failure-session",
+				"UserPromptExpansion", runtimeProvenanceClaudeExpansion,
+				skillRuntimeProbe{
+					TargetType: "skill", SkillName: "review-pr",
+					SourcePath: "skill", Surface: "prompt_expansion", Matched: true,
+				},
+			)
+			if !matched || decision.Action != "block" || decision.RawAction != "block" {
+				t.Fatalf("decision=%#v matched=%t, want enforced block", decision, matched)
+			}
+			if decision.Source != test.wantSource {
+				t.Fatalf("source=%q, want %q", decision.Source, test.wantSource)
+			}
+			if test.wantReasonContains != "" && !strings.Contains(decision.Reason, test.wantReasonContains) {
+				t.Fatalf("reason=%q, want %q", decision.Reason, test.wantReasonContains)
+			}
+			state, err := store.GetRuntimeAssetState(
+				context.Background(), "claudecode", "write-failure-session", "skill", "review-pr",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != nil {
+				t.Fatalf("runtime state = %#v, canceled write must not persist", state)
+			}
+		})
+	}
+}
+
 func TestClaudeNativePromptExpansionRecordsLoadedAttestation(t *testing.T) {
 	store, logger := newNativeSkillRuntimeTestStore(t)
 	api := &APIServer{store: store, logger: logger}

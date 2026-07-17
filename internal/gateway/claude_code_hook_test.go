@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -536,10 +537,12 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 	cfg.AssetPolicy.Skill.RegistryEmptyAction = "allow"
 	enableSkillRuntimeDetection(cfg)
 
-	api := &APIServer{scannerCfg: cfg}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 
 	req := claudeCodeHookRequest{
 		HookEventName: "UserPromptExpansion",
+		SessionID:     "empty-registry-allow-session",
 		ExpansionType: "slash_command",
 		CommandName:   "rogue-skill",
 		CommandSource: "skill",
@@ -552,6 +555,16 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 	}
 	if containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, did not expect ASSET-POLICY-SKILL", resp.Findings)
+	}
+	state, err := store.GetRuntimeAssetState(
+		context.Background(), "claudecode", req.SessionID, "skill", req.CommandName,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.State != audit.RuntimeAssetLoaded ||
+		state.Provenance != runtimeProvenanceClaudeExpansion {
+		t.Fatalf("runtime state = %#v, want durable loaded expansion attestation", state)
 	}
 }
 
