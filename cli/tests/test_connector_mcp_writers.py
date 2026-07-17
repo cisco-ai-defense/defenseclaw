@@ -540,6 +540,48 @@ class TestClaudeCodeWrites:
         assert settings.read_bytes() == original
         assert _claude_ownership_files(data_home) == []
 
+    @pytest.mark.skipif(os.name != "nt", reason="Windows publication identity hand-off")
+    def test_verified_publication_rebinds_candidate_projection(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        data_home = tmp_path / "d"
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        original = b'{ "theme" : "operator" }\r\n'
+        settings.write_bytes(original)
+        project = connector_paths._claude_postimage_identity_from_snapshot
+        projections = 0
+
+        def drift_prepublication_projection(snapshot):
+            nonlocal projections
+            projections += 1
+            identity = project(snapshot)
+            if projections == 1:
+                return {
+                    **identity,
+                    "inode": (identity["inode"] or 0) + 1,
+                }
+            return identity
+
+        monkeypatch.setattr(
+            connector_paths,
+            "_claude_postimage_identity_from_snapshot",
+            drift_prepublication_projection,
+        )
+        set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+
+        metadata = _claude_ownership_files(data_home)
+        assert len(metadata) == 1
+        committed = json.loads(metadata[0].read_text(encoding="utf-8"))["committed"]
+        assert projections >= 2
+        assert committed["postimage_identity"] == connector_paths._capture_claude_postimage_identity(
+            str(settings),
+        )
+
+        unset_mcp_server("claudecode", "demo")
+        assert settings.read_bytes() == original
+        assert _claude_ownership_files(data_home) == []
+
     def test_equal_byte_crash_after_publication_restores_operator_server_once(
         self,
         tmp_path,

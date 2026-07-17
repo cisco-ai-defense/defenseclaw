@@ -3911,6 +3911,7 @@ def _publish_claude_config_if_unchanged(
     replacement: bytes | None,
     *,
     candidate_prepared: Any = None,
+    candidate_verified: Any = None,
 ) -> dict[str, Any] | None:
     """Publish through the identity-bound observability CAS primitive."""
     # Import lazily: connector discovery must remain cheap and independent of
@@ -3989,12 +3990,14 @@ def _publish_claude_config_if_unchanged(
             raise MCPWriteUnsupportedError(
                 f"Claude MCP settings were replaced after publication: {path}",
             )
-        # Return the exact public snapshot only after proving it is still the
-        # staged file object with the expected bytes and security.  The caller
-        # durably rebinds the pending journal to this observed identity before
-        # finalization, closing the staged-to-public metadata hand-off without
-        # accepting a replacement file.
-        return _claude_postimage_identity_from_snapshot(observed)
+        # Rebind only after proving the public path still names the exact
+        # staged file object with the expected bytes and security.  The
+        # pre-publication journal remains the crash-safe fallback until this
+        # callback durably records the observed public identity.
+        observed_identity = _claude_postimage_identity_from_snapshot(observed)
+        if candidate_verified is not None:
+            candidate_verified(observed_identity)
+        return observed_identity
     except MCPWriteUnsupportedError:
         raise
     except (OSError, v8_activation.V8ActivationError) as exc:
@@ -4041,6 +4044,7 @@ def _apply_claude_mcp_transaction(
         ),
     )
     finalized_state = copy.deepcopy(next_state)
+    verified_identity_persisted = False
 
     def persist_candidate_identity(candidate_identity):
         if finalized_state is None:
@@ -4062,24 +4066,18 @@ def _apply_claude_mcp_transaction(
             ),
         )
 
-    published_identity = _publish_claude_config_if_unchanged(
-        path,
-        expected,
-        replacement,
-        candidate_prepared=(persist_candidate_identity if finalized_state is not None else None),
-    )
-    if finalized_state is not None:
-        if published_identity != finalized_state.get("postimage_identity"):
+    def persist_verified_identity(verified_identity):
+        nonlocal verified_identity_persisted
+        if finalized_state is None:
             raise MCPWriteUnsupportedError(
-                "refusing Claude MCP mutation: published candidate identity changed",
+                "refusing Claude MCP mutation: verified identity has no managed state",
             )
-        finalized_state["postimage_identity"] = published_identity
+        finalized_state["postimage_identity"] = verified_identity
         pending["next_state"] = copy.deepcopy(finalized_state)
-        # The pre-publication identity remains crash-safe until this write.
-        # Rebind only after publication has verified the live path still names
-        # that exact candidate; a crash before this point therefore remains
-        # fail-closed, while a crash afterward recovers from the observed
-        # public identity rather than a staged-file projection.
+        # This callback runs only after the publisher proves that the live
+        # path still names the exact staged candidate.  A crash before this
+        # write therefore retains the fail-closed pre-publication identity;
+        # a crash afterward can recover from the observed public identity.
         _save_claude_mcp_envelope(
             path,
             _claude_mcp_envelope(
@@ -4088,6 +4086,19 @@ def _apply_claude_mcp_transaction(
                 pending=pending,
                 released=released,
             ),
+        )
+        verified_identity_persisted = True
+
+    published_identity = _publish_claude_config_if_unchanged(
+        path,
+        expected,
+        replacement,
+        candidate_prepared=(persist_candidate_identity if finalized_state is not None else None),
+        candidate_verified=(persist_verified_identity if finalized_state is not None else None),
+    )
+    if finalized_state is not None and (published_identity is None or not verified_identity_persisted):
+        raise MCPWriteUnsupportedError(
+            "refusing Claude MCP mutation: verified publication identity is unavailable",
         )
     _finalize_claude_mcp_transaction(path, finalized_state, next_released)
 
