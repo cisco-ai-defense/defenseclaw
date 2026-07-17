@@ -4118,7 +4118,18 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         except Exception:  # noqa: BLE001
             mode = ""
         if mode:
-            _emit("pass", "Mode", mode, r=r)
+            try:
+                from defenseclaw.fail_mode import connector_fail_mode_report
+
+                fail_mode = connector_fail_mode_report(cfg, connector)
+            except Exception:  # noqa: BLE001 - doctor must still report partial state.
+                fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+            _emit(
+                "pass",
+                "Mode",
+                f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
+                r=r,
+            )
 
     workspace = _workspace_dir(cfg)
     if workspace:

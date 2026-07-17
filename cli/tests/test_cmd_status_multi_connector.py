@@ -78,6 +78,17 @@ class TestPrintAgentsRoster(unittest.TestCase):
         self.assertIn("Codex (codex)", out)
         self.assertIn("mode=action", out)
 
+    def test_roster_reports_effective_fail_mode_and_provenance(self):
+        report = {
+            "effective": "open",
+            "provenance": "process-env",
+        }
+        with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
+            out = _render(_cfg(["codex"], modes={"codex": "action"}))
+
+        self.assertIn("fail-mode=open", out)
+        self.assertIn("provenance=process-env", out)
+
     def test_zero_connectors_shows_no_active(self):
         out = _render(_cfg([]))
         self.assertIn("Agents", out)
@@ -373,6 +384,9 @@ class TestStatusJson(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        # Keep unit status tests config-only; runtime provenance has a dedicated
+        # disposable-state test in test_fail_mode_runtime.py.
+        self.app.cfg.data_dir = ""
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
@@ -412,6 +426,24 @@ class TestStatusJson(unittest.TestCase):
         self.assertEqual(by_name["codex"]["mode"], "action")
         self.assertEqual(by_name["hermes"]["mode"], "observe")
         self.assertTrue(by_name["codex"]["enabled"])
+
+    def test_json_roster_reports_canonical_fail_mode_projection(self):
+        report = {
+            "effective": "closed",
+            "provenance": "windows-sidecar",
+            "configured": "open",
+            "desired": "open",
+            "runtime": "closed",
+            "current": False,
+            "drift": ["windows-sidecar-closed"],
+            "sources": [],
+        }
+        with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
+            result = self._invoke_json()
+
+        doc = json.loads(result.output)
+        by_name = {c["name"]: c for c in doc["connectors"]}
+        self.assertEqual(by_name["codex"]["fail_mode"], report)
 
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))

@@ -373,6 +373,8 @@ def _print_agents(
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
+        fail_mode = _effective_status_fail_mode(cfg, conn)
+        fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
         if not _is_enabled(conn):
             # Operator-disabled: hooks were torn down, so there is no live
@@ -380,17 +382,19 @@ def _print_agents(
             # the dim "not reporting" branch, which is indistinguishable from a
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
-            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}")
+            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}")
             ux.echo(f"                {disabled_text} — {disabled_label}")
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
         if hc:
             suffix = _connector_state_verb(str(hc.get("state") or ""))
-            ux.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{source_suffix}{suffix}")
+            ux.echo(
+                f"                {friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{suffix}"
+            )
             _print_agent_counters(hc, indent="                  ")
         else:
-            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{source_suffix}")
+            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}")
             ux.echo(f"                {dim_text}")
 
 
@@ -479,6 +483,32 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
         except Exception:
             return ""
     return ""
+
+
+def _effective_status_fail_mode(cfg, connector: str) -> dict:
+    """Return the shared fail-mode report without making status fragile."""
+
+    try:
+        from defenseclaw.fail_mode import connector_fail_mode_report
+
+        return connector_fail_mode_report(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        guardrail = getattr(cfg, "guardrail", None)
+        resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+        try:
+            effective = str(resolver(connector) if callable(resolver) else "").strip().lower()
+        except Exception:  # noqa: BLE001 - preserve the informational command.
+            effective = ""
+        return {
+            "effective": effective or "unknown",
+            "provenance": "config-unverified",
+            "configured": effective or "unknown",
+            "desired": effective or "unknown",
+            "runtime": None,
+            "current": None,
+            "drift": ["report-unavailable"],
+            "sources": [],
+        }
 
 
 def _connector_state_verb(state: str) -> str:
@@ -838,6 +868,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             "name": c,
             "friendly": _friendly_connector_name(c),
             "mode": _mode(c),
+            "fail_mode": _effective_status_fail_mode(cfg, c),
             "enabled": _enabled(c),
             "source": "manual",
         }
@@ -851,6 +882,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             "name": name,
             "friendly": _friendly_connector_name(name),
             "mode": _effective_status_mode(cfg, name, source),
+            "fail_mode": _effective_status_fail_mode(cfg, name),
             "enabled": True,
             "source": "automatic",
             "state": hc.get("state"),
@@ -868,6 +900,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
                 "name": name,
                 "friendly": _friendly_connector_name(name),
                 "mode": _effective_status_mode(cfg, name, "automatic"),
+                "fail_mode": _effective_status_fail_mode(cfg, name),
                 "enabled": True,
                 "source": "automatic",
             },

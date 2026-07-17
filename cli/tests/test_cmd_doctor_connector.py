@@ -124,7 +124,9 @@ class TestCheckConnectorInventory(unittest.TestCase):
         # these returning plain strings so the isolated helper test doesn't
         # trip over MagicMock auto-attributes in os.path.isdir.
         cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.data_dir = ""
         return cfg
 
     def test_known_connector_passes(self) -> None:
@@ -220,7 +222,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         cfg.plugin_dirs.return_value = []
         cfg.mcp_servers.return_value = []
         cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.data_dir = ""
         return cfg
 
     def test_header_label_is_always_connector(self) -> None:
@@ -242,8 +246,30 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         _check_connector_inventory(cfg, "codex", r)
         labels = {c["label"]: c for c in r.checks}
         self.assertIn("Mode", labels)
-        self.assertEqual(labels["Mode"]["detail"], "action")
+        self.assertEqual(
+            labels["Mode"]["detail"],
+            "action; fail-mode=closed; provenance=config",
+        )
         self.assertIn("Rule pack", labels)
+
+    @patch(
+        "defenseclaw.fail_mode.connector_fail_mode_report",
+        return_value={"effective": "open", "provenance": "process-env"},
+    )
+    def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
+        cfg = self._cfg()
+        cfg.guardrail.effective_mode.return_value = "action"
+        r = _DoctorResult()
+
+        _check_connector_inventory(cfg, "codex", r)
+
+        mode_rows = [c for c in r.checks if c["label"] == "Mode"]
+        self.assertEqual(len(mode_rows), 1)
+        self.assertEqual(
+            mode_rows[0]["detail"],
+            "action; fail-mode=open; provenance=process-env",
+        )
+        self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
 
 class TestCheckConnectorHooks(unittest.TestCase):
