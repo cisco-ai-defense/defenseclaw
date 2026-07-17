@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -572,6 +573,127 @@ func TestWatcherQuarantineRecordsConnectorHashAndRestoresWithoutRequarantine(t *
 		context.Background(), "skill", "review-pr", "codex",
 	); err != nil || len(records) != 0 {
 		t.Fatalf("retired records = %#v err=%v", records, err)
+	}
+}
+
+func newWatcherQuarantineRetryFixture(
+	t *testing.T,
+) (*InstallWatcher, *audit.Store, audit.QuarantineRecord, string) {
+	t.Helper()
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	skillPath := filepath.Join(skillDir, "review-pr")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(skillPath, "SKILL.md"), []byte("review safely\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for field, value := range map[string]string{
+		"install": "block", "file": "quarantine", "runtime": "disable",
+	} {
+		if err := store.SetActionField("skill", "review-pr", field, value, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
+	if result := w.runAdmission(context.Background(), InstallEvent{
+		Type: InstallSkill, Name: "review-pr", Path: skillPath,
+		Connector: "codex", Timestamp: time.Now().UTC(),
+	}); result.Verdict != VerdictBlocked {
+		t.Fatalf("quarantine verdict = %q", result.Verdict)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("quarantine records = %#v", records)
+	}
+	return w, store, records[0], skillDir
+}
+
+func TestWatcherRestoreRetryUsesDurablyBoundAlternatePath(t *testing.T) {
+	w, store, record, skillDir := newWatcherQuarantineRetryFixture(t)
+	alternatePath := filepath.Join(skillDir, "alternate", "review-pr")
+	if err := store.UpdateQuarantineRecordState(
+		context.Background(), record.ID, audit.QuarantineStateRestoring, alternatePath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforce.ExecuteAssetRestore(enforce.AssetRestorePlan{
+		RecordID: record.ID, TargetType: record.TargetType, TargetName: record.TargetName,
+		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
+		RestorePath: alternatePath, AllowedRoots: []string{skillDir},
+		ContentHash: record.ContentHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate failure after the filesystem transaction but before
+	// CompleteQuarantineRestore commits. An empty-path retry must honor the
+	// already-bound restoring destination rather than reverting to OriginalPath.
+	if err := w.RestoreQuarantined(
+		context.Background(), "skill", "review-pr", "codex", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(
+		alternatePath, record.ContentHash,
+	); err != nil || !matches {
+		t.Fatalf("alternate restore hash match=%t err=%v", matches, err)
+	}
+	if records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	); err != nil || len(records) != 0 {
+		t.Fatalf("retired retry records = %#v err=%v", records, err)
+	}
+	entry, err := store.GetAction("skill", "review-pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.SourcePath != filepath.Clean(alternatePath) ||
+		entry.Actions.File != "" || entry.Actions.Install != "block" ||
+		entry.Actions.Runtime != "disable" {
+		t.Fatalf("alternate retry action = %#v", entry)
+	}
+}
+
+func TestWatcherRestoreRetryRejectsExplicitPathMismatch(t *testing.T) {
+	w, store, record, skillDir := newWatcherQuarantineRetryFixture(t)
+	boundPath := filepath.Join(skillDir, "alternate", "review-pr")
+	if err := store.UpdateQuarantineRecordState(
+		context.Background(), record.ID, audit.QuarantineStateRestoring, boundPath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	mismatchPath := filepath.Join(skillDir, "different", "review-pr")
+	err := w.RestoreQuarantined(
+		context.Background(), "skill", "review-pr", "codex", mismatchPath,
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("explicit mismatch error = %v", err)
+	}
+	current, err := store.GetQuarantineRecord(context.Background(), record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current == nil || current.State != audit.QuarantineStateRestoring ||
+		!sameWatcherPath(current.RestorePath, boundPath) {
+		t.Fatalf("restore journal changed after mismatch = %#v", current)
+	}
+	if matches, err := enforce.AssetContentHashMatches(
+		record.QuarantinePath, record.ContentHash,
+	); err != nil || !matches {
+		t.Fatalf("quarantine after mismatch match=%t err=%v", matches, err)
+	}
+	if _, err := os.Lstat(mismatchPath); !os.IsNotExist(err) {
+		t.Fatalf("mismatch restore path was created: %v", err)
 	}
 }
 

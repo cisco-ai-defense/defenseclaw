@@ -134,3 +134,62 @@ func TestAssetQuarantineRejectsEmptyRootAndRelativePlan(t *testing.T) {
 		t.Fatal("relative quarantine plan was accepted")
 	}
 }
+
+func TestAssetRestoreRejectsRelativePathsBeforeFilesystemMutation(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureName := filepath.Base("quarantine_asset_test.go")
+	fixturePath := filepath.Join(workingDirectory, fixtureName)
+	before, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restorePath := filepath.Join(
+		workingDirectory, ".win-aud-071-relative-restore", fixtureName,
+	)
+	base := AssetRestorePlan{
+		RecordID: "record", TargetType: "skill", TargetName: fixtureName,
+		QuarantineRoot: workingDirectory, QuarantinePath: fixturePath,
+		RestorePath: restorePath, AllowedRoots: []string{workingDirectory},
+		ContentHash: strings.Repeat("0", 64),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*AssetRestorePlan)
+	}{
+		{"quarantine root", func(plan *AssetRestorePlan) {
+			plan.QuarantineRoot = "."
+		}},
+		{"quarantine path", func(plan *AssetRestorePlan) {
+			plan.QuarantinePath = fixtureName
+		}},
+		{"restore path", func(plan *AssetRestorePlan) {
+			plan.RestorePath = filepath.Join(".win-aud-071-relative-restore", fixtureName)
+		}},
+		{"allowed root", func(plan *AssetRestorePlan) {
+			plan.AllowedRoots = []string{"."}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := base
+			test.mutate(&plan)
+			err := ExecuteAssetRestore(plan)
+			if err == nil || !strings.Contains(err.Error(), "absolute") {
+				t.Fatalf("relative restore plan error = %v, want absolute-path rejection", err)
+			}
+		})
+	}
+	after, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("relative restore plan mutated quarantine fixture")
+	}
+	if _, err := os.Lstat(restorePath); !os.IsNotExist(err) {
+		t.Fatalf("relative restore plan created destination: %v", err)
+	}
+}

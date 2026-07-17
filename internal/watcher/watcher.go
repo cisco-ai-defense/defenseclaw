@@ -847,8 +847,22 @@ func (w *InstallWatcher) RestoreQuarantined(
 		return fmt.Errorf("watcher: restore is ambiguous for %s %q connector %q", targetType, targetName, connector)
 	}
 	record := records[0]
-	if strings.TrimSpace(restorePath) == "" {
+	requestedRestorePath := strings.TrimSpace(restorePath)
+	boundRestorePath := strings.TrimSpace(record.RestorePath)
+	if record.State == audit.QuarantineStateRestoring && boundRestorePath != "" {
+		if requestedRestorePath == "" {
+			restorePath = boundRestorePath
+		} else if !sameWatcherPath(requestedRestorePath, boundRestorePath) {
+			return fmt.Errorf(
+				"watcher: explicit restore path does not match durable restoring destination",
+			)
+		} else {
+			restorePath = requestedRestorePath
+		}
+	} else if requestedRestorePath == "" {
 		restorePath = record.OriginalPath
+	} else {
+		restorePath = requestedRestorePath
 	}
 	if err := w.store.UpdateQuarantineRecordState(
 		ctx, record.ID, audit.QuarantineStateRestoring, restorePath,

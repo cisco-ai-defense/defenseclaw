@@ -344,16 +344,16 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 	}
 	var err error
 	quarantineRootInput := strings.TrimSpace(plan.QuarantineRoot)
-	if quarantineRootInput == "" {
-		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine root")
+	if quarantineRootInput == "" || !filepath.IsAbs(quarantineRootInput) {
+		return AssetRestorePlan{}, "", fmt.Errorf("enforce: quarantine root must be absolute")
 	}
 	plan.QuarantineRoot, err = filepath.Abs(quarantineRootInput)
 	if err != nil {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine root")
 	}
 	quarantinePathInput := strings.TrimSpace(plan.QuarantinePath)
-	if quarantinePathInput == "" {
-		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine path")
+	if quarantinePathInput == "" || !filepath.IsAbs(quarantinePathInput) {
+		return AssetRestorePlan{}, "", fmt.Errorf("enforce: quarantine path must be absolute")
 	}
 	plan.QuarantinePath, err = filepath.Abs(quarantinePathInput)
 	if err != nil {
@@ -403,24 +403,19 @@ func safePathSegment(value string) bool {
 
 func pathWithinRoots(path string, roots []string, allowEqual bool) (string, string, error) {
 	pathInput := strings.TrimSpace(path)
-	if pathInput == "" {
+	if pathInput == "" || !filepath.IsAbs(pathInput) {
 		return "", "", fmt.Errorf("path is not absolute")
 	}
-	path, err := filepath.Abs(pathInput)
-	if err != nil {
-		return "", "", fmt.Errorf("path is not absolute")
-	}
-	path = filepath.Clean(path)
+	path = filepath.Clean(pathInput)
 	for _, root := range roots {
 		rootInput := strings.TrimSpace(root)
 		if rootInput == "" {
 			continue
 		}
-		root, err = filepath.Abs(rootInput)
-		if err != nil {
-			continue
+		if !filepath.IsAbs(rootInput) {
+			return "", "", fmt.Errorf("root is not absolute")
 		}
-		root = filepath.Clean(root)
+		root = filepath.Clean(rootInput)
 		if pathWithin(path, root, allowEqual) {
 			return path, root, nil
 		}
