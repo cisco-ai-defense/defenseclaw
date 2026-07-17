@@ -77,6 +77,7 @@ from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, Over
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
@@ -715,6 +716,35 @@ async def test_overview_renders_silent_bypass_enforcement_row() -> None:
 
         assert "Silent bypass" in app.body_text
         assert "see Alerts -> egress" in app.body_text
+
+
+def test_command_progress_tick_stops_at_app_lifecycle_boundary(monkeypatch) -> None:
+    """A final timer callback must not render after Textual starts teardown."""
+
+    app = DefenseClawTUI()
+    app._strip_state = "running"  # noqa: SLF001
+    initial_spinner_tick = app._strip_spinner_tick  # noqa: SLF001
+    render_calls = 0
+
+    def render_missing_child() -> None:
+        nonlocal render_calls
+        render_calls += 1
+        raise NoMatches("missing command strip child")
+
+    monkeypatch.setattr(app, "_render_command_strip", render_missing_child)
+
+    # Detached and shutting-down apps both report ``is_running == False``.
+    # The interval callback must stop before changing state or querying DOM.
+    app._tick_command_strip()  # noqa: SLF001
+    assert app._strip_spinner_tick == initial_spinner_tick  # noqa: SLF001
+    assert render_calls == 0
+
+    # During the mounted lifecycle the same missing-widget failure remains
+    # strict, so the teardown guard cannot conceal real command-strip drift.
+    app._running = True  # noqa: SLF001
+    with pytest.raises(NoMatches, match="missing command strip child"):
+        app._tick_command_strip()  # noqa: SLF001
+    assert render_calls == 1
 
 
 @pytest.mark.asyncio

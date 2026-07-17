@@ -7002,6 +7002,14 @@ class DefenseClawTUI(App[None]):
         adding a second timer.
         """
 
+        # Textual clears ``is_running`` before it dismantles the screen, but
+        # an interval task may already be entering one final callback while
+        # shutdown awaits widget removal. Stop at that lifecycle boundary so
+        # the tick never queries a partially unmounted command strip. While
+        # mounted, render failures still propagate and expose real DOM drift.
+        if not self.is_running:
+            return
+
         if self.toasts.tick():
             self._toasts_dirty = True
         if self._toasts_dirty:
