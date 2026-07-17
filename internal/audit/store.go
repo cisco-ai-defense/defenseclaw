@@ -1706,6 +1706,14 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// WIN-AUD-070 was originally allocated migration 22. This branch
+		// already has append-only migrations through 28, so inserting at 22
+		// would reinterpret deployed schema_version rows. On this base the
+		// runtime/provenance state is therefore migration 29.
+		description: "runtime assets: add durable connector session provenance state",
+		apply:       migrateRuntimeAssetState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2026,6 +2034,8 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
+	// Connector/session selection and load provenance (WIN-AUD-070/071).
+	"runtime_asset_state": true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

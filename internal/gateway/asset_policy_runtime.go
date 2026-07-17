@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -58,6 +59,11 @@ type runtimeAssetDecision struct {
 	targetType string
 	decision   config.AssetPolicyDecision
 }
+
+const (
+	runtimeProvenanceCodexPromptSelection = "codex_prompt_selection"
+	runtimeProvenanceClaudeExpansion      = "claudecode_prompt_expansion"
+)
 
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
@@ -102,7 +108,10 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		Surface:    "prompt_expansion",
 		Matched:    true,
 	}
-	if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
+	if decision, matched := a.evaluateNativeRuntimeSkillSelection(
+		ctx, "claudecode", req.SessionID, req.HookEventName,
+		runtimeProvenanceClaudeExpansion, probe,
+	); matched {
 		return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
 	}
 	return nil
@@ -128,6 +137,19 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+func (a *APIServer) codexPromptSkillAssetDecision(
+	ctx context.Context, req codexHookRequest,
+) (config.AssetPolicyDecision, bool) {
+	probe := codexSkillProbeFromPrompt(req.Prompt)
+	if !probe.Matched {
+		return config.AssetPolicyDecision{}, false
+	}
+	return a.evaluateNativeRuntimeSkillSelection(
+		ctx, "codex", req.SessionID, req.HookEventName,
+		runtimeProvenanceCodexPromptSelection, probe,
+	)
 }
 
 func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
@@ -183,13 +205,22 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	if matched {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+	}
+	return decision, matched
+}
+
+func (a *APIServer) runtimeSkillAssetPolicyDecision(
+	connector string, probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
 	targetType := runtimeSkillAssetTargetType(probe)
 	runtimeSurface := coalesceRuntimeSurface(probe.Surface, "hook")
 	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
-		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 		return decision, true
 	}
 	if a.scannerCfg == nil {
@@ -244,8 +275,51 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
-	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 	return decision, true
+}
+
+func (a *APIServer) evaluateNativeRuntimeSkillSelection(
+	ctx context.Context,
+	connector, sessionID, hookEvent, provenance string,
+	probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
+	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	state := audit.RuntimeAssetSelected
+	if matched && decision.Action == "block" {
+		state = audit.RuntimeAssetBlocked
+	}
+	var persistenceErr error
+	if a == nil || a.store == nil {
+		persistenceErr = fmt.Errorf("runtime provenance store is unavailable")
+	} else {
+		persistenceErr = a.store.RecordRuntimeAssetState(ctx, audit.RuntimeAssetState{
+			Connector:      connector,
+			SessionID:      sessionID,
+			TargetType:     runtimeSkillAssetTargetType(probe),
+			TargetName:     probe.SkillName,
+			SourcePath:     probe.SourcePath,
+			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+			HookEvent:      hookEvent,
+			Provenance:     provenance,
+			State:          state,
+		})
+	}
+	if persistenceErr != nil && (!matched || decision.Action != "block") {
+		decision = runtimeAssetDisableBlockDecision(
+			runtimeSkillAssetTargetType(probe), probe.SkillName, connector,
+			coalesceRuntimeSurface(probe.Surface, "hook"),
+			fmt.Sprintf(
+				"%s %q runtime provenance write failed - failing closed: %v",
+				runtimeSkillAssetTargetType(probe), probe.SkillName, persistenceErr,
+			),
+			"runtime-provenance-error",
+		)
+		matched = true
+	}
+	if matched {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+	}
+	return decision, matched
 }
 
 func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
@@ -540,6 +614,49 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 	return skillRuntimeProbe{ToolName: toolName}
 }
 
+// codexSkillProbeFromPrompt recognizes Codex's native fresh-session skill
+// selection shape: UserPromptSubmit carries the literal prompt and a selected
+// skill is the first token, written as "$<skill-name>". Codex does not emit a
+// Skill tool call or a synthetic skill_name field for this path.
+func codexSkillProbeFromPrompt(prompt string) skillRuntimeProbe {
+	fields := strings.Fields(strings.TrimSpace(prompt))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "$") {
+		return skillRuntimeProbe{}
+	}
+	raw := fields[0]
+	name := strings.TrimPrefix(raw, "$")
+	if !validNativeSkillSelectionName(name) {
+		return skillRuntimeProbe{}
+	}
+	return skillRuntimeProbe{
+		TargetType: "skill",
+		SkillName:  name,
+		ToolName:   raw,
+		RawName:    raw,
+		Surface:    "prompt_selection",
+		Matched:    true,
+	}
+}
+
+func validNativeSkillSelectionName(name string) bool {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	for index, r := range name {
+		alphaNumeric := r >= 'a' && r <= 'z' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9'
+		if alphaNumeric {
+			continue
+		}
+		if index > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // skillFromMap returns (normalizedName, sourcePath, rawName).
 // rawName is the original input string when normalization stripped a
 // path (e.g. "/path/to/foo/SKILL.md" -> "foo"); empty otherwise.
@@ -783,9 +900,9 @@ func firstMapString(values map[string]interface{}, keys ...string) string {
 //     existing verdict is returned unchanged with wouldBlock=false.
 //   - matched=true with a blocking decision always sets rawAction=block
 //     and severity>=HIGH, regardless of whether enforcement runs.
-//   - When the current hook event is enforceable (PreToolUse,
-//     PermissionRequest, UserPromptExpansion), action=block and the
-//     returned wouldBlock=false (because the action IS the block —
+//   - When the current hook event is enforceable (UserPromptSubmit,
+//     UserPromptExpansion, PreToolUse, PermissionRequest), action=block and
+//     the returned wouldBlock=false (because the action IS the block —
 //     "would" only makes sense in observe mode / non-enforceable events).
 //   - Otherwise the merge stays in advisory mode: action stays "allow"
 //     (or "block" if a prior asset already blocked), and wouldBlock=true
@@ -925,11 +1042,11 @@ func assetPolicyRegistryStatusForReason(status string) string {
 }
 
 func runtimeAssetCanEnforce(event string) bool {
-	// Claude Code / Codex use canonical PascalCase event names — keep
-	// these literal switches so the original behavior is byte-identical
-	// for those high-traffic hooks.
+	// Claude Code / Codex use canonical PascalCase event names. Prompt
+	// submission/expansion are native pre-load selection surfaces, while
+	// tool and permission events are native pre-execution surfaces.
 	switch event {
-	case "UserPromptExpansion", "PreToolUse", "PermissionRequest":
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest":
 		return true
 	}
 	// Generic hook-only connectors (hermes, cursor, windsurf, geminicli,

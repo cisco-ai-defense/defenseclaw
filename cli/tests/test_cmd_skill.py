@@ -2784,8 +2784,7 @@ class TestSkillListOpencodeEmpty(SkillCommandTestBase):
 
 
 class TestSkillDisableHonesty(SkillCommandTestBase):
-    """SK-5b: hook connectors store runtime-disable policy rows. Connectors
-    without a skill runtime probe must get an explicit advisory warning."""
+    """SK-5b: runtime-disable output describes only native enforceable gates."""
 
     def test_disable_on_hook_connector_records_global_advisory(self):
         self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
@@ -2813,17 +2812,35 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         )
         mock_client.assert_not_called()
 
-    def test_disable_connector_with_probe_records_scoped_enforced(self):
+    def test_disable_connector_with_native_gate_records_scoped_enforced(self):
         self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
         with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
             result = self.invoke(["disable", "some-skill", "--connector", "codex"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
-        self.assertIn("Enforced by hook runtime gate", result.output)
+        self.assertIn("Codex UserPromptSubmit gate", result.output)
         self.assertNotIn("advisory", result.output)
         self.assertTrue(
             self.app.store.has_action("skill", "some-skill", "runtime", "disable", "codex")
+        )
+        mock_client.assert_not_called()
+
+    def test_disable_claudecode_claims_only_native_expansion_gate(self):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(
+                ["disable", "some-skill", "--connector", "claudecode"]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Claude Code UserPromptExpansion gate", result.output)
+        self.assertNotIn("hook runtime gate", result.output)
+        self.assertNotIn("advisory", result.output)
+        self.assertTrue(
+            self.app.store.has_action(
+                "skill", "some-skill", "runtime", "disable", "claudecode"
+            )
         )
         mock_client.assert_not_called()
 
