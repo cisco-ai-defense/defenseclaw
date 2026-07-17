@@ -815,10 +815,13 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) []string
 	if state != nil {
 		add(state.Connector)
 	}
-	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) {
+	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "codex_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")) {
 		add("codex")
 	}
-	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) {
+	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "claudecode", "settings.json.json")) {
 		add("claudecode")
 	}
 	return connectors

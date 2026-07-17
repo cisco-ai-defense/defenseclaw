@@ -277,6 +277,29 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 	}
 }
 
+func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
+	dataRoot := t.TempDir()
+	markers := []string{
+		filepath.Join("connector_backups", "codex", "config.toml.json"),
+		filepath.Join("connector_backups", "claudecode", "settings.json.json"),
+	}
+	for _, marker := range markers {
+		path := filepath.Join(dataRoot, marker)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	want := []string{"codex", "claudecode"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
 func TestGatewayAutoStartCommandQuotesPath(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows Run-key command quoting")
