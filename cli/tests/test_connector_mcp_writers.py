@@ -490,10 +490,27 @@ class TestClaudeCodeWrites:
         original = b'{ "theme" : "operator" }\n'
         settings.write_bytes(original)
         finalize = connector_paths._finalize_claude_mcp_transaction
+        save_envelope = connector_paths._save_claude_mcp_envelope
+        pending_identities: list[dict[str, object]] = []
+
+        def record_pending_identity(path, envelope):
+            pending = envelope.get("pending")
+            if isinstance(pending, dict):
+                next_state = pending.get("next_state")
+                if isinstance(next_state, dict):
+                    identity = next_state.get("postimage_identity")
+                    if isinstance(identity, dict):
+                        pending_identities.append(dict(identity))
+            return save_envelope(path, envelope)
 
         def crash_after_publish(*_args, **_kwargs):
             raise RuntimeError("simulated crash after config publication")
 
+        monkeypatch.setattr(
+            connector_paths,
+            "_save_claude_mcp_envelope",
+            record_pending_identity,
+        )
         monkeypatch.setattr(
             connector_paths,
             "_finalize_claude_mcp_transaction",
@@ -509,6 +526,10 @@ class TestClaudeCodeWrites:
         )["pending"]
         assert pending is not None
         assert isinstance(pending["next_state"]["postimage_identity"], dict)
+        # One durable write binds the staged candidate before publication;
+        # the next rebinds the journal to the proven public snapshot.
+        assert len(pending_identities) >= 2
+        assert pending["next_state"]["postimage_identity"] == pending_identities[-1]
 
         monkeypatch.setattr(
             connector_paths,
@@ -1915,6 +1936,39 @@ class TestClaudeCodeWrites:
 
         assert verified_settings
         assert settings.read_bytes() == original
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows native identity contract")
+    def test_windows_journal_identity_ignores_only_crt_projection_fields(
+        self,
+        tmp_path,
+    ):
+        from defenseclaw.observability import v8_activation
+
+        settings = tmp_path / "settings.json"
+        settings.write_bytes(b"{}\n")
+        snapshot = v8_activation._snapshot_regular_file(str(settings), required=True)
+        identity = connector_paths._claude_postimage_identity_from_snapshot(snapshot)
+
+        projected = replace(
+            snapshot,
+            mode=(snapshot.mode or 0) + 1,
+            uid=(snapshot.uid or 0) + 1,
+            gid=(snapshot.gid or 0) + 1,
+        )
+        assert connector_paths._claude_postimage_identity_from_snapshot(projected) == identity
+
+        different_file = replace(snapshot, inode=(snapshot.inode or 0) + 1)
+        assert connector_paths._claude_postimage_identity_from_snapshot(different_file) != identity
+
+        assert snapshot.windows_security is not None
+        different_security = replace(
+            snapshot,
+            windows_security=replace(
+                snapshot.windows_security,
+                dacl=snapshot.windows_security.dacl + b"\x00",
+            ),
+        )
+        assert connector_paths._claude_postimage_identity_from_snapshot(different_security) != identity
 
 
 # ---------------------------------------------------------------------------

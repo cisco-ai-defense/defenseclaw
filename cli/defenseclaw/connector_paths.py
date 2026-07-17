@@ -2303,14 +2303,22 @@ def _windows_security_sha256(security: Any) -> str | None:
 
 
 def _claude_postimage_identity_from_snapshot(snapshot: Any) -> dict[str, Any]:
+    # Windows ownership and authorization are represented by the native file
+    # ID, parent ID, and security descriptor.  The CRT mode/uid/gid projection
+    # can be normalized after a staged file is published (notably when an
+    # inheriting DACL is restored), so persisting those projection values
+    # would make two snapshots of the same proven file object disagree.  Keep
+    # the native security digest exact; only the non-authoritative CRT fields
+    # are normalized away on Windows.
+    windows_native = os.name == "nt"
     return {
         "device": snapshot.device,
         "inode": snapshot.inode,
         "parent_device": snapshot.parent_device,
         "parent_inode": snapshot.parent_inode,
-        "mode": snapshot.mode,
-        "uid": snapshot.uid,
-        "gid": snapshot.gid,
+        "mode": None if windows_native else snapshot.mode,
+        "uid": None if windows_native else snapshot.uid,
+        "gid": None if windows_native else snapshot.gid,
         "windows_security_sha256": _windows_security_sha256(snapshot.windows_security),
     }
 
@@ -3981,7 +3989,12 @@ def _publish_claude_config_if_unchanged(
             raise MCPWriteUnsupportedError(
                 f"Claude MCP settings were replaced after publication: {path}",
             )
-        return _claude_postimage_identity_from_snapshot(published)
+        # Return the exact public snapshot only after proving it is still the
+        # staged file object with the expected bytes and security.  The caller
+        # durably rebinds the pending journal to this observed identity before
+        # finalization, closing the staged-to-public metadata hand-off without
+        # accepting a replacement file.
+        return _claude_postimage_identity_from_snapshot(observed)
     except MCPWriteUnsupportedError:
         raise
     except (OSError, v8_activation.V8ActivationError) as exc:
@@ -4049,15 +4062,32 @@ def _apply_claude_mcp_transaction(
             ),
         )
 
-    candidate_identity = _publish_claude_config_if_unchanged(
+    published_identity = _publish_claude_config_if_unchanged(
         path,
         expected,
         replacement,
         candidate_prepared=(persist_candidate_identity if finalized_state is not None else None),
     )
-    if finalized_state is not None and candidate_identity != finalized_state.get("postimage_identity"):
-        raise MCPWriteUnsupportedError(
-            "refusing Claude MCP mutation: published candidate identity changed",
+    if finalized_state is not None:
+        if published_identity != finalized_state.get("postimage_identity"):
+            raise MCPWriteUnsupportedError(
+                "refusing Claude MCP mutation: published candidate identity changed",
+            )
+        finalized_state["postimage_identity"] = published_identity
+        pending["next_state"] = copy.deepcopy(finalized_state)
+        # The pre-publication identity remains crash-safe until this write.
+        # Rebind only after publication has verified the live path still names
+        # that exact candidate; a crash before this point therefore remains
+        # fail-closed, while a crash afterward recovers from the observed
+        # public identity rather than a staged-file projection.
+        _save_claude_mcp_envelope(
+            path,
+            _claude_mcp_envelope(
+                path,
+                committed=copy.deepcopy(committed),
+                pending=pending,
+                released=released,
+            ),
         )
     _finalize_claude_mcp_transaction(path, finalized_state, next_released)
 
