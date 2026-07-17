@@ -59,6 +59,8 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "fastapi": (">=0.137.1,<0.138", None),
 }
 
+TOMLI_COMPATIBILITY_CONTRACT = (">=2.0.1", 'python_version < "3.11"')
+
 SKILL_SCANNER_VERSION = "2.0.4"
 SKILL_SCANNER_SHA256 = "8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195430a5d74"
 MCP_SCANNER_VERSION = "4.3.0"
@@ -126,6 +128,31 @@ def test_wheel_security_floors_are_unmarked_on_every_supported_python_line(
     assert Version(f"{python_version}.0") in SpecifierSet(document["project"]["requires-python"])
     direct = _requirements(document["project"]["dependencies"])
     _assert_requirement_contract(direct, WHEEL_SECURITY_FLOOR_CONTRACT)
+
+
+def test_python_310_toml_parser_dependency_is_source_and_lock_metadata() -> None:
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    direct = _requirements(document["project"]["dependencies"])
+    _assert_requirement_contract(
+        direct,
+        {"tomli": TOMLI_COMPATIBILITY_CONTRACT},
+    )
+
+    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
+    locked = next(
+        requirement
+        for requirement in project["metadata"]["requires-dist"]
+        if requirement["name"] == "tomli"
+    )
+    assert locked["specifier"] == TOMLI_COMPATIBILITY_CONTRACT[0]
+    marker = Marker(locked["marker"])
+    assert marker.evaluate(
+        {"python_version": "3.10", "python_full_version": "3.10.14"}
+    )
+    assert not marker.evaluate(
+        {"python_version": "3.11", "python_full_version": "3.11.0"}
+    )
 
 
 def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
@@ -398,6 +425,10 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
     _assert_requirement_contract(wheel_requirements, RUNTIME_CONTRACT)
     _assert_requirement_contract(wheel_requirements, WHEEL_SECURITY_FLOOR_CONTRACT)
+    _assert_requirement_contract(
+        wheel_requirements,
+        {"tomli": TOMLI_COMPATIBILITY_CONTRACT},
+    )
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
     assert str(wheel_requirements["cisco-ai-skill-scanner"].url).endswith(

@@ -18,16 +18,66 @@
 
 from __future__ import annotations
 
+import builtins
+import importlib.util
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import defenseclaw.inventory.plugin_directories as plugin_directories_module
 from defenseclaw.inventory.plugin_directories import (
     discover_plugin_directories,
     plugin_directory_entries,
 )
 
 from tests.helpers import seed_cached_plugin
+
+try:
+    import tomllib as fallback_toml_parser
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as fallback_toml_parser
+
+
+def test_plugin_directory_module_falls_back_to_tomli_without_stdlib_parser(
+    tmp_path: Path,
+) -> None:
+    module_name = "defenseclaw.inventory._plugin_directories_tomli_contract"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        plugin_directories_module.__file__,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    compat_module = importlib.util.module_from_spec(spec)
+    original_import = builtins.__import__
+
+    def import_without_tomllib(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError("stdlib TOML parser unavailable", name=name)
+        return original_import(name, *args, **kwargs)
+
+    with (
+        patch.dict(
+            sys.modules,
+            {"tomli": fallback_toml_parser, module_name: compat_module},
+        ),
+        patch.object(builtins, "__import__", side_effect=import_without_tomllib),
+    ):
+        spec.loader.exec_module(compat_module)
+
+    codex_home = tmp_path / ".codex"
+    cache = codex_home / "plugins" / "cache"
+    cache.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
+        "[plugins.'example@registry']\nenabled = true\n",
+        encoding="utf-8",
+    )
+
+    assert compat_module.tomllib is fallback_toml_parser
+    assert compat_module._codex_active_plugins(str(cache)) == {
+        "example@registry": True
+    }
 
 
 def test_codex_cache_discovers_manifests_uses_activation_and_deduplicates(
