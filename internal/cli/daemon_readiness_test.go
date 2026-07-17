@@ -48,7 +48,7 @@ func TestLoadDaemonConfigMatchesGatewayDynamicConfigResolution(t *testing.T) {
 	resolvedDataDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	const (
-		secretEnv = "DEFENSECLAW_TEST_DAEMON_DYNAMIC_AUTH"
+		secretEnv = "DC_TEST_DAEMON_DYNAMIC_AUTH"
 		secret    = "dynamic-daemon-fixture-secret"
 	)
 	t.Setenv("DEFENSECLAW_HOME", defaultDataDir)
