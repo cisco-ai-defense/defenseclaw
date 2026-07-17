@@ -149,9 +149,12 @@ def test_release_gate_fails_closed_without_secrets_or_exact_clients() -> None:
     assert "latest" not in release_branch.lower()
 
 
-def test_publish_has_a_non_advisory_real_client_dependency() -> None:
+def test_publish_has_non_advisory_real_client_certification_custody() -> None:
     jobs = _workflow()["jobs"]
     certification = jobs["windows-real-client-certification"]
+    assemble = jobs["assemble-release-candidate"]
+    full = jobs["full-certification"]
+    select = jobs["select-candidate"]
     publish = jobs["publish-release"]
     rendered = str(certification)
 
@@ -174,11 +177,19 @@ def test_publish_has_a_non_advisory_real_client_dependency() -> None:
     assert certification_index < upload_index
     assert int(certification["timeout-minutes"]) >= 90
 
-    assert "windows-real-client-certification" in publish["needs"]
-    assert "windows-fresh-install" in publish["needs"]
-    assert "needs.windows-real-client-certification.result == 'success'" in publish["if"]
-    assert "needs.windows-fresh-install.result == 'success'" in publish["if"]
-    assert "needs.windows-upgrade.result == 'skipped'" in publish["if"]
+    assert "windows-real-client-certification" in assemble["needs"]
+    assert "windows-real-client-certification" in full["needs"]
+    assert "needs.windows-real-client-certification.result == 'success'" in full["if"]
+    assert {
+        "lookup-certification",
+        "assemble-release-candidate",
+        "full-certification",
+        "record-certification",
+    }.issubset(select["needs"])
+    assert "needs.lookup-certification.outputs.reuse == 'true'" in select["if"]
+    assert "needs.full-certification.result == 'success'" in select["if"]
+    assert "select-candidate" in publish["needs"]
+    assert "needs.select-candidate.result == 'success'" in publish["if"]
 
 
 def test_certification_evidence_is_not_faked_in_validated_versions() -> None:

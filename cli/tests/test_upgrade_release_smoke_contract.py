@@ -22,9 +22,11 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -524,8 +526,9 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     home = tmp_path / "home"
     baseline_python = home / ".defenseclaw/.venv/bin/python"
     baseline_python.parent.mkdir(parents=True)
+    interpreter = "python" if os.name == "nt" else shlex.quote(sys.executable)
     baseline_python.write_text(
-        "#!/bin/sh\nexec python \"$@\"\n",
+        f"#!/bin/sh\nexec {interpreter} \"$@\"\n",
         encoding="utf-8",
     )
     baseline_python.chmod(0o700)
