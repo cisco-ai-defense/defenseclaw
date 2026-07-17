@@ -5,6 +5,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -270,7 +271,10 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataRoot, "claudecode_backup.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := connectorsForNativeUninstall(&installState{Connector: "codex"}, dataRoot)
+	got, err := connectorsForNativeUninstall(&installState{Connector: "codex"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"codex", "claudecode"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("connectors = %v, want %v", got, want)
@@ -293,10 +297,75 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 		}
 	}
 
-	got := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"codex", "claudecode"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	state := []byte(`{"version":3,"names":["claudecode","codex"],"name":"claudecode"}`)
+	if err := os.WriteFile(filepath.Join(dataRoot, "active_connector.json"), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesLegacyActiveConnector(t *testing.T) {
+	dataRoot := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dataRoot, "active_connector.json"),
+		[]byte(`{"name":"codex"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(nil, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "codex" {
+		t.Fatalf("connectors = %v, want [codex]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsInvalidActiveConnectorState(t *testing.T) {
+	dataRoot := t.TempDir()
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	if err := os.WriteFile(statePath, []byte(`{"names":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "parse active connector state") {
+		t.Fatalf("invalid active connector state error = %v", err)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsOversizedActiveConnectorState(t *testing.T) {
+	dataRoot := t.TempDir()
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	if err := os.WriteFile(statePath, bytes.Repeat([]byte{'x'}, int(nativeConnectorStateLimit)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized active connector state error = %v", err)
 	}
 }
 

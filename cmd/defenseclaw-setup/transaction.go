@@ -196,7 +196,11 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		copyState := *oldState
 		previousState = &copyState
 	}
-	previousConnectors := normalizeStringSlice(connectorsForNativeUninstall(oldState, dataRoot))
+	previousConnectors, err := connectorsForNativeUninstall(oldState, dataRoot)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousConnectors = normalizeStringSlice(previousConnectors)
 	preserveConnectorConfiguration := action == "install" && opts.PreserveConnectorConfiguration
 	targetConnector := opts.Connector
 	targetServices := requestedServices(opts, previousServices)
@@ -332,7 +336,11 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, fmt.Errorf("snapshot maintenance executable for uninstall handoff: %w", err)
 	}
-	previousConnectors := normalizeStringSlice(connectorsForNativeUninstall(oldState, source.DataRoot))
+	previousConnectors, err := connectorsForNativeUninstall(oldState, source.DataRoot)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousConnectors = normalizeStringSlice(previousConnectors)
 	defaultCodexHome, err := defaultConnectorConfigHome(".codex")
 	if err != nil {
 		return setupTransaction{}, err

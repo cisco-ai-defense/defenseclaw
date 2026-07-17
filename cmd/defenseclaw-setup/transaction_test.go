@@ -1075,7 +1075,10 @@ func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *tes
 			); err != nil {
 				t.Fatal(err)
 			}
-			previous := connectorsForNativeUninstall(nil, dataRoot)
+			previous, err := connectorsForNativeUninstall(nil, dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
 			got, err := resolvePreviousConnectorHome(
 				"", previous, dataRoot, test.connector, test.logicalName, `C:\fallback`,
 			)

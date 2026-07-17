@@ -53,6 +53,7 @@ const (
 	setupValidationTimeout     = 30 * time.Second
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
+	nativeConnectorStateLimit  = int64(64 << 10)
 	maxRunCommandUTF16Units    = 260
 )
 
@@ -803,7 +804,7 @@ func requestedServices(opts options, previous serviceState) serviceState {
 	}
 }
 
-func connectorsForNativeUninstall(state *installState, dataRoot string) []string {
+func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	connectors := make([]string, 0, 2)
 	add := func(name string) {
@@ -815,6 +816,13 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) []string
 	if state != nil {
 		add(state.Connector)
 	}
+	active, err := readNativeActiveConnectors(dataRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read active connector state: %w", err)
+	}
+	for _, name := range active {
+		add(name)
+	}
 	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) ||
 		pathExists(filepath.Join(dataRoot, "codex_backup.json")) ||
 		pathExists(filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")) {
@@ -824,7 +832,78 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) []string
 		pathExists(filepath.Join(dataRoot, "connector_backups", "claudecode", "settings.json.json")) {
 		add("claudecode")
 	}
-	return connectors
+	return connectors, nil
+}
+
+// readNativeActiveConnectors consumes the small, durable roster written by the
+// gateway after connector activation. Native Setup cannot depend on backup
+// markers alone: exact restoration legitimately removes those markers, while
+// the active roster remains the authority for integrations that uninstall must
+// tear down. Bind the read to one regular, non-reparse file and cap its size so
+// an untrusted profile entry cannot redirect or exhaust the installer.
+func readNativeActiveConnectors(dataRoot string) ([]string, error) {
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	if err := rejectReparseAncestors(statePath); err != nil {
+		return nil, err
+	}
+	before, err := os.Lstat(statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("active connector state is not a regular file")
+	}
+	if before.Size() > nativeConnectorStateLimit {
+		return nil, fmt.Errorf("active connector state exceeds %d bytes", nativeConnectorStateLimit)
+	}
+
+	file, err := os.Open(statePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("active connector state changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, nativeConnectorStateLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > nativeConnectorStateLimit {
+		return nil, fmt.Errorf("active connector state exceeds %d bytes", nativeConnectorStateLimit)
+	}
+	after, err := os.Lstat(statePath)
+	if err != nil {
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(opened, after) {
+		return nil, fmt.Errorf("active connector state changed while reading")
+	}
+	if err := rejectReparseAncestors(statePath); err != nil {
+		return nil, err
+	}
+
+	var state struct {
+		Names []string `json:"names"`
+		Name  string   `json:"name"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse active connector state: %w", err)
+	}
+	if len(state.Names) > 0 {
+		return state.Names, nil
+	}
+	if strings.TrimSpace(state.Name) != "" {
+		return []string{state.Name}, nil
+	}
+	return nil, nil
 }
 
 func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
