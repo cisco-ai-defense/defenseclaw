@@ -5395,6 +5395,47 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	}
 }
 
+func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "bin", windowsHookBinaryName))
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	pristine := []byte("model_provider = \"openai\"\n")
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	connector := NewCodexConnector()
+	first := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	if err := connector.patchCodexConfig(first, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("first config patch: %v", err)
+	}
+	second := first
+	second.APIAddr = "127.0.0.1:43189"
+	if err := connector.patchCodexConfig(second, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("second config patch: %v", err)
+	}
+	if err := connector.restoreCodexConfig(second); err != nil {
+		t.Fatalf("config restore after port change: %v", err)
+	}
+
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, pristine) {
+		t.Fatalf("restored config differs from pristine state:\n%s", got)
+	}
+}
+
 func TestCodex_Teardown_RestoresOriginalOpenAIProviderBlock(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

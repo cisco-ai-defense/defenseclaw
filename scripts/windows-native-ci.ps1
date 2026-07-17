@@ -2206,6 +2206,47 @@ function Assert-NoDefenseClawRegistration([string[]]$Paths) {
     }
 }
 
+function Get-NativeConnectorCleanupAuthority([string]$DataRoot, [string]$Connector) {
+    $relativePaths = switch ($Connector) {
+        'codex' {
+            @(
+                'codex_config_backup.json',
+                'connector_backups\codex\config.toml.json'
+            )
+        }
+        'claudecode' {
+            @(
+                'claudecode_backup.json',
+                'connector_backups\claudecode\settings.json.json'
+            )
+        }
+        default { throw "unsupported native connector cleanup authority: $Connector" }
+    }
+    return @($relativePaths | Where-Object {
+        Test-Path -LiteralPath (Join-Path $DataRoot $_) -PathType Leaf
+    })
+}
+
+function Assert-NativeConnectorCleanupAuthorityPresent([string]$DataRoot) {
+    foreach ($connector in @('codex', 'claudecode')) {
+        if (@(Get-NativeConnectorCleanupAuthority $DataRoot $connector).Count -eq 0) {
+            throw "native Setup acceptance lost $connector cleanup authority before uninstall"
+        }
+    }
+}
+
+function Assert-NativeConnectorCleanupAuthorityConsumed([string]$DataRoot) {
+    $remaining = [Collections.Generic.List[string]]::new()
+    foreach ($connector in @('codex', 'claudecode')) {
+        foreach ($relativePath in @(Get-NativeConnectorCleanupAuthority $DataRoot $connector)) {
+            $remaining.Add("$connector/$relativePath")
+        }
+    }
+    if ($remaining.Count -ne 0) {
+        throw "native Setup uninstall left connector cleanup authority unconsumed: $($remaining -join ', ')"
+    }
+}
+
 function Get-DefenseClawRegistrationLocations([string]$Content) {
     # Report only bounded structural locations. Agent configs may contain
     # credentials or private paths, so the matching line/value must never be
@@ -3188,11 +3229,13 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw 'setup repair did not preserve user data'
         }
 
+        Assert-NativeConnectorCleanupAuthorityPresent $dataRoot
         Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
+        Assert-NativeConnectorCleanupAuthorityConsumed $dataRoot
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Assert-NoGatewayAutoStart
         Assert-UserPathRegistrySnapshot $userPathBefore `
