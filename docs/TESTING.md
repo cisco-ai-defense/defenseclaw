@@ -140,9 +140,18 @@ and exact operator commands.
 | Workflow | Purpose |
 |----------|---------|
 | `.github/workflows/ci.yml` | Fast deterministic release regressions on every PR; a five-class unsigned success/refusal matrix only for release-sensitive PRs; and an exact-SHA medium upgrade canary on every main merge, alongside the normal language/parity checks |
+| `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | Nightly/manual certification and promotion of exact certified release bytes |
 | `.github/workflows/pre-release-certification.yml` | Reusable expensive signed historical, rollback, native, and live-continuity gates |
+
+Ordinary PR and main CI always run `make telemetry-check`, which compiles the
+real registry and rejects stale generated runtime or Go outputs. The two
+exhaustive telemetry mutation suites are excluded from the regular Python
+shards and run only when their registry, compiler, renderer, schema, generated
+output, test, or dependency inputs change. They also run nightly and through
+manual dispatch. This keeps the common CI path fast without weakening the
+exhaustive gate for changes that can affect telemetry generation.
 
 ## Before a PR
 

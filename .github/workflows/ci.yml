@@ -346,45 +346,6 @@ jobs:
           path: coverage-py-shard-${{ matrix.shard }}
           retention-days: 1
 
-  python-telemetry-test:
-    name: Python Telemetry Test (${{ matrix.suite }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: registry-generator
-            test_file: cli/tests/test_telemetry_registry_generator.py
-          - suite: candidate-renderer
-            test_file: cli/tests/test_telemetry_registry_candidate_renderer.py
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - run: uv sync
-      - run: make _bundle-data
-      - name: Run telemetry registry suite with node-level workers
-        env:
-          PYTHON_TELEMETRY_SUITE: ${{ matrix.suite }}
-          PYTHON_TELEMETRY_TEST_FILE: ${{ matrix.test_file }}
-        run: |
-          set -euo pipefail
-          COVERAGE_FILE="coverage-py-telemetry-$PYTHON_TELEMETRY_SUITE" \
-            .venv/bin/python -m pytest "$PYTHON_TELEMETRY_TEST_FILE" \
-              -q --tb=short \
-              --durations=25 \
-              --numprocesses=4 \
-              --dist=worksteal \
-              --cov=defenseclaw \
-              --cov-report=
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: python-coverage-part-telemetry-${{ matrix.suite }}
-          path: coverage-py-telemetry-${{ matrix.suite }}
-          retention-days: 1
-
   python-lint:
     name: Python Lint
     runs-on: ubuntu-latest
@@ -400,18 +361,16 @@ jobs:
     # Preserve the existing required-check name while making it the single
     # authority over lint, every isolated test partition, and combined coverage.
     name: Python Lint & Test
-    needs: [python-test, python-telemetry-test, python-lint]
+    needs: [python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require lint and every Python test partition
         env:
           PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
-          PYTHON_TELEMETRY_RESULT: ${{ needs.python-telemetry-test.result }}
           PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
         run: |
           test "$PYTHON_REGULAR_RESULT" = success
-          test "$PYTHON_TELEMETRY_RESULT" = success
           test "$PYTHON_LINT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -429,7 +388,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-py-*' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 6
+          test "${#coverage_parts[@]}" -eq 4
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -899,6 +858,11 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       - run: make dev-pycli
+      # Keep the ordinary gate small: compile the real registry once and prove
+      # that every checked-in runtime/Go output is current. Exhaustive mutation
+      # coverage runs only when its inputs change, plus nightly/manual.
+      - name: Verify canonical telemetry registry outputs
+        run: make telemetry-check
       - run: make check VERIFY_OBSERVABILITY_BASELINE_ANCESTRY=1
 
   local-observability-golden:
