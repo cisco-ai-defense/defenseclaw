@@ -132,7 +132,10 @@ _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
 _HARD_CUT_PROMOTED_REQUIREMENTS = {
-    ("0.8.4", "0.8.5"): ("jsonschema<5,>=4.23.0",),
+    ("0.8.4", "0.8.5"): (
+        "jsonschema<5,>=4.23.0",
+        'mcp<2,>=1.28.1; python_version >= "3.11"',
+    ),
 }
 _MACOS_GATEWAY_CODESIGN_IDENTIFIER = "com.cisco.defenseclaw.gateway"
 _PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
@@ -1109,6 +1112,7 @@ def _start_and_verify_services(
         ["openclaw", "gateway", "restart"],
         "OpenClaw gateway restarted — DefenseClaw plugin loaded",
         "Could not restart OpenClaw gateway automatically",
+        failure_output_markers=("gateway service disabled",),
     ):
         ux.subhead("Run manually: openclaw gateway restart")
 
@@ -1519,9 +1523,7 @@ def _preflight_staged_target_controller_source(
     try:
         prefix_info = os.lstat(running_prefix)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The staged target-controller environment is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The staged target-controller environment is unavailable.")
     if (
         running_inside_installed
         or stat.S_ISLNK(prefix_info.st_mode)
@@ -1533,24 +1535,18 @@ def _preflight_staged_target_controller_source(
             "The target controller is not running from a private out-of-place environment."
         )
 
-    staged_dir = os.path.abspath(
-        os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV])
-    )
+    staged_dir = os.path.abspath(os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV]))
     try:
         staged_info = os.lstat(staged_dir)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The staged bridge artifact directory is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The staged bridge artifact directory is unavailable.")
     if (
         stat.S_ISLNK(staged_info.st_mode)
         or not stat.S_ISDIR(staged_info.st_mode)
         or staged_info.st_uid != os.getuid()
         or stat.S_IMODE(staged_info.st_mode) != 0o700
     ):
-        _fail_staged_target_controller_handoff(
-            "The staged bridge artifact directory is not private and caller-owned."
-        )
+        _fail_staged_target_controller_handoff("The staged bridge artifact directory is not private and caller-owned.")
 
     installed_cli = os.path.join(installed_venv, "bin", "defenseclaw")
     launcher = os.path.expanduser("~/.local/bin/defenseclaw")
@@ -1558,9 +1554,7 @@ def _preflight_staged_target_controller_source(
         installed_info = os.lstat(installed_cli)
         launcher_info = os.lstat(launcher)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI is unavailable.")
     if (
         stat.S_ISLNK(installed_info.st_mode)
         or not stat.S_ISREG(installed_info.st_mode)
@@ -1572,9 +1566,7 @@ def _preflight_staged_target_controller_source(
         or launcher_info.st_uid != os.getuid()
         or os.path.realpath(launcher) != installed_cli
     ):
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI lost release-managed custody."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI lost release-managed custody.")
 
     child_env = dict(os.environ)
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1588,15 +1580,11 @@ def _preflight_staged_target_controller_source(
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI version could not be verified."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI version could not be verified.")
     output = (result.stdout or "") + (result.stderr or "")
     reported = _VERSION_TOKEN_RE.findall(output)
     if result.returncode != 0 or reported != [source_version]:
-        _fail_staged_target_controller_handoff(
-            "The canonical installed CLI does not match the staged bridge source."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed CLI does not match the staged bridge source.")
 
 
 def _fail_installed_source_coherence(message: str) -> NoReturn:
@@ -2049,9 +2037,7 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
     os_name, arch = _detect_platform()
     expected = _COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
     if expected is None or os.name != "posix":
-        raise OSError(
-            f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}"
-        )
+        raise OSError(f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}")
 
     root_info = os.lstat(destination_dir)
     if (
@@ -2063,10 +2049,7 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
         raise OSError("Cosign bootstrap directory is not private and caller-owned")
 
     filename = f"cosign-{os_name}-{arch}"
-    url = (
-        "https://github.com/sigstore/cosign/releases/download/"
-        f"v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
-    )
+    url = f"https://github.com/sigstore/cosign/releases/download/v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
     response = None
     for _redirect in range(6):
         _validate_cosign_bootstrap_url(url)
@@ -2183,8 +2166,7 @@ def _cosign_verifier(*, strict: bool):
         if os.name == "posix":
             os.chmod(directory, 0o700)
         click.echo(
-            f"  {ux.dim('→')} Cosign was not found; authenticating temporary "
-            f"Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
+            f"  {ux.dim('→')} Cosign was not found; authenticating temporary Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
         )
         verifier = _download_bootstrap_cosign(directory)
         ux.ok("Temporary Cosign verifier authenticated")
@@ -3535,7 +3517,39 @@ def _canonicalize_macos_gateway_for_coherence(path: str) -> None:
 
 
 def _verify_macos_rollback_gateway_signature(path: str) -> None:
-    """Require a valid fixed-identifier signature on the exact rollback bytes."""
+    """Verify exact rollback bytes under the signed or ad-hoc release contract.
+
+    Developer-ID/native-app gateways must retain DefenseClaw's fixed signing
+    identifier.  The documented unsigned macOS release fallback is instead
+    linker/ad-hoc signed and the published 0.8.4 artifact used the linker's
+    ``a.out`` identifier.  For that explicit fallback, strict code-integrity
+    verification plus the authenticated artifact/coherence digest comparison
+    performed by the caller is the identity boundary.
+    """
+
+    try:
+        subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        details = subprocess.run(
+            ["/usr/bin/codesign", "-d", "--verbose=4", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("installed bridge gateway code signature is invalid") from exc
+
+    detail_lines = {line.strip() for line in f"{details.stdout}\n{details.stderr}".splitlines() if line.strip()}
+    if "Signature=adhoc" in detail_lines:
+        if "TeamIdentifier=not set" not in detail_lines or any(line.startswith("Authority=") for line in detail_lines):
+            raise OSError("installed bridge gateway ad-hoc signature metadata is invalid")
+        return
 
     requirement = f'=identifier "{_MACOS_GATEWAY_CODESIGN_IDENTIFIER}"'
     try:
@@ -3547,7 +3561,7 @@ def _verify_macos_rollback_gateway_signature(path: str) -> None:
             check=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise OSError("installed bridge gateway signature or identifier is invalid") from exc
+        raise OSError("installed bridge gateway signature identifier is invalid") from exc
 
 
 def _verify_installed_gateway_version(binary_path: str, expected: str) -> None:
@@ -3796,6 +3810,7 @@ def _run_installed_migrations(
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 _INSTALLED_MIGRATION_SCRIPT,
                 from_version,
@@ -3921,6 +3936,7 @@ sys.exit(0 if payload["ok"] else 1)
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 script,
                 operation,
@@ -4009,6 +4025,7 @@ def _handoff_to_installed_upgrade(
     argv = [
         venv_python,
         "-I",
+        "-B",
         "-m",
         "defenseclaw.main",
         "upgrade",
@@ -4252,32 +4269,104 @@ def _require_hard_cut_dependency_contract(
         )
 
 
-def _require_hard_cut_preexisting_jsonschema(python_path: str) -> None:
-    """Prove the bridge already satisfies v8 schema validation without mutation."""
+def _canonical_hard_cut_runtime_version(value: object, package: str) -> tuple[int, int, int]:
+    if not isinstance(value, str):
+        raise ValueError(f"installed {package} version is missing")
+    match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
+    if match is None:
+        raise ValueError(f"installed {package} version is not canonical")
+    return tuple(int(match.group(index)) for index in range(1, 4))
+
+
+def _compatible_hard_cut_dependency_version(value: object, package: str) -> tuple[int, ...]:
+    """Parse the final/post subset admitted by the promoted PEP 440 ranges.
+
+    Importing ``packaging`` here would add an unreviewed bootstrap dependency
+    to the 0.8.4 controller.  The hard-cut requirements exclude prereleases,
+    so the accepted installed forms are release segments with an optional
+    post release and local build label.  Those suffixes do not change whether
+    the release tuple falls inside either promoted runtime range.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError(f"installed {package} version is missing")
+    match = re.fullmatch(
+        r"(?:0!)?"
+        r"(?P<release>\d+(?:\.\d+)*)"
+        r"(?:(?:[-_.]?post[-_.]?\d+)|(?:-\d+))?"
+        r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        raise ValueError(f"installed {package} version is not a supported PEP 440 final/post release")
+    release = tuple(int(part) for part in match.group("release").split("."))
+    if len(release) < 3:
+        release += (0,) * (3 - len(release))
+    return release
+
+
+def _validate_hard_cut_promoted_runtime_probe(probe: object) -> None:
+    if not isinstance(probe, dict):
+        raise ValueError("installed promoted runtime probe is invalid")
+
+    python_version = _canonical_hard_cut_runtime_version(probe.get("python_version"), "Python")
+    if python_version < (3, 10, 0):
+        raise ValueError("installed Python runtime is below the supported 3.10 floor")
+
+    jsonschema_version = _compatible_hard_cut_dependency_version(probe.get("jsonschema_version"), "jsonschema")
+    if not (jsonschema_version >= (4, 23, 0) and jsonschema_version < (5, 0, 0)):
+        raise ValueError("installed jsonschema runtime is outside 4.23.0 <= version < 5")
+    if probe.get("jsonschema_draft") != "https://json-schema.org/draft/2020-12/schema":
+        raise ValueError("installed jsonschema lacks the Draft 2020-12 validator contract")
+
+    if python_version >= (3, 11, 0):
+        mcp_version = _compatible_hard_cut_dependency_version(probe.get("mcp_version"), "mcp")
+        if not (mcp_version >= (1, 28, 1) and mcp_version < (2, 0, 0)):
+            raise ValueError("installed mcp runtime is outside 1.28.1 <= version < 2")
+        if probe.get("mcp_import") is not True:
+            raise ValueError("installed mcp runtime cannot be imported")
+
+
+def _require_hard_cut_preexisting_promoted_runtime(python_path: str) -> None:
+    """Prove every reviewed target-only runtime already exists without mutation."""
 
     script = r"""
+import json
 from importlib.metadata import version
-import re
+import platform
+import sys
 
 from jsonschema import Draft202012Validator
 
-value = version("jsonschema")
-match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:[.+-].*)?", value)
-if match is None:
-    raise SystemExit("installed jsonschema version is not canonical")
-major, minor = (int(match.group(1)), int(match.group(2)))
-if major != 4 or minor < 23:
-    raise SystemExit("installed jsonschema runtime is outside 4.23 <= version < 5")
-if Draft202012Validator.META_SCHEMA.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
-    raise SystemExit("installed jsonschema lacks the Draft 2020-12 validator contract")
+mcp_version = None
+mcp_import = None
+if sys.version_info >= (3, 11):
+    import mcp
+
+    mcp_version = version("mcp")
+    mcp_import = mcp.__name__ == "mcp"
+
+print(json.dumps({
+    "python_version": platform.python_version(),
+    "jsonschema_version": version("jsonschema"),
+    "jsonschema_draft": Draft202012Validator.META_SCHEMA.get("$schema"),
+    "mcp_version": mcp_version,
+    "mcp_import": mcp_import,
+}, sort_keys=True))
 """
-    subprocess.run(
-        [python_path, "-I", "-c", script],
+    completed = subprocess.run(
+        [python_path, "-I", "-B", "-c", script],
         check=True,
         capture_output=True,
         text=True,
         timeout=10,
     )
+    try:
+        probe = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("installed promoted runtime probe is unreadable") from exc
+    _validate_hard_cut_promoted_runtime_probe(probe)
 
 
 def _require_target_phase_two_mutator_wrapper(whl_path: str) -> None:
@@ -4412,7 +4501,7 @@ def _preflight_wheel_install(
                 source_version=source_version,
                 target_version=target_version,
             )
-            _require_hard_cut_preexisting_jsonschema(venv_python)
+            _require_hard_cut_preexisting_promoted_runtime(venv_python)
             subprocess.run(
                 [uv, "--no-config", "pip", "check", "--python", venv_python],
                 check=True,
@@ -4438,7 +4527,7 @@ def _preflight_wheel_install(
                 capture_output=True,
                 text=True,
             )
-        except (ValueError, subprocess.CalledProcessError) as exc:
+        except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             _fail_wheel_preflight(
                 "Hard-cut target cannot preserve the authenticated bridge dependency environment.",
                 exc if isinstance(exc, subprocess.CalledProcessError) else None,
@@ -4915,9 +5004,7 @@ def _acquire_bridge_rollback_artifacts(
             from defenseclaw import __version__ as controller_version
 
             if staged_target != controller_version:
-                raise OSError(
-                    f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller"
-                )
+                raise OSError(f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller")
         staged = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
         if not staged:
             raise OSError(f"{_STAGED_BRIDGE_ARTIFACT_DIR_ENV} is required for staged handoff")
@@ -5427,6 +5514,7 @@ def _run_phase_two_mutator(command: list[str], **kwargs) -> subprocess.Completed
     wrapper = [
         sys.executable,
         "-I",
+        "-B",
         str(Path(__file__).parent.parent / "phase_two_mutator.py"),
         "--defenseclaw-phase-two-mutator",
         lease_path,
@@ -6108,12 +6196,7 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
     if os.name == "posix" and (named_before.st_uid != os.getuid() or stat.S_IMODE(named_before.st_mode) != 0o600):
         raise OSError("local observability rollback metadata must be owner-only")
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -6790,7 +6873,7 @@ def _handoff_hard_cut_recovery_to_source_controller(plan: _HardCutRollbackPlan) 
     try:
         os.execve(
             venv_python,
-            [venv_python, "-I", "-m", "defenseclaw.main", *sys.argv[1:]],
+            [venv_python, "-I", "-B", "-m", "defenseclaw.main", *sys.argv[1:]],
             child_env,
         )
     except OSError as exc:
@@ -7283,10 +7366,7 @@ def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool
             # two lstat snapshots use the same API. Keep that exact
             # named-before/named-after comparison so a same-object, same-size
             # write after the descriptor read is still detected.
-            or (
-                os.name == "nt"
-                and _rollback_capture_identity(named) != _rollback_capture_identity(info)
-            )
+            or (os.name == "nt" and _rollback_capture_identity(named) != _rollback_capture_identity(info))
         ):
             raise OSError(f"rollback source changed while being read: {active_path}")
 
@@ -7414,6 +7494,7 @@ def _poll_installed_health(
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 _INSTALLED_HEALTH_SCRIPT,
                 data_dir,
@@ -7911,7 +7992,7 @@ def _verify_restored_bridge_artifacts(plan: _HardCutRollbackPlan) -> None:
     managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, plan.os_name)
     cli = subprocess.run(
-        [venv_python, "-I", "-c", _INSTALLED_PACKAGE_METADATA_SCRIPT],
+        [venv_python, "-I", "-B", "-c", _INSTALLED_PACKAGE_METADATA_SCRIPT],
         capture_output=True,
         text=True,
         timeout=10,
@@ -8148,14 +8229,16 @@ def _run_silent(
     fail_msg: str,
     *,
     env: dict[str, str] | None = None,
+    failure_output_markers: tuple[str, ...] = (),
 ) -> bool:
     """Run a command, printing ok_msg on success and fail_msg on failure.
 
-    On non-zero exit, surface the first few stderr/stdout lines so an
-    operator can correlate with logs immediately instead of needing a
-    second debug pass with the same command. Exceptions (missing
-    binary, timeout) are caught and reported similarly so the upgrade
-    flow never raises mid-restart.
+    On non-zero exit, or when a command's successful exit output contains
+    a caller-declared failure marker, surface the first few stderr/stdout
+    lines so an operator can correlate with logs immediately instead of
+    needing a second debug pass with the same command. Exceptions (missing
+    binary, timeout) are caught and reported similarly so the upgrade flow
+    never raises mid-restart.
     """
     try:
         kwargs: dict[str, object] = {
@@ -8167,13 +8250,21 @@ def _run_silent(
         if env is not None:
             kwargs["env"] = env
         result = _run_phase_two_mutator(cmd, **kwargs)
-        if result.returncode == 0:
+        combined_output = "\n".join(
+            stripped
+            for part in (result.stderr, result.stdout)
+            if isinstance(part, str) and (stripped := part.strip())
+        )
+        output_casefold = combined_output.casefold()
+        matched_failure_marker = any(
+            marker.casefold() in output_casefold for marker in failure_output_markers
+        )
+        if result.returncode == 0 and not matched_failure_marker:
             ux.ok(ok_msg)
             return True
         ux.warn(fail_msg)
-        err = (result.stderr or result.stdout or "").strip()
-        if err:
-            for line in err.splitlines()[:5]:
+        if combined_output:
+            for line in combined_output.splitlines()[:5]:
                 ux.subhead(line, indent="    ")
         return False
     except (OSError, subprocess.SubprocessError) as exc:

@@ -168,9 +168,7 @@ def resolver_env(tmp_path: Path):
                     assert isinstance(gateway_name, str)
                     gateway = release_dir / gateway_name
                     gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
-                    checksum_rows.append(
-                        f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}"
-                    )
+                    checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
             if version == "0.8.5":
                 provenance = (
                     json.dumps(
@@ -579,9 +577,24 @@ def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
     assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")
 def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
     env, mutation_log, _curl_log = resolver_env("0.8.3")
-    (Path(env["PATH"].split(os.pathsep, 1)[0]) / "cosign").unlink()
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    (fake_bin / "cosign").unlink()
+    controlled_system_bin = fake_bin.parent / "system-bin"
+    controlled_system_bin.mkdir()
+    for directory in os.defpath.split(os.pathsep):
+        source_directory = Path(directory)
+        if not source_directory.is_dir():
+            continue
+        for candidate in source_directory.iterdir():
+            destination = controlled_system_bin / candidate.name
+            if candidate.name == "cosign" or destination.exists() or not os.access(candidate, os.X_OK):
+                continue
+            destination.symlink_to(candidate)
+    env["PATH"] = f"{fake_bin}:{controlled_system_bin}"
+    assert shutil.which("cosign", path=env["PATH"]) is None
 
     result = _run(env, "--plan")
 

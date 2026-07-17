@@ -662,7 +662,7 @@ if status in {"succeeded", "rolled_back"}:
     if gateway_version.returncode != 0 or reported_versions != [expected_version]:
         raise SystemExit("terminal phase-two gateway version is not proven")
     cli_version = subprocess.run(
-        [str(venv_python), "-I", "-c", "from defenseclaw import __version__; print(__version__)"],
+        [str(venv_python), "-I", "-B", "-c", "from defenseclaw import __version__; print(__version__)"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -759,7 +759,7 @@ finally:
     os.close(descriptor)
 PY
     DEFENSECLAW_HOME="${CONTROLLER_HOME}" DEFENSECLAW_CONFIG="${recorded_config_path}" \
-        "${venv_python}" -I -c \
+        "${venv_python}" -I -B -c \
         'from defenseclaw.commands.cmd_upgrade import _recover_interrupted_hard_cut; raise SystemExit(0 if _recover_interrupted_hard_cut() else 1)' \
         || die "The retained 0.8.4 controller could not complete interrupted hard-cut recovery."
     ok "Interrupted phase two rolled back to a healthy authenticated bridge"
@@ -2415,6 +2415,7 @@ if resume_unsealed_bridge:
         [
             bridge_python,
             "-I",
+            "-B",
             "-c",
             "from defenseclaw.config import load\n"
             "cfg = load()\n"
@@ -2831,7 +2832,7 @@ ensure_upgrade_lock_before_mutation() {
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-        observed_version="$("${DEFENSECLAW_VENV}/bin/python" -I -c \
+        observed_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
             'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     elif has defenseclaw; then
@@ -2965,7 +2966,7 @@ FRESH_HARD_CUT_HANDOFF=0
 
 CURRENT_VERSION="unknown"
 if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" -I -c \
+    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
         'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 elif has defenseclaw; then
@@ -3028,7 +3029,7 @@ if [[ "${CURRENT_VERSION}" != "unknown" && -x "${DEFENSECLAW_VENV}/bin/python" ]
     runtime_paths="$(
         DEFENSECLAW_HOME="${CONTROLLER_HOME}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" -I - \
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
             "${CONTROLLER_HOME}" \
             "${CONFIG_PATH}" \
             "${OPENCLAW_HOME_EXPLICIT}" \
@@ -3131,7 +3132,7 @@ fi
     || die "Resolved runtime paths are invalid; no changes were made."
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
-    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I - "${CONFIG_PATH}" \
+    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
         "${DATA_DIR}/.migration_state.json" <<'PY' 2>/dev/null || true
 import json
 import os
@@ -5067,7 +5068,7 @@ if not os.path.islink(launcher) or os.path.realpath(launcher) != os.path.realpat
     )
 PY
 
-    BRIDGE_PYTHON_INTERPRETER="$(${DEFENSECLAW_VENV}/bin/python -c 'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
+    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
         || die "Could not resolve the source Python interpreter; no services changed."
     [[ -x "${BRIDGE_PYTHON_INTERPRETER}" ]] \
         || die "The source Python interpreter is unavailable; no services changed."
@@ -5089,7 +5090,7 @@ PY
         || die "Could not create the bridge CLI preflight environment; no services changed."
     "${uv_bin}" --no-config pip install --python "${preflight_venv}/bin/python" --quiet "${STAGING_DIR}/${whl_name}" \
         || die "Could not install the bridge CLI in its preflight environment; no services changed."
-    preflight_version="$("${preflight_venv}/bin/python" -c 'from defenseclaw import __version__; print(__version__)')" \
+    preflight_version="$("${preflight_venv}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the preflighted bridge CLI; no services changed."
     [[ "${preflight_version}" == "${RELEASE_VERSION}" ]] \
         || die "Bridge CLI preflight version mismatch: expected ${RELEASE_VERSION}, got ${preflight_version}. No services changed."
@@ -5192,7 +5193,7 @@ PY
 
     BRIDGE_SOURCE_HEALTH_URL="$(DEFENSECLAW_HOME="${DATA_DIR}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" - <<'PY' 2>/dev/null || true
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 
 cfg = load()
@@ -5311,7 +5312,7 @@ PY
         || die "Could not create the bridge CLI environment"
     "${uv_bin}" --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline "${BRIDGE_WHEEL_CUSTODY_PATH}" \
         || die "Failed to install the bridge CLI wheel"
-    bridge_version="$("${DEFENSECLAW_VENV}/bin/python" -c 'from defenseclaw import __version__; print(__version__)')" \
+    bridge_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the installed bridge CLI"
     [[ "${bridge_version}" == "${RELEASE_VERSION}" ]] \
         || die "Installed bridge CLI version mismatch: expected ${RELEASE_VERSION}, got ${bridge_version}"
@@ -5645,7 +5646,7 @@ prepare_hard_cut_target_controller() {
         || die "uv not found on PATH — cannot prepare the fresh target controller. No services changed."
     [[ -x "${DEFENSECLAW_VENV}/bin/python" ]] \
         || die "The installed bridge Python environment is unavailable. No services changed."
-    base_python="$(${DEFENSECLAW_VENV}/bin/python -I -c \
+    base_python="$(${DEFENSECLAW_VENV}/bin/python -I -B -c \
         'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
         || die "Could not resolve the bridge base Python interpreter. No services changed."
     [[ -x "${base_python}" ]] \
@@ -5670,7 +5671,7 @@ PY
     "${uv_bin}" --no-config pip install \
         --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet "${materialized_wheel}" \
         || die "Could not install the authenticated target controller in private custody. No services changed."
-    observed="$(PYTHONDONTWRITEBYTECODE=1 "${TARGET_CONTROLLER_VENV}/bin/python" -I -c \
+    observed="$(PYTHONDONTWRITEBYTECODE=1 "${TARGET_CONTROLLER_VENV}/bin/python" -I -B -c \
         'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the fresh target controller. No services changed."
     [[ "${observed}" == "${FINAL_RELEASE_VERSION}" ]] \

@@ -534,7 +534,7 @@ gateway:
 observability:
   destinations:
     - name: otel
-      kind: otlp
+      kind: http_jsonl
       endpoint: https://collector.example.test/v1/traces/path-secret-canary?access_token=query-secret#fragment-secret
       headers:
         Authorization: inline-header-secret
@@ -612,6 +612,23 @@ observability:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(partial)
     assert captured.value.path.endswith("signal_overrides.logs.endpoint")
+
+
+def test_base_otlp_tls_error_reports_the_base_endpoint_path() -> None:
+    source = """config_version: 8
+observability:
+  destinations:
+    - name: traces
+      kind: otlp
+      protocol: http/protobuf
+      endpoint: http://collector.example.test
+      send: {signals: [traces], buckets: [agent.lifecycle]}
+"""
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(source)
+
+    assert captured.value.path.endswith("destinations[0].endpoint")
+    assert "signal_overrides" not in captured.value.path
 
 
 def test_grpc_otlp_rejects_signal_path_override() -> None:

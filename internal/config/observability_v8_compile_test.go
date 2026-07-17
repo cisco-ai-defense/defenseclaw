@@ -76,7 +76,8 @@ func TestCompileObservabilityV8RetentionDaysBoundaries(t *testing.T) {
 }
 
 func TestObservabilityV8MinimalEffectivePlanGolden(t *testing.T) {
-	defaultDataDir := "/var/lib/defenseclaw"
+	const goldenDataDir = "/var/lib/defenseclaw"
+	defaultDataDir := t.TempDir()
 	compiled, err := ParseCompileObservabilityV8(
 		"golden.yaml",
 		[]byte("config_version: 8\nobservability: {}\n"),
@@ -94,7 +95,7 @@ func TestObservabilityV8MinimalEffectivePlanGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{DefaultAuditDBName, DefaultJudgeBodiesDBName} {
-		portable, err := json.Marshal(filepath.ToSlash(filepath.Join(defaultDataDir, name)))
+		portable, err := json.Marshal(filepath.ToSlash(filepath.Join(goldenDataDir, name)))
 		if err != nil {
 			t.Fatal(err)
 		}

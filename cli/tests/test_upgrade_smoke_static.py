@@ -105,6 +105,9 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
 
     assert "stage_authenticated_baseline" in smoke
+    assert "prepare_required_bridge_assets()" in smoke
+    assert 'cosign_command="$(command -v cosign)"' in smoke
+    assert 'cosign_path="$(abs_path "${cosign_command}")"' in smoke
     assert 'scripts/historical_release_auth.py"' in smoke
     assert "checksums.txt.sig" in smoke
     assert "checksums.txt.pem" in smoke
@@ -117,8 +120,38 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert "start_source_gateway_canary" in smoke
     assert "is version-bound healthy before resolver handoff" in smoke
     assert 'stage_authenticated_baseline "${baseline}"' in protocol
-    assert "required bridge authentication failed" in protocol
+    assert "required bridge authentication failed" in smoke
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
+
+
+def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
+    real_bin = tmp_path / "real-bin"
+    command_dir = tmp_path / "commands"
+    real_bin.mkdir()
+    command_dir.mkdir()
+    real_cosign = real_bin / "cosign"
+    real_cosign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_cosign.chmod(0o700)
+    (command_dir / "cosign").symlink_to(real_cosign)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/test-upgrade-release.sh; trap - EXIT; "
+            'PATH="$1:$PATH"; resolved="$(abs_path "$(command -v cosign)")"; '
+            'test "$resolved" = "$2"',
+            "bridge-cosign-resolution",
+            str(command_dir),
+            str(real_cosign.resolve()),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
@@ -126,23 +159,16 @@ def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_s
 
     assert 'installed_refusal_mode="artifact-provenance"' in protocol
     assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
-    assert (
-        "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks"
-        in protocol
-    )
+    assert "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks" in protocol
     assert "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" in protocol
     assert "Modern release provenance is mandatory; --allow-unverified cannot override it." in protocol
 
 
 def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() -> None:
-    continuity = (
-        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
-    ).read_text()
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text()
 
     fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
-    fixture_end = continuity.index(
-        "\n}\n\nassert_local_candidate_provenance_verified()", fixture_start
-    )
+    fixture_end = continuity.index("\n}\n\nassert_local_candidate_provenance_verified()", fixture_start)
     fixture = continuity[fixture_start:fixture_end]
     main = continuity[continuity.index("main_continuity() {") :]
 
@@ -150,23 +176,159 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert 'if [[ -z "${RELEASE_ROOT}" && -z "${RELEASE_DIR}" ]]' in main
     assert 'LOCAL_CANDIDATE_PROVENANCE_FIXTURE="1"' in main
     assert "--certificate-identity" in fixture
-    assert (
-        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/"
-        "release.yaml@refs/heads/main"
-    ) in fixture
+    assert ("https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main") in fixture
     assert "--certificate-oidc-issuer" in fixture
     assert "https://token.actions.githubusercontent.com" in fixture
     assert '[[ "$#" -eq 10 ]]' in fixture
+    assert "RELEASE_PROVENANCE_FILENAME" in fixture
+    assert "RELEASE_SOURCE_MAP_FILENAME" in fixture
+    assert "_release_identity_documents" in fixture
+    assert "bridge_checksums_sha256=hashlib.sha256(bridge_payload).hexdigest()" in fixture
+    assert 'excluded = {"checksums.txt", "checksums.txt.pem", "checksums.txt.sig"}' in fixture
+    assert "prepare_required_bridge_assets" in main
+    assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
 
 
-def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
-    continuity = (
-        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
-    ).read_text(encoding="utf-8")
-    start = continuity.index(
-        "assert_published_bridge_binary_sqlite_rollback_compatibility() {"
+def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path) -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    function_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    marker = 'python3 - "${release_dir}" "${bridge_checksums}" "${TARGET_VERSION}" <<\'PY\'\n'
+    program_start = continuity.index(marker, function_start) + len(marker)
+    program_end = continuity.index("\nPY\n", program_start)
+    program = continuity[program_start:program_end]
+
+    release_dir = tmp_path / "0.8.5"
+    release_dir.mkdir()
+    artifact = release_dir / "candidate.bin"
+    artifact.write_bytes(b"candidate bytes")
+    initial_checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (release_dir / "checksums.txt").write_text(f"{initial_checksum}  {artifact.name}\n", encoding="utf-8")
+    bridge_checksums = tmp_path / "bridge-checksums.txt"
+    bridge_checksums.write_text(f"{'a' * 64}  bridge.bin\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(release_dir),
+            str(bridge_checksums),
+            "0.8.5",
+        ],
+        cwd=ROOT,
+        input=program,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    provenance_path = release_dir / "release-provenance.json"
+    source_map_path = release_dir / "release-source-map.json"
+    assert provenance_path.is_file()
+    assert source_map_path.is_file()
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    assert provenance["release_version"] == "0.8.5"
+    assert provenance["bridge"]["version"] == "0.8.4"
+    assert provenance["bridge"]["checksums_sha256"] == hashlib.sha256(bridge_checksums.read_bytes()).hexdigest()
+    checksums = (release_dir / "checksums.txt").read_text(encoding="utf-8")
+    checksum_rows = {name: digest for row in checksums.splitlines() for digest, name in [row.split()]}
+    assert checksum_rows[provenance_path.name] == hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+    assert checksum_rows[source_map_path.name] == hashlib.sha256(source_map_path.read_bytes()).hexdigest()
+
+
+def test_live_continuity_cosign_fixture_delegates_published_signatures(
+    tmp_path: Path,
+) -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    function_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    marker = 'python3 - "${fixture_bin}/cosign" "${verifier_log}" "${real_cosign}" <<\'PY\'\n'
+    program_start = continuity.index(marker, function_start) + len(marker)
+    program_end = continuity.index("\nPY\n", program_start)
+    program = continuity[program_start:program_end]
+
+    wrapper = tmp_path / "cosign"
+    verifier_log = tmp_path / "fixture-verifier.log"
+    delegated_log = tmp_path / "delegated.log"
+    real_cosign = tmp_path / "real-cosign"
+    real_cosign.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' delegated > {str(delegated_log)!r}\n",
+        encoding="utf-8",
+    )
+    real_cosign.chmod(0o700)
+    generated = subprocess.run(
+        [sys.executable, "-", str(wrapper), str(verifier_log), str(real_cosign)],
+        cwd=ROOT,
+        input=program,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_text(
+        "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    signature = tmp_path / "checksums.txt.sig"
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{'a' * 64}  candidate.bin\n", encoding="utf-8")
+    command = [
+        str(wrapper),
+        "verify-blob",
+        "--certificate",
+        str(certificate),
+        "--signature",
+        str(signature),
+        "--certificate-identity",
+        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main",
+        "--certificate-oidc-issuer",
+        "https://token.actions.githubusercontent.com",
+        str(checksums),
+    ]
+
+    signature.write_text("defenseclaw-continuity-fixture-signature-v1\n", encoding="utf-8")
+    target = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    assert target.returncode == 0, target.stdout + target.stderr
+    assert verifier_log.read_text(encoding="utf-8").splitlines() == [
+        "verified exact release workflow identity and issuer"
+    ]
+    assert not delegated_log.exists()
+
+    signature.write_text("published bridge signature\n", encoding="utf-8")
+    bridge = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    assert bridge.returncode == 0, bridge.stdout + bridge.stderr
+    assert delegated_log.read_text(encoding="utf-8") == "delegated\n"
+
+
+def test_live_continuity_uses_the_release_owned_resolver_for_the_positive_path() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    release_gate = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    start = continuity.index("run_live_upgrade() {")
+    end = continuity.index("\n}\n\nprepare_local_candidate_provenance_fixture()", start)
+    upgrade = continuity[start:end]
+
+    assert 'resolver="${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"' in upgrade
+    assert 'bash "${resolver}" --yes --version "${TARGET_VERSION}"' in upgrade
+    assert 'DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}"' in upgrade
+    assert 'real_curl="$(install_curl_rewrite_probe "${curl_shim}")"' in upgrade
+    assert 'UPGRADE_GATE_REAL_CURL="${real_curl}"' in upgrade
+    assert 'UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}"' in upgrade
+    assert 'UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}"' in upgrade
+    assert 'PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}"' in upgrade
+    assert "PYTHONDONTWRITEBYTECODE=1" in upgrade
+    assert 'defenseclaw "${args[@]}"' not in upgrade
+    assert 'curl_command="$(type -P curl)"' in release_gate
+    assert 'real_curl="$(abs_path "${curl_command}")"' in release_gate
+    assert '[[ -f "${real_curl}" && -x "${real_curl}" ]]' in release_gate
+
+
+def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    start = continuity.index("assert_published_bridge_binary_sqlite_rollback_compatibility() {")
     end = continuity.index("\n}\n\nresolve_continuity_upgrade_contract()", start)
     compatibility = continuity[start:end]
     main = continuity[continuity.index("main_continuity() {") :]
@@ -174,17 +336,24 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     # The gate is specifically bound to the immutable POSIX 0.8.4 bridge and
     # the material retained only after historical_release_auth.py succeeds.
     assert '[[ "${FROM_VERSION}" == "0.8.4" ]]' in compatibility
-    assert 'darwin|linux) ;;' in compatibility
-    assert (
-        'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"'
-        in compatibility
-    )
+    assert "darwin|linux) ;;" in compatibility
+    assert 'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"' in compatibility
     assert (
         'auth_marker="${WORKDIR}/published-release/${FROM_VERSION}/'
-        '.authenticated-${OS_NAME}-${ARCH_NAME}"'
-        in compatibility
+        '.authenticated-${OS_NAME}-${ARCH_NAME}"' in compatibility
     )
-    assert '"${bridge_gateway}" --version | grep -F "${FROM_VERSION}"' in compatibility
+    assert 'bridge_probe_name="dcb084probe${POST_STAMP}"' in compatibility
+    assert '[[ "${bridge_probe_name}" =~ ^[A-Za-z0-9]+$' in compatibility
+    assert '"${bridge_probe_name}" != *defenseclaw*' in compatibility
+    assert 'ln "${bridge_gateway}" "${bridge_probe}"' in compatibility
+    assert "source_stat.st_ino" in compatibility
+    assert "probe_stat.st_ino" in compatibility
+    assert "hashlib.sha256(source.read_bytes()).digest()" in compatibility
+    assert '"${bridge_probe}" --version | grep -F "${FROM_VERSION}"' in compatibility
+    assert '"${bridge_probe}" start' in compatibility
+    assert '"${bridge_probe}" stop' in compatibility
+    assert '"${bridge_gateway}" start' not in compatibility
+    assert '"${bridge_gateway}" stop' not in compatibility
 
     # It restores the byte-preserved source config while keeping one exact DB
     # path, then proves target-created correlation tables exist before boot.
@@ -211,7 +380,12 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     assert '"http://127.0.0.1:18970/audit/event"' in compatibility
     assert '"http://127.0.0.1:18970/alerts?limit=500"' in compatibility
     assert '"X-DefenseClaw-Client": "upgrade-continuity-gate"' in compatibility
-    assert 'event.get("binary_version") == "0.8.4"' in compatibility
+    assert '"SELECT COUNT(*) FROM audit_events WHERE target = ?"' in compatibility
+    assert 'event.get("target") == probe_target' in compatibility
+    assert 'event.get("details") == marker' not in compatibility
+    api_read_start = compatibility.index('read = urllib.request.Request(')
+    api_read_end = compatibility.index("\nPY\n", api_read_start)
+    assert 'event.get("binary_version")' not in compatibility[api_read_start:api_read_end]
     assert "SELECT COUNT(*), COALESCE(MAX(binary_version), '')" in compatibility
 
     # The target config and binary are restored and health-checked before the
@@ -219,11 +393,33 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     assert 'cp -p "${v8_config}" "${data_dir}/config.yaml"' in compatibility
     assert '"${target_gateway}" start' in compatibility
     activation = main.index("verify_target_activation")
-    old_binary_probe = main.index(
-        "assert_published_bridge_binary_sqlite_rollback_compatibility"
-    )
+    old_binary_probe = main.index("assert_published_bridge_binary_sqlite_rollback_compatibility")
     post_emit = main.index("emit_continuity_phase post")
     assert activation < old_binary_probe < post_emit
+
+
+def test_live_continuity_fixture_has_no_implicit_openclaw_fleet_dependency() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    start = continuity.index("write_continuity_v7_config() {")
+    end = continuity.index("\n}\n\nstart_baseline_stack()", start)
+    fixture = continuity[start:end]
+    verify_start = continuity.index("verify_target_activation() {")
+    verify_end = continuity.index(
+        "\n}\n\nassert_published_bridge_binary_sqlite_rollback_compatibility()",
+        verify_start,
+    )
+    verification = continuity[verify_start:verify_end]
+
+    assert '"claw:\\n"' in fixture
+    assert '"  mode: \'\'\\n"' in fixture
+    assert '"  connector:' not in fixture
+    assert '"gateway:\\n"' in fixture
+    assert '"  fleet_mode: disabled\\n"' in fixture
+    assert '"    enabled: false\\n"' in fixture
+    assert 'gateway.get("fleet_mode") != "disabled"' in verification
+    assert 'gateway.get("watcher") or {}' in verification
+    assert '(config.get("claw") or {}).get("mode") != ""' in verification
+    assert '(config.get("guardrail") or {}).get("connector") or ""' in verification
 
 
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
@@ -252,7 +448,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
             "bridge_phase1_state_transaction snapshot"
         )
     ]
-    assert 'post_stop_state="${post_stop_health%%$\'\\t\'*}"' in post_stop
+    assert "post_stop_state=\"${post_stop_health%%$'\\t'*}\"" in post_stop
     assert '[[ "${post_stop_state}" == "unreachable" ]]' in post_stop
     assert "remains live without PID custody after stop" in post_stop
 
@@ -493,6 +689,67 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert "_recover_interrupted_hard_cut" in text
 
 
+def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
+    posix = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "upgrade.ps1").read_text(encoding="utf-8")
+
+    # Isolated mode ignores PYTHONDONTWRITEBYTECODE. Every installed-runtime
+    # probe must therefore pass -B explicitly so a pre-mutation refusal cannot
+    # create __pycache__ entries inside snapshotted state.
+    for source in (posix, windows):
+        normalized = re.sub(r'["\'`,()]', " ", source)
+        normalized = re.sub(r"\s+", " ", normalized)
+        assert re.search(r"(?<!\S)-I\s+(?!-B(?:\s|$))\S+", normalized) is None
+    assert "-I -B -" in posix
+    assert "-I -B -c" in posix
+    assert "-I -B -c" in windows
+    assert "${DEFENSECLAW_VENV}/bin/python -c" not in posix
+    assert '"${preflight_venv}/bin/python" -c' not in posix
+    assert '"${DEFENSECLAW_VENV}/bin/python" -c' not in posix
+    assert '"${DEFENSECLAW_VENV}/bin/python" - <<' not in posix
+
+    installed_version = windows[
+        windows.index("function Get-InstalledVersion") : windows.index(
+            "function Get-CanonicalVersionOutput"
+        )
+    ]
+    assert "[void](Get-Cli)" in installed_version
+    assert "-Arguments @(\"-I\", \"-B\", \"-c\"" in installed_version
+    assert "Get-CanonicalVersionOutput -Command $cli" not in installed_version
+    assert 'Assert-VersionOutput (Get-Cli) $SourceVersion "source CLI"' not in windows
+
+
+def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() -> None:
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    legacy_start = smoke.index("seed_v8_observability_fixture() {")
+    legacy_end = smoke.index("\n}\n\nseed_native_v8_observability_fixture()", legacy_start)
+    native_start = legacy_end
+    native_end = smoke.index("\n}\n\nseed_upgrade_fixture()", native_start)
+
+    legacy_fixture = smoke[legacy_start:legacy_end]
+    native_fixture = smoke[native_start:native_end]
+    assert "python3 -I -B -c 'import secrets" in legacy_fixture
+    assert legacy_fixture.index("DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}") < legacy_fixture.index(
+        "finalize_observability_upgrade_fixture"
+    )
+    assert "python3 -I -B -c 'import secrets" in native_fixture
+    assert native_fixture.index("DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}") < native_fixture.index(
+        'environment.historical.source'
+    )
+    invariant_start = smoke.index("assert_source_gateway_canary_preserved_fixture() {")
+    invariant_end = smoke.index("\n}\n", invariant_start)
+    invariant = smoke[invariant_start:invariant_end]
+    assert 'cmp -s "${evidence_dir}/config.historical.source" "${data_dir}/config.yaml"' in invariant
+    assert 'cmp -s "${evidence_dir}/environment.historical.source" "${data_dir}/.env"' in invariant
+    run_one = smoke[smoke.index("run_one_upgrade_smoke() {") : smoke.index("\n}\n\nmain()")]
+    assert run_one.index("start_source_gateway_canary") < run_one.index(
+        "assert_source_gateway_canary_preserved_fixture"
+    ) < run_one.index("patch_installed_upgrade_endpoint")
+    assert 'actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token' in smoke
+    assert 'raise SystemExit("gateway token changed across the staged upgrade")' in smoke
+    assert "historical_gateway_token," in smoke
+
+
 def test_posix_same_version_noop_reports_actual_provenance_before_mutation() -> None:
     text = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     contract = text.rindex(
@@ -551,9 +808,7 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     bridge_switch = resolver.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture)
     assert capture < bridge_switch
     assert resolver.count('exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"') == 2
-    assert resolver.count(
-        'export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"'
-    ) == 2
+    assert resolver.count('export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"') == 2
     assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
     assert "verify_hard_cut_target_controller_handoff" in resolver
     assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver

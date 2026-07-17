@@ -817,6 +817,76 @@ start_release_server() {
     die "could not start local release server; see ${WORKDIR}/release-server.log"
 }
 
+install_curl_rewrite_probe() {
+    local shim_dir="$1"
+    local curl_command real_curl
+    curl_command="$(type -P curl)" \
+        || die "an external curl executable is required for the upgrade release gate"
+    real_curl="$(abs_path "${curl_command}")" \
+        || die "could not resolve the external curl executable for the upgrade release gate"
+    [[ -f "${real_curl}" && -x "${real_curl}" ]] \
+        || die "the resolved curl path is not an executable file: ${real_curl}"
+    mkdir -p "${shim_dir}"
+    cat > "${shim_dir}/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${UPGRADE_GATE_REAL_CURL:?}"
+: "${UPGRADE_GATE_RELEASE_URL:?}"
+prefix="https://github.com/cisco-ai-defense/defenseclaw/releases/download"
+latest="https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/latest"
+args=()
+for argument in "$@"; do
+    if [[ "${argument}" == "${latest}" ]]; then
+        printf '{"tag_name":"%s"}\n' "${UPGRADE_GATE_TARGET_VERSION:?}"
+        exit 0
+    fi
+    argument="${argument//${prefix}/${UPGRADE_GATE_RELEASE_URL}}"
+    args+=("${argument}")
+done
+exec "${UPGRADE_GATE_REAL_CURL}" "${args[@]}"
+SH
+    chmod 700 "${shim_dir}/curl"
+    printf '%s\n' "${real_curl}"
+}
+
+prepare_required_bridge_assets() {
+    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
+    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
+
+    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
+    local previous_from="${FROM_VERSION}"
+    local asset
+    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
+    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
+    mkdir -p "${bridge_dir}"
+    for asset in \
+        "${bridge_wheel}" \
+        "${bridge_gateway}" \
+        checksums.txt \
+        checksums.txt.sig \
+        checksums.txt.pem \
+        upgrade-manifest.json; do
+        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
+            "${REQUIRED_BRIDGE_VERSION}" \
+            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
+    done
+    local cosign_command cosign_path
+    cosign_command="$(command -v cosign)" \
+        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+    cosign_path="$(abs_path "${cosign_command}")" \
+        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+    python3 "${ROOT}/scripts/historical_release_auth.py" \
+        --version "${REQUIRED_BRIDGE_VERSION}" \
+        --release-dir "${bridge_dir}" \
+        --cosign "${cosign_path}" \
+        --asset "${bridge_wheel}" \
+        --asset "${bridge_gateway}" \
+        --asset upgrade-manifest.json \
+        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
+    FROM_VERSION="${previous_from}"
+    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+}
+
 tail_log() {
     local file="$1"
     if [[ -f "${file}" ]]; then
@@ -1049,8 +1119,10 @@ stage_authenticated_baseline() {
                 || die "published baseline asset is unavailable: ${version}/${name}"
         fi
     done
-    local cosign_path
-    cosign_path="$(abs_path "$(command -v cosign)")" \
+    local cosign_command cosign_path
+    cosign_command="$(command -v cosign)" \
+        || die "cosign is required to authenticate published baseline ${version}"
+    cosign_path="$(abs_path "${cosign_command}")" \
         || die "cosign is required to authenticate published baseline ${version}"
     python3 "${ROOT}/scripts/historical_release_auth.py" \
         --version "${version}" \
@@ -1229,6 +1301,16 @@ EOF
 EOF
 }
 
+assert_source_gateway_canary_preserved_fixture() {
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    [[ -f "${evidence_dir}/config.historical.source" ]] || return 0
+    cmp -s "${evidence_dir}/config.historical.source" "${data_dir}/config.yaml" \
+        || die "source gateway canary changed the historical config before resolver handoff"
+    cmp -s "${evidence_dir}/environment.historical.source" "${data_dir}/.env" \
+        || die "source gateway canary changed the historical environment before resolver handoff"
+}
+
 seed_v8_observability_fixture() {
     resolve_baseline_config_version
     log "Seeding representative comment-heavy config-v${FROM_CONFIG_VERSION} observability fixture for ${FROM_VERSION}"
@@ -1327,10 +1409,17 @@ ai_discovery:
 notifications:
   enabled: true # unrelated section survives
 YAML
-    cat >"${data_dir}/.env" <<'ENV'
+    local gateway_token
+    gateway_token="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(32))')" \
+        || die "could not generate the isolated fixture gateway token"
+    [[ "${gateway_token}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "isolated fixture gateway token has an invalid shape"
+    cat >"${data_dir}/.env" <<ENV
 # exact pre-upgrade environment bytes must be recoverable
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
+DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}
 ENV
+    unset gateway_token
     finalize_observability_upgrade_fixture
 }
 
@@ -1392,12 +1481,19 @@ observability:
 notifications:
   enabled: true # unrelated section survives
 YAML
-    cat >"${data_dir}/.env" <<'ENV'
+    local gateway_token
+    gateway_token="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(32))')" \
+        || die "could not generate the isolated fixture gateway token"
+    [[ "${gateway_token}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "isolated fixture gateway token has an invalid shape"
+    cat >"${data_dir}/.env" <<ENV
 # exact native-v8 environment bytes must survive later upgrades
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
+DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}
 DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
+    unset gateway_token
 
     # A real config-v8 host already has the v8 activation recorded. Seed the
     # cursor through the authenticated published baseline's own state API so a
@@ -1876,6 +1972,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -2064,9 +2161,18 @@ actual_environment = dotenv_values(data_dir / ".env")
 for name, value in expected_environment.items():
     if actual_environment.get(name) != value:
         raise SystemExit(f"protected environment promotion mismatch for {name}")
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if not isinstance(historical_gateway_token, str) or re.fullmatch(r"[0-9a-f]{64}", historical_gateway_token) is None:
+    raise SystemExit("historical fixture gateway token is missing or invalid")
+if actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token:
+    raise SystemExit("gateway token changed across the staged upgrade")
 if os.name != "nt" and stat.S_IMODE((data_dir / ".env").stat().st_mode) != 0o600:
     raise SystemExit("promoted .env is not mode 0600")
-protected_values = tuple(value for name, value in expected_environment.items() if name != "PRESERVE_UPGRADE_SMOKE_ENV")
+protected_values = (
+    *(value for name, value in expected_environment.items() if name != "PRESERVE_UPGRADE_SMOKE_ENV"),
+    historical_gateway_token,
+)
 log_text = upgrade_log.read_text(encoding="utf-8", errors="replace")
 if any(value in config_text or value in log_text for value in protected_values):
     raise SystemExit("protected fixture value escaped into v8 YAML or upgrade output")
@@ -2309,6 +2415,7 @@ run_one_upgrade_smoke() {
     install_baseline
     seed_upgrade_fixture
     start_source_gateway_canary
+    assert_source_gateway_canary_preserved_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade

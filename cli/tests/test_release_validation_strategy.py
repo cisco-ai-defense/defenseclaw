@@ -53,11 +53,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     assert "--scope full" not in text
     assert "unsigned-upgrade-candidate" in selective["needs"]
     pr = release_certification.select_cases("0.8.6", "pr", latest_stable="0.8.5")
-    assert {
-        behavior_class
-        for item in pr["cases"]
-        for behavior_class in item["classes"]
-    } == {
+    assert {behavior_class for item in pr["cases"] for behavior_class in item["classes"]} == {
         "latest_stable",
         "previous_stable",
         "bridge_boundary",
@@ -240,14 +236,16 @@ def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None
         "posix-fresh-install",
         "linux-upgrade",
         "macos-upgrade",
-        "historical-dependency-canary",
         "windows-unpublished-refusal",
         "live-continuity",
         "certification-complete",
     }.issubset(jobs)
     assert "scripts/test-upgrade-protocol-release.sh" in text
     assert "scripts/test-developer-target-activation.sh" not in text
-    assert "--baseline-dependencies published" in text
+    assert text.count("--baseline-dependencies published") == 1
+    assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in text
+    assert "matrix.start_source_gateway" in text
+    assert "--start-source-gateway" in text
     assert "scripts/test-observability-v8-upgrade-continuity.sh" in text
     assert "scripts/test-upgrade-release-windows.ps1" in text
     assert "scripts/verify-sigstore-blob.py" in text
@@ -256,7 +254,6 @@ def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None
         "posix-fresh-install",
         "linux-upgrade",
         "macos-upgrade",
-        "historical-dependency-canary",
         "windows-unpublished-refusal",
         "live-continuity",
     }

@@ -53,6 +53,22 @@ stables enter dynamically.
 Expanding the historical support floor or moving a protocol, installer, schema,
 or artifact-authentication boundary still requires a reviewed policy change.
 
+Full certification authenticates each selected historical wheel and gateway,
+then exercises its controller and state through the signed release-owned
+resolver on Linux and macOS. Representative latest-stable and pre-bridge Linux
+cases also start the authenticated source gateway and require version-bound
+health before the resolver handoff. Full certification does not reinstall an
+old wheel by resolving
+its transitive dependencies against today's mutable package index. That would
+model a fresh historical install—not an existing endpoint—and can become
+unsatisfiable after publication without any change to the candidate or upgrade
+path. The required bridge case is the narrow exception: it resolves the
+bridge's published dependencies so target-only dependency promotion and the
+hard-cut probe are exercised realistically. The current-stable main canary also
+resolves the published stable's dependencies. All other historical cases use
+the candidate-compatible runtime and validate the actual controller, migration,
+refusal, rollback, and health behavior.
+
 For nightly/manual certification, `scripts/resolve_upgrade_baselines.py`
 materializes `effective-upgrade-baselines.json`. It starts from the reviewed
 historical floor, then admits a newer live stable only after GitHub reports an

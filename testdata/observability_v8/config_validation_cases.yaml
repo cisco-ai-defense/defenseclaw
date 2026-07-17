@@ -22,6 +22,153 @@ cases:
             enabled: false
             endpoint: https://collector.example.test
 
+  - name: plaintext-otlp-explicit-insecure
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+            tls: {insecure: true}
+
+  - name: plaintext-otlp-missing-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+
+  - name: secure-otlp-marked-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            tls: {insecure: true}
+
+  - name: insecure-otlp-with-ca-cert
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+            tls:
+              insecure: true
+              ca_cert: /tmp/collector-ca.pem
+
+  - name: otlp-ca-cert-must-be-absolute
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: collector.example.test:4317
+            tls: {ca_cert: relative/collector-ca.pem}
+
+  - name: otlp-ca-cert-must-not-be-whitespace
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: collector.example.test:4317
+            tls: {ca_cert: " "}
+
+  - name: otlp-endpoint-query-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test?tenant=example
+
+  - name: otlp-endpoint-fragment-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test#fragment
+
+  - name: grpc-otlp-endpoint-path-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: https://collector.example.test/ignored
+
+  - name: plaintext-otlp-signal-override-missing-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            signal_overrides:
+              logs: {endpoint: http://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
+  - name: secure-otlp-signal-override-marked-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            tls: {insecure: true}
+            signal_overrides:
+              logs: {endpoint: https://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
+  - name: shadowed-base-otlp-tls-mismatch
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://unused.example.test
+            signal_overrides:
+              logs: {endpoint: https://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
   - name: explicit-console-logs
     valid: true
     source: |
@@ -68,6 +215,18 @@ cases:
               max_export_batch_size: 512
               max_export_batch_bytes: 4263936
               scheduled_delay_ms: 1
+
+  - name: non-otlp-relative-ca-path-is-normalized
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            tls:
+              ca_cert: relative/archive-ca.pem
 
   - name: push-batch-maximums
     valid: true

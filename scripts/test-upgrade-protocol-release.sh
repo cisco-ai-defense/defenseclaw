@@ -139,42 +139,6 @@ raise SystemExit(0 if not windows else 1)
 PY
 }
 
-prepare_required_bridge_assets() {
-    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
-    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
-
-    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
-    local previous_from="${FROM_VERSION}"
-    local asset
-    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
-    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
-    mkdir -p "${bridge_dir}"
-    for asset in \
-        "${bridge_wheel}" \
-        "${bridge_gateway}" \
-        checksums.txt \
-        checksums.txt.sig \
-        checksums.txt.pem \
-        upgrade-manifest.json; do
-        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
-            "${REQUIRED_BRIDGE_VERSION}" \
-            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
-    done
-    local cosign_path
-    cosign_path="$(command -v cosign)" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
-    python3 "${ROOT}/scripts/historical_release_auth.py" \
-        --version "${REQUIRED_BRIDGE_VERSION}" \
-        --release-dir "${bridge_dir}" \
-        --cosign "${cosign_path}" \
-        --asset "${bridge_wheel}" \
-        --asset "${bridge_gateway}" \
-        --asset upgrade-manifest.json \
-        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
-    FROM_VERSION="${previous_from}"
-    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
-}
-
 baseline_protocol() {
     local version="$1"
     local old_dir="${WORKDIR}/published-release/${version}"
@@ -401,33 +365,6 @@ restore_stop_probe() {
         mv "${real_gateway}" "${gateway}"
         chmod 700 "${gateway}"
     fi
-}
-
-install_curl_rewrite_probe() {
-    local shim_dir="$1"
-    local real_curl
-    real_curl="$(command -v curl)"
-    mkdir -p "${shim_dir}"
-    cat > "${shim_dir}/curl" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-: "${UPGRADE_GATE_REAL_CURL:?}"
-: "${UPGRADE_GATE_RELEASE_URL:?}"
-prefix="https://github.com/cisco-ai-defense/defenseclaw/releases/download"
-latest="https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/latest"
-args=()
-for argument in "$@"; do
-    if [[ "${argument}" == "${latest}" ]]; then
-        printf '{"tag_name":"%s"}\n' "${UPGRADE_GATE_TARGET_VERSION:?}"
-        exit 0
-    fi
-    argument="${argument//${prefix}/${UPGRADE_GATE_RELEASE_URL}}"
-    args+=("${argument}")
-done
-exec "${UPGRADE_GATE_REAL_CURL}" "${args[@]}"
-SH
-    chmod 700 "${shim_dir}/curl"
-    printf '%s\n' "${real_curl}"
 }
 
 assert_no_success_receipt() {

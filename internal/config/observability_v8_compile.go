@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1081,6 +1082,12 @@ func compileObservabilityV8PushDefaults(
 	}
 	if !httpOnly && result.TLS.InsecureSkipVerify {
 		return fmt.Errorf("%s.tls.insecure_skip_verify: valid only for HTTP push destinations", path)
+	}
+	if !httpOnly && result.TLS.CACert != "" && !filepath.IsAbs(result.TLS.CACert) {
+		return fmt.Errorf("%s.tls.ca_cert: must be an absolute path", path)
+	}
+	if !httpOnly && result.TLS.Insecure && result.TLS.CACert != "" {
+		return fmt.Errorf("%s.tls.ca_cert: cannot be combined with insecure OTLP transport", path)
 	}
 	if strings.TrimSpace(result.Endpoint) == "" {
 		return nil

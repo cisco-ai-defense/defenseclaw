@@ -1168,9 +1168,31 @@ def _validate_destination(destination: dict[str, Any], path: str, source_name: s
 
     endpoint = destination.get("endpoint", "")
     if endpoint:
-        _validate_endpoint(endpoint, protocol, safety, f"{path}.endpoint", source_name)
+        _validate_endpoint(
+            endpoint,
+            protocol,
+            safety,
+            f"{path}.endpoint",
+            source_name,
+            otlp=kind == "otlp",
+        )
     if kind != "otlp":
         return
+    tls = destination.get("tls", {})
+    tls_insecure = tls.get("insecure", False)
+    ca_cert = tls.get("ca_cert", "")
+    if ca_cert and not Path(ca_cert).is_absolute():
+        _semantic_error(
+            source_name,
+            f"{path}.tls.ca_cert",
+            "use an absolute CA certificate path",
+        )
+    if tls_insecure and ca_cert:
+        _semantic_error(
+            source_name,
+            f"{path}.tls.ca_cert",
+            "remove ca_cert when tls.insecure is true",
+        )
     for signal in selected:
         override = overrides.get(signal, {})
         override_path = override.get("path", "")
@@ -1180,15 +1202,19 @@ def _validate_destination(destination: dict[str, Any], path: str, source_name: s
                 f"{path}.signal_overrides.{signal}.path",
                 "remove path for gRPC or use http/protobuf",
             )
-        resolved = override.get("endpoint") or endpoint
+        override_endpoint = override.get("endpoint") or ""
+        resolved = override_endpoint or endpoint
         signal_path = f"{path}.signal_overrides.{signal}.endpoint"
+        if not override_endpoint and endpoint:
+            signal_path = f"{path}.endpoint"
         if not resolved:
             _semantic_error(
                 source_name,
                 signal_path,
                 "set a destination endpoint or a selected-signal endpoint override",
             )
-        _validate_endpoint(resolved, protocol, safety, signal_path, source_name)
+        _validate_endpoint(resolved, protocol, safety, signal_path, source_name, otlp=True)
+        _validate_otlp_endpoint_tls(resolved, tls_insecure, signal_path, source_name)
 
 
 def _validate_prometheus(listen: str, metrics_path: str, path: str, source_name: str) -> None:
@@ -1211,7 +1237,15 @@ def _validate_prometheus(listen: str, metrics_path: str, path: str, source_name:
         _semantic_error(source_name, f"{path}.path", "use an absolute metrics path beginning with /")
 
 
-def _validate_endpoint(raw: str, protocol: str, safety: dict[str, bool], path: str, source_name: str) -> None:
+def _validate_endpoint(
+    raw: str,
+    protocol: str,
+    safety: dict[str, bool],
+    path: str,
+    source_name: str,
+    *,
+    otlp: bool = False,
+) -> None:
     value = raw.strip()
     if not value or len(value) > 2_048 or any(character.isspace() for character in value):
         _semantic_error(source_name, path, "use a nonempty bounded collector endpoint without whitespace")
@@ -1223,6 +1257,10 @@ def _validate_endpoint(raw: str, protocol: str, safety: dict[str, bool], path: s
             _semantic_error(source_name, path, "use a valid HTTP(S) endpoint without inline credentials")
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None:
             _semantic_error(source_name, path, "use a valid HTTP(S) endpoint without inline credentials")
+        if otlp and ("?" in value or "#" in value):
+            _semantic_error(source_name, path, "remove query and fragment data from OTLP endpoints")
+        if otlp and protocol in ("grpc", "grpc/protobuf") and parsed.path not in ("", "/"):
+            _semantic_error(source_name, path, "remove the path from a gRPC OTLP endpoint")
         if port is not None and not 1 <= port <= 65_535:
             _semantic_error(source_name, path, "use an endpoint port from 1 through 65535")
         host = parsed.hostname
@@ -1240,6 +1278,18 @@ def _validate_endpoint(raw: str, protocol: str, safety: dict[str, bool], path: s
             _semantic_error(source_name, path, "use a valid gRPC host:port authority")
         host = parsed.hostname
     _validate_endpoint_host(host, safety, path, source_name)
+
+
+def _validate_otlp_endpoint_tls(raw: str, insecure: bool, path: str, source_name: str) -> None:
+    if "://" not in raw:
+        return
+    scheme = urlsplit(raw).scheme.lower()
+    if scheme in {"http", "https"} and (scheme == "http") is not insecure:
+        _semantic_error(
+            source_name,
+            path,
+            "set tls.insecure true for http:// endpoints and false for https:// endpoints",
+        )
 
 
 def _validate_endpoint_host(host: str, safety: dict[str, bool], path: str, source_name: str) -> None:
