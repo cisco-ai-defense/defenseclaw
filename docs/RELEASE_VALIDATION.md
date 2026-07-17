@@ -13,6 +13,13 @@ observability, Docker, or provenance defects for the first time.
 | Pre-release certification | Nightly schedule or manual dispatch for a selected ref and candidate version | Signed candidate; behavior-class historical matrix; live migration and rollback/recovery; Docker/local observability continuity; native platform checks; bounded-retry provenance verification | One signed candidate artifact plus one certification receipt |
 | Release | Manual version input on protected `main` | Verify a recent receipt for the exact SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; then publish those same bytes | Reuse certified bytes without rebuilding |
 
+The standalone macOS app workflow builds the complete ad-hoc DMG on affected
+pull requests and on manual request. It does not repeat that disk-intensive
+package build after the same reviewed tree is merged to `main`; the main smoke
+already validates the exact merged runtime candidate. The protected Release
+workflow remains the only path that builds the publishable, conditionally
+notarized macOS assets.
+
 If a matching certification receipt is missing, failed, stale, or does not
 cover the exact release inputs, Release must invoke the full certification path
 and wait for it. It must never publish after only a reduced smoke and must never
