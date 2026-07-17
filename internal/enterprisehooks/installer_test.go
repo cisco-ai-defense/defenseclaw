@@ -367,23 +367,44 @@ func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
 	}
 }
 
-func TestInstallRefusesMissingHookConfig(t *testing.T) {
+// TestInstallBootstrapsMissingHookConfigFirstTime locks the endpoint-
+// product contract: on a fresh target where the user has never
+// launched the agent (so ~/.codex/config.toml doesn't exist yet),
+// Install auto-creates the connector's minimal-valid stub as the
+// target user AND completes successfully. Before this change the
+// installer refused with "hook config file missing", leaving
+// customers with no enforcement until they opened each agent once —
+// see bootstrap.go for the rationale.
+func TestInstallBootstrapsMissingHookConfigFirstTime(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
-	_, err := Install(context.Background(), InstallOptions{
+	cfgPath := filepath.Join(home, ".codex", "config.toml")
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist before Install (err=%v)", cfgPath, err)
+	}
+	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
 		OwnerUID:      os.Getuid(),
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "hook config") || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("Install error = %v, want hook config missing", err)
+	if err != nil {
+		t.Fatalf("Install with missing hook config: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(statErr) {
-		t.Fatalf("data dir exists after refused install: %v", statErr)
+	if result.Connector != "codex" {
+		t.Fatalf("result.Connector = %q, want codex", result.Connector)
+	}
+	// The stub must exist AND be owned by the target user after Install.
+	info, statErr := os.Stat(cfgPath)
+	if statErr != nil {
+		t.Fatalf("stat %s after Install: %v", cfgPath, statErr)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("stub at %s is empty; Connector.Setup should have written entries", cfgPath)
 	}
 }
 
