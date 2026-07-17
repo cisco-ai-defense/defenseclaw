@@ -121,6 +121,24 @@ manifest_array_contains() {
     grep -Fxq "${expected}" <<<"${values}"
 }
 
+manifest_windows_sources_are_empty() {
+    python3 - "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    platform_tested = json.load(handle).get("platform_tested_source_versions")
+if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
+    raise SystemExit(
+        "platform_tested_source_versions must contain exactly the Windows source list"
+    )
+windows = platform_tested["windows"]
+if not isinstance(windows, list):
+    raise SystemExit("platform_tested_source_versions.windows must be a list")
+raise SystemExit(0 if not windows else 1)
+PY
+}
+
 prepare_required_bridge_assets() {
     [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
     [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
@@ -598,6 +616,16 @@ verify_refusal_invariants() {
             grep -Eiq "(^|[^[:alnum:]_])(tar|gzip)([^[:alnum:]_]|$)|not (in )?gzip format|non-zero exit status|CalledProcessError" "${log_file}" \
                 || die "legacy controller did not fail at canonical gateway extraction"
             ;;
+        immutable-bridge-empty-windows)
+            # The published 0.8.4 controller predates the schema-2 allowance
+            # for an empty platform list.  The current resolver understands
+            # that truthful value as "Windows unsupported", but the immutable
+            # bridge must fail closed before mutation when it reads it.
+            grep -Fq \
+                "upgrade-manifest.json platform_tested_source_versions.windows must be a non-empty version list." \
+                "${log_file}" \
+                || die "immutable 0.8.4 controller did not prove its known empty-Windows pre-mutation refusal"
+            ;;
         *) die "unknown installed-controller refusal mode: ${refusal_mode}" ;;
     esac
 }
@@ -673,6 +701,7 @@ run_candidate_updater_refusal() {
     HOME="${SMOKE_HOME}" \
     DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
     OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+    PYTHONDONTWRITEBYTECODE=1 \
     UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
     UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
     UPGRADE_GATE_REAL_CURL="${real_curl}" \
@@ -706,6 +735,7 @@ run_candidate_explicit_bridge_refusal() {
     HOME="${SMOKE_HOME}" \
     DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
     OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+    PYTHONDONTWRITEBYTECODE=1 \
     UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
     UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
     UPGRADE_GATE_REAL_CURL="${real_curl}" \
@@ -757,6 +787,7 @@ run_candidate_updater_staged_success() {
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
         DEFENSECLAW_UPGRADE_TEST_MODE=1 \
         DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
@@ -798,6 +829,7 @@ run_candidate_updater_direct_success() {
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
         DEFENSECLAW_UPGRADE_TEST_MODE=1 \
         DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
@@ -858,6 +890,16 @@ run_protocol_case() {
     if (( supported_protocol < CANDIDATE_MIN_PROTOCOL )); then
         protocol_too_old=1
     fi
+    local immutable_bridge_empty_windows_refusal=0
+    if [[ "${baseline}" == "${FIRST_SCHEMA2_RELEASE}" \
+        && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
+        && manifest_windows_sources_are_empty; then
+        # The signed policy is truthful: Windows cannot cross a hard cut when
+        # 0.8.4 was not published there.  The immutable 0.8.4 controller did
+        # not yet accept an empty platform matrix, so prove that known refusal
+        # and let the current release-owned resolver own the positive path.
+        immutable_bridge_empty_windows_refusal=1
+    fi
 
     if [[ -n "${REQUIRED_BRIDGE_VERSION}" && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
         (( supported_protocol >= CANDIDATE_MIN_PROTOCOL )) \
@@ -897,9 +939,11 @@ run_protocol_case() {
             return
         fi
 
-        if [[ "${legacy_schema_one_controller}" -eq 1 \
-              || "${protocol_too_old}" -eq 1 \
-              || "${source_too_old}" -eq 1 ]]; then
+        if [[ "${immutable_bridge_empty_windows_refusal}" -eq 1 ]]; then
+            run_installed_controller_refusal "${baseline}" "immutable-bridge-empty-windows"
+        elif [[ "${legacy_schema_one_controller}" -eq 1 \
+                || "${protocol_too_old}" -eq 1 \
+                || "${source_too_old}" -eq 1 ]]; then
             run_installed_controller_refusal "${baseline}" "${installed_refusal_mode}"
         else
             log "Schema-2 baseline ${baseline} is capable; requiring installed-controller success"

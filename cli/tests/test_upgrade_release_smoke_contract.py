@@ -23,15 +23,18 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+from defenseclaw.migrations import run_migrations
 from defenseclaw.observability.v8_config import load_validate_v8
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
+DEVELOPER_ACTIVATION_SCRIPT = ROOT / "scripts" / "test-developer-target-activation.sh"
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 MAKEFILE = ROOT / "Makefile"
@@ -85,6 +88,107 @@ def test_posix_install_upgrade_and_smoke_pin_private_umask() -> None:
         assert re.search(r"^set -euo pipefail\n(?:.*\n){0,8}umask 077$", text, re.MULTILINE), path
 
 
+def test_developer_activation_is_isolated_from_every_production_upgrade_surface() -> None:
+    source = DEVELOPER_ACTIVATION_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'source "${ROOT}/scripts/test-upgrade-release.sh"' in source
+    assert "run_migrations(" in source
+    assert "upgrade_handles_local_bundle=True" in source
+    assert "_poll_health(configuration" in source
+    assert '[[ -n "${RELEASE_ROOT}" ]]' in source
+    assert '[[ "${BASELINE_MODE}" == "seed" ]]' in source
+    assert '[[ "${CANDIDATE_SCHEMA_VERSION}" == "2" ]]' in source
+    assert '-e "${release_dir}/checksums.txt.sig" || -L "${release_dir}/checksums.txt.sig"' in source
+    assert '-e "${release_dir}/checksums.txt.pem" || -L "${release_dir}/checksums.txt.pem"' in source
+    assert "developer activation HOME escaped its private workdir" in source
+    assert "select_private_api_port" in source
+    assert 'gateway.get("api_port") != developer_api_port' in source
+    assert "must not claim a production upgrade receipt" in source
+    assert "No production resolver, provenance, bridge, receipt, or rollback success was claimed" in source
+
+    production_paths = (
+        ROOT / "scripts/install.sh",
+        ROOT / "scripts/install.ps1",
+        ROOT / "scripts/upgrade.sh",
+        ROOT / "scripts/upgrade.ps1",
+        ROOT / "cli/defenseclaw/commands/cmd_upgrade.py",
+    )
+    for path in production_paths:
+        assert DEVELOPER_ACTIVATION_SCRIPT.name not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--baseline-mode", "seed"], "requires --release-root"),
+        (["--release-root", "/tmp/does-not-exist"], "requires --baseline-mode seed"),
+    ],
+)
+def test_developer_activation_rejects_nonisolated_invocations_before_network(
+    arguments: list[str],
+    message: str,
+) -> None:
+    completed = subprocess.run(
+        [_bash_executable(), str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_developer_activation_removes_ambient_runtime_overrides() -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; '
+            "export DEFENSECLAW_DISABLE_REDACTION=true "
+            "DEFENSECLAW_GATEWAY_BIN=/ambient/gateway "
+            "OPENCLAW_HOME=/ambient/openclaw DOCKER_HOST=tcp://ambient:2375 "
+            "PYTHONPATH=/ambient/python VIRTUAL_ENV=/ambient/venv; "
+            "sanitize_developer_activation_environment; "
+            "for name in DEFENSECLAW_DISABLE_REDACTION DEFENSECLAW_GATEWAY_BIN "
+            "OPENCLAW_HOME DOCKER_HOST PYTHONPATH VIRTUAL_ENV; do "
+            '[[ -z "${!name+x}" ]] || exit 19; done',
+            "developer-environment-contract",
+            str(DEVELOPER_ACTIVATION_SCRIPT),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected_success"),
+    [
+        ("defenseclaw, version 0.8.5", True),
+        ("defenseclaw, version 0.8.50", False),
+        ("defenseclaw, version 0.8.5-rc1", False),
+        ("defenseclaw, version 0.8.5+dirty", False),
+        ("defenseclaw, version v0.8.5", False),
+        ("defenseclaw 0.8.5 (dependency 0.8.5)", False),
+    ],
+)
+def test_version_canary_requires_one_exact_semver_token(
+    reported: str,
+    expected_success: bool,
+) -> None:
+    completed = _source_script(
+        'assert_exact_reported_version "fixture" "0.8.5" "$2"',
+        reported,
+    )
+
+    assert (completed.returncode == 0) is expected_success, completed.stderr
+
+
 def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     canary = source[
@@ -96,6 +200,34 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert 'provenance.get("binary_version") != sys.argv[2]' in canary
     assert "version-bound healthy before resolver handoff" in canary
     assert "did not reach version-bound health" in canary
+
+
+@pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])
+def test_historical_canary_fixture_is_hermetic_before_gateway_start(
+    tmp_path: Path,
+    baseline: str,
+    config_version: int,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    completed = _source_script(
+        'SMOKE_HOME="$2"; FROM_VERSION="$3"; seed_v8_observability_fixture',
+        str(home),
+        baseline,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    config = yaml.safe_load((home / ".defenseclaw/config.yaml").read_text(encoding="utf-8"))
+    assert config["config_version"] == config_version
+    assert config["gateway"] == {
+        "fleet_mode": "disabled",
+        "watcher": {"enabled": False},
+    }
+    openclaw_home = home / ".openclaw"
+    assert openclaw_home.is_dir()
+    assert not openclaw_home.is_symlink()
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
 
 
 @pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
@@ -231,48 +363,9 @@ def test_v8_fixture_covers_each_historical_config_family(
     ).read_bytes()
 
 
-def test_already_v8_baseline_uses_a_canonical_byte_evidenced_fixture(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    completed = _source_script(
-        'SMOKE_HOME="$2"; FROM_VERSION="0.8.5"; mkdir -p "$SMOKE_HOME"; '
-        "seed_already_v8_observability_fixture",
-        str(home),
-    )
-    assert completed.returncode == 0, completed.stderr
-
-    data_dir = home / ".defenseclaw"
-    config_source = (data_dir / "config.yaml").read_bytes()
-    document = load_validate_v8(config_source, source_name=str(data_dir / "config.yaml")).source
-    assert document["config_version"] == 8
-    assert not {"otel", "audit_sinks", "privacy"}.intersection(document)
-    assert document["observability"]["defaults"]["redaction_profile"] == "strict"
-    assert document["observability"]["local"]["retention_days"] == 37
-    destinations = document["observability"]["destinations"]
-    assert len(destinations) == 1
-    destination = destinations[0]
-    assert destination["name"] == "upgrade-smoke-jsonl"
-    assert destination["kind"] == "jsonl"
-    assert Path(destination["path"]) == data_dir / "gateway-upgrade-smoke.jsonl"
-    assert destination["rotation"] == {
-        "max_size_mb": 17,
-        "max_backups": 3,
-        "max_age_days": 11,
-        "compress": True,
-    }
-    assert destination["send"] == {
-        "signals": ["logs"],
-        "buckets": ["platform.health"],
-        "redaction_profile": "strict",
-    }
-    assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_source
-    assert (home / "fixture-evidence/environment.historical.source").read_bytes() == (
-        data_dir / ".env"
-    ).read_bytes()
-
-
 @pytest.mark.parametrize(
     ("version", "config_version"),
-    [("0.8.5", "8"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
+    [("0.8.4", "7"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
 )
 def test_reviewed_baseline_config_version_lookup(
     version: str,
@@ -334,6 +427,177 @@ def test_baseline_config_policy_fails_closed_and_allows_pre_bridge_topology(
     assert unsupported.returncode != 0
 
 
+def test_materialized_policy_accepts_config_8_but_not_newer_than_candidate(
+    tmp_path: Path,
+) -> None:
+    effective = json.loads(BASELINE_POLICY.read_text(encoding="utf-8"))
+    effective["published_baselines"].insert(0, "0.8.5")
+    effective["published_baseline_config_versions"]["0.8.5"] = 8
+    policy = tmp_path / "effective-upgrade-baselines.json"
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+
+    accepted = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.5",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == "8"
+
+    effective["published_baseline_config_versions"]["0.8.5"] = 9
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+    rejected = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.5",
+    )
+    assert rejected.returncode != 0
+    assert "no newer than the candidate runtime" in rejected.stderr
+
+
+def _policy_with_baseline(
+    tmp_path: Path,
+    version: str,
+    config_version: int,
+) -> Path:
+    effective = json.loads(BASELINE_POLICY.read_text(encoding="utf-8"))
+    effective["published_baselines"].insert(0, version)
+    effective["published_baseline_config_versions"][version] = config_version
+    policy = tmp_path / f"effective-{version}.json"
+    policy.write_text(json.dumps(effective), encoding="utf-8")
+    return policy
+
+
+@pytest.mark.parametrize(
+    ("source_version", "source_config", "expected_fixture"),
+    [("0.8.4", 7, "legacy"), ("0.8.5", 8, "native-v8")],
+)
+def test_future_candidate_dispatches_fixture_by_authenticated_source_family(
+    tmp_path: Path,
+    source_version: str,
+    source_config: int,
+    expected_fixture: str,
+) -> None:
+    policy = (
+        BASELINE_POLICY
+        if source_version == "0.8.4"
+        else _policy_with_baseline(tmp_path, source_version, source_config)
+    )
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'TARGET_VERSION=0.8.6; FROM_VERSION="$3"; '
+        'seed_v8_observability_fixture() { printf "legacy\\n"; }; '
+        'seed_native_v8_observability_fixture() { printf "native-v8\\n"; }; '
+        "seed_upgrade_fixture",
+        str(policy),
+        source_version,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected_fixture
+
+
+def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
+    tmp_path: Path,
+) -> None:
+    policy = _policy_with_baseline(tmp_path, "0.8.6", 9)
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=9; '
+        'TARGET_VERSION=0.8.7; FROM_VERSION=0.8.6; '
+        'seed_v8_observability_fixture() { exit 91; }; '
+        'seed_native_v8_observability_fixture() { exit 92; }; '
+        "seed_upgrade_fixture",
+        str(policy),
+    )
+
+    assert completed.returncode != 0
+    assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
+
+
+def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy_with_baseline(tmp_path, "0.8.5", 8)
+    home = tmp_path / "home"
+    baseline_python = home / ".defenseclaw/.venv/bin/python"
+    baseline_python.parent.mkdir(parents=True)
+    baseline_python.write_text(
+        "#!/bin/sh\nexec python \"$@\"\n",
+        encoding="utf-8",
+    )
+    baseline_python.chmod(0o700)
+
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
+        'TARGET_VERSION=0.8.6; FROM_VERSION=0.8.5; SMOKE_HOME="$3"; '
+        "seed_native_v8_observability_fixture",
+        str(policy),
+        str(home),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    data_dir = home / ".defenseclaw"
+    openclaw_home = home / ".openclaw"
+    assert openclaw_home.is_dir()
+    assert not openclaw_home.is_symlink()
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
+    config_path = data_dir / "config.yaml"
+    environment_path = data_dir / ".env"
+    config_before = config_path.read_bytes()
+    environment_before = environment_path.read_bytes()
+    source = load_validate_v8(config_before, source_name=str(config_path)).source
+    assert source["config_version"] == 8
+    assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
+    destinations = {
+        item["name"]: item for item in source["observability"]["destinations"]
+    }
+    assert set(destinations) == {"existing-otlp", "v8-http-protected"}
+    assert destinations["existing-otlp"]["headers"] == {
+        "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
+    }
+    if os.name != "nt":
+        assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
+    assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_before
+    assert (home / "fixture-evidence/environment.historical.source").read_bytes() == environment_before
+    baseline_bundle_manifest = json.loads(
+        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert baseline_bundle_manifest["bundle_version"] == "0.8.5"
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    count = run_migrations(
+        "0.8.5",
+        "0.8.6",
+        str(home / ".openclaw"),
+        str(data_dir),
+        upgrade_handles_local_bundle=True,
+    )
+    assert count == 0
+    assert config_path.read_bytes() == config_before
+    assert environment_path.read_bytes() == environment_before
+    assert not list((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+    cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
+    assert "0.8.5" in cursor["applied"]
+
+
+def test_harnesses_accept_one_materialized_policy_snapshot() -> None:
+    posix = SCRIPT.read_text(encoding="utf-8")
+    windows = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'UPGRADE_BASELINE_POLICY="${UPGRADE_BASELINE_POLICY:-' in posix
+    assert "[string]$BaselinePolicy" in windows
+    assert "$env:UPGRADE_BASELINE_POLICY" in windows
+    assert "$script:UpgradeBaselinePolicy" in windows
+
+
 def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
     for contract in (
@@ -343,34 +607,6 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         'terminal_receipt.get("from_version") != bridge_version',
     ):
         assert contract in text
-
-
-def test_already_v8_upgrade_bootstraps_and_preserves_source_custody() -> None:
-    text = SCRIPT.read_text(encoding="utf-8")
-    bootstrap_start = text.index("bootstrap_already_v8_migration_cursor()")
-    bootstrap_end = text.index("\n}\n\nrun_v8_source_contract_tests()", bootstrap_start)
-    bootstrap = text[bootstrap_start:bootstrap_end]
-    for contract in (
-        "from defenseclaw.migrations import run_migrations",
-        "upgrade_handles_local_bundle=True",
-        "migration-cursor.source",
-        "same-version observability-v8 bootstrap count",
-        "already-v8 cursor bootstrap created a v7-to-v8 activation manifest",
-    ):
-        assert contract in bootstrap
-
-    run_one = text[text.index("run_one_upgrade_smoke()") : text.index("main()")]
-    assert run_one.index("seed_upgrade_fixture") < run_one.index(
-        "bootstrap_already_v8_migration_cursor"
-    ) < run_one.index("start_source_gateway_canary")
-
-    for verifier_contract in (
-        "already-v8 config bytes changed during upgrade",
-        "already-v8 migration cursor lost byte-exact continuity",
-        "post-hard-cut upgrade incorrectly created a v7-to-v8 activation manifest",
-        "post-hard-cut upgrade retained no normal byte-exact config/.env backup",
-    ):
-        assert verifier_contract in text
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
@@ -393,9 +629,8 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
     baselines = policy["published_baselines"]
 
     assert policy["schema_version"] == 2
-    assert baselines[0] == "0.8.5"
+    assert baselines[0] == "0.8.4"
     assert policy["published_baseline_config_versions"] == {
-        "0.8.5": 8,
         "0.8.4": 7,
         "0.8.3": 7,
         "0.8.2": 6,
@@ -435,22 +670,24 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
-    lines = script.splitlines()
-    programs: list[str] = []
-    index = 0
-    while index < len(lines):
-        if re.search(r"<<'PY'\s*$", lines[index]):
-            end = index + 1
-            while end < len(lines) and lines[end] != "PY":
-                end += 1
-            assert end < len(lines), f"unterminated Python heredoc after line {index + 1}"
-            programs.append("\n".join(lines[index + 1 : end]) + "\n")
-            index = end
-        index += 1
+    assert 'cosign_path="$(abs_path "$(command -v cosign)")"' in script
+    for path in (SCRIPT, DEVELOPER_ACTIVATION_SCRIPT):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        programs: list[str] = []
+        index = 0
+        while index < len(lines):
+            if re.search(r"<<'PY'\s*$", lines[index]):
+                end = index + 1
+                while end < len(lines) and lines[end] != "PY":
+                    end += 1
+                assert end < len(lines), f"unterminated Python heredoc after line {index + 1}"
+                programs.append("\n".join(lines[index + 1 : end]) + "\n")
+                index = end
+            index += 1
 
-    assert programs
-    for program in programs:
-        compile(program, str(SCRIPT), "exec")
+        assert programs
+        for program in programs:
+            compile(program, str(path), "exec")
     for verifier_contract in (
         'config.get("config_version") != 8',
         'for legacy in ("otel", "audit_sinks", "privacy")',
@@ -462,8 +699,18 @@ def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> 
         "prepare_isolated_docker_path",
         "upgrade smoke docker isolation forbids mutating operations",
         "tail_v8_upgrade_log_secret_safe",
+        "config_v8_native_fixture=byte_exact",
+        "native-v8 source unexpectedly ran the v7-to-v8 activation",
+        "native-v8 fixture OpenClaw home mode changed across the upgrade",
+        "local bundle manifest differs from the complete target package",
     ):
         assert verifier_contract in script
+
+    developer = DEVELOPER_ACTIVATION_SCRIPT.read_text(encoding="utf-8")
+    assert "legacy_source = source_config_version < 8" in developer
+    assert "native-v8 source unexpectedly ran the v7-to-v8 activation" in developer
+    assert "developer fixture OpenClaw home mode changed across target activation" in developer
+    assert "developer_target_native_v8_continuity=" in developer
 
 
 def test_prepare_only_windows_candidate_validates_zip_and_plain_refusal_envelope() -> None:

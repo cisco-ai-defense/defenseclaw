@@ -235,6 +235,16 @@ def test_macos_release_signer_requirement_pins_production_team_only() -> None:
     assert 'codesign --verify --strict -R "${APP_REQUIREMENT}"' in verify
 
 
+def test_macos_package_ci_is_not_repeated_after_merge() -> None:
+    workflow = yaml.load(
+        MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    triggers = workflow["on"]
+
+    assert set(triggers) == {"pull_request", "workflow_dispatch"}
+
+
 def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
     workflow = MACOS_CI_WORKFLOW.read_text(encoding="utf-8")
     smoke = UPGRADE_RELEASE_SMOKE.read_text(encoding="utf-8")
@@ -305,7 +315,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
         '"scripts/source_release_identity.py"',
         '"scripts/test-upgrade-release.sh"',
     ):
-        assert workflow.count(watched) == 2
+        assert workflow.count(watched) == 1
     assert 'make -C "${build_root}" dist-cli DIST_DIR="${out}"' in smoke
     assert 'make -C "${build_root}" dist-plugin DIST_DIR="${out}"' in smoke
     assert '"${build_root}/scripts/generate-upgrade-manifest.py"' in smoke

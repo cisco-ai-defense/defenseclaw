@@ -25,11 +25,29 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "name: Python Test (shard ${{ matrix.shard }})" in workflow
     assert "shard: [0, 1, 2, 3]" in workflow
     assert "python3 scripts/python_test_shards.py" in workflow
+    for isolated in (
+        "cli/tests/test_telemetry_registry_generator.py",
+        "cli/tests/test_telemetry_registry_candidate_renderer.py",
+    ):
+        assert workflow.count(f"--exclude {isolated}") == 1
+        assert workflow.count(f"test_file: {isolated}") == 1
+    assert "name: Python Telemetry Test (${{ matrix.suite }})" in workflow
+    assert "--numprocesses=4" in workflow
+    assert "--dist=worksteal" in workflow
+    assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: python-test" in workflow
+    assert "needs: [python-test, python-telemetry-test, python-lint]" in workflow
+    assert workflow.count("run: make py-lint") == 1
+    assert "pattern: python-coverage-part-*" in workflow
+    assert 'test "${#coverage_parts[@]}" -eq 6' in workflow
     assert ".venv/bin/coverage combine" in workflow
     assert "name: make test (unified)" not in workflow
     assert "run: make test" not in workflow
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert '"pytest-xdist==3.8.0"' in pyproject
+    assert 'name = "pytest-xdist"' in lock
 
 
 def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:

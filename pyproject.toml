@@ -29,37 +29,11 @@ dependencies = [
     # project while the JSON API and locked file URL remain healthy.
     # Pin the exact audited wheel URL so fresh CI venvs do not depend on
     # resolving this package through /simple/.
-    # 2.0.5 through 2.0.9 pin older LiteLLM/Textual releases, while 2.0.10
-    # through 2.0.12 cap Textual below 8. 2.0.4 is the newest non-yanked
-    # release whose wheel metadata permits both Textual 8 and the secure
-    # LiteLLM floor. Keep the audited PyPI wheel URL and hash explicit.
-    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/ad/c0/90b74836fd9a9e5b6530cbd1b3fe778266e863e9a8bc214db96d08c0e0ee/cisco_ai_skill_scanner-2.0.4-py3-none-any.whl#sha256=8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195430a5d74",
-    # Magika 1.0.2 removes its obsolete Windows onnxruntime<=1.20.1 cap and
-    # selects a supported ONNX Runtime for each Python line. Keep that floor in
-    # published-wheel metadata as well as the native installer's uv lock.
-    "magika>=1.0.2,<2",
-    # MCP scanner >=4.3.1 pins vulnerable LiteLLM releases exactly. 4.3.0 is
-    # the newest trusted release whose METADATA permits the project's secure
-    # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
-    # a release compatible with LiteLLM >=1.84.0.
-    "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
-    # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
-    # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
-    # so keep the fixed floor in published-wheel metadata as well as uv.lock.
-    "mcp>=1.28.1,<2",
-    # Declare MCP Scanner's YARA engine directly so uv can select the local,
-    # Native Setup substitutes the repository-owned, YARA-X-backed compatibility
-    # wheel and validates the exact MCP Scanner API; source installs use
-    # VirusTotal's upstream yara-python distribution.
-    "yara-python>=4.5.4; python_version>='3.11'",
-    # CVE-2026-40217 is fixed in 1.83.10; CVE-2026-49468 is fixed in 1.84.0.
-    # Stable LiteLLM releases currently declare Python <3.14. Version 1.92.0
-    # also dropped the portable wheel required by Windows and macOS, so keep
-    # the latest portable line until upstream restores cross-platform wheels.
-    "litellm>=1.84.0,<1.92.0",
-    # LiteLLM requires <9 and the development OpenTelemetry API requires
-    # <8.8; retain the security floor while expressing their intersection.
-    "importlib-metadata>=8.7.1,<8.8",
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl#sha256=9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe",
+    "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
+    # The MCP scanner installs this transitively. Keep the runtime above the
+    # fixes for CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950.
+    "mcp>=1.28.1,<2; python_version>='3.11'",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
     # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
@@ -94,6 +68,7 @@ vertex = ["google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
 dev = [
     "pytest==9.0.3",
     "pytest-cov==7.1.0",
+    "pytest-xdist==3.8.0",
     "pytest-asyncio==1.3.0",
     "hypothesis==6.140.4",
     "freezegun==1.5.5",

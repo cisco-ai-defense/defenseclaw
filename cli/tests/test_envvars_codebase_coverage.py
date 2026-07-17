@@ -102,6 +102,7 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # the later v8 migration will generate. They are test data, not bridge
     # runtime inputs, so the v7 bridge registry must not advertise them.
     "scripts/test-upgrade-release.sh",
+    "scripts/test-developer-target-activation.sh",
     "cli/tests/test_upgrade_release_smoke_contract.py",
     # Configuration docs that explicitly mention env vars users SOMETIMES
     # try to set (DEFENSECLAW_DATA_DIR, DEFENSECLAW_LOG_LEVEL, ...) but

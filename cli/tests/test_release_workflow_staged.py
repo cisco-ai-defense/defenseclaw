@@ -16,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
+CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
@@ -37,57 +38,56 @@ def _ci_workflow() -> dict[str, object]:
     return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_upgrade_refusal_contract_installs_cosign_before_historical_authentication() -> None:
-    steps = _ci_workflow()["jobs"]["upgrade-smoke"]["steps"]
+def _certification_workflow() -> dict[str, object]:
+    return yaml.load(
+        CERTIFICATION_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+
+
+def test_sensitive_plan_installs_cosign_before_historical_authentication() -> None:
+    workflow = _ci_workflow()
+    steps = workflow["jobs"]["release-validation-plan"]["steps"]
     cosign = next(
         index for index, step in enumerate(steps) if step.get("uses", "").startswith("sigstore/cosign-installer@")
     )
-    smoke = next(
-        index for index, step in enumerate(steps) if "make upgrade-refusal-contract-matrix" in step.get("run", "")
+    resolver = next(
+        index
+        for index, step in enumerate(steps)
+        if "resolve_upgrade_baselines.py" in step.get("run", "")
     )
 
     assert steps[cosign]["uses"] == ("sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da")
-    assert steps[cosign]["with"] == {"cosign-release": "v2.6.2"}
-    assert cosign < smoke
+    assert cosign < resolver
 
-    job = _ci_workflow()["jobs"]["upgrade-smoke"]
-    assert job["name"] == "Upgrade Refusal Contract (unsigned PR candidate)"
+    job = workflow["jobs"]["upgrade-smoke"]
+    assert job["name"] == "Release Regression (deterministic)"
     rendered = str(job)
-    assert "--baseline-mode seed" in rendered
+    assert "sigstore/cosign-installer" not in rendered
+    assert "test_upgrade_smoke_static.py" in rendered
     assert "make upgrade-smoke-matrix" not in rendered
     workflow_text = CI_WORKFLOW.read_text(encoding="utf-8")
     assert "release.yaml@refs/heads/main" in workflow_text
-    assert "positive resolver" in workflow_text
-    assert "fake cosign success" in workflow_text
+    assert "cannot mint" in workflow_text
+    assert "nightly/manual certification" in workflow_text
 
 
-def test_release_is_manual_and_default_permissions_are_read_only() -> None:
+def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     workflow = _workflow()
-    assert workflow["on"] == {
-        "workflow_dispatch": {
-            "inputs": {
-                "version": {
-                    "description": "Version to release (X.Y.Z, no v prefix). Tag must not already exist.",
-                    "required": "true",
-                    "type": "string",
-                },
-                "immutable_releases_confirmed": {
-                    "description": "Confirm repository release immutability is enabled in Settings.",
-                    "required": "true",
-                    "type": "boolean",
-                    "default": "false",
-                },
-            }
-        }
-    }
-    assert workflow["permissions"] == {"contents": "read"}
+    triggers = workflow["on"]
+    assert triggers["schedule"] == [{"cron": "17 5 * * *"}]
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert inputs["operation"]["options"] == ["release", "certify"]
+    assert inputs["version"]["required"] == "false"
+    assert inputs["candidate_ref"]["required"] == "false"
+    assert inputs["immutable_releases_confirmed"]["default"] == "false"
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
 
 
 def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
-    jobs = _workflow()["jobs"]
+    jobs = [*_workflow()["jobs"].values(), *_certification_workflow()["jobs"].values()]
     installers = [
         step
-        for job in jobs.values()
+        for job in jobs
         for step in job.get("steps", [])
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
@@ -166,22 +166,16 @@ def test_release_target_must_advance_reviewed_and_published_stable_state() -> No
     assert "--releases-json published-releases.json" in text
 
 
-def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
+def test_publish_job_promotes_only_a_selected_certified_candidate() -> None:
     jobs = _workflow()["jobs"]
     publish = jobs["publish-release"]
     assert set(publish["needs"]) == {
+        "release-mode",
         "release-preflight",
-        "windows-real-client-certification",
-        "assemble-release-candidate",
-        "posix-fresh-install",
-        "windows-fresh-install",
-        "linux-upgrade",
-        "macos-upgrade",
-        "historical-baseline-canary",
-        "windows-upgrade",
-        "windows-unpublished-refusal",
-        "live-continuity",
+        "select-candidate",
     }
+    assert "needs.release-mode.outputs.operation == 'release'" in publish["if"]
+    assert "needs.select-candidate.result == 'success'" in publish["if"]
     assert publish["environment"] == "release"
     assert publish["permissions"] == {"contents": "write"}
     for name, job in jobs.items():
@@ -191,25 +185,18 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
 
 def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() -> None:
     jobs = _workflow()["jobs"]
-    assert "if" not in jobs["windows-fresh-install"]
-    assert jobs["windows-upgrade"]["if"] == "${{ false }}"
+    assert "windows-installer" in jobs
+    assert "windows-real-client-certification" in jobs
+    assert "windows-real-client-certification" in jobs["assemble-release-candidate"]["needs"]
+    assert "windows-real-client-certification" in jobs["full-certification"]["needs"]
 
-    publish_condition = jobs["publish-release"]["if"]
-    assert "always()" in publish_condition
-    for required in (
-        "release-preflight",
-        "windows-real-client-certification",
-        "assemble-release-candidate",
-        "posix-fresh-install",
-        "windows-fresh-install",
-        "linux-upgrade",
-        "macos-upgrade",
-        "historical-baseline-canary",
-        "windows-unpublished-refusal",
-        "live-continuity",
-    ):
-        assert f"needs.{required}.result == 'success'" in publish_condition
-    assert "needs.windows-upgrade.result == 'skipped'" in publish_condition
+    certification = _certification_workflow()["jobs"]
+    assert "windows-unpublished-refusal" in certification
+    assert "windows-fresh-install" not in certification
+    assert "windows-upgrade" not in certification
+    assert "windows_prebridge_baselines == '[]'" in certification[
+        "windows-unpublished-refusal"
+    ]["if"]
 
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
     assert workflow_text.count("--omit-windows-binaries") == 2
@@ -224,15 +211,15 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     installer = jobs["windows-installer"]
     certification = jobs["windows-real-client-certification"]
     assemble = jobs["assemble-release-candidate"]
-    fresh = jobs["windows-fresh-install"]
 
-    upload_actions = {
-        step["uses"]
-        for job in jobs.values()
-        for step in job.get("steps", [])
-        if step.get("uses", "").startswith("actions/upload-artifact@")
-    }
-    assert upload_actions == {DIGEST_CAPABLE_UPLOAD_ACTION}
+    for job in (runtime, installer, certification, assemble):
+        upload_actions = [
+            step["uses"]
+            for step in job.get("steps", [])
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        ]
+        assert upload_actions
+        assert set(upload_actions) == {DIGEST_CAPABLE_UPLOAD_ACTION}
 
     assert runtime["outputs"]["artifact_id"] == ("${{ steps.runtime-artifact.outputs.artifact-id }}")
     assert runtime["outputs"]["artifact_digest"] == ("${{ steps.runtime-artifact.outputs.artifact-digest }}")
@@ -299,28 +286,16 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assemble_step = next(step for step in assemble["steps"] if "release_candidate.py assemble" in step.get("run", ""))
     assert "--windows-dir candidate-input/windows" in assemble_step["run"]
 
-    fresh_setup = next(
+    setup_acceptance = next(
         step
-        for step in fresh["steps"]
-        if step.get("name") == "Verify and exercise the exact sealed Setup on a fresh host"
+        for step in installer["steps"]
+        if step.get("name")
+        == "Validate the exact signed Setup lifecycle as a standard user"
     )["run"]
-    assert any(
-        step.get("uses")
-        == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
-        for step in fresh["steps"]
-    )
-    assert "defenseclaw-sealed-setup-inputs" in fresh_setup
-    assert "Get-FileHash -LiteralPath $sealedSetup -Algorithm SHA256" in fresh_setup
-    assert "Get-FileHash -LiteralPath $acceptanceSetup -Algorithm SHA256" in fresh_setup
-    assert "./internal/tools/windowsresources" in fresh_setup
-    for helper in (
-        "DefenseClawWindowsResourceVerifier-x64.exe",
-        "DefenseClawWindowsResourceIcon.png",
-        "DefenseClawWindowsResourceVersion.txt",
-    ):
-        assert helper in fresh_setup
-        assert all(helper not in path for path in certified_upload["with"]["path"].splitlines())
-    assert "-ArtifactRoot $acceptanceRoot" in fresh_setup
+    assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in setup_acceptance
+    assert "-Mode setup-acceptance" in setup_acceptance
+    assert "-ArtifactRoot windows-installer-output" in setup_acceptance
+    assert "-TimeoutSeconds 4500" in setup_acceptance
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
@@ -330,7 +305,7 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert text.count("make dist-plugin") == 1
     assert text.count("make extensions") == 1
     assert text.count("scripts/release_candidate.py assemble") == 1
-    assert "steps.upload.outputs.artifact-digest" not in text
+    assert "steps.upload.outputs.artifact-digest" in text
 
     jobs = _workflow()["jobs"]
     build_job = jobs["build-runtime-candidate"]
@@ -352,41 +327,36 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert "MACOS_GATEWAY_INPUT" in macos_job
     assert "make extensions" not in macos_job
 
+    certification = _certification_workflow()["jobs"]
     for name in (
         "linux-upgrade",
         "macos-upgrade",
-        "historical-baseline-canary",
-        "windows-upgrade",
+        "historical-dependency-canary",
         "windows-unpublished-refusal",
         "posix-fresh-install",
-        "windows-fresh-install",
         "live-continuity",
-        "publish-release",
     ):
-        rendered = str(jobs[name])
-        assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
+        rendered = str(certification[name])
+        assert "inputs.candidate_artifact" in rendered
         assert "scripts/release_candidate.py verify" in rendered
+    assert "needs.select-candidate.outputs.artifact_name" in str(
+        jobs["publish-release"]
+    )
 
 
 def test_unpublished_windows_runtime_requires_sealed_native_refusal() -> None:
-    jobs = _workflow()["jobs"]
-    job = jobs["windows-unpublished-refusal"]
+    job = _certification_workflow()["jobs"]["windows-unpublished-refusal"]
     rendered = str(job)
 
     assert job["runs-on"] == "windows-latest"
-    assert job["if"] == (
-        "${{ needs.assemble-release-candidate.outputs."
-        "windows_prebridge_baselines == '[]' }}"
-    )
-    assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
+    assert job["if"] == "${{ inputs.windows_prebridge_baselines == '[]' }}"
+    assert "inputs.candidate_artifact" in rendered
     assert "scripts/release_candidate.py verify" in rendered
-    assert "cosign verify-blob" in rendered
+    assert "scripts/verify-sigstore-blob.py" in rendered
     assert "scripts/test-upgrade-release-windows.ps1" in rendered
     assert "-UnpublishedWindowsRefusalOnly" in rendered
-    assert (
-        "needs.windows-unpublished-refusal.result == 'success'"
-        in jobs["publish-release"]["if"]
-    )
+    complete = str(_certification_workflow()["jobs"]["certification-complete"])
+    assert "needs.windows-unpublished-refusal.result" in complete
 
 
 def test_release_certificate_is_canonicalized_and_authenticated_before_seal() -> None:
@@ -404,13 +374,14 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     seal_script = seal_step["run"]
 
     sign = sign_script.index("cosign sign-blob")
-    canonicalize = sign_script.index("scripts/release_candidate.py canonicalize-certificate")
-    authenticate = sign_script.index("cosign verify-blob")
+    canonicalize = sign_script.index(
+        "scripts/release_candidate.py canonicalize-certificate"
+    )
+    authenticate = sign_script.index("scripts/verify-sigstore-blob.py")
     assert sign < canonicalize < authenticate
     assert sign_index + 1 == seal_index
     assert sign_script.count("canonicalize-certificate") == 1
     assert "--bundle=release-candidate/dist/checksums.txt.bundle" in sign_script
-    assert "--offline" in sign_script
     assert "--certificate release-candidate/dist/checksums.txt.pem" in sign_script
     assert (
         '--certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"'
@@ -419,38 +390,18 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     assert "--certificate-identity-regexp" not in sign_script
     assert "scripts/release_candidate.py seal" in seal_script
 
-    candidate_verifications = []
-    for job in _workflow()["jobs"].values():
-        for step in job.get("steps", []):
-            script = step.get("run", "")
-            if "cosign verify-blob" in script and "release-candidate/dist/checksums.txt" in script:
-                candidate_verifications.append(script)
-    assert len(candidate_verifications) >= 8
-    for script in candidate_verifications:
-        assert "--bundle=release-candidate/dist/checksums.txt.bundle" in script
-        assert "--offline" in script
-        assert ".github/workflows/release.yaml@refs/heads/main" in script
-        assert "--certificate-identity-regexp" not in script
-
 
 def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal() -> None:
-    jobs = _workflow()["jobs"]
+    jobs = _certification_workflow()["jobs"]
     posix = str(jobs["posix-fresh-install"])
-    windows = str(jobs["windows-fresh-install"])
-
-    assert jobs["posix-fresh-install"]["strategy"]["matrix"]["runner"] == [
-        "ubuntu-latest",
-        "macos-15",
+    includes = jobs["posix-fresh-install"]["strategy"]["matrix"]["include"]
+    assert [item["platform"] for item in includes] == [
+        "linux-amd64",
+        "darwin-arm64",
     ]
     assert "scripts/test-fresh-install-release.sh" in posix
-    assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in windows
-    assert "-Mode setup-acceptance" in windows
-    assert "-ArtifactRoot" in windows
-    assert "-TimeoutSeconds 4500" in windows
-    assert "if" not in jobs["windows-fresh-install"]
-    for rendered in (posix, windows):
-        assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
-        assert "scripts/release_candidate.py verify" in rendered
+    assert "inputs.candidate_artifact" in posix
+    assert "scripts/release_candidate.py verify" in posix
 
 
 def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None:
@@ -478,13 +429,8 @@ def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None
 
 
 def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
-    job = _workflow()["jobs"]["historical-baseline-canary"]
-    includes = job["strategy"]["matrix"]["include"]
-
-    assert includes == [
-        {"baseline": "0.8.3", "start_source_gateway": "true"},
-        {"baseline": "0.4.0", "start_source_gateway": "false"},
-    ]
+    job = _certification_workflow()["jobs"]["historical-dependency-canary"]
+    assert job["strategy"]["matrix"] == "${{ fromJSON(inputs.historical_matrix) }}"
     rendered = str(job)
     assert "--baseline-dependencies published" in rendered
     assert "--success-path-only" in rendered
@@ -549,12 +495,12 @@ def test_posix_installer_cannot_bypass_upgrade_graph_on_existing_install() -> No
 def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     jobs = _workflow()["jobs"]
-    assert "release/upgrade-baselines.json" in text
+    certification_jobs = _certification_workflow()["jobs"]
+    assert "scripts/resolve_upgrade_baselines.py" in text
+    assert "effective-upgrade-baselines.json" in text
+    assert "--baselines effective-upgrade-baselines.json" in text
     assert 'json.dumps(older, separators=(",", ":"))' in text
     assert "platform_published_baselines" in text
-    assert "release/historical-artifact-digests.json" in text
-    assert "historical wheel digest exceptions do not exactly cover" in text
-    assert "signed_wheel_coverage_starts_at" in text
     assert "platform_tested_source_versions" in text
     assert "tested_source_versions does not match the reviewed release matrix" in text
     assert "platform_tested_source_versions.windows does not match" in text
@@ -568,15 +514,12 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "ObservabilityV8ConfigVersion" in text
     assert "compatibility ceiling" in text
     for name in ("linux-upgrade", "macos-upgrade"):
-        assert jobs[name]["strategy"]["matrix"]["baseline"] == (
-            "${{ fromJSON(needs.release-preflight.outputs.baselines) }}"
+        assert certification_jobs[name]["strategy"]["matrix"]["baseline"] == (
+            "${{ fromJSON(inputs.baselines) }}"
         )
-    assert jobs["windows-upgrade"]["strategy"]["matrix"]["baseline"] == (
-        "${{ fromJSON(needs.assemble-release-candidate.outputs.windows_prebridge_baselines) }}"
-    )
-    assert '-SourceVersion "$env:BASELINE"' in text
-    assert "scripts/test-upgrade-protocol-release.sh" in text
-    assert "scripts/test-upgrade-release-windows.ps1" in text
+    certification_text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
+    assert "scripts/test-upgrade-protocol-release.sh" in certification_text
+    assert "scripts/test-upgrade-release-windows.ps1" in certification_text
     assert "required_bridge_version" in text
     assert "min_upgrade_protocol" in text
     assert "auto_bridge_from does not match the reviewed pre-bridge matrix" in text
@@ -588,10 +531,10 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "set(windows_release_binary_names(expected))" in text
     assert "if name in omitted_windows" in text
     assert "if name in assets" in text
-    assert "cosign verify-blob" in text
+    assert "scripts/verify-sigstore-blob.py" in text
     assert '--source-tree "$SOURCE_TREE"' in text
     assert '--bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"' in text
-    assert not re.search(r"\b0\.8\.[45]\b", text)
+    assert not re.search(r"\b0\.8\.[45]\b", certification_text)
 
 
 def test_only_final_step_can_create_remote_release_or_tag() -> None:
@@ -641,6 +584,8 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
         "run_candidate_updater_direct_success",
+        "manifest_windows_sources_are_empty",
+        "immutable-bridge-empty-windows",
         "prepare_required_bridge_assets",
         "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
         "assert_staged_success_receipt",
@@ -677,6 +622,106 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
     assert "force_latest_version" in smoke
     assert 'target_version = "{force_latest_version}"' in smoke
+
+
+def test_external_resolver_boundaries_disable_python_bytecode() -> None:
+    text = PROTOCOL_GATE.read_text(encoding="utf-8")
+    for function_name in (
+        "run_candidate_updater_refusal",
+        "run_candidate_explicit_bridge_refusal",
+        "run_candidate_updater_staged_success",
+        "run_candidate_updater_direct_success",
+    ):
+        match = re.search(
+            rf"^{function_name}\(\) \{{\n(?P<body>.*?)^\}}$",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None, function_name
+        body = match.group("body")
+        assert "PYTHONDONTWRITEBYTECODE=1" in body, function_name
+        assert 'bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"' in body
+
+
+def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) -> None:
+    release_dir = tmp_path / "0.8.5"
+    release_dir.mkdir()
+    manifest = release_dir / "upgrade-manifest.json"
+
+    def run_helper() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    'source "$1"; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.5"; '
+                    "manifest_windows_sources_are_empty"
+                ),
+                "windows-source-matrix-test",
+                str(PROTOCOL_GATE),
+                str(tmp_path),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+    manifest.write_text(
+        '{"platform_tested_source_versions":{"windows":[]}}\n',
+        encoding="utf-8",
+    )
+    assert run_helper().returncode == 0
+
+    manifest.write_text(
+        '{"platform_tested_source_versions":{"windows":["0.8.3"]}}\n',
+        encoding="utf-8",
+    )
+    assert run_helper().returncode == 1
+
+
+def test_empty_windows_matrix_uses_bridge_refusal_then_current_resolver() -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r'''
+source "$1"
+TARGET_VERSION="0.8.5"
+CANDIDATE_MIN_PROTOCOL=2
+CANDIDATE_SCHEMA_VERSION=2
+MINIMUM_SOURCE_VERSION="0.8.4"
+REQUIRED_BRIDGE_VERSION="0.8.4"
+REFUSAL_CONTRACT_ONLY=0
+SUCCESS_PATH_ONLY=0
+stage_authenticated_baseline() { :; }
+baseline_protocol() { printf '%s\n' 2; }
+baseline_has_schema_gate() { printf '%s\n' 1; }
+manifest_array_contains() { return 0; }
+manifest_windows_sources_are_empty() { return 0; }
+run_installed_controller_refusal() { printf 'refusal=%s:%s\n' "$1" "$2"; }
+run_one_upgrade_smoke() { printf '%s\n' unexpected-installed-success; return 97; }
+run_candidate_updater_refusal() { return 96; }
+run_candidate_explicit_bridge_refusal() { return 95; }
+run_candidate_updater_staged_success() { return 94; }
+run_candidate_updater_direct_success() { printf 'direct=%s\n' "$1"; }
+run_protocol_case "0.8.4"
+''',
+            "bridge-empty-windows-test",
+            str(PROTOCOL_GATE),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "refusal=0.8.4:immutable-bridge-empty-windows" in completed.stdout
+    assert "direct=0.8.4" in completed.stdout
+    assert "unexpected-installed-success" not in completed.stdout
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link permission contract")

@@ -17,32 +17,6 @@
 name: macOS App
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "macos/**"
-      - "scripts/build-macos-app-release.sh"
-      - "scripts/check-macos-upstream.py"
-      - "scripts/export-uv-overrides.py"
-      - "scripts/generate-upgrade-manifest.py"
-      - "scripts/macos_license_headers.py"
-      - "scripts/release_candidate.py"
-      - "scripts/source_release_identity.py"
-      - "scripts/stamp-version.sh"
-      - "scripts/test-upgrade-release.sh"
-      - "scripts/update-macos-app.sh"
-      - "scripts/verify-macos-app-release.sh"
-      - "release/source-install-identity.json"
-      - "release/upgrade-baselines.json"
-      - "Makefile"
-      - "pyproject.toml"
-      - "cli/**"
-      - "go.mod"
-      - "go.sum"
-      - "cmd/**"
-      - "internal/**"
-      - "extensions/defenseclaw/**"
-      - ".github/workflows/macos-app.yml"
   pull_request:
     paths:
       - "macos/**"

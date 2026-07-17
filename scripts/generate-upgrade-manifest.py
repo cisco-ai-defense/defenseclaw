@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -44,7 +45,12 @@ HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
 OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
 WINDOWS_INSTALLER_START_VERSION = "0.8.6"
-UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
+UPGRADE_BASELINES_PATH = Path(
+    os.environ.get(
+        "UPGRADE_BASELINE_POLICY",
+        str(ROOT / "release" / "upgrade-baselines.json"),
+    )
+)
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
 OBSERVABILITY_V8_CONFIG_PATH = (
     ROOT / "internal" / "config" / "observability_v8_types.go"
@@ -250,7 +256,7 @@ def protected_release_artifacts(version: str) -> dict[str, Any]:
     }
 
 
-def published_upgrade_baselines() -> list[str]:
+def published_upgrade_baselines(candidate_version: str | None = None) -> list[str]:
     """Load the single release-gate/source-support matrix."""
     try:
         payload = json.loads(UPGRADE_BASELINES_PATH.read_text(encoding="utf-8"))
@@ -285,11 +291,19 @@ def published_upgrade_baselines() -> list[str]:
         raise RuntimeError(
             "published_baseline_config_versions keys must exactly match published_baselines"
         )
+    candidate_version = candidate_version or current_version()
+    runtime_ceiling = expected_runtime_config_version(candidate_version)
     if any(
-        not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7, 8}
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 1
+        or value > runtime_ceiling
         for value in config_versions.values()
     ):
-        raise RuntimeError("published baseline config versions must be integers in {5, 6, 7, 8}")
+        raise RuntimeError(
+            "published baseline config versions must be positive integers no newer "
+            "than the candidate runtime"
+        )
     if (
         OBSERVABILITY_V8_BRIDGE_VERSION in config_versions
         and config_versions.get(OBSERVABILITY_V8_BRIDGE_VERSION) != 7
@@ -298,7 +312,9 @@ def published_upgrade_baselines() -> list[str]:
     return baselines
 
 
-def platform_published_upgrade_baselines() -> dict[str, list[str]]:
+def platform_published_upgrade_baselines(
+    candidate_version: str | None = None,
+) -> dict[str, list[str]]:
     """Load reviewed platform subsets without widening the global matrix."""
 
     try:
@@ -308,7 +324,7 @@ def platform_published_upgrade_baselines() -> dict[str, list[str]]:
     platforms = payload.get("platform_published_baselines")
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise RuntimeError("platform_published_baselines must contain exactly the windows matrix")
-    global_baselines = published_upgrade_baselines()
+    global_baselines = published_upgrade_baselines(candidate_version)
     windows = platforms["windows"]
     if not isinstance(windows, list) or not windows:
         raise RuntimeError("platform_published_baselines.windows must be a non-empty list")
@@ -335,11 +351,13 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         return {"min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION}
 
     tested_sources = [
-        baseline for baseline in published_upgrade_baselines() if _ver_tuple(baseline) < version_t
+        baseline
+        for baseline in published_upgrade_baselines(version)
+        if _ver_tuple(baseline) < version_t
     ]
     platform_tested_sources = {
         platform: [baseline for baseline in baselines if _ver_tuple(baseline) < version_t]
-        for platform, baselines in platform_published_upgrade_baselines().items()
+        for platform, baselines in platform_published_upgrade_baselines(version).items()
     }
     if not tested_sources:
         raise RuntimeError(f"release {version} has an empty tested-source matrix")
@@ -355,7 +373,7 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
 
     auto_bridge_from = [
         baseline
-        for baseline in published_upgrade_baselines()
+        for baseline in published_upgrade_baselines(version)
         if _ver_tuple(baseline) < bridge_t
     ]
     if not auto_bridge_from:
@@ -368,10 +386,14 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
     for platform, sources in tuple(platform_tested_sources.items()):
         if OBSERVABILITY_V8_BRIDGE_VERSION not in sources:
             # A platform cannot traverse the hard cut when the immutable
-            # bridge was not published for it. Encode that platform as
-            # unsupported instead of claiming its older releases were tested
-            # through a bridge that users cannot install.
-            platform_tested_sources[platform] = []
+            # bridge was not published for it. Exclude pre-hard-cut sources,
+            # but retain any actually published post-hard-cut runtimes that can
+            # drive a direct protocol-2 upgrade without that bridge.
+            platform_tested_sources[platform] = [
+                source
+                for source in sources
+                if _ver_tuple(source) >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION)
+            ]
     policy.update(
         {
             "min_upgrade_protocol": HARD_CUT_UPGRADE_PROTOCOL_VERSION,

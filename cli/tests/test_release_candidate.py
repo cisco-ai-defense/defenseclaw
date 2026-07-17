@@ -209,12 +209,12 @@ def test_release_progression_requires_target_newer_than_reviewed_and_published(
     )
 
     assert release_candidate.validate_release_progression("0.8.6", releases) == (
-        "0.8.5",
+        "0.8.4",
         "0.8.3",
     )
 
     with pytest.raises(release_candidate.CandidateError, match="strictly newer"):
-        release_candidate.validate_release_progression("0.8.5", releases)
+        release_candidate.validate_release_progression("0.8.4", releases)
 
 
 def test_release_progression_uses_published_stable_max_even_when_policy_lags(
@@ -1435,7 +1435,7 @@ def test_086_assemble_seals_the_exact_windows_setup_bytes(
     monkeypatch.setattr(
         release_candidate,
         "_validate_upgrade_manifest",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(release_candidate, "_validate_wheel", lambda *_args: None)
     monkeypatch.setattr(
@@ -1572,7 +1572,7 @@ def test_windows_installer_input_extractor_is_exclusive_and_canonical(
     monkeypatch.setattr(
         release_candidate,
         "_validate_upgrade_manifest",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     output = tmp_path / "private-inputs"
 
@@ -1605,6 +1605,13 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     assert (root / "dist/checksums.txt.pem").read_bytes() == TEST_CERTIFICATE_PEM
 
     manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
+    effective_policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    assert effective_policy.read_bytes() == (
+        ROOT / "release/upgrade-baselines.json"
+    ).read_bytes()
+    assert manifest["effective_upgrade_baselines_sha256"] == hashlib.sha256(
+        effective_policy.read_bytes()
+    ).hexdigest()
     assert [item["name"] for item in manifest["assets"]] == list(
         release_candidate.published_asset_names(VERSION, "notarized")
     )
@@ -1635,6 +1642,17 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+
+def test_candidate_verification_rejects_effective_baseline_snapshot_mutation(
+    tmp_path: Path,
+) -> None:
+    root = _sealed_candidate(tmp_path)
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    policy.write_bytes(policy.read_bytes() + b"\n")
+
+    with pytest.raises(release_candidate.CandidateError, match="policy digest mismatch"):
+        release_candidate.verify(root, VERSION, COMMIT)
 
 
 def test_publication_can_omit_every_windows_specific_asset(

@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.python_test_shards import discover_test_files, partition_test_files
+from scripts.python_test_shards import (
+    discover_test_files,
+    exclude_test_files,
+    main,
+    partition_test_files,
+)
 
 
 def _write(path: Path, size: int) -> Path:
@@ -62,6 +67,53 @@ def test_partition_is_deterministic_exhaustive_and_balanced(tmp_path: Path) -> N
     assert sorted(flattened) == sorted(files)
     assert len(flattened) == len(set(flattened))
     assert max(shard.weight for shard in first) - min(shard.weight for shard in first) <= 10
+
+
+def test_excludes_isolated_modules_exactly_once(tmp_path: Path) -> None:
+    files = [_write(tmp_path / f"test_{index}.py", 1) for index in range(4)]
+
+    remaining = exclude_test_files(files, [files[1], files[3]])
+
+    assert remaining == [files[0], files[2]]
+
+
+def test_exclusion_rejects_missing_or_duplicate_modules(tmp_path: Path) -> None:
+    files = [_write(tmp_path / "test_present.py", 1)]
+    missing = tmp_path / "test_missing.py"
+
+    with pytest.raises(ValueError, match="were not discovered"):
+        exclude_test_files(files, [missing])
+    with pytest.raises(ValueError, match="must be unique"):
+        exclude_test_files(files, [files[0], files[0]])
+
+
+def test_cli_exclusion_omits_isolated_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = [_write(tmp_path / f"test_{index}.py", index + 1) for index in range(5)]
+    isolated = files[0]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "python_test_shards.py",
+            "--test-root",
+            str(tmp_path),
+            "--shard-count",
+            "2",
+            "--shard-index",
+            "0",
+            "--exclude",
+            str(isolated),
+        ],
+    )
+
+    assert main() == 0
+
+    selected = {Path(line).resolve() for line in capsys.readouterr().out.splitlines()}
+    assert selected
+    assert isolated not in selected
 
 
 @pytest.mark.parametrize("count", (0, -1, 7))

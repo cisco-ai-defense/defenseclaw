@@ -48,6 +48,7 @@ RELEASE_URL=""
 FROM_VERSION_LIST=()
 FROM_CONFIG_VERSION=""
 CANDIDATE_WHEEL_NAME=""
+CANDIDATE_RUNTIME_CONFIG_VERSION=""
 
 usage() {
     cat <<'EOF'
@@ -86,7 +87,11 @@ Examples:
 For a Linux host without the repo's Go toolchain, build/copy artifacts first:
   scripts/test-upgrade-release.sh --prepare-only --platform linux/arm64 --keep-workdir
   scp -r /tmp/candidate-root user@linux:/tmp/
-  ssh user@linux 'scripts/test-upgrade-release.sh --release-root /tmp/candidate-root'
+  ssh user@linux 'scripts/test-developer-target-activation.sh --release-root /tmp/candidate-root --target-version 0.8.5 --from-version 0.8.4 --baseline-mode seed'
+
+That developer activation checks target migration/health only. Use the signed
+protocol harness for positive production resolver, bridge, receipt, and
+rollback certification.
 EOF
 }
 
@@ -94,6 +99,26 @@ log() { printf '==> %s\n' "$*"; }
 ok() { printf 'OK: %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+assert_exact_reported_version() {
+    local label="$1"
+    local expected="$2"
+    local reported="$3"
+    python3 - "${label}" "${expected}" "${reported}" <<'PY' \
+        || die "${label} did not report exact version ${expected}"
+import re
+import sys
+
+label, expected, reported = sys.argv[1:]
+versions = re.findall(
+    r"(?<![0-9A-Za-z.+-])(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)(?![0-9A-Za-z.+-])",
+    reported,
+)
+if versions != [expected]:
+    raise SystemExit(f"{label} reported {versions!r}; want exactly [{expected!r}]")
+PY
+}
 
 cleanup() {
     local status=$?
@@ -289,9 +314,14 @@ normalize_baseline_versions() {
 
 published_baseline_config_version() {
     local version="$1"
+    local runtime_config="${CANDIDATE_RUNTIME_CONFIG_VERSION:-}"
+    if [[ -z "${runtime_config}" ]]; then
+        runtime_config="$(candidate_runtime_config_version "$(current_version)")"
+    fi
     python3 - \
         "${UPGRADE_BASELINE_POLICY}" \
-        "${version}" <<'PY'
+        "${version}" \
+        "${runtime_config}" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -301,6 +331,7 @@ import sys
 
 policy_path = Path(sys.argv[1])
 requested_version = sys.argv[2]
+candidate_runtime = int(sys.argv[3])
 canonical_version = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
@@ -364,8 +395,11 @@ if type(config_versions) is not dict or set(config_versions) != set(versions):
     fail("published_baseline_config_versions keys must exactly match published_baselines")
 for published_version in versions:
     value = config_versions[published_version]
-    if type(value) is not int or value not in {5, 6, 7, 8}:
-        fail(f"{published_version} has no reviewed config version in {{5,6,7,8}}")
+    if type(value) is not int or value < 1 or value > candidate_runtime:
+        fail(
+            f"{published_version} config version must be positive and no newer "
+            "than the candidate runtime"
+        )
 
 platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
@@ -385,6 +419,28 @@ if windows_versions != [item for item in versions if item in windows_set]:
 if requested_version not in config_versions:
     fail(f"{requested_version} is not a reviewed published baseline")
 print(config_versions[requested_version])
+PY
+}
+
+candidate_runtime_config_version() {
+    local target_version="${1:-${TARGET_VERSION}}"
+    python3 - "${ROOT}" "${target_version}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+target = tuple(map(int, sys.argv[2].split(".")))
+if target >= (0, 8, 5):
+    path = root / "internal/config/observability_v8_types.go"
+    pattern = r"^\s*ObservabilityV8ConfigVersion\s*=\s*([1-9][0-9]*)\s*$"
+else:
+    path = root / "internal/config/config.go"
+    pattern = r"^\s*const\s+CurrentConfigVersion\s*=\s*([1-9][0-9]*)\s*$"
+match = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
+if match is None:
+    raise SystemExit(f"could not resolve candidate runtime config version from {path}")
+print(match.group(1))
 PY
 }
 
@@ -429,12 +485,16 @@ fresh_install_tool_path() {
 validate_inputs() {
     normalize_baseline_versions
     [[ "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --target-version: ${TARGET_VERSION}"
+    CANDIDATE_RUNTIME_CONFIG_VERSION="$(candidate_runtime_config_version)" \
+        || die "could not resolve candidate runtime config version"
+    [[ "${CANDIDATE_RUNTIME_CONFIG_VERSION}" =~ ^[1-9][0-9]*$ ]] \
+        || die "candidate runtime config version is invalid"
     local version config_version
     for version in "${FROM_VERSION_LIST[@]}"; do
         if ! config_version="$(published_baseline_config_version "${version}")"; then
             die "could not resolve the reviewed config version for baseline ${version}"
         fi
-        [[ "${config_version}" =~ ^[5678]$ ]] \
+        [[ "${config_version}" =~ ^[1-9][0-9]*$ ]] \
             || die "published baseline ${version} resolved to an invalid config version"
     done
     case "${BASELINE_MODE}" in
@@ -780,6 +840,9 @@ protected = (
     "upgrade-smoke-http-protected-value",
     "Bearer upgrade-smoke-otlp-protected-value",
     "upgrade-smoke-otlp-protected-value",
+    "Bearer upgrade-smoke-v8-otlp-value",
+    "upgrade-smoke-v8-otlp-value",
+    "upgrade-smoke-v8-http-value",
 )
 for value in protected:
     text = text.replace(value, "[REDACTED]")
@@ -987,7 +1050,7 @@ stage_authenticated_baseline() {
         fi
     done
     local cosign_path
-    cosign_path="$(command -v cosign)" \
+    cosign_path="$(abs_path "$(command -v cosign)")" \
         || die "cosign is required to authenticate published baseline ${version}"
     python3 "${ROOT}/scripts/historical_release_auth.py" \
         --version "${version}" \
@@ -1099,7 +1162,7 @@ resolve_baseline_config_version() {
     if ! FROM_CONFIG_VERSION="$(published_baseline_config_version "${FROM_VERSION}")"; then
         die "could not resolve the reviewed config version for baseline ${FROM_VERSION}"
     fi
-    [[ "${FROM_CONFIG_VERSION}" =~ ^[5678]$ ]] \
+    [[ "${FROM_CONFIG_VERSION}" =~ ^[1-9][0-9]*$ ]] \
         || die "published baseline ${FROM_VERSION} resolved to an invalid config version"
 }
 
@@ -1141,13 +1204,39 @@ otel:
 YAML
 }
 
+finalize_observability_upgrade_fixture() {
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local openclaw_home="${SMOKE_HOME}/.openclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+
+    chmod 600 "${data_dir}/config.yaml" "${data_dir}/.env"
+    cp -p "${data_dir}/config.yaml" "${evidence_dir}/config.historical.source"
+    cp -p "${data_dir}/.env" "${evidence_dir}/environment.historical.source"
+
+    # An installed but stopped stack exercises the production bundle refresh
+    # without requiring Docker or a remote service. Runtime restart behavior,
+    # down-without--v, fault rollback, and live inventory are covered by the
+    # focused production contract tests invoked once for every v8 smoke run.
+    cp -R "${ROOT}/bundles/local_observability_stack" "${data_dir}/observability-stack"
+    mkdir -p \
+        "${data_dir}/observability-stack/operator" \
+        "${data_dir}/observability-stack/grafana/dashboards"
+    cat >"${data_dir}/observability-stack/operator/volume-continuity.txt" <<'EOF'
+operator-owned volume continuity marker
+EOF
+    cat >"${data_dir}/observability-stack/grafana/dashboards/team-upgrade-smoke.json" <<'EOF'
+{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}
+EOF
+}
+
 seed_v8_observability_fixture() {
     resolve_baseline_config_version
     log "Seeding representative comment-heavy config-v${FROM_CONFIG_VERSION} observability fixture for ${FROM_VERSION}"
     local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local openclaw_home="${SMOKE_HOME}/.openclaw"
     local evidence_dir="${SMOKE_HOME}/fixture-evidence"
-    mkdir -p "${data_dir}/state" "${evidence_dir}"
-    chmod 700 "${data_dir}" "${data_dir}/state" "${evidence_dir}"
+    mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+    chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
 
     # The values are deliberately recognizable test canaries. Verification
     # checks that they move into the private .env transaction and never occur
@@ -1162,6 +1251,10 @@ judge_bodies_db: ${data_dir}/state/judge-custom.db # custom judge path
 guardrail:
   enabled: true
   retain_judge_bodies: false
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
 otel:
   enabled: true
   protocol: grpc
@@ -1238,24 +1331,127 @@ YAML
 # exact pre-upgrade environment bytes must be recoverable
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
 ENV
+    finalize_observability_upgrade_fixture
+}
+
+seed_native_v8_observability_fixture() {
+    resolve_baseline_config_version
+    [[ "${FROM_CONFIG_VERSION}" == "8" ]] \
+        || die "native v8 fixture requires a reviewed config-v8 baseline"
+    log "Seeding representative native config-v8 observability fixture for ${FROM_VERSION}"
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local openclaw_home="${SMOKE_HOME}/.openclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+    chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+
+    cat >"${data_dir}/config.yaml" <<YAML
+# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐
+# comments, order, and unrelated settings must survive
+config_version: 8
+data_dir: ${data_dir}
+guardrail:
+  enabled: true
+  retain_judge_bodies: false
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
+observability:
+  defaults:
+    redaction_profile: strict
+  local:
+    path: ${data_dir}/state/audit-custom.db
+    judge_bodies_path: ${data_dir}/state/judge-custom.db
+    retention_days: 90
+  destinations:
+    - name: existing-otlp
+      kind: otlp
+      enabled: false
+      protocol: grpc
+      endpoint: collector.example.test:4317
+      headers:
+        Authorization:
+          env: DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION
+      send:
+        signals: [logs, traces]
+        buckets: [compliance.activity, platform.health]
+        redaction_profile: strict
+    - name: v8-http-protected
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://events.example.test/v1/audit
+      bearer_env: DEFENSECLAW_V8_FIXTURE_HTTP_BEARER
+      send:
+        signals: [logs]
+        buckets: [compliance.activity]
+        redaction_profile: strict
+  connectors:
+    codex:
+      webhooks: []
+notifications:
+  enabled: true # unrelated section survives
+YAML
+    cat >"${data_dir}/.env" <<'ENV'
+# exact native-v8 environment bytes must survive later upgrades
+PRESERVE_UPGRADE_SMOKE_ENV=preserved
+DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
+DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
+ENV
+
+    # A real config-v8 host already has the v8 activation recorded. Seed the
+    # cursor through the authenticated published baseline's own state API so a
+    # later candidate must preserve, rather than invent, that history.
+    local baseline_python="${data_dir}/.venv/bin/python"
+    [[ -x "${baseline_python}" ]] \
+        || die "published config-v8 baseline interpreter is unavailable"
+    HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${data_dir}" \
+        "${baseline_python}" -I - "${data_dir}" "${FROM_VERSION}" <<'PY'
+import os
+from pathlib import Path
+import shutil
+import sys
+
+from defenseclaw import migration_state
+from defenseclaw.bundle_refresh import _build_local_observability_manifest
+from defenseclaw.migrations import MIGRATIONS
+from defenseclaw.paths import bundled_local_observability_dir
+
+data_dir, source_version = sys.argv[1:]
+state = migration_state.bootstrap(
+    None,
+    from_version=source_version,
+    package_version=source_version,
+    registry_versions=[version for version, _description, _migration in MIGRATIONS],
+)
+if "0.8.5" not in state.applied:
+    raise SystemExit("published config-v8 baseline did not record the v8 activation")
+migration_state.save(data_dir, state)
+
+data_root = Path(data_dir)
+source_bundle = bundled_local_observability_dir().absolute()
+destination = data_root / "observability-stack"
+if not source_bundle.is_dir():
+    raise SystemExit("published config-v8 baseline has no bundled observability stack")
+shutil.copytree(source_bundle, destination)
+manifest = _build_local_observability_manifest(source_bundle, source_version)
+manifest_path = destination / ".defenseclaw-bundle-manifest.json"
+manifest_path.write_bytes(manifest.raw)
+os.chmod(manifest_path, 0o600)
+(destination / "operator").mkdir(parents=True, exist_ok=True)
+(destination / "grafana/dashboards").mkdir(parents=True, exist_ok=True)
+(destination / "operator/volume-continuity.txt").write_text(
+    "operator-owned volume continuity marker\n",
+    encoding="utf-8",
+)
+(destination / "grafana/dashboards/team-upgrade-smoke.json").write_text(
+    '{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}\n',
+    encoding="utf-8",
+)
+PY
     chmod 600 "${data_dir}/config.yaml" "${data_dir}/.env"
     cp -p "${data_dir}/config.yaml" "${evidence_dir}/config.historical.source"
     cp -p "${data_dir}/.env" "${evidence_dir}/environment.historical.source"
-
-    # An installed but stopped stack exercises the production bundle refresh
-    # without requiring Docker or a remote service. Runtime restart behavior,
-    # down-without--v, fault rollback, and live inventory are covered by the
-    # focused production contract tests invoked once for every v8 smoke run.
-    cp -R "${ROOT}/bundles/local_observability_stack" "${data_dir}/observability-stack"
-    mkdir -p \
-        "${data_dir}/observability-stack/operator" \
-        "${data_dir}/observability-stack/grafana/dashboards"
-    cat >"${data_dir}/observability-stack/operator/volume-continuity.txt" <<'EOF'
-operator-owned volume continuity marker
-EOF
-    cat >"${data_dir}/observability-stack/grafana/dashboards/team-upgrade-smoke.json" <<'EOF'
-{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}
-EOF
 }
 
 seed_already_v8_observability_fixture() {
@@ -1327,12 +1523,14 @@ EOF
 }
 
 seed_upgrade_fixture() {
+    resolve_baseline_config_version
     if target_uses_observability_v8; then
-        resolve_baseline_config_version
-        if [[ "${FROM_CONFIG_VERSION}" == "8" ]]; then
-            seed_already_v8_observability_fixture
-        else
+        if (( FROM_CONFIG_VERSION < 8 )); then
             seed_v8_observability_fixture
+        elif (( FROM_CONFIG_VERSION == 8 )); then
+            seed_native_v8_observability_fixture
+        else
+            die "no reviewed upgrade fixture exists for config-v${FROM_CONFIG_VERSION} baseline ${FROM_VERSION}"
         fi
     else
         seed_pre_v8_otel_fixture
@@ -1565,15 +1763,17 @@ verify_upgrade() {
         require_v8=1
     fi
 
-    HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-    PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
-        defenseclaw --version | grep -F "${TARGET_VERSION}" >/dev/null \
-        || die "defenseclaw --version does not report ${TARGET_VERSION}"
+    local cli_version gateway_version
+    cli_version="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw --version)" \
+        || die "defenseclaw --version failed"
+    assert_exact_reported_version "defenseclaw" "${TARGET_VERSION}" "${cli_version}"
 
-    HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-    PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
-        defenseclaw-gateway --version | grep -F "${TARGET_VERSION}" >/dev/null \
-        || die "defenseclaw-gateway --version does not report ${TARGET_VERSION}"
+    gateway_version="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw-gateway --version)" \
+        || die "defenseclaw-gateway --version failed"
+    assert_exact_reported_version \
+        "defenseclaw-gateway" "${TARGET_VERSION}" "${gateway_version}"
 
     "${venv_python}" - \
         "${SMOKE_HOME}/.defenseclaw" \
@@ -1608,113 +1808,191 @@ print("cursor_applied=" + ",".join(cursor.get("applied", [])))
 PY
 
     if target_uses_observability_v8; then
-        if [[ "${FROM_CONFIG_VERSION}" == "8" ]]; then
+        if (( FROM_CONFIG_VERSION == 8 )); then
             "${venv_python}" - \
                 "${SMOKE_HOME}/.defenseclaw" \
                 "${SMOKE_HOME}/fixture-evidence" \
+                "${SMOKE_HOME}/upgrade.log" \
                 "${TARGET_VERSION}" \
-                "${V8_ACTIVATION_VERSION}" <<'PY'
+                "${FROM_VERSION}" <<'PY'
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 
+from defenseclaw.bundle_refresh import _build_local_observability_manifest
 from defenseclaw.observability.v8_config import load_validate_v8
 from defenseclaw.paths import bundled_local_observability_dir
+from dotenv import dotenv_values
+import yaml
 
 data_dir = Path(sys.argv[1])
 evidence_dir = Path(sys.argv[2])
-target_version = sys.argv[3]
-activation_version = sys.argv[4]
+upgrade_log = Path(sys.argv[3])
+target_version = sys.argv[4]
+source_version = sys.argv[5]
 config_path = data_dir / "config.yaml"
 environment_path = data_dir / ".env"
-cursor_path = data_dir / ".migration_state.json"
+config_bytes = config_path.read_bytes()
+environment_bytes = environment_path.read_bytes()
+historical_config = (evidence_dir / "config.historical.source").read_bytes()
+historical_environment = (evidence_dir / "environment.historical.source").read_bytes()
 
-config_source = (evidence_dir / "config.historical.source").read_bytes()
-environment_source = (evidence_dir / "environment.historical.source").read_bytes()
-cursor_source = (evidence_dir / "migration-cursor.source").read_bytes()
-if config_path.read_bytes() != config_source:
-    raise SystemExit("already-v8 config bytes changed during upgrade")
-if environment_path.read_bytes() != environment_source:
-    raise SystemExit("already-v8 environment bytes changed during upgrade")
-if cursor_path.read_bytes() != cursor_source:
-    raise SystemExit("already-v8 migration cursor lost byte-exact continuity")
-
-validated = load_validate_v8(config_source, source_name=str(config_path))
-config = validated.source
+if config_bytes != historical_config:
+    raise SystemExit("native-v8 config bytes changed without a target config migration")
+if environment_bytes != historical_environment:
+    raise SystemExit("native-v8 environment bytes changed without a target config migration")
+config = load_validate_v8(config_bytes, source_name=str(config_path)).source
 if config.get("config_version") != 8:
-    raise SystemExit("already-v8 source is not canonical config version 8")
-cursor = json.loads(cursor_source.decode("utf-8"))
-if activation_version not in cursor.get("applied", []):
-    raise SystemExit("already-v8 source cursor omitted the observability-v8 migration")
-if list((data_dir / "backups").glob("observability-v8-*/manifest.json")):
-    raise SystemExit("post-hard-cut upgrade incorrectly created a v7-to-v8 activation manifest")
+    raise SystemExit("native-v8 source no longer has config_version 8")
+for legacy in ("otel", "audit_sinks", "privacy"):
+    if legacy in config:
+        raise SystemExit(f"native-v8 source gained legacy block: {legacy}")
 
-normal_backup_dirs = sorted(
-    path for path in (data_dir / "backups").glob("upgrade-*") if path.is_dir() and not path.is_symlink()
+destinations = {
+    item.get("name"): item
+    for item in (config.get("observability") or {}).get("destinations", [])
+    if isinstance(item, dict) and isinstance(item.get("name"), str)
+}
+if set(destinations) != {"existing-otlp", "v8-http-protected"}:
+    raise SystemExit("native-v8 destination set changed across the upgrade")
+if destinations["existing-otlp"].get("headers") != {
+    "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
+}:
+    raise SystemExit("native-v8 OTLP secret reference changed across the upgrade")
+if destinations["v8-http-protected"].get("bearer_env") != "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER":
+    raise SystemExit("native-v8 HTTP secret reference changed across the upgrade")
+
+expected_environment = {
+    "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+    "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
+    "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
+}
+actual_environment = dotenv_values(environment_path)
+if any(actual_environment.get(name) != value for name, value in expected_environment.items()):
+    raise SystemExit("native-v8 environment continuity failed")
+if stat.S_IMODE(environment_path.stat().st_mode) != 0o600:
+    raise SystemExit("native-v8 environment is not mode 0600")
+openclaw_home = data_dir.parent / ".openclaw"
+try:
+    openclaw_info = openclaw_home.lstat()
+except FileNotFoundError:
+    raise SystemExit("native-v8 fixture OpenClaw home disappeared across the upgrade") from None
+if not stat.S_ISDIR(openclaw_info.st_mode) or stat.S_IMODE(openclaw_info.st_mode) != 0o700:
+    raise SystemExit("native-v8 fixture OpenClaw home mode changed across the upgrade")
+log_text = upgrade_log.read_text(encoding="utf-8", errors="replace")
+protected_values = (
+    value
+    for name, value in expected_environment.items()
+    if name != "PRESERVE_UPGRADE_SMOKE_ENV"
 )
-matching_backups = [
-    path
-    for path in normal_backup_dirs
-    if (path / "config.yaml").is_file()
-    and not (path / "config.yaml").is_symlink()
-    and (path / ".env").is_file()
-    and not (path / ".env").is_symlink()
-    and (path / "config.yaml").read_bytes() == config_source
-    and (path / ".env").read_bytes() == environment_source
-]
-if not matching_backups:
-    raise SystemExit("post-hard-cut upgrade retained no normal byte-exact config/.env backup")
+if any(value in config_bytes.decode() or value in log_text for value in protected_values):
+    raise SystemExit("native-v8 protected value escaped into YAML or upgrade output")
 
-config_text = config_source.decode("utf-8")
-for token in (
-    "# ┌──── ALREADY-V8 UPGRADE SMOKE ────┐",
-    "# exact comments, order, and bytes must survive a post-hard-cut upgrade",
-    "enabled: true # unrelated application setting survives",
+activation_manifests = sorted((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+if activation_manifests:
+    raise SystemExit("native-v8 source unexpectedly ran the v7-to-v8 activation")
+normal_backups = sorted(
+    path
+    for path in (data_dir / "backups").glob("upgrade-*")
+    if path.is_dir() and not path.is_symlink()
+)
+if not any(
+    (path / "config.yaml").is_file()
+    and (path / ".env").is_file()
+    and (path / "config.yaml").read_bytes() == historical_config
+    and (path / ".env").read_bytes() == historical_environment
+    for path in normal_backups
 ):
-    if token not in config_text:
-        raise SystemExit(f"already-v8 source token was lost: {token}")
+    raise SystemExit("native-v8 upgrade retained no byte-exact source backup")
+
+receipts = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((data_dir / ".upgrade-receipts").glob("*.json"))
+    if path.is_file() and not path.is_symlink()
+]
+terminal = [item for item in receipts if item.get("target_version") == target_version]
+if len(terminal) != 1:
+    raise SystemExit(f"expected one native-v8 target receipt, got {len(terminal)}")
+receipt = terminal[0]
+if receipt.get("from_version") != source_version:
+    raise SystemExit("native-v8 target receipt has the wrong source version")
+if (
+    receipt.get("status") != "succeeded"
+    or receipt.get("migration_status") != "completed"
+    or receipt.get("artifacts_verified") is not True
+    or receipt.get("failure_code")
+):
+    raise SystemExit("native-v8 target receipt is not fully successful")
+
+for comment in (
+    "# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐",
+    "# comments, order, and unrelated settings must survive",
+    "# unrelated section survives",
+):
+    if comment not in config_bytes.decode():
+        raise SystemExit(f"native-v8 comment token was lost: {comment}")
 
 stack = data_dir / "observability-stack"
-manifest_path = stack / ".defenseclaw-bundle-manifest.json"
-bundle_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+bundle_manifest = json.loads(
+    (stack / ".defenseclaw-bundle-manifest.json").read_text(encoding="utf-8")
+)
 if bundle_manifest.get("bundle_version") != target_version:
-    raise SystemExit("already-v8 local bundle manifest is not stamped with the target version")
-if (stack / "operator/volume-continuity.txt").read_bytes() != b"operator-owned volume continuity marker\n":
-    raise SystemExit("operator volume-continuity marker was not preserved")
+    raise SystemExit("native-v8 local bundle was not refreshed to the target")
+if (stack / "operator/volume-continuity.txt").read_bytes() != (
+    b"operator-owned volume continuity marker\n"
+):
+    raise SystemExit("native-v8 operator volume marker was lost")
 if (stack / "grafana/dashboards/team-upgrade-smoke.json").read_bytes() != (
     b'{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}\n'
 ):
-    raise SystemExit("operator custom dashboard was not preserved")
-
+    raise SystemExit("native-v8 operator dashboard was lost")
 target_bundle = bundled_local_observability_dir()
+expected_bundle_manifest = json.loads(
+    _build_local_observability_manifest(target_bundle, target_version).raw
+)
+if bundle_manifest != expected_bundle_manifest:
+    raise SystemExit("native-v8 local bundle manifest differs from the complete target package")
 for item in bundle_manifest.get("files", []):
     relative = item.get("path")
     digest = item.get("sha256")
     if not isinstance(relative, str) or not isinstance(digest, str):
-        raise SystemExit("invalid local bundle manifest entry")
+        raise SystemExit("invalid native-v8 local bundle manifest entry")
     installed = stack / relative
     packaged = target_bundle / relative
     if hashlib.sha256(installed.read_bytes()).hexdigest() != digest:
-        raise SystemExit(f"installed managed bundle digest mismatch: {relative}")
+        raise SystemExit(f"native-v8 bundle digest mismatch: {relative}")
     if installed.read_bytes() != packaged.read_bytes():
-        raise SystemExit(f"installed managed bundle differs from target package: {relative}")
+        raise SystemExit(f"native-v8 bundle differs from target package: {relative}")
 
-sqlite_path = Path(config["observability"]["local"]["path"])
-if not sqlite_path.is_file():
-    raise SystemExit("target gateway did not initialize the already-v8 SQLite database")
-connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+database = data_dir / "state/audit-custom.db"
+if not database.is_file():
+    raise SystemExit("native-v8 target gateway did not initialize SQLite")
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
 try:
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
-        raise SystemExit("already-v8 SQLite database failed quick_check")
+        raise SystemExit("native-v8 SQLite database failed quick_check")
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    required = {
+        "correlation_events",
+        "correlation_identifiers",
+        "correlation_observations",
+        "correlation_relationships",
+        "correlation_receipts",
+    }
+    if not required.issubset(tables):
+        raise SystemExit("native-v8 SQLite database lost correlation tables")
 finally:
     connection.close()
 
-print("config_v8_source_bytes=preserved")
-print("cursor_v8_source_bytes=continuous")
-print("v8_activation_manifest=absent")
-print("normal_upgrade_backup=byte_exact")
+print("config_v8_native_fixture=byte_exact")
+print("v8_activation_recovery=not_reapplied")
+print("native_v8_release_backup_and_receipt=ok")
 print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         else
@@ -1736,6 +2014,7 @@ import sys
 
 from dotenv import dotenv_values
 import yaml
+from defenseclaw.bundle_refresh import _build_local_observability_manifest
 from defenseclaw.paths import bundled_local_observability_dir
 
 data_dir = Path(sys.argv[1])
@@ -1780,6 +2059,16 @@ if observability.get("local") != {
     raise SystemExit("non-default audit/judge paths were not preserved")
 if (config.get("guardrail") or {}).get("retain_judge_bodies") is not False:
     raise SystemExit("judge-body retention enablement was not preserved")
+gateway = config.get("gateway") or {}
+if gateway.get("fleet_mode") != "disabled" or (gateway.get("watcher") or {}).get("enabled") is not False:
+    raise SystemExit("hermetic gateway connectivity policy was not preserved")
+openclaw_home = data_dir.parent / ".openclaw"
+try:
+    openclaw_info = openclaw_home.lstat()
+except FileNotFoundError:
+    raise SystemExit("fixture OpenClaw home disappeared across the staged upgrade") from None
+if not stat.S_ISDIR(openclaw_info.st_mode) or stat.S_IMODE(openclaw_info.st_mode) != 0o700:
+    raise SystemExit("fixture OpenClaw home mode changed across the staged upgrade")
 
 destinations = {
     item.get("name"): item
@@ -2046,6 +2335,11 @@ if (stack / "grafana/dashboards/team-upgrade-smoke.json").read_bytes() != (
     raise SystemExit("operator custom dashboard was not preserved")
 
 target_bundle = bundled_local_observability_dir()
+expected_bundle_manifest = json.loads(
+    _build_local_observability_manifest(target_bundle, target_version).raw
+)
+if bundle_manifest != expected_bundle_manifest:
+    raise SystemExit("local bundle manifest differs from the complete target package")
 for item in bundle_manifest.get("files", []):
     relative = item.get("path")
     digest = item.get("sha256")
@@ -2146,7 +2440,6 @@ run_one_upgrade_smoke() {
 
     install_baseline
     seed_upgrade_fixture
-    bootstrap_already_v8_migration_cursor
     start_source_gateway_canary
     patch_installed_upgrade_endpoint
     run_upgrade
