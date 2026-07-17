@@ -2195,9 +2195,73 @@ function Assert-NoDefenseClawRegistration([string[]]$Paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         $content = [IO.File]::ReadAllText($path)
         if ($content -match '(?i)defenseclaw') {
-            throw "unexpected DefenseClaw connector registration remains in $path"
+            $locations = @(Get-DefenseClawRegistrationLocations $content)
+            $detail = if ($locations.Count) {
+                ' (safe fields: ' + ($locations -join ', ') + ')'
+            } else {
+                ' (safe field: unclassified)'
+            }
+            throw "unexpected DefenseClaw connector registration remains in $path$detail"
         }
     }
+}
+
+function Get-DefenseClawRegistrationLocations([string]$Content) {
+    # Report only bounded structural locations. Agent configs may contain
+    # credentials or private paths, so the matching line/value must never be
+    # included in CI output even when this assertion is the only available
+    # failure evidence from a disposable standard-user process.
+    $locations = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $table = 'root'
+    $lines = [regex]::Split($Content, '\r?\n')
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(?<table>[A-Za-z0-9_.-]{1,160})\]$') {
+            $candidateTable = [string]$Matches['table']
+            if ($candidateTable -match '^(?:otel(?:\.(?:exporter|trace_exporter|metrics_exporter|otlp-http|headers))*)$') {
+                $table = $candidateTable
+            } elseif ($candidateTable -eq 'hooks' -or $candidateTable -eq 'features') {
+                $table = $candidateTable
+            } else {
+                $table = 'other-table'
+            }
+        } elseif ($trimmed.StartsWith('[')) {
+            # A quoted/dynamic table can contain private names. Keep only a
+            # fixed classifier instead of copying any part of it.
+            $table = 'nonstandard-table'
+        }
+        if ($line -notmatch '(?i)defenseclaw') { continue }
+
+        $field = 'array-or-value'
+        if ($trimmed.StartsWith('#')) {
+            $field = 'comment'
+        } elseif ($trimmed -match '^(?<key>[A-Za-z0-9_.-]{1,96})\s*=') {
+            $candidateField = [string]$Matches['key']
+            if ($candidateField -match '^(?:notify|openai_base_url|hooks|command|command_windows|endpoint|headers|x-defenseclaw-(?:source|client|token))$') {
+                $field = $candidateField
+            } else {
+                $field = 'other-field'
+            }
+        } elseif ($trimmed -match '^"(?<key>[A-Za-z0-9_.-]{1,96})"\s*:') {
+            $candidateField = [string]$Matches['key']
+            if ($candidateField -match '^(?:notify|openai_base_url|hooks|command|command_windows|endpoint|headers|x-defenseclaw-(?:source|client|token))$') {
+                $field = $candidateField
+            } else {
+                $field = 'other-field'
+            }
+        } elseif ($trimmed.StartsWith('[')) {
+            $field = 'table-name'
+        }
+        $location = if ($table -eq 'root') { $field } else { "$table.$field" }
+        $descriptor = "line $($index + 1): $location"
+        if ($seen.Add($descriptor)) {
+            $locations.Add($descriptor)
+            if ($locations.Count -ge 8) { break }
+        }
+    }
+    return @($locations)
 }
 
 function Assert-NoInstalledGatewayProcess([string]$GatewayPath) {
