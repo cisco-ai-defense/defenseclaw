@@ -102,25 +102,52 @@ discover_agent_version() {
   local home="$2"
   case "${connector}" in
     codex)
-      # Codex-cli is a Rust binary, not npm. We probe metadata paths
-      # first (safe, no exec), then fall back to `codex --version`
-      # exec'd AS THE TARGET USER via `sudo -u`. Running the user's
-      # own codex binary as their identity is not a privilege
-      # escalation — install.sh's outer sudo drops privileges for this
-      # subprocess, matching the security posture of the hook
-      # guardian's connector.Setup call.
-      local pkg
-      for pkg in \
-        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
-        /usr/local/lib/node_modules/@openai/codex/package.json \
-        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
-        [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}")"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      # Codex-cli is a Rust binary that ships from three OpenAI-owned
+      # channels on macOS. Probe order picks the first-party
+      # ChatGPT.app bundled copy FIRST because it is the newest
+      # distribution (auto-updated with the desktop app) and it is
+      # what customers actually have on a fresh Mac — stray old
+      # `npm i -g @openai/codex` installs from an earlier engagement
+      # frequently linger and would otherwise win with a stale
+      # version that fails our MinAgentVersion contract gate.
+      #
+      # Order:
+      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
+      #   2. Homebrew Caskroom                (versioned dir name)
+      #   3. npm module package.json         (user-global then system)
+      #   4. `command -v codex` last resort   (arbitrary PATH install)
+      #
+      # Every probe runs as the target user via sudo -u (not root).
+      # The app bundle is Gatekeeper-signed and world-readable by
+      # design; running its --version as an unprivileged user is
+      # safe. install.sh's outer sudo already dropped privs before
+      # calling this helper, matching the security posture of the
+      # hook guardian's connector.Setup call.
+      local vraw
+
+      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
+      # Contents/Resources/codex is the current stable location; the
+      # older MacOS/ path is kept as a fallback for pre-2026 builds.
+      local chatgpt_codex
+      for chatgpt_codex in \
+        /Applications/ChatGPT.app/Contents/Resources/codex \
+        /Applications/ChatGPT.app/Contents/MacOS/codex; do
+        [[ -x "${chatgpt_codex}" ]] || continue
+        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
+          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
+        else
+          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
+        fi
+        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
+        # take the first token that looks like a version.
+        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+        if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       done
-      # Homebrew cask keeps the binary under Caskroom with a version
-      # in the path itself: /opt/homebrew/Caskroom/codex/<version>/...
-      # Glob-based version pick (avoids shellcheck SC2010 on `ls | grep`).
+
+      # 2. Homebrew cask keeps the binary under Caskroom with a
+      # version in the path itself:
+      #   /opt/homebrew/Caskroom/codex/<version>/...
+      # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
       local caskroom ver dir dname
       for caskroom in /opt/homebrew/Caskroom/codex /usr/local/Caskroom/codex; do
         [[ -d "${caskroom}" ]] || continue
@@ -136,12 +163,23 @@ discover_agent_version() {
         done
         if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
-      # Last resort: exec codex --version as the target user (not as
-      # root). Requires TARGET_USER to be known to the caller.
+
+      # 3. npm module package.json — user-global first (most likely
+      # up to date on developer boxes), then system dirs.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        /usr/local/lib/node_modules/@openai/codex/package.json \
+        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+
+      # 4. Last resort: exec codex --version as the target user (not
+      # as root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
-        local vraw
         vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
-        # Codex prints "codex-cli X.Y.Z"; take just the version token.
         vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       fi
