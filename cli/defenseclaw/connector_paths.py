@@ -3552,11 +3552,11 @@ def _atomic_replace_claude_windows_with_proof(
     staged = None
     displaced = None
     try:
-        windows_acl.write_new_file(temporary_path, payload, security)
+        staged_security = windows_acl.write_new_file(temporary_path, payload, security) or security.staging_copy()
         staged = v8_activation._snapshot_regular_file(temporary_path, required=True)
-        v8_activation._assert_windows_staged_snapshot(staged, payload, security)
+        v8_activation._assert_windows_staged_snapshot(staged, payload, staged_security)
         verification_staged = staged
-        expected_security = security if snapshot.existed else security.staging_copy()
+        expected_security = security if snapshot.existed else staged_security
         expected = v8_activation._ExpectedFileState(
             existed=True,
             sha256=v8_activation._sha256(payload),

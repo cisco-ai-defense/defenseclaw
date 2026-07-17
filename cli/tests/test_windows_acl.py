@@ -48,6 +48,17 @@ def _dacl(*aces: tuple[int, int, int, bytes]) -> bytes:
     return struct.pack("<BBHHH", 2, 0, 8 + len(payload), len(encoded), 0) + payload
 
 
+def _ace_offsets(acl: bytes) -> tuple[int, ...]:
+    _revision, _reserved, acl_size, ace_count, _reserved2 = struct.unpack_from("<BBHHH", acl, 0)
+    offsets = []
+    cursor = 8
+    for _index in range(ace_count):
+        offsets.append(cursor)
+        cursor += struct.unpack_from("<H", acl, cursor + 2)[0]
+    assert cursor == acl_size == len(acl)
+    return tuple(offsets)
+
+
 OWNER = _sid(21, 101, 202, 303, 1001)
 SYSTEM = _sid(18)
 ADMINISTRATORS = _sid(32, 544)
@@ -78,7 +89,6 @@ class _FakeApi:
         self.change_after_write = False
         self.create_security_override: WindowsFileSecurity | None = None
         self.ignore_exact_set_security = False
-        self.exact_set_security_overrides: list[WindowsFileSecurity] = []
         self.private_flags: list[int] = []
 
     def open_path(self, path: str, *, access: int, directory: bool = False) -> int:
@@ -112,9 +122,7 @@ class _FakeApi:
         security: WindowsFileSecurity,
     ) -> None:
         self.events.append(("set-exact-new", (current, security)))
-        if self.exact_set_security_overrides:
-            self.security[handle] = self.exact_set_security_overrides.pop(0)
-        elif not self.ignore_exact_set_security:
+        if not self.ignore_exact_set_security:
             self.security[handle] = security
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int:
@@ -195,35 +203,75 @@ def test_write_new_file_repairs_create_security_before_first_payload_byte(
     assert api.security[handle] == staged
 
 
-def test_write_new_file_reapplies_exact_security_after_provider_transition(
+@pytest.mark.parametrize("clear_inherited_markers", [False, True])
+def test_write_new_file_selects_exact_provider_dacl_representation(
     monkeypatch: pytest.MonkeyPatch,
+    clear_inherited_markers: bool,
 ) -> None:
     api = _FakeApi()
-    api.create_security_override = WindowsFileSecurity(
-        PRIVATE.owner,
-        _dacl((0, 0, 0x001F01FF, USERS)),
+    requested = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x10, 0x001F01FF, OWNER),
+            (0, 0x10, 0x001F01FF, SYSTEM),
+        ),
         False,
     )
-    transition = WindowsFileSecurity(
-        PRIVATE.owner,
-        _dacl((0, 0, 0x001F01FF, USERS)),
-        True,
+    retained = requested.staging_copy()
+    provider_dacl = (
+        windows_acl._dacl_with_inherited_markers_cleared(retained.dacl) if clear_inherited_markers else retained.dacl
     )
-    api.exact_set_security_overrides.append(transition)
+    provider_security = WindowsFileSecurity(
+        retained.owner,
+        provider_dacl,
+        True,
+        retained.mandatory_label,
+        retained.sacl_protected,
+    )
+    api.create_security_override = provider_security
     monkeypatch.setattr(windows_acl, "_api", api)
-    requested = WindowsFileSecurity(PRIVATE.owner, PRIVATE.dacl, False)
-    staged = requested.staging_copy()
 
-    windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
+    selected = windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
 
-    exact_sets = [event for event in api.events if event[0] == "set-exact-new"]
-    assert exact_sets == [
-        ("set-exact-new", (api.create_security_override, staged)),
-        ("set-exact-new", (transition, staged)),
-    ]
-    second_set_index = api.events.index(exact_sets[1])
+    assert selected == provider_security
+    assert not any(event[0] == "set-exact-new" for event in api.events)
     write_index = api.events.index(("write", b"secret-payload"))
-    assert second_set_index < write_index
+    final_get_index = max(index for index, event in enumerate(api.events) if event[0] == "get")
+    assert write_index < final_get_index
+
+
+def test_write_new_file_repairs_label_without_rewriting_cleared_provider_dacl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = WindowsFileSecurity(
+        OWNER,
+        _dacl((0, 0x10, 0x001F01FF, OWNER)),
+        False,
+    )
+    retained = requested.staging_copy()
+    cleared_dacl = windows_acl._dacl_with_inherited_markers_cleared(retained.dacl)
+    current = WindowsFileSecurity(
+        retained.owner,
+        cleared_dacl,
+        True,
+        MEDIUM_MANDATORY_LABEL,
+        retained.sacl_protected,
+    )
+    selected = WindowsFileSecurity(
+        retained.owner,
+        cleared_dacl,
+        True,
+        None,
+        retained.sacl_protected,
+    )
+    api = _FakeApi()
+    api.create_security_override = current
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    actual = windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
+
+    assert actual == selected
+    assert ("set-exact-new", (current, selected)) in api.events
 
 
 def test_write_new_file_rejects_unrepaired_create_security_before_payload(
@@ -252,14 +300,43 @@ def test_write_new_file_rejects_unrepaired_create_security_before_payload(
         windows_acl.write_new_file("candidate.tmp", b"secret-payload", PRIVATE)
 
     candidate_handle = api.paths["candidate.tmp"]
-    assert len([event for event in api.events if event[0] == "set-exact-new"]) == 2
+    assert len([event for event in api.events if event[0] == "set-exact-new"]) == 1
     assert not any(event in {"write", "flush", "handle-delete"} for event, _value in api.events)
     assert api.events[-1] == ("close", candidate_handle)
     assert api.paths["unrelated.tmp"] == 9
     assert api.security[9] == unrelated_security
 
 
-def test_staging_copy_converts_only_inherited_ace_markers_to_explicit() -> None:
+@pytest.mark.parametrize(
+    "drifted_dacl",
+    [
+        _dacl((0, 0, 0x00020089, OWNER), (0, 0, 0x001F01FF, SYSTEM)),
+        _dacl((0, 0, 0x001F01FF, USERS), (0, 0, 0x001F01FF, SYSTEM)),
+        _dacl((0, 0, 0x001F01FF, SYSTEM), (0, 0, 0x001F01FF, OWNER)),
+    ],
+)
+def test_write_new_file_rejects_mask_sid_and_order_drift_before_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    drifted_dacl: bytes,
+) -> None:
+    requested = WindowsFileSecurity(
+        OWNER,
+        _dacl((0, 0, 0x001F01FF, OWNER), (0, 0, 0x001F01FF, SYSTEM)),
+        True,
+    )
+    api = _FakeApi()
+    api.create_security_override = WindowsFileSecurity(OWNER, drifted_dacl, True)
+    api.ignore_exact_set_security = True
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    with pytest.raises(WindowsAclError, match=r"does not match before write \(dacl\)"):
+        windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
+
+    assert len([event for event in api.events if event[0] == "set-exact-new"]) == 1
+    assert not any(event in {"write", "flush", "handle-delete"} for event, _value in api.events)
+
+
+def test_staging_copy_protects_without_rewriting_inherited_ace_provenance() -> None:
     inherited = WindowsFileSecurity(
         OWNER,
         _dacl(
@@ -272,11 +349,7 @@ def test_staging_copy_converts_only_inherited_ace_markers_to_explicit() -> None:
     staged = inherited.staging_copy()
 
     assert staged.dacl_protected is True
-    assert staged.dacl == _dacl(
-        (0, 0x03, 0x001F01FF, OWNER),
-        (0, 0x00, 0x00020089, SYSTEM),
-    )
-    assert inherited.dacl != staged.dacl
+    assert staged.dacl == inherited.dacl
 
 
 def test_unprotected_set_security_input_omits_inherited_aces() -> None:
@@ -344,22 +417,21 @@ def test_native_staged_file_round_trips_unprotected_security(tmp_path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
-def test_native_exact_setter_converges_unprotected_inherited_file(tmp_path) -> None:
+def test_native_protected_create_retains_inherited_ace_provenance(tmp_path) -> None:
     parent = tmp_path / "inherited-transition"
     parent.mkdir()
     inheritable = windows_acl.private_security_for_directory(str(parent), inherit_children=True)
     windows_acl.apply_path(str(parent), inheritable, directory=True)
+    source = parent / "source.json"
+    source.write_bytes(b"{}")
+    inherited = windows_acl.capture_path(str(source))
+    assert inherited.dacl_protected is False
+    assert any(inherited.dacl[cursor + 1] & windows_acl._INHERITED_ACE for cursor in _ace_offsets(inherited.dacl))
+    staged = inherited.staging_copy()
     candidate = parent / "candidate.tmp"
-    candidate.write_bytes(b"")
     api = windows_acl._get_api()
-    handle = api._open_regular_security_mutator_exclusive(str(candidate))
+    handle = api.create_file(str(candidate), staged)
     try:
-        current = api.get_security(handle)
-        assert current.dacl_protected is False
-        staged = current.staging_copy()
-
-        api.set_new_file_security_exact(handle, current, staged)
-
         assert api.get_security(handle) == staged
     finally:
         api.close_handle(handle)
@@ -454,7 +526,7 @@ def test_general_security_setter_leaves_absent_label_out_of_existing_file_update
         (None, True, False, windows_acl._UNPROTECTED_SACL_SECURITY_INFORMATION),
     ],
 )
-def test_exact_new_file_security_setter_replaces_every_requested_component(
+def test_exact_new_file_security_setter_replaces_only_differing_components(
     mandatory_label: bytes | None,
     current_sacl_protected: bool,
     sacl_protected: bool,
@@ -484,16 +556,37 @@ def test_exact_new_file_security_setter_replaces_every_requested_component(
     arguments = set_security_info.call_args.args
     information = arguments[2]
     assert information == (
-        windows_acl._OWNER_SECURITY_INFORMATION
-        | windows_acl._DACL_SECURITY_INFORMATION
+        windows_acl._DACL_SECURITY_INFORMATION
         | windows_acl._LABEL_SECURITY_INFORMATION
         | windows_acl._PROTECTED_DACL_SECURITY_INFORMATION
         | expected_sacl_flag
     )
+    assert arguments[3] is None
     assert ctypes.string_at(arguments[5], len(PRIVATE.dacl)) == PRIVATE.dacl
     expected_label = mandatory_label if mandatory_label is not None else windows_acl._EMPTY_ACL
     assert ctypes.string_at(arguments[6], len(expected_label)) == expected_label
     api.get_security.assert_not_called()
+
+
+def test_exact_new_file_security_setter_preserves_matching_dacl_during_label_clear() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    set_security_info = Mock(return_value=windows_acl._ERROR_SUCCESS)
+    api._set_security_info = set_security_info
+    current = WindowsFileSecurity(
+        PRIVATE.owner,
+        PRIVATE.dacl,
+        True,
+        MEDIUM_MANDATORY_LABEL,
+        False,
+    )
+
+    api.set_new_file_security_exact(33, current, PRIVATE)
+
+    arguments = set_security_info.call_args.args
+    assert arguments[2] == windows_acl._LABEL_SECURITY_INFORMATION
+    assert arguments[3] is None
+    assert arguments[5] is None
+    assert ctypes.string_at(arguments[6], len(windows_acl._EMPTY_ACL)) == windows_acl._EMPTY_ACL
 
 
 def test_native_security_descriptor_includes_mandatory_label_and_protection() -> None:
