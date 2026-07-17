@@ -78,6 +78,7 @@ class _FakeApi:
         self.change_after_write = False
         self.create_security_override: WindowsFileSecurity | None = None
         self.ignore_exact_set_security = False
+        self.exact_set_security_overrides: list[WindowsFileSecurity] = []
         self.private_flags: list[int] = []
 
     def open_path(self, path: str, *, access: int, directory: bool = False) -> int:
@@ -111,7 +112,9 @@ class _FakeApi:
         security: WindowsFileSecurity,
     ) -> None:
         self.events.append(("set-exact-new", (current, security)))
-        if not self.ignore_exact_set_security:
+        if self.exact_set_security_overrides:
+            self.security[handle] = self.exact_set_security_overrides.pop(0)
+        elif not self.ignore_exact_set_security:
             self.security[handle] = security
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int:
@@ -192,6 +195,37 @@ def test_write_new_file_repairs_create_security_before_first_payload_byte(
     assert api.security[handle] == staged
 
 
+def test_write_new_file_reapplies_exact_security_after_provider_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    api.create_security_override = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x001F01FF, USERS)),
+        False,
+    )
+    transition = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x001F01FF, USERS)),
+        True,
+    )
+    api.exact_set_security_overrides.append(transition)
+    monkeypatch.setattr(windows_acl, "_api", api)
+    requested = WindowsFileSecurity(PRIVATE.owner, PRIVATE.dacl, False)
+    staged = requested.staging_copy()
+
+    windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
+
+    exact_sets = [event for event in api.events if event[0] == "set-exact-new"]
+    assert exact_sets == [
+        ("set-exact-new", (api.create_security_override, staged)),
+        ("set-exact-new", (transition, staged)),
+    ]
+    second_set_index = api.events.index(exact_sets[1])
+    write_index = api.events.index(("write", b"secret-payload"))
+    assert second_set_index < write_index
+
+
 def test_write_new_file_rejects_unrepaired_create_security_before_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -211,10 +245,14 @@ def test_write_new_file_rejects_unrepaired_create_security_before_payload(
     api.security[9] = unrelated_security
     monkeypatch.setattr(windows_acl, "_api", api)
 
-    with pytest.raises(WindowsAclError, match="does not match before write"):
+    with pytest.raises(
+        WindowsAclError,
+        match=r"does not match before write \(dacl, dacl_protected\)",
+    ):
         windows_acl.write_new_file("candidate.tmp", b"secret-payload", PRIVATE)
 
     candidate_handle = api.paths["candidate.tmp"]
+    assert len([event for event in api.events if event[0] == "set-exact-new"]) == 2
     assert not any(event in {"write", "flush", "handle-delete"} for event, _value in api.events)
     assert api.events[-1] == ("close", candidate_handle)
     assert api.paths["unrelated.tmp"] == 9
@@ -303,6 +341,28 @@ def test_native_staged_file_round_trips_unprotected_security(tmp_path) -> None:
     windows_acl.apply_path(str(staged), requested)
 
     assert windows_acl.capture_path(str(staged)) == requested
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
+def test_native_exact_setter_converges_unprotected_inherited_file(tmp_path) -> None:
+    parent = tmp_path / "inherited-transition"
+    parent.mkdir()
+    inheritable = windows_acl.private_security_for_directory(str(parent), inherit_children=True)
+    windows_acl.apply_path(str(parent), inheritable, directory=True)
+    candidate = parent / "candidate.tmp"
+    candidate.write_bytes(b"")
+    api = windows_acl._get_api()
+    handle = api._open_regular_security_mutator_exclusive(str(candidate))
+    try:
+        current = api.get_security(handle)
+        assert current.dacl_protected is False
+        staged = current.staging_copy()
+
+        api.set_new_file_security_exact(handle, current, staged)
+
+        assert api.get_security(handle) == staged
+    finally:
+        api.close_handle(handle)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows mandatory labels")

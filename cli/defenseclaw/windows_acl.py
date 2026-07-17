@@ -157,6 +157,25 @@ class WindowsFileSecurity:
         )
 
 
+def _security_difference_names(
+    actual: WindowsFileSecurity,
+    expected: WindowsFileSecurity,
+) -> tuple[str, ...]:
+    """Name mismatched components without disclosing descriptor contents."""
+
+    return tuple(
+        name
+        for name in (
+            "owner",
+            "dacl",
+            "dacl_protected",
+            "mandatory_label",
+            "sacl_protected",
+        )
+        if getattr(actual, name) != getattr(expected, name)
+    )
+
+
 class _WindowsApi(Protocol):
     def open_path(self, path: str, *, access: int, directory: bool = False) -> int: ...
 
@@ -1203,14 +1222,22 @@ def write_new_file(path: str, payload: bytes, security: WindowsFileSecurity) -> 
         # the empty candidate. Reapply that same descriptor through the
         # claimed handle, then keep the exact comparison as the write gate.
         actual_security = api.get_security(handle)
-        if actual_security != staged_security:
+        # A provider may commit an inheritance-protection transition before
+        # its exact explicit DACL settles. Re-observe that transition and
+        # allow one bounded second exact application while the candidate is
+        # still exclusively claimed and contains zero payload bytes.
+        for _attempt in range(2):
+            if actual_security == staged_security:
+                break
             api.set_new_file_security_exact(handle, actual_security, staged_security)
             actual_security = api.get_security(handle)
-            if actual_security != staged_security:
-                # The exclusive candidate still contains zero payload bytes.
-                # Do not path-delete it here: a later name could identify a
-                # different file after this exact handle is closed.
-                raise WindowsAclError("new file security does not match before write")
+        if actual_security != staged_security:
+            # The exclusive candidate still contains zero payload bytes. Do
+            # not path-delete it here: a later name could identify a different
+            # file after this exact handle is closed. Name components only;
+            # owner, ACL, and label bytes are intentionally not disclosed.
+            differences = ", ".join(_security_difference_names(actual_security, staged_security))
+            raise WindowsAclError(f"new file security does not match before write ({differences})")
         api.write_all(handle, payload)
         api.flush(handle)
         if api.get_security(handle) != staged_security:
