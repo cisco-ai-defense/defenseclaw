@@ -324,6 +324,144 @@ func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
 	}
 }
 
+func TestConnectorsForNativeUninstallUsesConfiguredConnectorRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte(`config_version: 8
+data_dir: D:\synthetic-defenseclaw
+guardrail:
+  enabled: false
+  connector: openclaw
+  connectors:
+    claudecode:
+      mode: action
+    codex:
+      mode: observe
+gateway:
+  token: private-synthetic-value-must-not-appear
+observability:
+  enabled: true
+`)
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesLegacyConfiguredConnector(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("guardrail:\n  connector: claude-code\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"claudecode"}) {
+		t.Fatalf("connectors = %v, want [claudecode]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesConfiguredClawMode(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("config_version: 8\nclaw:\n  mode: codex\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"codex"}) {
+		t.Fatalf("connectors = %v, want [codex]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallMatchesRuntimeRosterPrecedence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "multi connector roster overrides singular fields",
+			config: "guardrail:\n  connector: codex\n  connectors:\n    openclaw: {}\n" +
+				"claw:\n  mode: claudecode\n",
+		},
+		{
+			name:   "guardrail connector overrides claw mode",
+			config: "guardrail:\n  connector: openclaw\nclaw:\n  mode: codex\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("connectors = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsInvalidConfigRosterWithoutValueLeak(t *testing.T) {
+	dataRoot := t.TempDir()
+	privateValue := "private-synthetic-config-value"
+	config := []byte("gateway:\n  token: " + privateValue + "\nguardrail:\n  connectors: [codex\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err == nil || !strings.Contains(err.Error(), "invalid YAML") {
+		t.Fatalf("invalid config roster error = %v", err)
+	}
+	if strings.Contains(err.Error(), privateValue) {
+		t.Fatal("invalid config roster error leaked a configuration value")
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsMultipleConfigDocuments(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("guardrail:\n  connectors:\n    codex: {}\n---\nguardrail:\n  connectors: {}\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "document count") {
+		t.Fatalf("multiple config document error = %v", err)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsOversizedConfigRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	configPath := filepath.Join(dataRoot, "config.yaml")
+	if err := os.WriteFile(configPath, bytes.Repeat([]byte{'x'}, int(nativeConfigRosterLimit)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized config roster error = %v", err)
+	}
+}
+
 func TestConnectorsForNativeUninstallUsesLegacyActiveConnector(t *testing.T) {
 	dataRoot := t.TempDir()
 	if err := os.WriteFile(

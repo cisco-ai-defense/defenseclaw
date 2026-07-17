@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/mod/semver"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed payload/*
@@ -54,6 +56,7 @@ const (
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
 	nativeConnectorStateLimit  = int64(64 << 10)
+	nativeConfigRosterLimit    = int64(4 << 20)
 	maxRunCommandUTF16Units    = 260
 )
 
@@ -823,6 +826,13 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	for _, name := range active {
 		add(name)
 	}
+	configured, err := readNativeConfiguredConnectors(dataRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read configured connector roster: %w", err)
+	}
+	for _, name := range configured {
+		add(name)
+	}
 	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) ||
 		pathExists(filepath.Join(dataRoot, "codex_backup.json")) ||
 		pathExists(filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")) {
@@ -843,50 +853,8 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 // an untrusted profile entry cannot redirect or exhaust the installer.
 func readNativeActiveConnectors(dataRoot string) ([]string, error) {
 	statePath := filepath.Join(dataRoot, "active_connector.json")
-	if err := rejectReparseAncestors(statePath); err != nil {
-		return nil, err
-	}
-	before, err := os.Lstat(statePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("active connector state is not a regular file")
-	}
-	if before.Size() > nativeConnectorStateLimit {
-		return nil, fmt.Errorf("active connector state exceeds %d bytes", nativeConnectorStateLimit)
-	}
-
-	file, err := os.Open(statePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("active connector state changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, nativeConnectorStateLimit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > nativeConnectorStateLimit {
-		return nil, fmt.Errorf("active connector state exceeds %d bytes", nativeConnectorStateLimit)
-	}
-	after, err := os.Lstat(statePath)
-	if err != nil {
-		return nil, err
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(opened, after) {
-		return nil, fmt.Errorf("active connector state changed while reading")
-	}
-	if err := rejectReparseAncestors(statePath); err != nil {
+	data, exists, err := readBoundedNativeStateFile(statePath, nativeConnectorStateLimit)
+	if err != nil || !exists {
 		return nil, err
 	}
 
@@ -904,6 +872,196 @@ func readNativeActiveConnectors(dataRoot string) ([]string, error) {
 		return []string{state.Name}, nil
 	}
 	return nil, nil
+}
+
+// readNativeConfiguredConnectors consumes only the connector names that the
+// runtime treats as active. Native Setup cannot rely exclusively on installer
+// selection, runtime state, or backup markers: users may add connectors later
+// through the CLI, and those auxiliary markers can be absent after recovery.
+// Parse into a YAML node tree so aliases are not expanded and never include a
+// configuration value in an error returned by this classifier.
+func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
+	data, exists, err := readBoundedNativeStateFile(
+		filepath.Join(dataRoot, "config.yaml"),
+		nativeConfigRosterLimit,
+	)
+	if err != nil || !exists {
+		return nil, err
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("parse config roster: invalid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse config roster: invalid YAML document count")
+	}
+	root, err := nativeYAMLMappingRoot(&document)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	add := func(value string) {
+		name := normalizeConnector(strings.TrimSpace(value))
+		if name == "codex" || name == "claudecode" {
+			seen[name] = true
+		}
+	}
+	result := func() []string {
+		connectors := make([]string, 0, len(seen))
+		for name := range seen {
+			connectors = append(connectors, name)
+		}
+		sort.Strings(connectors)
+		return connectors
+	}
+
+	guardrail, err := nativeYAMLMappingChild(root, "guardrail")
+	if err != nil {
+		return nil, err
+	}
+	if guardrail != nil {
+		connectors, err := nativeYAMLMappingChild(guardrail, "connectors")
+		if err != nil {
+			return nil, err
+		}
+		if connectors != nil && len(connectors.Content) > 0 {
+			for index := 0; index+1 < len(connectors.Content); index += 2 {
+				key := connectors.Content[index]
+				if key.Kind != yaml.ScalarNode {
+					return nil, fmt.Errorf("config connector roster contains a non-scalar name")
+				}
+				if strings.TrimSpace(key.Value) == "" {
+					return nil, fmt.Errorf("config connector roster contains an empty name")
+				}
+				add(key.Value)
+			}
+			return result(), nil
+		}
+		connector, err := nativeYAMLScalarChild(guardrail, "connector")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(connector) != "" {
+			add(connector)
+			return result(), nil
+		}
+	}
+	claw, err := nativeYAMLMappingChild(root, "claw")
+	if err != nil {
+		return nil, err
+	}
+	if claw != nil {
+		mode, err := nativeYAMLScalarChild(claw, "mode")
+		if err != nil {
+			return nil, err
+		}
+		add(mode)
+	}
+	return result(), nil
+}
+
+func nativeYAMLMappingRoot(document *yaml.Node) (*yaml.Node, error) {
+	if document == nil || document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil, fmt.Errorf("config roster has an invalid document shape")
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster root is not a mapping")
+	}
+	return root, nil
+}
+
+func nativeYAMLChild(mapping *yaml.Node, name string) (*yaml.Node, error) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster section is not a mapping")
+	}
+	var found *yaml.Node
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		if key.Kind != yaml.ScalarNode || key.Value != name {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("config roster contains a duplicate %s field", name)
+		}
+		found = mapping.Content[index+1]
+	}
+	return found, nil
+}
+
+func nativeYAMLMappingChild(mapping *yaml.Node, name string) (*yaml.Node, error) {
+	child, err := nativeYAMLChild(mapping, name)
+	if err != nil || child == nil {
+		return child, err
+	}
+	if child.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster %s field is not a mapping", name)
+	}
+	return child, nil
+}
+
+func nativeYAMLScalarChild(mapping *yaml.Node, name string) (string, error) {
+	child, err := nativeYAMLChild(mapping, name)
+	if err != nil || child == nil {
+		return "", err
+	}
+	if child.Kind != yaml.ScalarNode {
+		return "", fmt.Errorf("config roster %s field is not a scalar", name)
+	}
+	return child.Value, nil
+}
+
+func readBoundedNativeStateFile(path string, limit int64) ([]byte, bool, error) {
+	if err := rejectReparseAncestors(path); err != nil {
+		return nil, false, err
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("native state path is not a regular file")
+	}
+	if before.Size() > limit {
+		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, false, fmt.Errorf("native state changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(opened, after) {
+		return nil, false, fmt.Errorf("native state changed while reading")
+	}
+	if err := rejectReparseAncestors(path); err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
