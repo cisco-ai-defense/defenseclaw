@@ -130,9 +130,9 @@ _BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
 _TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class WindowsFileSecurity:
-    """Authorization-relevant file security, safe to compare exactly."""
+    """Authorization-relevant file security, safe to compare structurally."""
 
     owner: bytes = field(repr=False)
     dacl: bytes = field(repr=False)
@@ -143,6 +143,32 @@ class WindowsFileSecurity:
     def __post_init__(self) -> None:
         if self.mandatory_label is not None and _normalize_mandatory_label_acl(self.mandatory_label) is None:
             raise WindowsAclError("an empty mandatory-label ACL must be represented as absent")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WindowsFileSecurity):
+            return NotImplemented
+        if (
+            self.owner != other.owner
+            or self.dacl_protected != other.dacl_protected
+            or self.mandatory_label != other.mandatory_label
+            or self.sacl_protected != other.sacl_protected
+        ):
+            return False
+        if self.dacl_protected:
+            return self.dacl == other.dacl
+        return _stable_unprotected_dacl(self.dacl) == _stable_unprotected_dacl(other.dacl)
+
+    def __hash__(self) -> int:
+        dacl = self.dacl if self.dacl_protected else _stable_unprotected_dacl(self.dacl)
+        return hash(
+            (
+                self.owner,
+                dacl,
+                self.dacl_protected,
+                self.mandatory_label,
+                self.sacl_protected,
+            )
+        )
 
     def staging_copy(self) -> WindowsFileSecurity:
         """Protect a staged copy so its ACL cannot be widened by inheritance."""
@@ -202,6 +228,55 @@ class _WindowsApi(Protocol):
 
 class WindowsAclError(OSError):
     """A native security operation was unavailable, unsafe, or failed."""
+
+
+def _stable_unprotected_dacl(dacl: bytes) -> bytes:
+    """Collapse only the kernel's exact mirrored auto-inheritance suffix.
+
+    A legacy unprotected DACL can contain explicit ACEs without a materialized
+    inherited suffix.  Updating that descriptor through the supported Windows
+    file-security APIs stabilizes it by appending the parent's matching ACEs,
+    marked only with ``INHERITED_ACE``.  The stable form preserves the explicit
+    entries (and therefore their future access) while enabling the inheritance
+    the original unprotected descriptor already requested.
+
+    Treat only a complete, byte-identical mirror as the same authorization
+    state.  Different access masks, SIDs, ACE types, propagation flags, order,
+    or additional entries remain observable and fail exact verification.
+    Invalid ACLs are returned unchanged so comparison never hides corruption.
+    """
+
+    if len(dacl) < 8:
+        return dacl
+    revision, reserved, acl_size, ace_count, reserved2 = struct.unpack_from("<BBHHH", dacl, 0)
+    if acl_size != len(dacl) or ace_count == 0 or ace_count % 2:
+        return dacl
+    aces: list[bytes] = []
+    cursor = 8
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            return dacl
+        ace_size = struct.unpack_from("<H", dacl, cursor + 2)[0]
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            return dacl
+        aces.append(dacl[cursor : cursor + ace_size])
+        cursor += ace_size
+    if cursor != acl_size:
+        return dacl
+
+    midpoint = ace_count // 2
+    explicit = aces[:midpoint]
+    inherited = aces[midpoint:]
+    for explicit_ace, inherited_ace in zip(explicit, inherited, strict=True):
+        if explicit_ace[1] & _INHERITED_ACE or not inherited_ace[1] & _INHERITED_ACE:
+            return dacl
+        normalized_inherited = bytearray(inherited_ace)
+        normalized_inherited[1] &= ~_INHERITED_ACE
+        if bytes(normalized_inherited) != explicit_ace:
+            return dacl
+
+    explicit_size = 8 + sum(len(ace) for ace in explicit)
+    return struct.pack("<BBHHH", revision, reserved, explicit_size, midpoint, reserved2) + b"".join(explicit)
 
 
 def _acl_shape(acl: bytes | None) -> str:

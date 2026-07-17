@@ -214,6 +214,81 @@ def test_unprotect_transition_supplies_complete_dacl_with_inherited_markers() ->
     assert windows_acl._dacl_for_set_security(current, requested) == requested.dacl
 
 
+def test_unprotected_security_accepts_only_exact_mirrored_inheritance_suffix() -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+    stabilized = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+            (0, 0x10, 0x001F01FF, OWNER),
+            (0, 0x13, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+
+    assert expected.dacl != stabilized.dacl
+    assert expected == stabilized
+    assert hash(expected) == hash(stabilized)
+
+
+@pytest.mark.parametrize(
+    "inherited_aces",
+    (
+        (
+            (0, 0x10, 0x001F01FE, OWNER),
+            (0, 0x13, 0x00020089, SYSTEM),
+        ),
+        (
+            (0, 0x13, 0x00020089, SYSTEM),
+            (0, 0x10, 0x001F01FF, OWNER),
+        ),
+        (
+            (0, 0x10, 0x001F01FF, OWNER),
+        ),
+    ),
+)
+def test_unprotected_security_rejects_nonidentical_inheritance_suffix(
+    inherited_aces: tuple[tuple[int, int, int, bytes], ...],
+) -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+    drifted = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+            *inherited_aces,
+        ),
+        False,
+    )
+
+    assert expected != drifted
+
+
+def test_protected_security_keeps_mirrored_suffix_byte_exact() -> None:
+    explicit = _dacl((0, 0x00, 0x001F01FF, OWNER))
+    mirrored = _dacl(
+        (0, 0x00, 0x001F01FF, OWNER),
+        (0, 0x10, 0x001F01FF, OWNER),
+    )
+
+    assert WindowsFileSecurity(OWNER, explicit, True) != WindowsFileSecurity(OWNER, mirrored, True)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
 def test_native_staged_file_round_trips_unprotected_security(tmp_path) -> None:
     parent = tmp_path / "inherited"
