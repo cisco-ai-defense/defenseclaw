@@ -289,11 +289,18 @@ class TestReleaseInvariants(unittest.TestCase):
         )
 
         self.assertEqual(baselines, baseline_policy["published_baselines"])
-        self.assertEqual(baselines[0], "0.8.4")
-        self.assertNotIn("0.8.5", baselines)
-        self.assertIn("0.8.3", baselines)
-        self.assertEqual(baselines[-1], "0.4.0")
+        self.assertTrue(baselines)
         self.assertEqual(baselines, sorted(set(baselines), key=_ver_tuple, reverse=True))
+        self.assertEqual(
+            set(baseline_policy["published_baseline_config_versions"]),
+            set(baselines),
+        )
+        for platform_baselines in baseline_policy["platform_published_baselines"].values():
+            self.assertTrue(set(platform_baselines).issubset(baselines))
+            self.assertEqual(
+                platform_baselines,
+                sorted(set(platform_baselines), key=_ver_tuple, reverse=True),
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
