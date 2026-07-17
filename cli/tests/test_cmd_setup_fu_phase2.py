@@ -387,10 +387,18 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         confirms = iter([True, False])  # enable guardrail, advanced options
         emitted: list[str] = []
 
+        def record_echo(message: object | None = None, **_kwargs: object) -> None:
+            if message is None:
+                emitted.append("")
+                return
+            if not isinstance(message, str):
+                raise TypeError(f"unexpected echo message type: {type(message).__name__}")
+            emitted.append(message)
+
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._supports_terminal_redraw", return_value=False), \
                 patch("defenseclaw.commands.cmd_setup.click.getchar", side_effect=lambda: next(keys)), \
-                patch("defenseclaw.commands.cmd_setup.click.echo", side_effect=lambda text="", **_kwargs: emitted.append(text)), \
+                patch("defenseclaw.commands.cmd_setup.click.echo", side_effect=record_echo), \
                 patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=lambda *a, **k: next(confirms)), \
                 patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
                 patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode", return_value=None), \
