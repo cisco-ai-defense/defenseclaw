@@ -6573,18 +6573,19 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
 
-        # Establish one complete coherent render baseline before counting
-        # updates. Under a loaded full-suite run the mount-time snapshot may
-        # have sampled the model just before this test scrolls the panel; only
-        # resetting the connector-row fingerprint then leaves the body/live
-        # fingerprints from that older generation and makes the first explicit
-        # periodic refresh look like idle churn.
-        with app._connector_hook_event_render_cache():
-            app._last_body_signature = app._overview_body_signature()
-            app._overview_connector_rows_signature_cache = (
-                app._overview_connector_rows_signature()
-            )
-            app._overview_live_data_signature_cache = app._overview_live_data_signature()
+        # Establish the baseline through the same deferred production path
+        # that the assertion exercises.  Directly assigning the three
+        # fingerprints is not equivalent: the worker snapshot also advances
+        # its sampled hook-stat generation/cache, so the first real periodic
+        # sample can legitimately replace the mount-time synchronous frame.
+        # Waiting for that generation before installing the counter makes the
+        # measured refresh a true unchanged -> unchanged transition even when
+        # the full suite is running under coverage instrumentation.
+        app._overview_last_scroll_activity_at = 0.0
+        periodic_refresh()
+        await _wait_for_panel_render(app, "overview")
+        await pilot.pause()
+
         body = app.query_one("#body", Static)
         update_calls = 0
         original_update = body.update
@@ -6595,12 +6596,6 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             original_update(*args, **kwargs)
 
         body.update = counted_update  # type: ignore[method-assign]
-        # Flush callbacks queued by the initial mount/render before the idle
-        # repaint measurement begins.  They are not effects of the explicit
-        # periodic refresh exercised below.
-        await pilot.pause()
-        update_calls = 0
-        app._overview_last_scroll_activity_at = 0.0
 
         periodic_refresh()
         await _wait_for_panel_render(app, "overview")
