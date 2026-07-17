@@ -46,6 +46,19 @@ RUNTIME_CONTRACT = {
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
+WHEEL_SECURITY_FLOOR_CONTRACT = {
+    "cryptography": (">=48.0.1,<49", None),
+    "python-dotenv": (">=1.2.2", None),
+    "python-multipart": (">=0.0.31", None),
+    "urllib3": (">=2.7.0", None),
+    "idna": (">=3.15", None),
+    "pydantic-settings": (">=2.14.2", None),
+    "aiohttp": (">=3.14.1,<4", None),
+    "pyjwt": (">=2.13.0", None),
+    "starlette": (">=1.3.1,<1.4", None),
+    "fastapi": (">=0.137.1,<0.138", None),
+}
+
 SKILL_SCANNER_VERSION = "2.0.4"
 SKILL_SCANNER_SHA256 = "8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195430a5d74"
 MCP_SCANNER_VERSION = "4.3.0"
@@ -59,20 +72,26 @@ def _requirements(values: list[str]) -> dict[str, Requirement]:
     return {Requirement(value).name.lower(): Requirement(value) for value in values}
 
 
-def _assert_runtime_contract(requirements: dict[str, Requirement]) -> None:
-    for name, (specifier, marker) in RUNTIME_CONTRACT.items():
+def _assert_requirement_contract(
+    requirements: dict[str, Requirement],
+    contract: dict[str, tuple[str, str | None]],
+) -> None:
+    for name, (specifier, marker) in contract.items():
         requirement = requirements[name]
         assert requirement.specifier == SpecifierSet(specifier)
         assert (str(requirement.marker) if requirement.marker else None) == marker
 
 
-def test_runtime_contract_is_direct_and_synchronized_with_uv_overrides() -> None:
+def test_runtime_and_security_contracts_are_direct_and_synchronized_with_uv_overrides() -> None:
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     direct = _requirements(document["project"]["dependencies"])
     overrides = _requirements(document["tool"]["uv"]["override-dependencies"])
 
-    _assert_runtime_contract(direct)
-    _assert_runtime_contract(overrides)
+    for contract in (RUNTIME_CONTRACT, WHEEL_SECURITY_FLOOR_CONTRACT):
+        _assert_requirement_contract(direct, contract)
+        _assert_requirement_contract(overrides, contract)
+    assert "msgpack" not in direct
+    assert "msgpack" not in overrides
     mcp_scanner = direct["cisco-ai-mcp-scanner"]
     assert str(mcp_scanner.url).endswith(
         f"cisco_ai_mcp_scanner-{MCP_SCANNER_VERSION}-py3-none-any.whl#sha256={MCP_SCANNER_SHA256}"
@@ -99,6 +118,16 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
 
 
+@pytest.mark.parametrize("python_version", ["3.10", "3.11", "3.12", "3.13"])
+def test_wheel_security_floors_are_unmarked_on_every_supported_python_line(
+    python_version: str,
+) -> None:
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    assert Version(f"{python_version}.0") in SpecifierSet(document["project"]["requires-python"])
+    direct = _requirements(document["project"]["dependencies"])
+    _assert_requirement_contract(direct, WHEEL_SECURITY_FLOOR_CONTRACT)
+
+
 def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
     """The unused snapshot plugin cannot coexist with the project's pytest 9 pin."""
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
@@ -112,19 +141,25 @@ def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
     assert "syrupy" not in overrides
 
 
-def test_lock_records_the_same_runtime_contract() -> None:
+def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
     overrides = {entry["name"]: (entry["specifier"], entry.get("marker")) for entry in lock["manifest"]["overrides"]}
-    expected = {
-        "rich": (">=14.2,<15", None),
-        "textual": (">=8.2.8,<9", None),
-        "pygments": (">=2.20,<3", None),
-        "litellm": (">=1.84.0,<1.92.0", None),
-        "importlib-metadata": (">=8.7.1,<8.8", None),
-    }
+    expected = RUNTIME_CONTRACT | WHEEL_SECURITY_FLOOR_CONTRACT
     assert {name: overrides[name] for name in expected} == expected
+    assert "msgpack" not in overrides
+
+    project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
+    locked_requirements = {
+        requirement["name"]: (requirement.get("specifier", ""), requirement.get("marker"))
+        for requirement in project["metadata"]["requires-dist"]
+    }
+    assert {
+        name: locked_requirements[name]
+        for name in WHEEL_SECURITY_FLOOR_CONTRACT
+    } == WHEEL_SECURITY_FLOOR_CONTRACT
 
     locked = {package["name"]: package["version"] for package in lock["package"]}
+    assert "msgpack" not in locked
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
@@ -361,7 +396,8 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
         assert bundled_registry == source_registry
 
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
-    _assert_runtime_contract(wheel_requirements)
+    _assert_requirement_contract(wheel_requirements, RUNTIME_CONTRACT)
+    _assert_requirement_contract(wheel_requirements, WHEEL_SECURITY_FLOOR_CONTRACT)
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
     assert str(wheel_requirements["cisco-ai-skill-scanner"].url).endswith(

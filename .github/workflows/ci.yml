@@ -284,12 +284,12 @@ jobs:
           path: coverage-py.xml
 
   python-wheel-install:
-    name: Python Wheel Install (${{ matrix.python-version }})
+    name: Python Wheel Security Contract (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -303,9 +303,11 @@ jobs:
           whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
           test -n "$whl"
           python3 - "$whl" "$tmp/telemetry-resource-digests.json" <<'PY'
+          import email
           import gzip
           import hashlib
           import json
+          import re
           import sys
           import zipfile
           from pathlib import Path
@@ -332,7 +334,24 @@ jobs:
                   "schemas/telemetry/runtime/compatibility/openinference-v1.json.gz"
               ),
           }
+          security_floors = {
+              "cryptography": ">=48.0.1,<49",
+              "python-dotenv": ">=1.2.2",
+              "python-multipart": ">=0.0.31",
+              "urllib3": ">=2.7.0",
+              "idna": ">=3.15",
+              "pydantic-settings": ">=2.14.2",
+              "aiohttp": ">=3.14.1,<4",
+              "pyjwt": ">=2.13.0",
+              "starlette": ">=1.3.1,<1.4",
+              "fastapi": ">=0.137.1,<0.138",
+          }
           with zipfile.ZipFile(wheel) as archive:
+              metadata_name = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_name))
               packaged = {
                   name for name in archive.namelist()
                   if name.startswith("defenseclaw/_data/telemetry/v8/") and not name.endswith("/")
@@ -347,10 +366,39 @@ jobs:
                       raise SystemExit(f"wheel resource drift: {member}")
                   json.loads(bundled)
                   digests[Path(member).name] = hashlib.sha256(source).hexdigest()
+          requirements = {}
+          for value in metadata.get_all("Requires-Dist", []):
+              match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+              if match is None:
+                  raise SystemExit(f"invalid Requires-Dist value: {value}")
+              name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+              requirements[name] = value[match.end():]
+          for name, expected in security_floors.items():
+              value = requirements.get(name)
+              if value is None:
+                  raise SystemExit(f"wheel metadata omits security floor: {name}")
+              specifier, separator, marker = value.partition(";")
+              if separator:
+                  raise SystemExit(f"wheel security floor is marked: {name}; {marker.strip()}")
+              actual_clauses = {
+                  clause.strip()
+                  for clause in specifier.strip().strip("()").split(",")
+                  if clause.strip()
+              }
+              expected_clauses = {clause.strip() for clause in expected.split(",")}
+              if actual_clauses != expected_clauses:
+                  raise SystemExit(
+                      f"wheel security floor drift for {name}: "
+                      f"expected {expected}, found {specifier.strip()}"
+                  )
           digest_path.write_text(json.dumps(digests), encoding="utf-8")
           PY
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
-          uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
+          # Use pip's foreign-interpreter mode so this is an ordinary pip
+          # resolution without adding packaging tools to the runtime graph.
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" \
+            install --disable-pip-version-check "$whl"
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" check
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
           (
             cd "$tmp"
@@ -377,6 +425,9 @@ jobs:
           PY
           )
           "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          uvx --from pip-audit pip-audit \
+            --vulnerability-service osv \
+            --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   upgrade-smoke:
     name: Upgrade Refusal Contract (unsigned PR candidate)
