@@ -73,6 +73,8 @@ class _FakeApi:
         self.events: list[tuple[str, object]] = []
         self.next_handle = 10
         self.change_after_write = False
+        self.create_security_override: WindowsFileSecurity | None = None
+        self.ignore_set_security = False
         self.private_flags: list[int] = []
 
     def open_path(self, path: str, *, access: int, directory: bool = False) -> int:
@@ -97,13 +99,14 @@ class _FakeApi:
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None:
         self.events.append(("set", security))
-        self.security[handle] = security
+        if not self.ignore_set_security:
+            self.security[handle] = security
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int:
         handle = self.next_handle
         self.next_handle += 1
         self.paths[path] = handle
-        self.security[handle] = security
+        self.security[handle] = self.create_security_override or security
         self.events.append(("create", security))
         return handle
 
@@ -149,6 +152,61 @@ def test_write_new_file_protects_exact_acl_before_first_payload_byte(monkeypatch
     assert create_index < write_index
     assert api.events[create_index][1].dacl_protected is True
     assert api.security[api.paths["candidate.tmp"]] == requested.staging_copy()
+
+
+def test_write_new_file_repairs_create_security_before_first_payload_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    api.create_security_override = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x001F01FF, USERS)),
+        False,
+    )
+    monkeypatch.setattr(windows_acl, "_api", api)
+    requested = WindowsFileSecurity(PRIVATE.owner, PRIVATE.dacl, False)
+    staged = requested.staging_copy()
+
+    windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
+
+    handle = api.paths["candidate.tmp"]
+    set_index = api.events.index(("set", staged))
+    write_index = api.events.index(("write", b"secret-payload"))
+    flush_index = api.events.index(("flush", handle))
+    final_get_index = max(index for index, event in enumerate(api.events) if event == ("get", handle))
+    close_index = api.events.index(("close", handle))
+    assert set_index < write_index < flush_index < final_get_index < close_index
+    assert ("get", handle) in api.events[set_index + 1 : write_index]
+    assert api.security[handle] == staged
+
+
+def test_write_new_file_rejects_unrepaired_create_security_before_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    api.create_security_override = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x001F01FF, USERS)),
+        False,
+    )
+    api.ignore_set_security = True
+    unrelated_security = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x00020089, SYSTEM)),
+        True,
+    )
+    api.paths["unrelated.tmp"] = 9
+    api.security[9] = unrelated_security
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    with pytest.raises(WindowsAclError, match="does not match before write"):
+        windows_acl.write_new_file("candidate.tmp", b"secret-payload", PRIVATE)
+
+    candidate_handle = api.paths["candidate.tmp"]
+    assert not any(event in {"write", "flush", "handle-delete"} for event, _value in api.events)
+    assert api.events[-1] == ("close", candidate_handle)
+    assert api.paths["unrelated.tmp"] == 9
+    assert api.security[9] == unrelated_security
 
 
 def test_staging_copy_converts_only_inherited_ace_markers_to_explicit() -> None:
@@ -479,6 +537,29 @@ def test_native_exclusive_security_mutator_has_exact_repair_and_flush_rights() -
         None,
     )
     api.close_handle.assert_not_called()
+
+
+def test_native_new_file_candidate_denies_sharing_until_verified() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    descriptor = windows_acl._SecurityDescriptor()
+    owner_buffer = ctypes.create_string_buffer(PRIVATE.owner)
+    dacl_buffer = ctypes.create_string_buffer(PRIVATE.dacl)
+    api._absolute_descriptor = Mock(
+        return_value=(descriptor, owner_buffer, dacl_buffer, None),
+    )
+    create_file = Mock(return_value=86)
+    api._create_file = create_file
+
+    assert api.create_file(r"C:\state\candidate.tmp", PRIVATE) == 86
+
+    arguments = create_file.call_args.args
+    assert arguments[0] == r"C:\state\candidate.tmp"
+    assert arguments[2] == 0
+    assert arguments[4:] == (
+        windows_acl._CREATE_NEW,
+        windows_acl._FILE_ATTRIBUTE_NORMAL | windows_acl._FILE_FLAG_WRITE_THROUGH,
+        None,
+    )
 
 
 @pytest.mark.parametrize(

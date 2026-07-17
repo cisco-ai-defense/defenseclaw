@@ -715,7 +715,11 @@ class _CtypesWindowsApi:
         handle = self._create_file(
             path,
             _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _WRITE_DAC | _WRITE_OWNER | _DELETE,
-            _FILE_SHARE_READ,
+            # Keep the empty candidate exclusive until its exact descriptor,
+            # payload, and flush have all been verified. A reader admitted by
+            # a transient CreateFileW descriptor could otherwise retain its
+            # handle after the descriptor is repaired.
+            0,
             ctypes.byref(attributes),
             _CREATE_NEW,
             _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_WRITE_THROUGH,
@@ -1139,9 +1143,20 @@ def write_new_file(path: str, payload: bytes, security: WindowsFileSecurity) -> 
     staged_security = security.staging_copy()
     handle = api.create_file(path, staged_security)
     try:
-        # CreateFileW applied the protected descriptor before this first byte.
-        if api.get_security(handle) != staged_security:
-            raise WindowsAclError("new file security does not match before write")
+        # CreateFileW received the protected descriptor before this first byte.
+        # Some Windows security providers do not return the exact requested
+        # descriptor from CREATE_NEW even though the handle is still bound to
+        # the empty candidate. Reapply that same descriptor through the
+        # claimed handle, then keep the exact comparison as the write gate.
+        actual_security = api.get_security(handle)
+        if actual_security != staged_security:
+            api.set_security(handle, staged_security)
+            actual_security = api.get_security(handle)
+            if actual_security != staged_security:
+                # The exclusive candidate still contains zero payload bytes.
+                # Do not path-delete it here: a later name could identify a
+                # different file after this exact handle is closed.
+                raise WindowsAclError("new file security does not match before write")
         api.write_all(handle, payload)
         api.flush(handle)
         if api.get_security(handle) != staged_security:
