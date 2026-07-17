@@ -224,6 +224,44 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     )
 
 
+def test_runtime_candidate_keeps_generated_policy_outside_goreleaser_checkout() -> None:
+    job = _workflow()["jobs"]["build-runtime-candidate"]
+    steps = job["steps"]
+    rendered = str(job)
+
+    baseline_download = next(
+        step
+        for step in steps
+        if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert baseline_download["with"]["path"] == "${{ runner.temp }}/effective-baselines"
+    baseline_binding = next(
+        step
+        for step in steps
+        if step.get("name") == "Bind effective baseline outside the source checkout"
+    )
+    assert (
+        "UPGRADE_BASELINE_POLICY=$RUNNER_TEMP/effective-baselines/"
+        "effective-upgrade-baselines.json"
+    ) in baseline_binding["run"]
+
+    first_stamp = rendered.index('scripts/stamp-version.sh "$RELEASE_TAG"')
+    extension_build = rendered.index("make extensions", first_stamp)
+    clean_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Restore a clean source checkout before GoReleaser"
+    )
+    clean = rendered.index(clean_step["name"])
+    goreleaser = rendered.index("goreleaser/goreleaser-action@")
+    second_stamp = rendered.index('scripts/stamp-version.sh "$RELEASE_TAG"', first_stamp + 1)
+    assert first_stamp < extension_build < clean < goreleaser < second_stamp
+    clean_run = clean_step["run"]
+    assert "git status --porcelain --untracked-files=all" in clean_run
+    assert 'if [[ -n "$dirty" ]]' in clean_run
+    assert "exit 1" in clean_run
+
+
 def test_unpublished_windows_runtime_requires_sealed_native_refusal() -> None:
     job = _certification_workflow()["jobs"]["windows-unpublished-refusal"]
     rendered = str(job)

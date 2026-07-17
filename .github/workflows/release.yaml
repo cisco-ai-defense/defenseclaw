@@ -520,8 +520,6 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
-    env:
-      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
     permissions:
       contents: read
     outputs:
@@ -540,7 +538,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.release-preflight.outputs.baseline_artifact }}
-          path: .
+          path: ${{ runner.temp }}/effective-baselines
+
+      - name: Bind effective baseline outside the source checkout
+        run: echo "UPGRADE_BASELINE_POLICY=$RUNNER_TEMP/effective-baselines/effective-upgrade-baselines.json" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -588,22 +589,26 @@ jobs:
       - name: Build OpenClaw plugin and populate embed tree
         run: make extensions
 
-      - name: Restore tracked generated files before GoReleaser
+      - name: Restore a clean source checkout before GoReleaser
         run: |
           set -euo pipefail
           git restore --worktree -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
             extensions/defenseclaw/dist \
-            internal/gateway/connector/openclaw_extension/.placeholder
-          git diff --exit-code -- \
-            . \
-            ':(exclude)Makefile' \
-            ':(exclude)pyproject.toml' \
-            ':(exclude)uv.lock' \
-            ':(exclude)cli/defenseclaw/__init__.py' \
-            ':(exclude)extensions/defenseclaw/package.json' \
-            ':(exclude)extensions/defenseclaw/package-lock.json' \
-            ':(exclude)macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj' \
-            ':(exclude)release/source-install-identity.json'
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            internal/gateway/connector/openclaw_extension/.placeholder \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json
+          dirty="$(git status --porcelain --untracked-files=all)"
+          if [[ -n "$dirty" ]]; then
+            echo "::error title=Dirty GoReleaser source checkout::Generated release inputs must stay outside the source checkout."
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
 
       - name: Build gateway archives and SBOMs
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
@@ -620,6 +625,7 @@ jobs:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
+          scripts/stamp-version.sh "$RELEASE_TAG"
           make dist-cli
           make dist-plugin
           make dist-upgrade-manifest
