@@ -741,13 +741,34 @@ func minimalWindowsHookTestEnvironment(overrides ...string) []string {
 		"TMP",
 		"WINDIR",
 	}
-	env := make([]string, 0, len(allowedNames)+len(overrides))
+	// Windows PowerShell 5.1 otherwise shares a user-profile module-analysis
+	// cache across every test process. Fresh broad-suite runners can initialize
+	// that cache concurrently, changing the shell's exit status after the hook
+	// process completes. NUL is the documented per-process way to disable this
+	// nonessential file cache without inheriting the ambient profile.
+	env := make([]string, 0, len(allowedNames)+len(overrides)+1)
+	env = append(env, "PSModuleAnalysisCachePath=NUL")
 	for _, name := range allowedNames {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
 		}
 	}
 	return append(env, overrides...)
+}
+
+func TestMinimalWindowsHookTestEnvironmentDisablesSharedModuleCache(t *testing.T) {
+	t.Setenv("PSModuleAnalysisCachePath", filepath.Join(t.TempDir(), "ambient-module-cache"))
+
+	env := minimalWindowsHookTestEnvironment()
+	var cacheEntries []string
+	for _, entry := range env {
+		if strings.HasPrefix(strings.ToUpper(entry), "PSMODULEANALYSISCACHEPATH=") {
+			cacheEntries = append(cacheEntries, entry)
+		}
+	}
+	if len(cacheEntries) != 1 || cacheEntries[0] != "PSModuleAnalysisCachePath=NUL" {
+		t.Fatalf("module-analysis cache environment = %q, want isolated NUL device", cacheEntries)
+	}
 }
 
 // TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
