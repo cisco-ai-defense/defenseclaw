@@ -2731,25 +2731,26 @@ async def test_logs_mouse_controls_and_structured_row_click_open_detail() -> Non
     async with app.run_test(size=(190, 44)) as pilot:
         await pilot.press("8")
         await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
 
-        await pilot.click("#logs-filter-3")
+        await _click_when_ready(pilot, "#logs-filter-3")
         await pilot.pause()
         assert logs.filter_mode == "errors"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
-        await pilot.click("#logs-toggle-pause")
+        await _click_when_ready(pilot, "#logs-toggle-pause")
         await pilot.pause()
         assert logs.paused is True
 
-        await pilot.click("#logs-source-watchdog")
+        await _click_when_ready(pilot, "#logs-source-watchdog")
         await pilot.pause()
         assert logs.source == "watchdog"
 
-        await pilot.click("#logs-source-verdicts")
+        await _click_when_ready(pilot, "#logs-source-verdicts")
         await pilot.pause()
-        await pilot.click("#logs-filter-0")
+        await _click_when_ready(pilot, "#logs-filter-0")
         await pilot.pause()
-        await pilot.click("#panel-table", offset=(2, 1))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 1))
         await pilot.pause()
 
         screen = app.screen_stack[-1]
