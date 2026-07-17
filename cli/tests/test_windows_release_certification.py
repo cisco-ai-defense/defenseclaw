@@ -239,3 +239,22 @@ def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
         "defenseclaw/_data/telemetry/v8/openinference-v1.json",
     ):
         assert packaged in build
+
+
+def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:
+    acceptance = _function("Invoke-SetupAcceptance")
+
+    for contract in (
+        "installedState.version = '0.8.0'",
+        "FROMVERSION=0.8.0",
+        "config_version: 7",
+        "temporality: delta",
+        "config-v8', 'validate'",
+        "setup-seeded-v8-contract.log",
+        "'0.8.5' -notin @($migrationCursor.applied)",
+        "Get-GatewayIdentity $dataRoot",
+        "Get-WatchdogIdentity $dataRoot",
+        "seeded upgrade-restored gateway",
+        "seeded upgrade-restored watchdog",
+    ):
+        assert contract in acceptance

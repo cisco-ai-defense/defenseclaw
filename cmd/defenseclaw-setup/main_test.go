@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -426,9 +427,12 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	}
 
 	wantEnv := map[string]bool{
-		"DEFENSECLAW_HOME=" + dataRoot: false,
-		"PYTHONUTF8=1":                 false,
-		"PYTHONIOENCODING=utf-8":       false,
+		"DEFENSECLAW_HOME=" + dataRoot:                                                     false,
+		"DEFENSECLAW_CONFIG=" + filepath.Join(dataRoot, "config.yaml"):                     false,
+		"DEFENSECLAW_INSTALL_ROOT=" + root:                                                 false,
+		"DEFENSECLAW_GATEWAY_BIN=" + filepath.Join(root, "bin", "defenseclaw-gateway.exe"): false,
+		"PYTHONUTF8=1":           false,
+		"PYTHONIOENCODING=utf-8": false,
 	}
 	for _, entry := range cmd.Env {
 		if _, ok := wantEnv[entry]; ok {
@@ -438,6 +442,63 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	for entry, found := range wantEnv {
 		if !found {
 			t.Fatalf("packaged migration environment is missing %q", entry)
+		}
+	}
+}
+
+func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "DefenseClaw.staging.fixture")
+	dataRoot := filepath.Join(t.TempDir(), "profile", ".defenseclaw")
+	openClawRoot := filepath.Join(t.TempDir(), "profile", ".openclaw")
+	scratch := filepath.Join(root, "installer", ".migration-preflight")
+	cmd := newPackagedMigrationPreflightCommand(
+		context.Background(),
+		root,
+		dataRoot,
+		openClawRoot,
+		"0.8.0",
+		"0.8.6",
+		scratch,
+	)
+	if got, want := cmd.Path, filepath.Join(root, "runtime", "python", "python.exe"); got != want {
+		t.Fatalf("preflight interpreter = %q, want staged target %q", got, want)
+	}
+	if !slices.Contains(cmd.Args, packagedMigrationPreflightScript) || !slices.Contains(cmd.Args, scratch) {
+		t.Fatalf("preflight arguments do not bind the staged script and scratch root: %v", cmd.Args)
+	}
+	for name, want := range map[string]string{
+		"DEFENSECLAW_HOME":         dataRoot,
+		"DEFENSECLAW_CONFIG":       filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT": root,
+		"DEFENSECLAW_GATEWAY_BIN":  filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	} {
+		if got := envValue(cmd.Env, name); got != want {
+			t.Fatalf("preflight %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestPackagedTargetRuntimeEnvRejectsAmbientRuntimeAndConfigAuthority(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "staged-target")
+	dataRoot := filepath.Join(t.TempDir(), "live-data")
+	env := packagedTargetRuntimeEnv([]string{
+		"DEFENSECLAW_HOME=D:\\untrusted-data",
+		"DEFENSECLAW_CONFIG=D:\\outside\\config.yaml",
+		"DEFENSECLAW_INSTALL_ROOT=D:\\old-runtime",
+		"DEFENSECLAW_GATEWAY_BIN=D:\\old-runtime\\gateway.exe",
+		"SAFE_SETTING=kept",
+	}, root, dataRoot)
+	if got := envValue(env, "SAFE_SETTING"); got != "kept" {
+		t.Fatalf("unrelated environment was not preserved: %q", got)
+	}
+	for name, want := range map[string]string{
+		"DEFENSECLAW_HOME":         dataRoot,
+		"DEFENSECLAW_CONFIG":       filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT": root,
+		"DEFENSECLAW_GATEWAY_BIN":  filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	} {
+		if got := envValue(env, name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
 		}
 	}
 }

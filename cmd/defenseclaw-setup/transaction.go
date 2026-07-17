@@ -5,10 +5,12 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,6 +24,7 @@ const setupTransactionSchemaVersion = 1
 const (
 	setupJournalSchemaVersion = 1
 	setupPhaseIntent          = "intent"
+	setupPhasePublished       = "published"
 	setupPhaseCommitted       = "committed"
 	setupPhaseConverged       = "converged"
 	setupPhaseComplete        = "complete"
@@ -94,9 +97,23 @@ type setupJournal struct {
 
 type setupRecoveryOps struct {
 	Rollback   func(setupTransaction) error
+	Activate   func(setupTransaction) error
 	Converge   func(setupTransaction) error
 	Cleanup    func(setupTransaction) error
 	Transition func(setupTransaction, string, string) error
+}
+
+var errPublishedActivationStateChanged = errors.New("published migration state changed")
+
+type migrationFileSnapshot struct {
+	Exists bool
+	SHA256 string
+}
+
+type publishedMigrationSnapshot struct {
+	Config migrationFileSnapshot
+	Env    migrationFileSnapshot
+	Cursor migrationFileSnapshot
 }
 
 type installRuntimeConvergenceOps struct {
@@ -921,7 +938,11 @@ func beginSetupTransactionAtWithWriter(path string, transaction setupTransaction
 }
 
 func markSetupTransactionCommitted(transaction setupTransaction) error {
-	return transitionSetupJournal(transaction, setupPhaseIntent, setupPhaseCommitted)
+	return transitionSetupJournal(transaction, setupPhasePublished, setupPhaseCommitted)
+}
+
+func markSetupTransactionPublished(transaction setupTransaction) error {
+	return transitionSetupJournal(transaction, setupPhaseIntent, setupPhasePublished)
 }
 
 func markSetupTransactionConverged(transaction setupTransaction) error {
@@ -1118,7 +1139,7 @@ func readSetupJournal(path string) (*setupJournal, error) {
 		return nil, fmt.Errorf("unsupported setup transaction journal schema %d", journal.SchemaVersion)
 	}
 	switch journal.Phase {
-	case setupPhaseIntent, setupPhaseCommitted, setupPhaseConverged, setupPhaseComplete:
+	case setupPhaseIntent, setupPhasePublished, setupPhaseCommitted, setupPhaseConverged, setupPhaseComplete:
 	default:
 		return nil, fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase)
 	}
@@ -1177,6 +1198,7 @@ func recoverPendingSetupTransaction(installRoot, dataRoot string) error {
 	paths := journalPaths(root)
 	return recoverSetupTransactionAt(paths.Journal, expected, setupRecoveryOps{
 		Rollback: rollbackSetupTransaction,
+		Activate: activatePublishedSetupTransaction,
 		Converge: convergeCommittedSetupTransaction,
 		Cleanup:  cleanupCommittedSetupTransaction,
 		Transition: func(transaction setupTransaction, fromPhase, toPhase string) error {
@@ -1209,6 +1231,7 @@ func preparePendingSetupTransactionForUninstall(opts options, installRoot, dataR
 		recoverUninstall: func(journal setupJournal) error {
 			return recoverSetupJournalPhase(journal, setupRecoveryOps{
 				Rollback: rollbackSetupTransaction,
+				Activate: activatePublishedSetupTransaction,
 				Converge: convergeCommittedSetupTransaction,
 				Cleanup:  cleanupCommittedSetupTransaction,
 				Transition: func(transaction setupTransaction, fromPhase, toPhase string) error {
@@ -1253,6 +1276,11 @@ func preparePendingSetupTransactionForUninstallAt(
 		if err := ops.rollbackInstall(journal.Transaction); err != nil {
 			return nil, fmt.Errorf("prepare interrupted install for uninstall handoff: %w", err)
 		}
+	case setupPhasePublished:
+		if err := ops.recoverUninstall(*journal); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	case setupPhaseCommitted, setupPhaseConverged:
 		if err := ops.prepareCommittedInstall(journal.Transaction); err != nil {
 			return nil, fmt.Errorf("prepare committed install for uninstall handoff: %w", err)
@@ -1339,6 +1367,24 @@ func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error 
 			return fmt.Errorf("roll back interrupted setup transaction: %w", err)
 		}
 		return ops.Transition(transaction, setupPhaseIntent, setupPhaseComplete)
+	case setupPhasePublished:
+		if err := ops.Activate(transaction); err != nil {
+			if errors.Is(err, errPublishedActivationStateChanged) {
+				return fmt.Errorf("activate interrupted published setup transaction; target runtime retained for recovery: %w", err)
+			}
+			rollbackErr := ops.Rollback(transaction)
+			if rollbackErr == nil {
+				rollbackErr = ops.Transition(transaction, setupPhasePublished, setupPhaseComplete)
+			}
+			return errors.Join(
+				fmt.Errorf("activate interrupted published setup transaction: %w", err),
+				rollbackErr,
+			)
+		}
+		if err := ops.Transition(transaction, setupPhasePublished, setupPhaseCommitted); err != nil {
+			return fmt.Errorf("commit activated setup transaction: %w", err)
+		}
+		fallthrough
 	case setupPhaseCommitted:
 		if err := ops.Converge(transaction); err != nil {
 			return fmt.Errorf("complete committed setup transaction: %w", err)
@@ -1559,6 +1605,124 @@ func startMissingServices(gatewayPath, dataRoot string, wanted serviceState) (se
 	return startSelectedServices(gatewayPath, dataRoot, missing)
 }
 
+func activatePublishedSetupTransaction(transaction setupTransaction) error {
+	if transaction.Action != "install" {
+		return errors.New("only an install transaction can enter the published phase")
+	}
+	state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
+	if err != nil {
+		return err
+	}
+	if state == nil || state.TransactionID != transaction.ID || state.Version != transaction.TargetVersion ||
+		state.Connector != transaction.TargetConnector || state.Mode != transaction.TargetMode {
+		return errors.New("published install transaction does not own the target install tree")
+	}
+	if err := validateInstall(transaction.InstallRoot, transaction.TargetVersion); err != nil {
+		return err
+	}
+	maintenanceDigest, err := fileSHA256(transaction.MaintenancePath)
+	if err != nil {
+		return fmt.Errorf("validate published maintenance executable: %w", err)
+	}
+	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
+		return errors.New("published maintenance executable does not match the setup transaction")
+	}
+	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
+		return fmt.Errorf("validate published maintenance executable Authenticode policy: %w", err)
+	}
+	if !shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
+		return nil
+	}
+	before, err := snapshotPublishedMigrationState(transaction.DataRoot)
+	if err != nil {
+		return fmt.Errorf("snapshot live migration state before activation: %w", err)
+	}
+	err = runPackagedMigrationsWithEnv(
+		transaction.InstallRoot,
+		transaction.DataRoot,
+		transaction.FromVersion,
+		transaction.TargetVersion,
+		transactionChildEnv(transaction),
+	)
+	if err == nil {
+		return nil
+	}
+	after, snapshotErr := snapshotPublishedMigrationState(transaction.DataRoot)
+	if snapshotErr != nil {
+		return errors.Join(
+			errPublishedActivationStateChanged,
+			fmt.Errorf("packaged migration failed: %w", err),
+			fmt.Errorf("verify live migration state after failure: %w", snapshotErr),
+		)
+	}
+	if before != after {
+		return errors.Join(
+			errPublishedActivationStateChanged,
+			fmt.Errorf("packaged migration failed after changing live migration state: %w", err),
+		)
+	}
+	return err
+}
+
+func snapshotPublishedMigrationState(dataRoot string) (publishedMigrationSnapshot, error) {
+	config, err := snapshotMigrationFile(filepath.Join(dataRoot, "config.yaml"))
+	if err != nil {
+		return publishedMigrationSnapshot{}, fmt.Errorf("snapshot config: %w", err)
+	}
+	env, err := snapshotMigrationFile(filepath.Join(dataRoot, ".env"))
+	if err != nil {
+		return publishedMigrationSnapshot{}, fmt.Errorf("snapshot environment: %w", err)
+	}
+	cursor, err := snapshotMigrationFile(filepath.Join(dataRoot, ".migration_state.json"))
+	if err != nil {
+		return publishedMigrationSnapshot{}, fmt.Errorf("snapshot migration cursor: %w", err)
+	}
+	return publishedMigrationSnapshot{Config: config, Env: env, Cursor: cursor}, nil
+}
+
+func snapshotMigrationFile(path string) (migrationFileSnapshot, error) {
+	if err := rejectReparseAncestors(path); err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return migrationFileSnapshot{}, nil
+	}
+	if err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return migrationFileSnapshot{}, fmt.Errorf("migration state path is not a regular file: %s", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	if !os.SameFile(before, opened) {
+		return migrationFileSnapshot{}, fmt.Errorf("migration state path changed while opening: %s", path)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	if !os.SameFile(opened, after) {
+		return migrationFileSnapshot{}, fmt.Errorf("migration state path changed while reading: %s", path)
+	}
+	if err := rejectReparseAncestors(path); err != nil {
+		return migrationFileSnapshot{}, err
+	}
+	return migrationFileSnapshot{Exists: true, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
+}
+
 func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	if transaction.Action == "uninstall" {
 		// Agent clients cache hook commands for the lifetime of their process.
@@ -1614,40 +1778,15 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 		return nil
 	}
+	if err := activatePublishedSetupTransaction(transaction); err != nil {
+		return err
+	}
 	state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
 	if err != nil {
 		return err
 	}
-	if state == nil || state.TransactionID != transaction.ID || state.Version != transaction.TargetVersion ||
-		state.Connector != transaction.TargetConnector || state.Mode != transaction.TargetMode {
-		return errors.New("committed install transaction does not own the published install tree")
-	}
-	if err := validateInstall(transaction.InstallRoot, transaction.TargetVersion); err != nil {
-		return err
-	}
-	maintenanceDigest, err := fileSHA256(transaction.MaintenancePath)
-	if err != nil {
-		return fmt.Errorf("validate maintenance executable: %w", err)
-	}
-	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
-		return errors.New("maintenance executable does not match the committed installer transaction")
-	}
-	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, state.UnsignedLocalArtifact); err != nil {
-		return fmt.Errorf("validate maintenance executable Authenticode policy: %w", err)
-	}
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
-	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
-		if err := runPackagedMigrationsWithEnv(
-			transaction.InstallRoot,
-			transaction.DataRoot,
-			transaction.FromVersion,
-			transaction.TargetVersion,
-			childEnv,
-		); err != nil {
-			return err
-		}
-	}
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	// Publish the signed no-console launcher outside both InstallRoot and
 	// DataRoot before connector configuration writes absolute commands. The

@@ -2926,15 +2926,103 @@ function Invoke-SetupAcceptance {
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
-        $installedState.version = '0.0.0'
+        # Model the exact native 0.8.0 -> current-candidate observability-v8
+        # boundary with a realistic, valid v7 configuration. The setup must
+        # preflight this configuration with the staged target runtime before
+        # it stops these owned services or publishes either managed tree.
+        $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $configPath = Join-Path $dataRoot 'config.yaml'
+        $yamlDataRoot = $dataRoot.Replace("'", "''")
+        $v7Fixture = @"
+# native Setup 0.8.0 observability migration acceptance fixture
+config_version: 7
+data_dir: '$yamlDataRoot'
+audit_db: '$yamlDataRoot\state\audit.db'
+judge_bodies_db: '$yamlDataRoot\state\judge-bodies.db'
+guardrail:
+  enabled: true
+  retain_judge_bodies: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
+otel:
+  enabled: true
+  protocol: http
+  endpoint: http://127.0.0.1:4318
+  traces:
+    enabled: true
+    sampler: always_on
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    temporality: delta
+  logs:
+    enabled: true
+"@.Replace("`r`n", "`n")
+        [IO.File]::WriteAllText($configPath, $v7Fixture, [Text.UTF8Encoding]::new($false))
+        $seedCursor = @'
+import sys
+from defenseclaw import migration_state
+from defenseclaw.migrations import MIGRATIONS
+state = migration_state.bootstrap(
+    None,
+    from_version="0.8.0",
+    package_version="0.8.0",
+    registry_versions=[version for version, _description, _migration in MIGRATIONS],
+)
+migration_state.save(sys.argv[1], state)
+'@
+        Invoke-Installed $python @('-I', '-c', $seedCursor, $dataRoot) -Timeout 120 `
+            -Log (Join-Path $logs 'setup-seed-080-migration-cursor.log') | Out-Null
+        $v7Hash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+        $gatewayBeforeSeededUpgrade = Get-GatewayIdentity $dataRoot
+        $watchdogBeforeSeededUpgrade = Get-WatchdogIdentity $dataRoot
         Invoke-WindowsSetupStandardUserProcess $setup @(
             '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
-            'FROMVERSION=0.0.0'
+            'FROMVERSION=0.8.0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
         $upgradedState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$upgradedState.version -ne $targetVersion) {
             throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
+        }
+        if ((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ceq $v7Hash) {
+            throw 'seeded setup upgrade did not activate the preflighted v8 candidate'
+        }
+        Invoke-Installed $gateway @(
+            'config-v8', 'validate', '--config', $configPath, '--data-dir', $dataRoot
+        ) -Timeout 120 -Log (Join-Path $logs 'setup-seeded-v8-validation.log') | Out-Null
+        $assertMigratedConfig = @'
+import sys
+import yaml
+document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+assert document.get("config_version") == 8
+observability = document.get("observability") or {}
+assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
+assert (document.get("guardrail") or {}).get("retain_judge_bodies") is True
+assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"codex", "claudecode"}
+'@
+        Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath) -Timeout 120 `
+            -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
+        $migrationCursor = Get-Content -LiteralPath (Join-Path $dataRoot '.migration_state.json') `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ('0.8.5' -notin @($migrationCursor.applied)) {
+            throw 'seeded setup upgrade did not durably record observability-v8 activation'
+        }
+        $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
+        $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot
+        Assert-OwnedManagedProcess $gatewayAfterSeededUpgrade $gateway 'seeded upgrade-restored gateway'
+        Assert-OwnedManagedProcess $watchdogAfterSeededUpgrade $gateway 'seeded upgrade-restored watchdog'
+        if (-not (Test-GatewayIdentityChanged $gatewayBeforeSeededUpgrade $gatewayAfterSeededUpgrade)) {
+            throw 'seeded setup upgrade did not restore the previously running gateway'
+        }
+        if (-not (Test-GatewayIdentityChanged $watchdogBeforeSeededUpgrade $watchdogAfterSeededUpgrade)) {
+            throw 'seeded setup upgrade did not restore the previously running watchdog'
         }
 
         $stateHashBeforeLockedRepair = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash

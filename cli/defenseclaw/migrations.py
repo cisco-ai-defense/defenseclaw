@@ -237,16 +237,12 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
 
-    try:
-        with open(config_path, "rb") as source_file:
-            source = source_file.read()
-    except FileNotFoundError:
+    source = _read_observability_v8_upgrade_source(config_path, data_dir)
+    if source is None:
         # An unconfigured installation has no schema to convert. This is a
         # deliberate no-op rather than a post-install migration failure; a
         # later setup command will create a native v8 document.
         return
-    except OSError:
-        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
 
     environment = _observability_v8_upgrade_environment(environment_path)
     migration = convert_v7_observability_to_v8(
@@ -277,6 +273,90 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
     if activation.activated:
         ctx.changes.append("activated observability configuration schema v8")
+
+
+def preflight_required_migrations(
+    from_version: str,
+    to_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    required_versions: list[str] | tuple[str, ...],
+    scratch_dir: str,
+) -> int:
+    """Exercise required target migrations without mutating live state.
+
+    Native Setup calls this from the staged target interpreter while the old
+    runtime is still live.  Each supported preflight may read a bounded secure
+    snapshot, but candidate files are confined to ``scratch_dir`` and no
+    migration cursor, config, environment, service, or connector state is
+    published.
+    """
+
+    del openclaw_home  # Reserved for future required-migration preflights.
+    if not isinstance(required_versions, (list, tuple)) or any(
+        not isinstance(version, str) for version in required_versions
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_manifest_invalid")
+    scratch = os.path.abspath(os.path.expanduser(scratch_dir))
+    if not os.path.isabs(scratch_dir) or not os.path.isdir(scratch):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+    scratch_metadata = os.lstat(scratch)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(scratch_metadata.st_mode) or (
+        getattr(scratch_metadata, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+
+    selected = [
+        version
+        for version in dict.fromkeys(required_versions)
+        if _ver_tuple(from_version) < _ver_tuple(version) <= _ver_tuple(to_version)
+    ]
+    for version in selected:
+        if version != "0.8.5":
+            raise ObservabilityV8UpgradeMigrationError("required_preflight_unsupported")
+        ctx = MigrationContext(
+            openclaw_home="",
+            data_dir=data_dir,
+            from_version=from_version,
+            to_version=to_version,
+            config_path=os.path.join(data_dir, "config.yaml"),
+            upgrade_handles_local_bundle=True,
+        )
+        _preflight_observability_v8(ctx, scratch)
+    return len(selected)
+
+
+def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None:
+    """Convert and target-validate a read-only snapshot in staged custody."""
+
+    data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    environment_path = os.path.join(data_dir, ".env")
+    try:
+        common = os.path.commonpath((os.path.normcase(data_dir), os.path.normcase(config_path)))
+    except ValueError:
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
+    if common != os.path.normcase(data_dir):
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
+    source = _read_observability_v8_upgrade_source(config_path, data_dir)
+    if source is None:
+        return
+    environment = _observability_v8_upgrade_environment(environment_path)
+    migration = convert_v7_observability_to_v8(
+        source,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    protected = dict(environment)
+    protected.update({edit.name: edit.value for edit in migration.environment_edits})
+    _validate_observability_v8_candidate(
+        migration.candidate,
+        protected,
+        data_dir=data_dir,
+        candidate_directory=scratch_dir,
+    )
 
 
 def _refresh_observability_v8_bundle_for_legacy_upgrader(
@@ -491,6 +571,55 @@ def _observability_v8_upgrade_environment(environment_path: str) -> dict[str, st
     return snapshot
 
 
+def _read_observability_v8_upgrade_source(config_path: str, data_dir: str) -> bytes | None:
+    """Read the canonical config without following a reparse/path escape."""
+
+    del data_dir  # Native Setup separately binds the canonical path below its data root.
+
+    descriptor = -1
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        metadata = os.lstat(config_path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
+    if _observability_v8_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise ObservabilityV8UpgradeMigrationError("source_reparse_forbidden")
+    try:
+        descriptor = os.open(config_path, flags)
+        opened_metadata = os.fstat(descriptor)
+        if _observability_v8_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
+            raise ObservabilityV8UpgradeMigrationError("source_reparse_forbidden")
+        if (metadata.st_dev, metadata.st_ino) != (opened_metadata.st_dev, opened_metadata.st_ino):
+            raise ObservabilityV8UpgradeMigrationError("source_changed")
+        with os.fdopen(descriptor, "rb") as source_file:
+            descriptor = -1
+            source = source_file.read(64 * 1024 * 1024 + 1)
+        if len(source) > 64 * 1024 * 1024:
+            raise ObservabilityV8UpgradeMigrationError("source_read_failed")
+        return source
+    except ObservabilityV8UpgradeMigrationError:
+        raise
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _observability_v8_reparse(metadata: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
 def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
     """Read the exact active dotenv without the legacy parser's silent loss."""
 
@@ -504,11 +633,11 @@ def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, st
     descriptor = -1
     try:
         metadata = os.lstat(environment_path)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        if _observability_v8_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
             raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
         descriptor = os.open(environment_path, flags)
         opened_metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(opened_metadata.st_mode):
+        if _observability_v8_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
             raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
         if (metadata.st_dev, metadata.st_ino) != (opened_metadata.st_dev, opened_metadata.st_ino):
             raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
@@ -551,6 +680,7 @@ def _validate_observability_v8_candidate(
     protected_environment: dict[str, str],
     *,
     data_dir: str,
+    candidate_directory: str | None = None,
 ) -> None:
     """Compile exact candidate bytes with the installed target Go binary.
 
@@ -567,7 +697,7 @@ def _validate_observability_v8_candidate(
         descriptor, candidate_path = tempfile.mkstemp(
             prefix=".observability-v8-candidate-",
             suffix=".yaml",
-            dir=data_dir,
+            dir=candidate_directory or data_dir,
         )
         if os.name != "nt":
             os.fchmod(descriptor, 0o600)
@@ -576,12 +706,20 @@ def _validate_observability_v8_candidate(
             candidate_file.write(candidate)
             candidate_file.flush()
             os.fsync(candidate_file.fileno())
-        inspected = inspect_v8_config(
-            "validate",
-            config_path=candidate_path,
-            data_dir=data_dir,
-            environment_overrides=protected_environment,
-        )
+        try:
+            inspected = inspect_v8_config(
+                "validate",
+                config_path=candidate_path,
+                data_dir=data_dir,
+                environment_overrides=protected_environment,
+            )
+        except Exception as exc:
+            from defenseclaw.config_inspect import ConfigInspectError
+            from defenseclaw.observability.v8_activation import V8CandidateValidationError
+
+            if isinstance(exc, ConfigInspectError) and exc.field_path and exc.reason:
+                raise V8CandidateValidationError(exc.field_path, exc.reason) from None
+            raise
         if inspected.valid is not True or inspected.config_version != 8:
             raise ObservabilityV8UpgradeMigrationError("target_validation_invalid")
     finally:
@@ -2714,6 +2852,7 @@ def run_migrations(
     data_dir: str | None = None,
     *,
     upgrade_handles_local_bundle: bool = False,
+    strict_required: tuple[str, ...] = (),
 ) -> int:
     """Run all applicable migrations up to ``to_version``.
 
@@ -2760,6 +2899,12 @@ def run_migrations(
     so that operators with a non-default ``DEFENSECLAW_HOME`` get
     their migration applied at the right path.
 
+    ``strict_required`` is reserved for authenticated upgrade controllers.
+    A listed migration retains its bounded exception instead of being reduced
+    to a later missing-cursor error, so native Setup can roll back before it
+    commits an unusable target runtime. Ordinary CLI callers preserve the
+    historical continue-and-retry behavior.
+
     Returns the number of migrations actually executed (excludes
     cursor-skipped ones). Failures don't increment the counter and
     don't leave a cursor entry — the next upgrade will retry them.
@@ -2789,6 +2934,9 @@ def run_migrations(
 
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)
+    strict = frozenset(strict_required)
+    if any(not isinstance(version, str) for version in strict_required):
+        raise ValueError("strict required migrations must be version strings")
     same_version_reapply = from_t == to_t
     applied_count = 0
 
@@ -2824,14 +2972,15 @@ def run_migrations(
             package_version=to_version,
             registry_versions=[v for v, _, _ in MIGRATIONS],
         )
-        # Persist the bootstrap snapshot eagerly so a crash mid-run
-        # still leaves the host with a usable cursor for next time.
-        # save() failure is non-fatal: we'll just bootstrap again
-        # next upgrade (still idempotent).
-        try:
-            migration_state.save(data_dir, state)
-        except OSError as exc:
-            ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
+        # Ordinary CLI upgrades persist the bootstrap snapshot eagerly so a
+        # crash mid-run leaves a usable cursor. A strict native-Setup run must
+        # not write even this metadata before its required migration succeeds:
+        # a candidate refusal must leave the old runtime's data byte-identical.
+        if not strict:
+            try:
+                migration_state.save(data_dir, state)
+            except OSError as exc:
+                ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
@@ -2875,8 +3024,10 @@ def run_migrations(
         try:
             fn(ctx)
             ux.ok(f"Migration {ver} applied.", indent="    ")
-        except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
             ux.err(f"migration {ver} failed: {exc}", indent="    ")
+            if ver in strict:
+                raise
             ux.subhead(
                 "upgrade will continue; run 'defenseclaw doctor --fix' afterwards",
                 indent="    ",
@@ -2901,6 +3052,8 @@ def run_migrations(
         try:
             migration_state.save(data_dir, state)
         except OSError as exc:
+            if ver in strict:
+                raise
             ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
 
     return applied_count

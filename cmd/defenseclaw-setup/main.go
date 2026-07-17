@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/mod/semver"
 )
 
@@ -498,6 +499,20 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := checkSetupContext(ctx); err != nil {
 		return tryRestore(err)
 	}
+	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
+		if err := runPackagedMigrationPreflightWithEnv(
+			transaction.StagingPath,
+			transaction.DataRoot,
+			transaction.FromVersion,
+			transaction.TargetVersion,
+			transactionChildEnv(transaction),
+		); err != nil {
+			return tryRestore(fmt.Errorf("preflight packaged migrations with staged target runtime: %w", err))
+		}
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return tryRestore(err)
+	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
 	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
 	if err != nil {
@@ -548,17 +563,32 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := publishMaintenanceCopyForTransaction(transaction, payload.Manifest.Unsigned); err != nil {
 		return tryRestore(err)
 	}
-	// Cancellation is honored through the last rollback-safe boundary. After
-	// the committed phase is durable, setup must converge or leave recovery in
-	// the journal instead of partially undoing externally visible registration.
+	// Record publication before the live migration. Recovery can then resume
+	// with the same target runtime after a crash, while an ordinary migration
+	// refusal still rolls application, maintenance, and service state back.
 	if err := checkSetupContext(ctx); err != nil {
 		return tryRestore(err)
 	}
-	if err := markSetupTransactionCommitted(transaction); err != nil {
+	if err := markSetupTransactionPublished(transaction); err != nil {
 		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
-			return retryRequiredCode, fmt.Errorf("commit setup transaction; recovery is required before retrying: %w", err)
+			return retryRequiredCode, fmt.Errorf("record published setup transaction; recovery is required before retrying: %w", err)
 		}
-		return tryRestore(fmt.Errorf("commit setup transaction: %w", err))
+		return tryRestore(fmt.Errorf("record published setup transaction: %w", err))
+	}
+	tryRestorePublished := func(cause error) (int, error) {
+		return rollbackPublishedSetup(transaction, cause)
+	}
+	if err := activatePublishedSetupTransaction(transaction); err != nil {
+		if errors.Is(err, errPublishedActivationStateChanged) {
+			return retryRequiredCode, fmt.Errorf("activate published setup transaction; target runtime retained for recovery: %w", err)
+		}
+		return tryRestorePublished(err)
+	}
+	// Successful activation may have published config v8. From this point the
+	// target application must remain paired with that config, so a journal
+	// transition failure is recovered by idempotently resuming publication.
+	if err := markSetupTransactionCommitted(transaction); err != nil {
+		return retryRequiredCode, fmt.Errorf("commit activated setup transaction; recovery is required before retrying: %w", err)
 	}
 	if _, err := finishCommittedSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, fmt.Errorf("installation committed but convergence is pending: %w", err)
@@ -577,9 +607,20 @@ type rollbackSetupTransactionFunc func(setupTransaction) error
 type completeSetupTransactionFunc func(setupTransaction, string) error
 
 func rollbackSetupIntent(transaction setupTransaction, cause error) (int, error) {
-	return rollbackSetupIntentWith(
+	return rollbackSetupPhaseWith(
 		transaction,
 		cause,
+		setupPhaseIntent,
+		rollbackSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func rollbackPublishedSetup(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhasePublished,
 		rollbackSetupTransaction,
 		markSetupTransactionComplete,
 	)
@@ -591,9 +632,19 @@ func rollbackSetupIntentWith(
 	rollback rollbackSetupTransactionFunc,
 	complete completeSetupTransactionFunc,
 ) (int, error) {
+	return rollbackSetupPhaseWith(transaction, cause, setupPhaseIntent, rollback, complete)
+}
+
+func rollbackSetupPhaseWith(
+	transaction setupTransaction,
+	cause error,
+	phase string,
+	rollback rollbackSetupTransactionFunc,
+	complete completeSetupTransactionFunc,
+) (int, error) {
 	rollbackErr := rollback(transaction)
 	if rollbackErr == nil {
-		rollbackErr = complete(transaction, setupPhaseIntent)
+		rollbackErr = complete(transaction, phase)
 	}
 	if rollbackErr != nil {
 		return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
@@ -1209,12 +1260,38 @@ with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-count = run_migrations(from_version, to_version, openclaw_home, data_root)
+required = tuple(manifest.get("required_cli_migrations", ()))
+count = run_migrations(
+    from_version,
+    to_version,
+    openclaw_home,
+    data_root,
+    upgrade_handles_local_bundle=True,
+    strict_required=required,
+)
 state = migration_state.load(data_root)
 applied = set(state.applied if state else ())
-missing = [value for value in manifest.get("required_cli_migrations", ()) if value not in applied]
+missing = [value for value in required if value not in applied]
 if missing:
     raise SystemExit("required migrations are missing: " + ", ".join(missing))
+print(count)`
+
+const packagedMigrationPreflightScript = `import json, sys
+from defenseclaw.migrations import preflight_required_migrations
+from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+if manifest.get("release_version") != to_version:
+    raise SystemExit("upgrade manifest version mismatch")
+required = manifest.get("required_cli_migrations", ())
+count = preflight_required_migrations(
+    from_version,
+    to_version,
+    openclaw_home,
+    data_root,
+    required,
+    scratch_dir,
+)
 print(count)`
 
 func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
@@ -1229,13 +1306,70 @@ func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string,
 	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
 	defer cancel()
 	cmd := newPackagedMigrationCommand(ctx, root, dataRoot, openClawRoot, fromVersion, toVersion)
-	cmd.Env = env
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
 	output, err := processutil.CombinedOutputTree(cmd, false)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("run packaged migrations timed out after %s: %w: %s", setupMigrationTimeout, ctxErr, strings.TrimSpace(string(output)))
 	}
 	if err != nil {
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func runPackagedMigrationPreflightWithEnv(
+	root, dataRoot, fromVersion, toVersion string,
+	env []string,
+) (resultErr error) {
+	openClawRoot, err := defaultOpenClawRoot()
+	if err != nil {
+		return err
+	}
+	scratch, err := safeJoin(root, "installer/.migration-preflight")
+	if err != nil {
+		return err
+	}
+	if err := rejectReparseAncestors(filepath.Dir(scratch)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		return fmt.Errorf("create migration preflight root: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, removeTransactionTree(scratch, root))
+	}()
+	if err := safefile.ProtectDirectory(scratch); err != nil {
+		return fmt.Errorf("protect migration preflight root: %w", err)
+	}
+	if err := validatePrivateTransactionPath(scratch, true); err != nil {
+		return fmt.Errorf("validate migration preflight root: %w", err)
+	}
+	if err := rejectReparseTree(scratch); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newPackagedMigrationPreflightCommand(
+		ctx,
+		root,
+		dataRoot,
+		openClawRoot,
+		fromVersion,
+		toVersion,
+		scratch,
+	)
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf(
+			"preflight packaged migrations timed out after %s: %w: %s",
+			setupMigrationTimeout,
+			ctxErr,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("preflight packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -1260,8 +1394,56 @@ func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRo
 		dataRoot,
 		manifest,
 	)
-	cmd.Env = managedChildEnv(dataRoot)
+	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
 	return cmd
+}
+
+func newPackagedMigrationPreflightCommand(
+	ctx context.Context,
+	root, dataRoot, openClawRoot, fromVersion, toVersion, scratch string,
+) *exec.Cmd {
+	python := filepath.Join(root, "runtime", "python", "python.exe")
+	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
+	cmd := newCapturedSetupCommand(
+		ctx,
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationPreflightScript,
+		fromVersion,
+		toVersion,
+		openClawRoot,
+		dataRoot,
+		manifest,
+		scratch,
+	)
+	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
+	return cmd
+}
+
+func packagedTargetRuntimeEnv(input []string, root, dataRoot string) []string {
+	filtered := make([]string, 0, len(input)+4)
+	for _, entry := range input {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(name) {
+		case "DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_INSTALL_ROOT", "DEFENSECLAW_GATEWAY_BIN":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(
+		filtered,
+		"DEFENSECLAW_HOME="+dataRoot,
+		"DEFENSECLAW_CONFIG="+filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT="+root,
+		"DEFENSECLAW_GATEWAY_BIN="+filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	)
 }
 
 func startGateway(gatewayPath, dataRoot string) error {

@@ -66,6 +66,43 @@ observability:
 	}
 }
 
+func TestConfigV8ValidateEmitsValueSafeStructuredFailure(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	secretLikeInvalidValue := "private-invalid-temporality"
+	raw := "config_version: 8\nobservability:\n  metric_policy:\n    temporality: " + secretLikeInvalidValue + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	t.Cleanup(func() {
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+	})
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an invalid candidate")
+	}
+	if strings.Contains(err.Error(), secretLikeInvalidValue) || strings.Contains(output.String(), secretLikeInvalidValue) {
+		t.Fatalf("structured validation failure leaked the rejected value: err=%v output=%s", err, output)
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v", decodeErr)
+	}
+	if failure.WireVersion != configV8WireVersion || failure.Kind != "validation_error" ||
+		failure.ConfigVersion != config.ObservabilityV8ConfigVersion ||
+		failure.Path != "$.observability.metric_policy.temporality" ||
+		!strings.Contains(failure.Reason, "config_schema_invalid") ||
+		!strings.Contains(failure.Reason, "expected one of") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
 func TestCompileConfigV8FileLoadsInstallationDotEnvForValidationOnly(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

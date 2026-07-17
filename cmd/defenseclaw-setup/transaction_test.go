@@ -647,6 +647,7 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 		want  []string
 	}{
 		{phase: setupPhaseIntent, want: []string{"rollback", "intent->complete"}},
+		{phase: setupPhasePublished, want: []string{"activate", "published->committed", "converge", "committed->converged", "cleanup", "converged->complete"}},
 		{phase: setupPhaseCommitted, want: []string{"converge", "committed->converged", "cleanup", "converged->complete"}},
 		{phase: setupPhaseConverged, want: []string{"cleanup", "converged->complete"}},
 		{phase: setupPhaseComplete, want: nil},
@@ -665,6 +666,7 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 				Transaction:   transaction,
 			}, setupRecoveryOps{
 				Rollback: func(setupTransaction) error { return appendStep("rollback") },
+				Activate: func(setupTransaction) error { return appendStep("activate") },
 				Converge: func(setupTransaction) error { return appendStep("converge") },
 				Cleanup:  func(setupTransaction) error { return appendStep("cleanup") },
 				Transition: func(_ setupTransaction, from, to string) error {
@@ -678,6 +680,92 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 				t.Fatalf("steps = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRecoverPublishedMigrationRefusalRollsBackBeforeCompletingJournal(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	refusal := errors.New("candidate field=$.observability.destinations[0].protocol; reason=unsupported value")
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error {
+			calls = append(calls, "activate")
+			return refusal
+		},
+		Rollback: func(setupTransaction) error {
+			calls = append(calls, "rollback-files-maintenance-services")
+			return nil
+		},
+		Converge: func(setupTransaction) error {
+			t.Fatal("published refusal reached committed convergence")
+			return nil
+		},
+		Cleanup: func(setupTransaction) error { return nil },
+		Transition: func(_ setupTransaction, from, to string) error {
+			calls = append(calls, from+"->"+to)
+			return nil
+		},
+	})
+	if !errors.Is(err, refusal) {
+		t.Fatalf("recovery error = %v, want migration refusal", err)
+	}
+	want := "activate,rollback-files-maintenance-services,published->complete"
+	if got := strings.Join(calls, ","); got != want {
+		t.Fatalf("published refusal calls = %q, want %q", got, want)
+	}
+}
+
+func TestRecoverPublishedMigrationRollbackFailureKeepsJournalPublished(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	rollbackFailure := errors.New("injected post-publication rollback failure")
+	transitioned := false
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error { return errors.New("candidate refusal") },
+		Rollback: func(setupTransaction) error { return rollbackFailure },
+		Transition: func(setupTransaction, string, string) error {
+			transitioned = true
+			return nil
+		},
+	})
+	if !errors.Is(err, rollbackFailure) || transitioned {
+		t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+	}
+}
+
+func TestRecoverPublishedMigrationStateChangeRetainsTargetRuntime(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error {
+			calls = append(calls, "activate")
+			return errors.Join(errPublishedActivationStateChanged, errors.New("synthetic post-activation fault"))
+		},
+		Rollback: func(setupTransaction) error {
+			calls = append(calls, "rollback")
+			return nil
+		},
+		Transition: func(_ setupTransaction, from, to string) error {
+			calls = append(calls, from+"->"+to)
+			return nil
+		},
+	})
+	if !errors.Is(err, errPublishedActivationStateChanged) {
+		t.Fatalf("recovery error = %v, want migration-state-change sentinel", err)
+	}
+	if got, want := strings.Join(calls, ","), "activate"; got != want {
+		t.Fatalf("state-change recovery calls = %q, want %q", got, want)
 	}
 }
 
@@ -1019,7 +1107,7 @@ func envValue(env []string, name string) string {
 }
 
 func TestRecoverSetupTransactionAtPersistsCompleteTombstone(t *testing.T) {
-	for _, phase := range []string{setupPhaseIntent, setupPhaseCommitted, setupPhaseConverged} {
+	for _, phase := range []string{setupPhaseIntent, setupPhasePublished, setupPhaseCommitted, setupPhaseConverged} {
 		t.Run(phase, func(t *testing.T) {
 			installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 			transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
@@ -1031,6 +1119,7 @@ func TestRecoverSetupTransactionAtPersistsCompleteTombstone(t *testing.T) {
 			var effects int
 			ops := setupRecoveryOps{
 				Rollback: func(setupTransaction) error { effects++; return nil },
+				Activate: func(setupTransaction) error { effects++; return nil },
 				Converge: func(setupTransaction) error { effects++; return nil },
 				Cleanup:  func(setupTransaction) error { effects++; return nil },
 				Transition: func(want setupTransaction, from, to string) error {
