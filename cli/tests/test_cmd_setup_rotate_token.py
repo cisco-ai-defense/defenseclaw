@@ -184,12 +184,12 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             dotenv = os.path.join(td, ".env")
             with open(dotenv, "wb") as fh:
                 fh.write(b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n")
-            events: list[tuple[str, bytes]] = []
+            events: list[tuple[str, str, bytes]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
+            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
                 self.assertFalse(cleanup)
                 with open(dotenv, "rb") as fh:
-                    events.append((action, fh.read()))
+                    events.append((action, token, fh.read()))
 
             with (
                 mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
@@ -197,9 +197,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             ):
                 result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual([action for action, _ in events], ["stop", "start"])
-            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64, events[0][1])
-            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[1][1])
+            self.assertEqual([action for action, _, _ in events], ["stop", "start"])
+            self.assertEqual([token for _, token, _ in events], ["a" * 64, "b" * 64])
+            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64, events[0][2])
+            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[1][2])
             with open(dotenv, "rb") as fh:
                 body = fh.read()
             self.assertIn(b"KEEP=exact\r\n", body)
@@ -214,11 +215,11 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n"
             with open(dotenv, "wb") as fh:
                 fh.write(original)
-            events: list[tuple[str, bool]] = []
+            events: list[tuple[str, bool, str]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
-                events.append((action, cleanup))
-                if events == [("stop", False)]:
+            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+                events.append((action, cleanup, token))
+                if len(events) == 1:
                     raise click.ClickException("fixture stop timeout")
 
             with (
@@ -229,7 +230,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertEqual(events, [("stop", False), ("start", False)])
+            self.assertEqual(events, [("stop", False, "a" * 64), ("start", False, "a" * 64)])
             with open(dotenv, "rb") as fh:
                 self.assertEqual(fh.read(), original)
             self.assertNotIn("b" * 64, result.output)
@@ -243,9 +244,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             events: list[str] = []
             app.logger.log_action.side_effect = lambda *_args: events.append("audit")
 
-            def record_lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
+            def record_lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
                 self.assertFalse(cleanup)
                 if action == "start":
+                    self.assertEqual(token, "a" * 64)
                     self.assertEqual(os.environ.get("DEFENSECLAW_GATEWAY_TOKEN"), "a" * 64)
                 events.append(action)
 
@@ -279,11 +281,11 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             original = b"# exact snapshot\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n\r\n"
             with open(dotenv, "wb") as fh:
                 fh.write(original)
-            events: list[tuple[str, bool, bytes]] = []
+            events: list[tuple[str, bool, str, bytes]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
+            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
                 with open(dotenv, "rb") as fh:
-                    events.append((action, cleanup, fh.read()))
+                    events.append((action, cleanup, token, fh.read()))
 
             with (
                 mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
@@ -293,12 +295,13 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
             self.assertNotEqual(result.exit_code, 0)
             self.assertEqual(
-                [(action, cleanup) for action, cleanup, _ in events],
+                [(action, cleanup) for action, cleanup, _, _ in events],
                 [("stop", False), ("start", False), ("stop", True), ("start", False)],
             )
-            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[1][2])
-            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[2][2])
-            self.assertEqual(events[3][2], original)
+            self.assertEqual([token for _, _, token, _ in events], ["a" * 64, "b" * 64, "b" * 64, "a" * 64])
+            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[1][3])
+            self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[2][3])
+            self.assertEqual(events[3][3], original)
             with open(dotenv, "rb") as fh:
                 self.assertEqual(fh.read(), original)
             self.assertNotIn("b" * 64, result.output)
@@ -423,7 +426,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             app = _make_rotate_ctx(td, ["codex"])
             events: list[tuple[str, bool]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
+            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
                 events.append((action, cleanup))
                 if events == [("stop", False), ("start", False)]:
                     raise click.ClickException("fixture start failure")
@@ -452,7 +455,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             mock.patch.object(cmd_setup.subprocess, "run", side_effect=timeout) as run,
         ):
             with self.assertRaises(click.ClickException) as raised:
-                cmd_setup._run_rotate_token_lifecycle("D:\\fixture-data", "start")
+                cmd_setup._run_rotate_token_lifecycle("D:\\fixture-data", "start", token="explicit-a-value")
 
         argv = run.call_args.args[0]
         self.assertEqual(argv, ["gateway-fixture", "start", "--rotation-transaction"])
@@ -469,10 +472,58 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
             mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as cleanup_run,
         ):
-            cmd_setup._run_rotate_token_lifecycle("D:\\fixture-data", "stop", cleanup=True)
+            cmd_setup._run_rotate_token_lifecycle(
+                "D:\\fixture-data",
+                "stop",
+                token="explicit-b-value",
+                cleanup=True,
+            )
         self.assertEqual(
             cleanup_run.call_args.args[0],
             ["gateway-fixture", "stop", "--rotation-transaction", "--rotation-cleanup"],
+        )
+
+    def test_lifecycle_child_environment_is_bounded_and_uses_explicit_transaction_inputs(self) -> None:
+        data_dir = "D:\\fixture-data"
+        explicit_token = "explicit-a-value"
+        ambient = {
+            "PATH": "D:\\fixture-bin",
+            "SystemRoot": "D:\\fixture-windows",
+            "UNRELATED_SENTINEL": "sentinel-value",
+            "UNRELATED_SECRET": "private-fixture-value",
+            cmd_setup._GATEWAY_TOKEN_ENV: "ambient-gateway-value",
+            cmd_setup._LEGACY_GATEWAY_TOKEN_ENV: "ambient-legacy-value",
+            cmd_setup._DEFENSECLAW_HOME_ENV: "D:\\ambient-home",
+            cmd_setup._DEFENSECLAW_DATA_DIR_ENV: "D:\\ambient-data",
+        }
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.dict(os.environ, ambient, clear=True),
+            mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
+            mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as run,
+        ):
+            cmd_setup._run_rotate_token_lifecycle(data_dir, "stop", token=explicit_token)
+
+        argv = run.call_args.args[0]
+        child_env = run.call_args.kwargs["env"]
+        self.assertNotIn(explicit_token, " ".join(argv))
+        self.assertEqual(child_env["PATH"], ambient["PATH"])
+        self.assertEqual(child_env["SystemRoot"], ambient["SystemRoot"])
+        self.assertEqual(child_env[cmd_setup._DEFENSECLAW_HOME_ENV], os.path.abspath(data_dir))
+        self.assertEqual(child_env[cmd_setup._DEFENSECLAW_DATA_DIR_ENV], os.path.abspath(data_dir))
+        self.assertEqual(child_env[cmd_setup._GATEWAY_TOKEN_ENV], explicit_token)
+        self.assertNotIn("UNRELATED_SENTINEL", child_env)
+        self.assertNotIn("UNRELATED_SECRET", child_env)
+        self.assertNotIn(cmd_setup._LEGACY_GATEWAY_TOKEN_ENV, child_env)
+        self.assertEqual(
+            set(child_env),
+            {
+                "PATH",
+                "SystemRoot",
+                cmd_setup._DEFENSECLAW_HOME_ENV,
+                cmd_setup._DEFENSECLAW_DATA_DIR_ENV,
+                cmd_setup._GATEWAY_TOKEN_ENV,
+            },
         )
 
     def test_start_b_failure_restores_exact_snapshot_and_ready_a(self) -> None:
@@ -486,7 +537,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 fh.write(original)
             events: list[tuple[str, bool]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, cleanup: bool = False) -> None:
+            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
                 events.append((action, cleanup))
                 if events == [("stop", False), ("start", False)]:
                     raise click.ClickException("fixture failure that must stay redacted")

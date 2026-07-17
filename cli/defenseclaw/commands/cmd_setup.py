@@ -117,6 +117,27 @@ _TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS = 120
 _TOKEN_ROTATION_TRANSACTION_FLAG = "--rotation-transaction"
 _TOKEN_ROTATION_CLEANUP_FLAG = "--rotation-cleanup"
 _GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
+_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+_DEFENSECLAW_HOME_ENV = "DEFENSECLAW_HOME"
+_DEFENSECLAW_DATA_DIR_ENV = "DEFENSECLAW_DATA_DIR"
+_TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+)
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
 
@@ -2421,7 +2442,67 @@ def _restore_rotate_token_environment(snapshot: dict[str, str | None]) -> None:
             os.environ[name] = value
 
 
-def _run_rotate_token_lifecycle(data_dir: str, action: str, *, cleanup: bool = False) -> None:
+def _rotate_token_snapshot_value(snapshot: _RotateTokenDotenvSnapshot, name: str) -> str:
+    """Return one named dotenv value without materializing unrelated entries."""
+
+    expected = name.encode("ascii")
+    value = b""
+    for raw_line in snapshot.body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(b"#"):
+            continue
+        key, separator, candidate = line.partition(b"=")
+        if not separator:
+            continue
+        key = key.strip()
+        matches = key.upper() == expected if os.name == "nt" else key == expected
+        if not matches:
+            continue
+        value = candidate.strip()
+        if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
+            value = value[1:-1]
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise click.ClickException("Gateway dotenv token is not valid UTF-8; refusing token rotation.") from exc
+
+
+def _rotate_token_previous_value(app: AppContext, snapshot: _RotateTokenDotenvSnapshot) -> str:
+    """Resolve A using the daemon's dotenv-before-process precedence."""
+
+    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = _rotate_token_snapshot_value(snapshot, name).strip()
+        if value:
+            return value
+    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return str(getattr(app.cfg.gateway, "token", "") or "").strip()
+
+
+def _rotate_token_child_environment(data_dir: str, token: str) -> dict[str, str]:
+    """Build the bounded lifecycle environment from individually named inputs."""
+
+    child_env: dict[str, str] = {}
+    for name in _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST:
+        value = os.environ.get(name)
+        if value is not None:
+            child_env[name] = value
+    normalized_data_dir = os.path.abspath(data_dir)
+    child_env[_DEFENSECLAW_HOME_ENV] = normalized_data_dir
+    child_env[_DEFENSECLAW_DATA_DIR_ENV] = normalized_data_dir
+    child_env[_GATEWAY_TOKEN_ENV] = token
+    return child_env
+
+
+def _run_rotate_token_lifecycle(
+    data_dir: str,
+    action: str,
+    *,
+    token: str,
+    cleanup: bool = False,
+) -> None:
     """Run one bounded lifecycle phase without placing a token on argv."""
 
     if action not in {"start", "stop"}:
@@ -2434,8 +2515,7 @@ def _run_rotate_token_lifecycle(data_dir: str, action: str, *, cleanup: bool = F
     command = [executable, action, _TOKEN_ROTATION_TRANSACTION_FLAG]
     if cleanup:
         command.append(_TOKEN_ROTATION_CLEANUP_FLAG)
-    child_env = os.environ.copy()
-    child_env["DEFENSECLAW_DATA_DIR"] = os.path.abspath(data_dir)
+    child_env = _rotate_token_child_environment(data_dir, token)
     try:
         result = subprocess.run(
             command,
@@ -2483,13 +2563,14 @@ def _rotate_token_transaction(
     # post-commit loader result for the authenticated stop phase.
     with locked_config_yaml(config_file), locked_file_update(dotenv_path):
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        old_token = _rotate_token_previous_value(app, snapshot)
         pid_file = os.path.join(data_dir, "gateway.pid")
         was_running = _is_pid_alive(pid_file)
         old_stopped = False
         mutation_attempted = False
         try:
             try:
-                _run_rotate_token_lifecycle(data_dir, "stop")
+                _run_rotate_token_lifecycle(data_dir, "stop", token=old_token)
             except BaseException as stop_error:
                 # The bounded child may fail after it has completed shutdown
                 # (for example while verifying listener release). If A's
@@ -2497,7 +2578,7 @@ def _rotate_token_transaction(
                 # before returning without ever committing B.
                 if was_running and not _is_pid_alive(pid_file):
                     try:
-                        _run_rotate_token_lifecycle(data_dir, "start")
+                        _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
                     except BaseException:
                         raise click.ClickException(
                             "Token rotation stopped gateway A before the transaction could commit; "
@@ -2510,7 +2591,7 @@ def _rotate_token_transaction(
             atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
 
-            _run_rotate_token_lifecycle(data_dir, "start")
+            _run_rotate_token_lifecycle(data_dir, "start", token=new_token)
             _log_setup_action(
                 app,
                 ACTION_SETUP_GATEWAY,
@@ -2525,7 +2606,7 @@ def _rotate_token_transaction(
                 try:
                     # Reconcile a READY replacement (including a watchdog-start
                     # failure) while B is still the durable authentication state.
-                    _run_rotate_token_lifecycle(data_dir, "stop", cleanup=True)
+                    _run_rotate_token_lifecycle(data_dir, "stop", token=new_token, cleanup=True)
                 except BaseException:
                     raise click.ClickException(
                         "Token rotation failed and the replacement gateway could not be "
@@ -2543,7 +2624,7 @@ def _rotate_token_transaction(
             _restore_rotate_token_environment(environment_before)
             if was_running:
                 try:
-                    _run_rotate_token_lifecycle(data_dir, "start")
+                    _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
                 except BaseException:
                     raise click.ClickException(
                         "Token rotation failed; the exact prior dotenv snapshot was restored, "
