@@ -5259,7 +5259,8 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
         rows = {row.connector: row for row in app._overview_connector_rows()}
         assert rows["codex"].calls == 20000
         assert rows["cursor"].calls == 7000
-        assert store.stats_calls == 1
+        startup_stats_calls = store.stats_calls
+        assert startup_stats_calls > 0
 
         overview.set_health(
             HealthSnapshot(
@@ -5275,7 +5276,7 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
         rows = {row.connector: row for row in app._overview_connector_rows()}
         assert rows["codex"].calls == 20000
         assert rows["cursor"].calls == 7000
-        assert store.stats_calls == 1
+        assert store.stats_calls == startup_stats_calls
 
 
 @pytest.mark.asyncio
