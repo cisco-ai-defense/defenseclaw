@@ -683,6 +683,30 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 	}
 }
 
+func TestSetupTransactionCommitSourcePhaseKeepsUninstallOnIntent(t *testing.T) {
+	tests := []struct {
+		action string
+		want   string
+	}{
+		{action: "install", want: setupPhasePublished},
+		{action: "uninstall", want: setupPhaseIntent},
+	}
+	for _, test := range tests {
+		t.Run(test.action, func(t *testing.T) {
+			got, err := setupTransactionCommitSourcePhase(test.action)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("commit source phase = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if _, err := setupTransactionCommitSourcePhase("repair"); err == nil {
+		t.Fatal("commit source phase accepted an unsupported action")
+	}
+}
+
 func TestRecoverPublishedMigrationRefusalRollsBackBeforeCompletingJournal(t *testing.T) {
 	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
 	refusal := errors.New("candidate field=$.observability.destinations[0].protocol; reason=unsupported value")

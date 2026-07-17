@@ -938,7 +938,22 @@ func beginSetupTransactionAtWithWriter(path string, transaction setupTransaction
 }
 
 func markSetupTransactionCommitted(transaction setupTransaction) error {
-	return transitionSetupJournal(transaction, setupPhasePublished, setupPhaseCommitted)
+	fromPhase, err := setupTransactionCommitSourcePhase(transaction.Action)
+	if err != nil {
+		return err
+	}
+	return transitionSetupJournal(transaction, fromPhase, setupPhaseCommitted)
+}
+
+func setupTransactionCommitSourcePhase(action string) (string, error) {
+	switch action {
+	case "install":
+		return setupPhasePublished, nil
+	case "uninstall":
+		return setupPhaseIntent, nil
+	default:
+		return "", fmt.Errorf("unsupported setup transaction action %q", action)
+	}
 }
 
 func markSetupTransactionPublished(transaction setupTransaction) error {
