@@ -521,6 +521,21 @@ def test_semantic_diagnostics_do_not_render_resource_credentials() -> None:
     assert captured.value.path == "$.observability.resource.attributes.service.note"
 
 
+def test_malformed_url_resource_userinfo_is_rejected_without_rendering_value() -> None:
+    canary = "review-user:review-secret"
+    value = f"http://{canary}@[malformed-resource-note]"
+    source = {
+        "config_version": 8,
+        "observability": {"resource": {"attributes": {"custom.note": value}}},
+    }
+
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(source)
+    assert canary not in str(captured.value)
+    assert canary not in repr(captured.value)
+    assert captured.value.path == "$.observability.resource.attributes.custom.note"
+
+
 def test_masked_source_hides_inline_secrets_and_static_headers() -> None:
     source = """config_version: 8
 llm:

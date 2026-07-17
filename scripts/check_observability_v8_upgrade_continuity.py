@@ -256,6 +256,16 @@ def _assert_decision(records: list[dict[str, Any]], stamp: str) -> None:
         raise ContinuityError(f"run {stamp} raw/effective hook decision drifted")
 
 
+def _canonical_tempo_trace_id(value: object) -> str | None:
+    """Restore Tempo search IDs to the canonical 16-byte W3C spelling."""
+
+    raw = str(value).strip()
+    if re.fullmatch(r"[0-9a-fA-F]{1,32}", raw) is None:
+        return None
+    canonical = raw.lower().zfill(32)
+    return None if canonical == "0" * 32 else canonical
+
+
 def _tempo_spans(stamps: tuple[str, str], lookback_seconds: int) -> list[dict[str, Any]]:
     stamp_expression = "|".join(re.escape(stamp) for stamp in stamps)
     now = time.time()
@@ -270,9 +280,10 @@ def _tempo_spans(stamps: tuple[str, str], lookback_seconds: int) -> list[dict[st
         timeout_seconds=60,
     )
     trace_ids = {
-        item.get("traceID", "").lower()
+        canonical
         for item in response.get("traces", [])
-        if isinstance(item, dict) and re.fullmatch(r"[0-9a-fA-F]{32}", str(item.get("traceID", "")))
+        if isinstance(item, dict)
+        and (canonical := _canonical_tempo_trace_id(item.get("traceID", ""))) is not None
     }
     return [
         span

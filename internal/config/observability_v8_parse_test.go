@@ -57,7 +57,11 @@ func TestParseCompileObservabilityV8ReferenceConfiguration(t *testing.T) {
 	if err := os.WriteFile(caPath, []byte("test CA fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	raw = bytes.ReplaceAll(raw, []byte("/etc/defenseclaw/otel-ca.pem"), []byte(filepath.ToSlash(caPath)))
+	fixtureCAPath := []byte("/etc/defenseclaw/otel-ca.pem")
+	if count := bytes.Count(raw, fixtureCAPath); count != 1 {
+		t.Fatalf("reference CA path occurrences = %d, want 1", count)
+	}
+	raw = bytes.Replace(raw, fixtureCAPath, []byte(filepath.ToSlash(caPath)), 1)
 	compiled, err := ParseCompileObservabilityV8(
 		"observability.yaml",
 		raw,

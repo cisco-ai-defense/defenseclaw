@@ -2,33 +2,42 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import stat
 import tempfile
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
+import defenseclaw.observability.v8_activation as activation_module
 from defenseclaw import migration_state
 from defenseclaw.migrations import (
     MIGRATIONS,
     MigrationContext,
+    ObservabilityV8PreflightBinding,
     ObservabilityV8UpgradeMigrationError,
     _allocate_observability_v8_bundle_backup,
     _migrate_observability_v8,
     _observability_v8_upgrade_environment,
     _validate_observability_v8_candidate,
+    preflight_observability_v8_upgrade,
     run_migrations,
 )
 from defenseclaw.observability.v8_activation import V8ActivationError
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES
+from defenseclaw.observability.v8_migration import V8MigrationError
 
 
 class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def setUp(self) -> None:
         self.root = tempfile.TemporaryDirectory(prefix="defenseclaw-v8-upgrade-")
-        self.data_dir = os.path.join(self.root.name, "active-data")
+        self.root_path = os.path.realpath(self.root.name)
+        self.data_dir = os.path.join(self.root_path, "active-data")
         os.makedirs(self.data_dir, mode=0o700)
-        self.config_path = os.path.join(self.root.name, "operator-config.yaml")
+        self.config_path = os.path.join(self.root_path, "operator-config.yaml")
         self.environment_path = os.path.join(self.data_dir, ".env")
         with open(self.config_path, "wb") as config_file:
             config_file.write(b"config_version: 7\ndata_dir: /legacy\n")
@@ -63,6 +72,506 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
         convert.assert_not_called()
         activate.assert_not_called()
         self.assertEqual(self.ctx.changes, [])
+
+    def test_read_only_preflight_uses_downloaded_target_and_changes_nothing(self) -> None:
+        config_before = open(self.config_path, "rb").read()
+        environment_before = open(self.environment_path, "rb").read()
+        candidate_paths: list[str] = []
+        migration = SimpleNamespace(
+            candidate=b"config_version: 8\n",
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_dependencies=(
+                SimpleNamespace(name="DOTENV_ONLY", present=True, value_sha256="3" * 64),
+            ),
+            environment_edits=(
+                SimpleNamespace(
+                    name="MOVED_SECRET",
+                    value="protected-value",
+                    value_sha256="4" * 64,
+                    operation="set_if_absent",
+                ),
+            ),
+        )
+
+        def inspect(operation, **kwargs):
+            candidate_paths.append(kwargs["config_path"])
+            self.assertEqual(operation, "validate")
+            self.assertEqual(kwargs["gateway_binary"], "/staged/0.8.5/defenseclaw-gateway")
+            self.assertEqual(kwargs["data_dir"], os.path.abspath(self.data_dir))
+            self.assertEqual(kwargs["environment_overrides"]["DOTENV_ONLY"], "dotenv-value")
+            self.assertEqual(kwargs["environment_overrides"]["MOVED_SECRET"], "protected-value")
+            self.assertEqual(os.path.dirname(kwargs["config_path"]), self.root.name)
+            with open(kwargs["config_path"], "rb") as candidate_file:
+                self.assertEqual(candidate_file.read(), migration.candidate)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(os.stat(kwargs["config_path"]).st_mode), 0o600)
+            return SimpleNamespace(valid=True, config_version=8)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", return_value=migration) as convert,
+            patch("defenseclaw.migrations.inspect_v8_config", side_effect=inspect),
+            patch(
+                "defenseclaw.migrations.preflight_v8_migration_activation"
+            ) as activation_preflight,
+            patch("defenseclaw.migrations.activate_v8_migration") as activate,
+        ):
+            binding = preflight_observability_v8_upgrade(
+                data_dir=self.data_dir,
+                config_path=self.config_path,
+                gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                candidate_directory=self.root.name,
+            )
+
+        convert.assert_called_once()
+        activation_preflight.assert_called_once_with(
+            migration,
+            data_dir=os.path.abspath(self.data_dir),
+            config_path=os.path.abspath(self.config_path),
+            environment_path=os.path.abspath(self.environment_path),
+            tighten_legacy_backup_root=True,
+            environment=ANY,
+        )
+        activate.assert_not_called()
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.source_sha256, "1" * 64)
+        self.assertEqual(binding.candidate_sha256, "2" * 64)
+        self.assertEqual(open(self.config_path, "rb").read(), config_before)
+        self.assertEqual(open(self.environment_path, "rb").read(), environment_before)
+        self.assertEqual(len(candidate_paths), 1)
+        self.assertFalse(os.path.exists(candidate_paths[0]))
+
+    def test_preflight_binding_changes_when_source_changes(self) -> None:
+        def convert(source, _environment, **_kwargs):
+            source_digest = hashlib.sha256(source).hexdigest()
+            return SimpleNamespace(
+                candidate=b"config_version: 8\n",
+                source_sha256=source_digest,
+                candidate_sha256="2" * 64,
+                environment_dependencies=(),
+                environment_edits=(),
+            )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", side_effect=convert),
+            patch(
+                "defenseclaw.migrations.inspect_v8_config",
+                return_value=SimpleNamespace(valid=True, config_version=8),
+            ),
+            patch("defenseclaw.migrations.preflight_v8_migration_activation"),
+        ):
+            before = preflight_observability_v8_upgrade(
+                data_dir=self.data_dir,
+                config_path=self.config_path,
+                gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                candidate_directory=self.root.name,
+            )
+            with open(self.config_path, "ab") as config_file:
+                config_file.write(b"# concurrent operator edit\n")
+            after = preflight_observability_v8_upgrade(
+                data_dir=self.data_dir,
+                config_path=self.config_path,
+                gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                candidate_directory=self.root.name,
+            )
+
+        self.assertNotEqual(before, after)
+
+    def test_read_only_preflight_rejects_unmigratable_source_before_validation(self) -> None:
+        config_before = open(self.config_path, "rb").read()
+        environment_before = open(self.environment_path, "rb").read()
+        failure = V8MigrationError(
+            "invalid_endpoint",
+            "$.otel.destinations[1].endpoint",
+            "correct the endpoint and retry",
+            source_name=self.config_path,
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", side_effect=failure),
+            patch("defenseclaw.migrations.inspect_v8_config") as inspect,
+        ):
+            with self.assertRaises(V8MigrationError) as raised:
+                preflight_observability_v8_upgrade(
+                    data_dir=self.data_dir,
+                    config_path=self.config_path,
+                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                    candidate_directory=self.root.name,
+                )
+
+        self.assertIs(raised.exception, failure)
+        inspect.assert_not_called()
+        self.assertEqual(open(self.config_path, "rb").read(), config_before)
+        self.assertEqual(open(self.environment_path, "rb").read(), environment_before)
+
+    def _real_preflight_binding(self) -> ObservabilityV8PreflightBinding:
+        with open(self.config_path, "wb") as config_file:
+            config_file.write(
+                f"config_version: 7\ndata_dir: {self.data_dir}\n".encode()
+            )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "defenseclaw.migrations.inspect_v8_config",
+                return_value=SimpleNamespace(valid=True, config_version=8),
+            ),
+        ):
+            binding = preflight_observability_v8_upgrade(
+                data_dir=self.data_dir,
+                config_path=self.config_path,
+                gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                candidate_directory=self.root.name,
+            )
+        self.assertIsInstance(binding, ObservabilityV8PreflightBinding)
+        return binding
+
+    def _target_binding_environment(
+        self,
+        binding: ObservabilityV8PreflightBinding | None,
+    ) -> dict[str, str]:
+        return {
+            "DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "a" * 32,
+            "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": json.dumps(
+                None if binding is None else binding.to_payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+
+    def test_preflight_binding_payload_round_trip_and_strict_schema(self) -> None:
+        binding = ObservabilityV8PreflightBinding(
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_file_present=True,
+            environment_file_sha256="3" * 64,
+            environment_dependencies_sha256="4" * 64,
+            environment_edits_sha256="5" * 64,
+        )
+        payload = binding.to_payload()
+        self.assertEqual(ObservabilityV8PreflightBinding.from_payload(payload), binding)
+
+        malformed = (
+            None,
+            {**payload, "extra": "value"},
+            {**payload, "schema_version": 2},
+            {**payload, "environment_file_present": 1},
+            {**payload, "source_sha256": "A" * 64},
+            {**payload, "candidate_sha256": "2" * 63},
+        )
+        for candidate in malformed:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                    ObservabilityV8PreflightBinding.from_payload(candidate)
+                self.assertEqual(raised.exception.code, "preflight_binding_invalid")
+
+    def test_target_accepts_exact_preflight_binding_before_activation(self) -> None:
+        binding = self._real_preflight_binding()
+        activate = Mock(return_value=SimpleNamespace(activated=True, already_v8=False))
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            _migrate_observability_v8(self.ctx)
+
+        activate.assert_called_once()
+        self.assertEqual(self.ctx.changes, ["activated observability configuration schema v8"])
+
+    def test_target_rejects_config_drift_before_activation(self) -> None:
+        binding = self._real_preflight_binding()
+        with open(self.config_path, "ab") as config_file:
+            config_file.write(b"# concurrent edit\n")
+        activate = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+
+        self.assertEqual(raised.exception.code, "preflight_source_changed")
+        activate.assert_not_called()
+
+    def test_target_rejects_dotenv_byte_drift_before_activation(self) -> None:
+        binding = self._real_preflight_binding()
+        with open(self.environment_path, "ab") as environment_file:
+            environment_file.write(b"# comment-only concurrent edit\n")
+        activate = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+
+        self.assertEqual(raised.exception.code, "preflight_source_changed")
+        activate.assert_not_called()
+
+    def test_target_rejects_missing_to_present_config_drift(self) -> None:
+        os.unlink(self.config_path)
+        with patch.dict(os.environ, {}, clear=True):
+            binding = preflight_observability_v8_upgrade(
+                data_dir=self.data_dir,
+                config_path=self.config_path,
+                gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                candidate_directory=self.root.name,
+            )
+        self.assertIsNone(binding)
+        with open(self.config_path, "wb") as config_file:
+            config_file.write(b"config_version: 7\n")
+        activate = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+        self.assertEqual(raised.exception.code, "preflight_source_changed")
+        activate.assert_not_called()
+
+    def test_target_rejects_present_to_missing_config_drift(self) -> None:
+        binding = self._real_preflight_binding()
+        os.unlink(self.config_path)
+        activate = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+        self.assertEqual(raised.exception.code, "preflight_source_changed")
+        activate.assert_not_called()
+
+    def test_target_mutation_token_requires_preflight_binding(self) -> None:
+        activate = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "a" * 32},
+                clear=True,
+            ),
+            patch("defenseclaw.migrations.activate_v8_migration", activate),
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+        self.assertEqual(raised.exception.code, "preflight_binding_missing")
+        activate.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX backup-root mode assertion")
+    def test_target_rejects_config_changed_after_real_locks_before_any_activation_mutation(
+        self,
+    ) -> None:
+        self._assert_post_lock_preflight_binding_refusal("config")
+
+    @unittest.skipIf(os.name == "nt", "POSIX backup-root mode assertion")
+    def test_target_rejects_dotenv_comment_changed_after_real_locks_before_any_activation_mutation(
+        self,
+    ) -> None:
+        self._assert_post_lock_preflight_binding_refusal("dotenv-comment")
+
+    @unittest.skipIf(os.name == "nt", "POSIX backup-root mode assertion")
+    def test_target_rejects_dotenv_created_after_real_locks_before_any_activation_mutation(
+        self,
+    ) -> None:
+        os.unlink(self.environment_path)
+        self._assert_post_lock_preflight_binding_refusal("dotenv-create")
+
+    def _assert_post_lock_preflight_binding_refusal(self, mutation: str) -> None:
+        """Inject an uncooperative source write after both real locks exist."""
+
+        backup_root = os.path.join(self.data_dir, "backups")
+        os.mkdir(backup_root, mode=0o755)
+        os.chmod(backup_root, 0o755)
+        binding = self._real_preflight_binding()
+        config_before = open(self.config_path, "rb").read()
+        environment_before = (
+            open(self.environment_path, "rb").read()
+            if os.path.exists(self.environment_path)
+            else None
+        )
+        config_mutation = b"# post-lock uncooperative config edit\n"
+        environment_mutation = b"# post-lock comment-only dotenv edit\n"
+        created_environment = b"POST_LOCK_CREATED=1\n"
+        real_locks = activation_module._migration_update_locks
+
+        @contextmanager
+        def mutate_after_real_locks(active_config: str, active_environment: str):
+            with real_locks(active_config, active_environment):
+                if mutation == "config":
+                    with open(active_config, "ab") as config_file:
+                        config_file.write(config_mutation)
+                elif mutation == "dotenv-comment":
+                    with open(active_environment, "ab") as environment_file:
+                        environment_file.write(environment_mutation)
+                elif mutation == "dotenv-create":
+                    with open(active_environment, "wb") as environment_file:
+                        environment_file.write(created_environment)
+                else:  # pragma: no cover - helper callers are fixed above.
+                    raise AssertionError(f"unknown post-lock mutation: {mutation}")
+                yield
+
+        validator = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                self._target_binding_environment(binding),
+                clear=True,
+            ),
+            patch.object(
+                activation_module,
+                "_migration_update_locks",
+                mutate_after_real_locks,
+            ),
+            patch(
+                "defenseclaw.migrations._validate_observability_v8_candidate",
+                validator,
+            ),
+            patch.object(
+                activation_module,
+                "_tighten_existing_backup_root",
+                wraps=activation_module._tighten_existing_backup_root,
+            ) as tighten_backup_root,
+            patch.object(
+                activation_module,
+                "_create_recovery_backup",
+                wraps=activation_module._create_recovery_backup,
+            ) as create_backup,
+            patch.object(
+                activation_module,
+                "_atomic_replace",
+                wraps=activation_module._atomic_replace,
+            ) as atomic_replace,
+        ):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                _migrate_observability_v8(self.ctx)
+
+        self.assertEqual(raised.exception.code, "preflight_source_changed")
+        validator.assert_not_called()
+        tighten_backup_root.assert_not_called()
+        create_backup.assert_not_called()
+        atomic_replace.assert_not_called()
+        self.assertEqual(self.ctx.changes, [])
+        self.assertEqual(stat.S_IMODE(os.stat(backup_root).st_mode), 0o755)
+        self.assertEqual(os.listdir(backup_root), [])
+        expected_config = config_before + (config_mutation if mutation == "config" else b"")
+        self.assertEqual(open(self.config_path, "rb").read(), expected_config)
+        if mutation == "dotenv-comment":
+            assert environment_before is not None
+            expected_environment = environment_before + environment_mutation
+        elif mutation == "dotenv-create":
+            expected_environment = created_environment
+        else:
+            expected_environment = environment_before
+        self.assertEqual(open(self.environment_path, "rb").read(), expected_environment)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires platform-specific privileges")
+    def test_preflight_rejects_symlink_config_without_reading_target(self) -> None:
+        target = os.path.join(self.root.name, "sensitive-target")
+        with open(target, "wb") as target_file:
+            target_file.write(b"config_version: 7\nsecret: do-not-read\n")
+        os.unlink(self.config_path)
+        os.symlink(target, self.config_path)
+        convert = Mock()
+        with patch("defenseclaw.migrations.convert_v7_observability_to_v8", convert):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                preflight_observability_v8_upgrade(
+                    data_dir=self.data_dir,
+                    config_path=self.config_path,
+                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                    candidate_directory=self.root.name,
+                )
+        self.assertEqual(raised.exception.code, "source_read_failed")
+        convert.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO creation is POSIX-only")
+    def test_preflight_rejects_nonregular_config_without_blocking(self) -> None:
+        os.unlink(self.config_path)
+        os.mkfifo(self.config_path)
+        convert = Mock()
+        with patch("defenseclaw.migrations.convert_v7_observability_to_v8", convert):
+            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+                preflight_observability_v8_upgrade(
+                    data_dir=self.data_dir,
+                    config_path=self.config_path,
+                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                    candidate_directory=self.root.name,
+                )
+        self.assertEqual(raised.exception.code, "source_read_failed")
+        convert.assert_not_called()
+
+    def test_preflight_large_source_is_bounded_and_reports_source_limit(self) -> None:
+        with open(self.config_path, "wb") as config_file:
+            config_file.write(b"x" * (MAX_SOURCE_BYTES + 2))
+        inspect = Mock()
+        with patch("defenseclaw.migrations.inspect_v8_config", inspect):
+            with self.assertRaises(V8MigrationError) as raised:
+                preflight_observability_v8_upgrade(
+                    data_dir=self.data_dir,
+                    config_path=self.config_path,
+                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                    candidate_directory=self.root.name,
+                )
+        self.assertEqual(raised.exception.code, "source_too_large")
+        inspect.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission-mode assertion")
+    def test_preflight_rejects_world_readable_dotenv_before_any_mutation(self) -> None:
+        secret = "pre-stop-secret-must-not-leak"
+        source = f"""config_version: 7
+data_dir: {self.data_dir}
+audit_sinks:
+  - name: splunk
+    kind: splunk_hec
+    enabled: true
+    splunk_hec:
+      endpoint: https://splunk.example.test/services/collector
+      token: {secret}
+""".encode()
+        with open(self.config_path, "wb") as config_file:
+            config_file.write(source)
+        os.chmod(self.environment_path, 0o644)
+        environment_before = open(self.environment_path, "rb").read()
+        inspect = Mock(return_value=SimpleNamespace(valid=True, config_version=8))
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("defenseclaw.migrations.inspect_v8_config", inspect),
+        ):
+            with self.assertRaises(V8ActivationError) as raised:
+                preflight_observability_v8_upgrade(
+                    data_dir=self.data_dir,
+                    config_path=self.config_path,
+                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+                    candidate_directory=self.root.name,
+                )
+
+        self.assertEqual(raised.exception.code, "environment_permissions_unsafe")
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertEqual(open(self.config_path, "rb").read(), source)
+        self.assertEqual(open(self.environment_path, "rb").read(), environment_before)
+        self.assertEqual(stat.S_IMODE(os.stat(self.environment_path).st_mode), 0o644)
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, "backups")))
 
     def test_convert_validate_activate_order_and_exact_active_paths(self) -> None:
         calls: list[str] = []

@@ -67,6 +67,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _poll_health,
     _poll_installed_health,
     _preflight_check,
+    _preflight_hard_cut_observability_migration,
     _preflight_installed_source_coherence,
     _preflight_staged_target_controller_source,
     _preflight_target_wheel_migrations,
@@ -108,6 +109,7 @@ from defenseclaw.commands.cmd_upgrade import (
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
 from defenseclaw.context import AppContext
+from defenseclaw.migrations import ObservabilityV8PreflightBinding
 from defenseclaw.upgrade_receipt import (
     UPGRADE_RECEIPT_DIRECTORY,
     begin_upgrade_receipt,
@@ -2867,6 +2869,8 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                 {
                     "HOME": home,
                     "DEFENSECLAW_HOME": os.path.join(home, "custom-defenseclaw"),
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "stale-value",
+                    "DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "b" * 32,
                 },
             ),
             patch("shutil.which", return_value="/usr/bin/uv"),
@@ -3222,6 +3226,102 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertIn('kwargs["upgrade_handles_local_bundle"] = True', call[4])
         self.assertNotIn("upgrade_handles_local_bundle=True", call[4])
         self.assertEqual(call[5:9], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
+        child_environment = run_mock.call_args.kwargs["env"]
+        self.assertNotIn(
+            "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING",
+            child_environment,
+        )
+        self.assertNotIn("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", child_environment)
+
+    def test_run_installed_migrations_binds_hard_cut_token_and_preflight(self):
+        binding = ObservabilityV8PreflightBinding(
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_file_present=True,
+            environment_file_sha256="3" * 64,
+            environment_dependencies_sha256="4" * 64,
+            environment_edits_sha256="5" * 64,
+        )
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home,
+                    "DEFENSECLAW_HOME": os.path.join(home, "custom-defenseclaw"),
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "stale-value",
+                },
+                clear=True,
+            ),
+            patch("subprocess.run") as run_mock,
+        ):
+            venv_python = os.path.join(
+                os.environ["DEFENSECLAW_HOME"],
+                ".venv",
+                "bin",
+                "python",
+            )
+            os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+            Path(venv_python).write_text("# python", encoding="utf-8")
+
+            def run_child(args, **_kwargs):
+                Path(args[-1]).write_text(
+                    json.dumps({"count": 1}),
+                    encoding="utf-8",
+                )
+                return Mock(returncode=0)
+
+            run_mock.side_effect = run_child
+            count = _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                os_name="darwin",
+                mutation_token="a" * 32,
+                observability_v8_preflight_binding=binding,
+            )
+
+        self.assertEqual(count, 1)
+        child_environment = run_mock.call_args.kwargs["env"]
+        self.assertEqual(
+            child_environment["DEFENSECLAW_UPGRADE_MUTATION_TOKEN"],
+            "a" * 32,
+        )
+        self.assertEqual(
+            json.loads(
+                child_environment[
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
+                ]
+            ),
+            binding.to_payload(),
+        )
+
+    def test_run_installed_migrations_rejects_unpaired_hard_cut_authority(self):
+        binding = ObservabilityV8PreflightBinding(
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_file_present=False,
+            environment_file_sha256="3" * 64,
+            environment_dependencies_sha256="4" * 64,
+            environment_edits_sha256="5" * 64,
+        )
+        with self.assertRaises(ValueError):
+            _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                observability_v8_preflight_binding=binding,
+            )
+        with self.assertRaises(ValueError):
+            _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                mutation_token="a" * 32,
+            )
 
     def test_bundle_child_uses_custom_home_isolated_python_and_sanitized_environment(self):
         with TemporaryDirectory() as home:
@@ -3734,6 +3834,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         upgrade_manifest=None,
         rollback_plan=None,
         rollback_result: bool = True,
+        preflight_binding_side_effect=None,
         unset_config_data_dir: bool = False,
         controller_home_override: bool = False,
     ):
@@ -3836,6 +3937,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 )
             )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
+            self.read_migration_preflight = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._read_hard_cut_observability_preflight_binding",
+                    return_value=None,
+                    side_effect=preflight_binding_side_effect,
+                )
+            )
             stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade._install_gateway",
@@ -3867,6 +3975,11 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 patch(
                     "defenseclaw.commands.cmd_upgrade._prepare_hard_cut_rollback_plan",
                     return_value=rollback_plan,
+                )
+            )
+            self.require_stable_preflight_source = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
                 )
             )
             self.write_recovery_journal = stack.enter_context(
@@ -4017,6 +4130,37 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(receipt.status, "pending")
         self.assertIn("Upgrade Rolled Back", result.output)
         self.assertNotIn("Upgrade Complete", result.output)
+
+    def test_final_full_preflight_rejects_metadata_drift_before_service_stop(self):
+        manifest = {
+            "minimum_source_version": "9.9.8",
+            "required_bridge_version": "9.9.8",
+            "auto_bridge_from": ["9.9.7"],
+        }
+        plan = Mock(name="rollback-plan")
+        result, receipt, poll_health = self._invoke_upgrade(
+            upgrade_manifest=manifest,
+            rollback_plan=plan,
+            preflight_binding_side_effect=(
+                None,
+                None,
+                OSError("fixture parent metadata changed after rollback capture"),
+            ),
+        )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertEqual(self.read_migration_preflight.call_count, 3)
+        self.write_recovery_journal.assert_called_once()
+        self.remove_recovery_journal.assert_called_once()
+        self.require_stable_preflight_source.assert_called_once()
+        self.run_silent.assert_not_called()
+        self.execute_rollback.assert_not_called()
+        poll_health.assert_not_called()
+        self.assertEqual(receipt.status, "failed")
+        self.assertEqual(receipt.failure_code, "install_failed")
+        self.assertIn("refusing to stop services", result.output)
+        self.assertIn("No service stop, artifact install, or migration", result.output)
+        self.assertNotIn("Stopping Services", result.output)
 
     def test_surviving_timed_out_mutator_defers_rollback_and_retains_authority(self):
         manifest = {
@@ -5149,6 +5293,79 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertEqual(manifest["controller_upgrade_protocol"], 2)
         self.assertEqual(manifest["platform_tested_source_versions"], {"windows": []})
         _require_hard_cut_manifest_contract(manifest, target_version="0.8.5", required=True)
+
+    def test_hard_cut_migration_preflight_failure_is_bounded_and_pre_stop(self):
+        from defenseclaw.observability.v8_migration import V8MigrationError
+
+        runner = CliRunner()
+        failure = V8MigrationError(
+            "invalid_endpoint",
+            "$.otel.destinations[1].endpoint",
+            "correct the endpoint and retry",
+        )
+        with runner.isolation() as (out, _err, _):
+            with (
+                patch(
+                    "defenseclaw.migrations.preflight_observability_v8_upgrade",
+                    side_effect=failure,
+                ),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                _preflight_hard_cut_observability_migration(
+                    data_dir="/active/data",
+                    config_path="/active/config.yaml",
+                    gateway_binary="/staged/defenseclaw-gateway",
+                    candidate_directory="/staged",
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("$.otel.destinations[1].endpoint", output)
+        self.assertIn("No backup, receipt, service stop, artifact install, or migration", output)
+
+    def test_hard_cut_migration_preflight_forwards_authenticated_target(self):
+        with patch("defenseclaw.migrations.preflight_observability_v8_upgrade") as preflight:
+            _preflight_hard_cut_observability_migration(
+                data_dir="/active/data",
+                config_path="/active/config.yaml",
+                gateway_binary="/staged/defenseclaw-gateway",
+                candidate_directory="/staged",
+                announce=False,
+            )
+
+        preflight.assert_called_once_with(
+            data_dir="/active/data",
+            config_path="/active/config.yaml",
+            gateway_binary="/staged/defenseclaw-gateway",
+            candidate_directory="/staged",
+        )
+
+    def test_hard_cut_migration_preflight_rejects_binding_drift_for_yes_path(self):
+        initial = object()
+        changed = object()
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, _):
+            with (
+                patch(
+                    "defenseclaw.migrations.preflight_observability_v8_upgrade",
+                    return_value=changed,
+                ),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                _preflight_hard_cut_observability_migration(
+                    data_dir="/active/data",
+                    config_path="/active/config.yaml",
+                    gateway_binary="/staged/defenseclaw-gateway",
+                    candidate_directory="/staged",
+                    expected_binding=initial,
+                    enforce_binding=True,
+                    announce=False,
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("preflight_source_changed", output)
+        self.assertIn("No backup, receipt, service stop, artifact install, or migration", output)
 
     def test_hard_cut_contract_is_mandatory_even_with_unsafe_override(self):
         runner = CliRunner()

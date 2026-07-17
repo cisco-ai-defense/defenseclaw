@@ -159,6 +159,20 @@
       "since": "0.8.5"
     },
     {
+      "name": "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING",
+      "category": "upgrade_internal",
+      "purpose": "Carries the controller-authenticated observability-v8 preflight snapshot into the fresh target migration child. It binds the validated config and recovery plan to the phase-two mutation process.",
+      "default": "unset",
+      "accepted_values": ["JSON object no larger than 4096 bytes", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Passes the verified binding only to the isolated phase-two migration child"},
+        {"location": "cli/defenseclaw/migrations.py", "description": "Requires and validates the binding before the v7-to-v8 hard-cut mutation"}
+      ],
+      "since": "0.8.5"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_MUTATION_TOKEN",
       "category": "upgrade_internal",
       "purpose": "Carries the authenticated 32-character lowercase-hex upgrade attempt identifier into migration writers so attempt-owned temporary files can be named and cleaned without touching unrelated files.",

@@ -1039,11 +1039,11 @@ def _validate_resource_attributes(attributes: dict[str, str], source_name: str) 
                 "remove filesystem and home-directory paths from resource attributes",
             )
         upper = trimmed.upper()
-        parsed = urlsplit(trimmed)
+        has_inline_credentials = _resource_value_has_inline_credentials(trimmed)
         if (
             ("PRIVATE KEY" in upper and "-----BEGIN" in upper)
             or upper.startswith(("BEARER ", "BASIC "))
-            or parsed.username is not None
+            or has_inline_credentials
         ):
             _semantic_error(
                 source_name,
@@ -1196,6 +1196,12 @@ def _validate_destination(destination: dict[str, Any], path: str, source_name: s
     for signal in selected:
         override = overrides.get(signal, {})
         override_path = override.get("path", "")
+        if override_path:
+            _validate_otlp_signal_path(
+                override_path,
+                f"{path}.signal_overrides.{signal}.path",
+                source_name,
+            )
         if override_path and protocol in ("grpc", "grpc/protobuf"):
             _semantic_error(
                 source_name,
@@ -1215,6 +1221,20 @@ def _validate_destination(destination: dict[str, Any], path: str, source_name: s
             )
         _validate_endpoint(resolved, protocol, safety, signal_path, source_name, otlp=True)
         _validate_otlp_endpoint_tls(resolved, tls_insecure, signal_path, source_name)
+
+
+def _validate_otlp_signal_path(value: str, path: str, source_name: str) -> None:
+    if (
+        not value.startswith("/")
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or any(character in value for character in "?#")
+        or re.search(r"%(?![0-9A-Fa-f]{2})", value)
+    ):
+        _semantic_error(
+            source_name,
+            path,
+            "use an absolute URL path with valid percent-encoding and no query or fragment delimiters",
+        )
 
 
 def _validate_prometheus(listen: str, metrics_path: str, path: str, source_name: str) -> None:
@@ -1410,6 +1430,21 @@ def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False) -> 
     if isinstance(value, list):
         return [_masked_copy(child, parent_key, in_headers) for child in value]
     return copy.deepcopy(value)
+
+
+def _resource_value_has_inline_credentials(value: str) -> bool:
+    try:
+        return urlsplit(value).username is not None
+    except ValueError:
+        # Custom resource values are arbitrary text, so a malformed URL-like
+        # value is not itself an error. Still fail closed when its authority
+        # explicitly contains userinfo, even if a malformed host prevented
+        # urllib from returning a parsed result.
+        prefix, separator, remainder = value.partition("://")
+        if not separator or not prefix:
+            return False
+        authority = re.split(r"[/?#]", remainder, maxsplit=1)[0]
+        return "@" in authority
 
 
 def _masked_url(value: str) -> str:

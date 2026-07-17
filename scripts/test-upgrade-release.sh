@@ -899,12 +899,13 @@ tail_v8_upgrade_log_secret_safe() {
     local file="$1"
     [[ -f "${file}" ]] || return 0
     printf '\n--- %s redacted tail ---\n' "${file}" >&2
-    python3 - "${file}" <<'PY' >&2
+    python3 - "${file}" "${SMOKE_HOME}/fixture-evidence/environment.historical.source" <<'PY' >&2
 from pathlib import Path
+import re
 import sys
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-protected = (
+protected = [
     "upgrade-smoke-flat-protected-value",
     "upgrade-smoke-splunk-protected-value",
     "upgrade-smoke-http-protected-value",
@@ -913,7 +914,15 @@ protected = (
     "Bearer upgrade-smoke-v8-otlp-value",
     "upgrade-smoke-v8-otlp-value",
     "upgrade-smoke-v8-http-value",
-)
+]
+environment_path = Path(sys.argv[2])
+if environment_path.is_file() and not environment_path.is_symlink():
+    for line in environment_path.read_text(encoding="utf-8", errors="strict").splitlines():
+        name, separator, value = line.partition("=")
+        if name == "DEFENSECLAW_GATEWAY_TOKEN" and separator:
+            if re.fullmatch(r"[0-9a-f]{64}", value):
+                protected.append(value)
+            break
 for value in protected:
     text = text.replace(value, "[REDACTED]")
 print("\n".join(text.splitlines()[-80:]))
@@ -985,7 +994,7 @@ write_flags = (
     | getattr(os, "O_NOFOLLOW", 0)
 )
 source_fd = os.open(source, read_flags)
-destination_fd: int | None = None
+destination_fd = None
 created = False
 try:
     opened = os.fstat(source_fd)
@@ -1713,7 +1722,11 @@ run_upgrade() {
     # freshly installed CLI/gateway as new processes and catches real drift.
     if grep -E "Traceback|AttributeError|Required migration\\(s\\).*not recorded" \
         "${SMOKE_HOME}/upgrade.log" >/dev/null; then
-        tail_log "${SMOKE_HOME}/upgrade.log"
+        if target_uses_observability_v8; then
+            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"
+        else
+            tail_log "${SMOKE_HOME}/upgrade.log"
+        fi
         die "upgrade log contains a known regression marker"
     fi
 }
@@ -1782,6 +1795,7 @@ PY
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -1829,8 +1843,13 @@ if destinations["existing-otlp"].get("headers") != {
 if destinations["v8-http-protected"].get("bearer_env") != "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER":
     raise SystemExit("native-v8 HTTP secret reference changed across the upgrade")
 
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if not isinstance(historical_gateway_token, str) or re.fullmatch(r"[0-9a-f]{64}", historical_gateway_token) is None:
+    raise SystemExit("historical fixture gateway token is missing or invalid")
 expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+    "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
 }

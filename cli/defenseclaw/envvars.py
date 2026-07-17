@@ -189,10 +189,17 @@ def _registry_path() -> Path:
         if p.is_file():
             return p
     here = Path(__file__).resolve()
+    # Prefer every possible source-tree registry before considering the
+    # disposable package-data copy.  An editable source checkout has both:
+    # ``cli/defenseclaw/_data`` can be left stale by an interrupted build,
+    # while the repository source remains authoritative.  Checking a bundled
+    # copy inside ``cli`` during the same walk would otherwise shadow the
+    # source registry at the repository root.
     for parent in (here, *here.parents):
         candidate = parent / _REGISTRY_RELATIVE_PATH
         if candidate.is_file():
             return candidate
+    for parent in (here, *here.parents):
         bundled = parent / _BUNDLED_REGISTRY_PATH
         if bundled.is_file():
             return bundled

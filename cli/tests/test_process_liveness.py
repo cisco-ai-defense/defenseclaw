@@ -20,7 +20,8 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from subprocess import CompletedProcess
+from unittest.mock import mock_open, patch
 
 from defenseclaw import process_liveness
 from defenseclaw.process_liveness import pid_alive, pid_file_alive, read_pid_file
@@ -92,11 +93,70 @@ class TestPidFileAlive(unittest.TestCase):
 
 
 class TestProcessIdentity(unittest.TestCase):
+    def test_macos_fallback_preserves_spaces_in_executable_path(self):
+        ps_result = CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="/Users/Test User/.local/bin/defenseclaw-gateway\n",
+            stderr="",
+        )
+        with (
+            patch.object(process_liveness.sys, "platform", "darwin"),
+            patch("builtins.open", mock_open()) as proc_open,
+            patch.object(
+                process_liveness.subprocess,
+                "run",
+                return_value=ps_result,
+            ) as run,
+        ):
+            proc_open.side_effect = FileNotFoundError
+            self.assertEqual(
+                process_liveness.process_argv0_basename(1234),
+                "defenseclaw-gateway",
+            )
+
+        run.assert_called_once_with(
+            ["ps", "-p", "1234", "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+
+    def test_macos_fallback_rejects_near_match_with_spaces(self):
+        ps_result = CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="/Users/Test User/.local/bin/defenseclaw-gateway-helper\n",
+            stderr="",
+        )
+        with (
+            patch.object(process_liveness.sys, "platform", "darwin"),
+            patch("builtins.open", side_effect=FileNotFoundError),
+            patch.object(
+                process_liveness.subprocess,
+                "run",
+                return_value=ps_result,
+            ) as run,
+        ):
+            self.assertFalse(process_liveness.process_is_gateway(1234))
+
+        run.assert_called_once_with(
+            ["ps", "-p", "1234", "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+
     def test_windows_image_path_uses_windows_basename_rules(self):
-        with patch.object(process_liveness.sys, "platform", "win32"), patch.object(
-            process_liveness,
-            "_process_image_path_windows",
-            return_value=r"C:\Program Files\DefenseClaw\DEFENSECLAW-GATEWAY.EXE",
+        with (
+            patch.object(process_liveness.sys, "platform", "win32"),
+            patch.object(
+                process_liveness,
+                "_process_image_path_windows",
+                return_value=r"C:\Program Files\DefenseClaw\DEFENSECLAW-GATEWAY.EXE",
+            ),
         ):
             self.assertEqual(
                 process_liveness.process_argv0_basename(1234),

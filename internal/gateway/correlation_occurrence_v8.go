@@ -366,13 +366,14 @@ func (a *APIServer) correlateHookOccurrence(
 	if err := tx.Commit(); err != nil {
 		return ctx, req, err
 	}
+	correlatedCtx := contextWithHookCorrelation(ctx, req, traceID)
 	if emitErr := a.emitCorrelationRelationshipsV8(
-		ctx, observability.SourceConnector, req.ConnectorName, semantic, logical,
+		correlatedCtx, observability.SourceConnector, req.ConnectorName, semantic, logical,
 		instance.ConnectorInstanceID, relationships,
 	); emitErr != nil {
 		fmt.Fprintln(os.Stderr, "[gateway] committed correlation relationship export incomplete")
 	}
-	return contextWithHookCorrelation(ctx, req, traceID), req, nil
+	return correlatedCtx, req, nil
 }
 
 // finalizeHookCorrelationReceipt authorizes exact replay suppression only

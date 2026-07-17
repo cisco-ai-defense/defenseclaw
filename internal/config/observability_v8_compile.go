@@ -1197,7 +1197,7 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 			if err != nil {
 				return fmt.Errorf("%s: invalid endpoint", endpointPath)
 			}
-			if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+			if strings.ContainsAny(endpoint, "?#") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 				return fmt.Errorf("%s: OTLP endpoints must not contain query or fragment data", endpointPath)
 			}
 			if (parsed.Scheme == "http") != observabilityV8TransportTLSInsecure(transport) {
@@ -1208,13 +1208,29 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 			}
 		}
 		if override, ok := transport.SignalOverrides[signal]; ok && override.Path != "" {
-			if transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf" {
-				return fmt.Errorf("%s.signal_overrides.%s.path: gRPC OTLP service paths are fixed; remove path or use http/protobuf", path, signal)
+			overridePath := fmt.Sprintf("%s.signal_overrides.%s.path", path, signal)
+			if err := validateObservabilityV8SignalPath(override.Path, overridePath); err != nil {
+				return err
 			}
-			if !strings.HasPrefix(override.Path, "/") {
-				return fmt.Errorf("%s.signal_overrides.%s.path: must begin with /", path, signal)
+			if transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf" {
+				return fmt.Errorf("%s: gRPC OTLP service paths are fixed; remove path or use http/protobuf", overridePath)
 			}
 		}
+	}
+	return nil
+}
+
+func validateObservabilityV8SignalPath(value, path string) error {
+	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#") {
+		return fmt.Errorf("%s: must be an absolute URL path without query or fragment delimiters", path)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("%s: must be an absolute URL path without query or fragment delimiters", path)
+		}
+	}
+	if _, err := url.PathUnescape(value); err != nil {
+		return fmt.Errorf("%s: contains invalid percent-encoding", path)
 	}
 	return nil
 }
@@ -1593,8 +1609,14 @@ func observabilityV8LooksSecretResourceValue(value string) bool {
 	if strings.HasPrefix(upper, "BEARER ") || strings.HasPrefix(upper, "BASIC ") {
 		return true
 	}
-	if parsed, err := url.Parse(trimmed); err == nil && parsed.User != nil {
-		return true
+	if parsed, err := url.Parse(trimmed); err == nil {
+		return parsed.User != nil
+	}
+	if prefix, remainder, found := strings.Cut(trimmed, "://"); found && prefix != "" {
+		if end := strings.IndexAny(remainder, "/?#"); end >= 0 {
+			remainder = remainder[:end]
+		}
+		return strings.Contains(remainder, "@")
 	}
 	return false
 }

@@ -44,6 +44,7 @@ type nativeOTLPCorrelationResult struct {
 type nativeOTLPContextualMatch struct {
 	match   audit.CorrelationMatchResult
 	pending *audit.CorrelationPendingLocator
+	cursor  *audit.CorrelationCursor
 }
 
 type nativeOTLPCorrelationValuesContextKey struct{}
@@ -192,6 +193,14 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 			// non-collapsing semantic-event relationship for this occurrence.
 			matched = contextual.match
 		}
+	}
+	// Cursor-derived membership is appended only after exact matching. The
+	// dedicated rule is intentionally narrower than the legacy hook turn-mint
+	// rule: older profiles do not retain cursor identity provenance, so they
+	// keep their existing causal edge without relabeling a minted hook ID as a
+	// connector-native one.
+	if spec.Allows(connector.CorrelationInferenceUniqueActivePromptBoundary) {
+		values = appendNativeOTLPActiveCursorValuesV8(values, contextual.cursor, spec)
 	}
 	if matched.Conflict && reportedSemantic != "" {
 		// The same exact source key with a different fingerprint is a new,
@@ -589,6 +598,14 @@ func resolveNativeOTLPContextualMatchV8(
 	}
 
 	target, operationType, pendingAllowed := nativeOTLPPendingKind(spec, lifecycle)
+	// A reported provider operation ID is exact evidence, not an invitation to
+	// choose the one pending hook operation in the same session. Exact matching
+	// earlier in the coordinator may join the same typed ID; a different or
+	// unknown reported ID must remain standalone rather than being assigned to
+	// an unrelated hook tool/model operation.
+	if pendingAllowed && nativeOTLPHasReportedOperationIdentity(req, target) {
+		pendingAllowed = false
+	}
 	if pendingAllowed {
 		operation, locator, count, err := findNativeOTLPPendingOperationV8(
 			ctx, repo, instance.ConnectorInstanceID, req, spec, target, operationType,
@@ -617,9 +634,14 @@ func resolveNativeOTLPContextualMatchV8(
 		}
 	}
 
-	if (lifecycle != connector.CorrelationLifecycleModelStart &&
+	// A reported native turn is stronger evidence than a session cursor.  It
+	// may represent a later provider turn on the same conversation, so joining
+	// it to the active hook prompt would fabricate causal lineage.  Cursor
+	// inference is only the bounded fallback for a session-only native leaf.
+	if req.TurnID != "" || (lifecycle != connector.CorrelationLifecycleModelStart &&
 		lifecycle != connector.CorrelationLifecycleModelEnd) ||
-		!spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) {
+		(!spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) &&
+			!spec.Allows(connector.CorrelationInferenceUniqueActivePromptBoundary)) {
 		return nativeOTLPContextualMatch{}, nil
 	}
 	cursor, err := nativeOTLPActiveCursorV8(
@@ -649,7 +671,68 @@ func resolveNativeOTLPContextualMatchV8(
 		Method:                 audit.CorrelationMethodDerived,
 		RuleID:                 "unique-active-prompt-boundary", RuleVersion: string(spec.ProfileVersion),
 		RelationshipType: audit.CorrelationCausedBy, CandidateCount: 1,
-	}}, nil
+	}, cursor: &cursor}, nil
+}
+
+func nativeOTLPHasReportedOperationIdentity(
+	req agentHookRequest,
+	target connector.CorrelationTarget,
+) bool {
+	reported := func(candidate connector.CorrelationTarget, value string) bool {
+		return value != "" && req.CorrelationOrigins[candidate] == connector.CorrelationOriginReported
+	}
+	switch target {
+	case connector.CorrelationTargetTool:
+		return reported(connector.CorrelationTargetTool, req.ToolInvocationID)
+	case connector.CorrelationTargetModelRequest:
+		// A response ID is not comparable to a request-ID pending operation;
+		// it nevertheless proves this native model leaf has its own provider
+		// identity and must not be joined through session recency.
+		return reported(connector.CorrelationTargetModelRequest, req.ModelRequestID) ||
+			reported(connector.CorrelationTargetModelResponse, req.ModelResponseID)
+	default:
+		return false
+	}
+}
+
+// appendNativeOTLPActiveCursorValuesV8 preserves the exact session reported by
+// the native leaf and adds only absent membership IDs from a unique durable
+// hook cursor. These values explain causal context across a process restart;
+// their derived origin prevents them from becoming exact identity claims.
+func appendNativeOTLPActiveCursorValuesV8(
+	values []connector.CorrelationValue,
+	cursor *audit.CorrelationCursor,
+	spec connector.CorrelationSpec,
+) []connector.CorrelationValue {
+	if cursor == nil || spec.Connector == "" {
+		return values
+	}
+	hasTarget := make(map[connector.CorrelationTarget]bool, len(values))
+	for _, value := range values {
+		if value.Value != "" {
+			hasTarget[value.Target] = true
+		}
+	}
+	appendValue := func(target connector.CorrelationTarget, value, kind, path string) {
+		if value == "" || hasTarget[target] {
+			return
+		}
+		values = append(values, connector.CorrelationValue{
+			Target: target, Value: value, Path: path,
+			Origin:    connector.CorrelationOriginDerived,
+			Namespace: spec.Connector, IDKind: kind,
+		})
+		hasTarget[target] = true
+	}
+	turnKind := "turn"
+	if cursor.ActivePromptID != "" && cursor.ActivePromptID == cursor.ActiveTurnID {
+		turnKind = "prompt"
+	}
+	appendValue(connector.CorrelationTargetTurn, cursor.ActiveTurnID, turnKind,
+		"correlation_cursor.active_turn_id")
+	appendValue(connector.CorrelationTargetAgent, cursor.AgentID, "agent",
+		"correlation_cursor.agent_id")
+	return values
 }
 
 func nativeOTLPPendingKind(

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -703,6 +705,7 @@ def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
     assert "-I -B -" in posix
     assert "-I -B -c" in posix
     assert "-I -B -c" in windows
+    assert '"${DEFENSECLAW_VENV}"/bin/python -I -B -c' in posix
     assert "${DEFENSECLAW_VENV}/bin/python -c" not in posix
     assert '"${preflight_venv}/bin/python" -c' not in posix
     assert '"${DEFENSECLAW_VENV}/bin/python" -c' not in posix
@@ -717,6 +720,81 @@ def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
     assert "-Arguments @(\"-I\", \"-B\", \"-c\"" in installed_version
     assert "Get-CanonicalVersionOutput -Command $cli" not in installed_version
     assert 'Assert-VersionOutput (Get-Cli) $SourceVersion "source CLI"' not in windows
+
+
+def test_release_owned_embedded_python_remains_apple_python39_compatible() -> None:
+    paths = (
+        ROOT / "scripts" / "upgrade.sh",
+        ROOT / "scripts" / "test-upgrade-release.sh",
+        ROOT / "scripts" / "test-upgrade-protocol-release.sh",
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh",
+        ROOT / "scripts" / "test-fresh-install-release.sh",
+    )
+    programs: list[tuple[Path, str]] = []
+    marker_count = 0
+    for path in paths:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        marker_count += sum("<<'PY'" in line for line in lines)
+        index = 0
+        while index < len(lines):
+            if "<<'PY'" in lines[index]:
+                body_start = index + 1
+                while body_start < len(lines) and lines[body_start - 1].rstrip().endswith("\\"):
+                    body_start += 1
+                end = body_start
+                while end < len(lines) and lines[end] != "PY":
+                    end += 1
+                assert end < len(lines), f"unterminated Python heredoc in {path} after line {index + 1}"
+                programs.append((path, "\n".join(lines[body_start:end]) + "\n"))
+                index = end
+            index += 1
+
+    assert len(programs) == marker_count
+    incompatible_annotations: list[str] = []
+    incompatible_calls: list[str] = []
+    for path, program in programs:
+        # Release recovery/certification can run before the managed venv is
+        # trustworthy, so these programs support stock Apple Python 3.9.
+        tree = ast.parse(program, filename=str(path), feature_version=(3, 9))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "zip"
+                and any(keyword.arg == "strict" for keyword in node.keywords)
+            ):
+                incompatible_calls.append(f"{path.name}: {ast.unparse(node)}")
+            annotations: list[ast.expr | None] = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                annotations.extend(argument.annotation for argument in arguments)
+                annotations.append(node.returns)
+                if node.args.vararg is not None:
+                    annotations.append(node.args.vararg.annotation)
+                if node.args.kwarg is not None:
+                    annotations.append(node.args.kwarg.annotation)
+            elif isinstance(node, ast.AnnAssign):
+                annotations.append(node.annotation)
+
+            for annotation in (value for value in annotations if value is not None):
+                if any(
+                    isinstance(candidate, ast.BinOp) and isinstance(candidate.op, ast.BitOr)
+                    for candidate in ast.walk(annotation)
+                ):
+                    incompatible_annotations.append(f"{path.name}: {ast.unparse(annotation)}")
+
+    assert not incompatible_annotations, (
+        "release-owned embedded Python may execute under bare python3 and must remain compatible "
+        f"with Apple Python 3.9: {incompatible_annotations}"
+    )
+    assert not incompatible_calls, (
+        "release-owned embedded Python cannot use zip(strict=...) before Python 3.10: "
+        f"{incompatible_calls}"
+    )
 
 
 def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() -> None:
@@ -748,6 +826,8 @@ def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() 
     assert 'actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token' in smoke
     assert 'raise SystemExit("gateway token changed across the staged upgrade")' in smoke
     assert "historical_gateway_token," in smoke
+    assert '"DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token' in smoke
+    assert '"${SMOKE_HOME}/fixture-evidence/environment.historical.source"' in smoke
 
 
 def test_posix_same_version_noop_reports_actual_provenance_before_mutation() -> None:
@@ -774,8 +854,16 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
     command = (ROOT / "cli/defenseclaw/commands/cmd_upgrade.py").read_text(encoding="utf-8")
     gate_call = command.index("_require_release_owned_hard_cut_handoff(", command.index("def upgrade("))
     acquisition = command.index("_acquire_bridge_rollback_artifacts(", gate_call)
+    migration_preflight = command.index("_preflight_hard_cut_observability_migration(", acquisition)
     backup = command.index('ux.banner("Creating Backup")', acquisition)
-    assert gate_call < acquisition < backup
+    assert gate_call < acquisition < migration_preflight < backup
+    pre_stop = command[migration_preflight:backup]
+    assert pre_stop.count("_preflight_hard_cut_observability_migration(") == 2
+    assert "gateway_binary=gw_binary_path" in pre_stop
+    assert "config_path=active_config_path" in pre_stop
+    assert "expected_binding=hard_cut_preflight_binding" in pre_stop
+    assert "including --yes" in pre_stop
+    assert "No backup, receipt, service stop, artifact install, or migration was performed" in command
 
     main = (ROOT / "cli/defenseclaw/main.py").read_text(encoding="utf-8")
     journal_guard = main.index("if any(os.path.lexists(path) for path in recovery_journals):")
@@ -807,11 +895,565 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     capture = resolver.index("capture_hard_cut_target_controller_contract")
     bridge_switch = resolver.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture)
     assert capture < bridge_switch
-    assert resolver.count('exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"') == 2
+    target_command = '"${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"'
+    assert resolver.count(target_command) == 2
+    assert f"exec {target_command}" not in resolver
+    assert resolver.count("|| target_status=$?") == 2
+    assert resolver.count('exit "${target_status}"') == 2
     assert resolver.count('export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"') == 2
     assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
     assert "verify_hard_cut_target_controller_handoff" in resolver
     assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver
+
+
+def _posix_resolver_lock_functions() -> str:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    functions_start = resolver.index("acquire_upgrade_lock() {")
+    release_start = resolver.index("release_upgrade_lock() {", functions_start)
+    functions_end = resolver.index(
+        "\n}\n\nregister_bridge_phase1_recovery_journal() {",
+        release_start,
+    ) + len("\n}\n")
+    return resolver[functions_start:functions_end]
+
+
+def _posix_resolver_lock_harness() -> str:
+    return f"""
+set -euo pipefail
+umask 077
+DEFENSECLAW_HOME="$TEST_DATA_HOME"
+UPGRADE_RECOVERY_ROOT="${{DEFENSECLAW_HOME}}/.upgrade-recovery"
+UPGRADE_LOCK_FILE="${{UPGRADE_RECOVERY_ROOT}}/upgrade.lock"
+UPGRADE_ADVISORY_LOCK_FILE="${{UPGRADE_RECOVERY_ROOT}}/upgrade.advisory.lock"
+UPGRADE_LOCK_TOKEN=""
+UPGRADE_ADVISORY_LOCK_HELD=0
+UPGRADE_ADVISORY_LOCK_OPEN=0
+UPGRADE_RECOVERY_ROOT_CREATED=0
+UPGRADE_ADVISORY_LOCK_CREATED=0
+UPGRADE_RECOVERY_ROOT_DEVICE=""
+UPGRADE_RECOVERY_ROOT_INODE=""
+UPGRADE_ADVISORY_LOCK_DEVICE=""
+UPGRADE_ADVISORY_LOCK_INODE=""
+die() {{ printf '%s\n' "$*" >&2; exit 1; }}
+{_posix_resolver_lock_functions()}
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+@pytest.mark.parametrize("preexisting_recovery_root", (False, True))
+def test_posix_resolver_releases_only_the_lock_custody_it_created(
+    tmp_path: Path,
+    preexisting_recovery_root: bool,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    recovery_root = data_home / ".upgrade-recovery"
+    advisory_lock = recovery_root / "upgrade.advisory.lock"
+    if preexisting_recovery_root:
+        recovery_root.mkdir(mode=0o700)
+        advisory_lock.write_bytes(b"")
+        advisory_lock.chmod(0o600)
+
+    script = _posix_resolver_lock_harness() + """
+acquire_upgrade_lock
+test -f "${UPGRADE_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+release_upgrade_lock
+test ! -e "${UPGRADE_LOCK_FILE}"
+"""
+    if preexisting_recovery_root:
+        script += """
+test -d "${UPGRADE_RECOVERY_ROOT}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+"""
+    else:
+        script += 'test ! -e "${UPGRADE_RECOVERY_ROOT}"\n'
+
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_parent_wait_refusal_runs_exit_cleanup(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+target_status=0
+bash -c 'exit 42' || target_status=$?
+exit "${target_status}"
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 42, completed.stdout + completed.stderr
+    assert not (data_home / ".upgrade-recovery").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_never_deletes_replacement_advisory_inode(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+acquire_upgrade_lock
+mv "${UPGRADE_ADVISORY_LOCK_FILE}" "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
+printf 'replacement\n' >"${UPGRADE_ADVISORY_LOCK_FILE}"
+chmod 600 "${UPGRADE_ADVISORY_LOCK_FILE}"
+release_upgrade_lock
+test ! -e "${UPGRADE_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recovery_root = data_home / ".upgrade-recovery"
+    assert (recovery_root / "upgrade.advisory.lock").read_bytes() == b"replacement\n"
+    assert (recovery_root / "upgrade.advisory.lock.displaced").read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_keeps_kernel_lease_until_created_path_is_removed(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "observer-ready"
+    result = tmp_path / "observer-result"
+    script = _posix_resolver_lock_harness() + """
+acquire_upgrade_lock
+(
+    exec 9>&-
+    python3 - "${UPGRADE_ADVISORY_LOCK_FILE}" "$TEST_READY" "$TEST_RESULT" <<'PY'
+import fcntl
+import os
+from pathlib import Path
+import sys
+import time
+
+path, ready, result = sys.argv[1:]
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    Path(ready).write_text("ready\\n", encoding="utf-8")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise SystemExit("timed out waiting for resolver lease")
+            time.sleep(0.005)
+    Path(result).write_text(
+        "present\\n" if os.path.lexists(path) else "absent\\n",
+        encoding="utf-8",
+    )
+finally:
+    os.close(descriptor)
+PY
+) &
+observer_pid=$!
+for _attempt in $(seq 1 500); do
+    [[ -f "$TEST_READY" ]] && break
+    sleep 0.01
+done
+test -f "$TEST_READY"
+release_upgrade_lock
+wait "${observer_pid}"
+    # Cleanup and this fresh descriptor can acquire immediately after the
+    # parent releases FD 9 in either order. If this observer wins first it sees
+    # the name; otherwise it observes an already-unlinked inode. In both cases
+    # cleanup must finish by reclaiming the resolver-created inode/root.
+    case "$(cat "$TEST_RESULT")" in
+        present|absent) ;;
+        *) exit 1 ;;
+    esac
+    test ! -e "${UPGRADE_RECOVERY_ROOT}"
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_RESULT": str(result),
+        }
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_retry_waits_for_surviving_mutation_child(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "parent-ready"
+    child_pid_path = tmp_path / "child-pid"
+    parent_script = _posix_resolver_lock_harness() + """
+acquire_upgrade_lock
+bash -c 'sleep 4' &
+child_pid=$!
+printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
+printf 'ready\n' >"$TEST_READY"
+wait "${child_pid}"
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_CHILD_PID": str(child_pid_path),
+        }
+    )
+    parent = subprocess.Popen(
+        ["bash", "-c", parent_script],
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+    parent.kill()
+    assert parent.wait(timeout=5) != 0
+    os.kill(child_pid, 0)
+
+    retry_script = _posix_resolver_lock_harness() + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+"""
+    refused = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "surviving mutation child" in refused.stderr
+
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("mutation child did not exit")
+
+    completed = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_exit_cleanup_keeps_surviving_child_advisory_lease(tmp_path: Path) -> None:
+    """Exit cleanup must not unlink an inode still locked by an inherited FD."""
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "parent-ready"
+    child_pid_path = tmp_path / "child-pid"
+    parent_script = _posix_resolver_lock_harness() + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+bash -c 'sleep 4' &
+child_pid=$!
+printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
+printf 'ready\n' >"$TEST_READY"
+exit 0
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_CHILD_PID": str(child_pid_path),
+        }
+    )
+    parent = subprocess.Popen(
+        ["bash", "-c", parent_script],
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert parent.wait(timeout=5) == 0
+    os.kill(child_pid, 0)
+
+    advisory_lock = data_home / ".upgrade-recovery" / "upgrade.advisory.lock"
+    assert advisory_lock.is_file()
+    retry_script = _posix_resolver_lock_harness() + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+"""
+    refused = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "surviving mutation child" in refused.stderr
+    assert advisory_lock.is_file()
+
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("mutation child did not exit")
+
+    completed = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc process-start identity")
+def test_posix_resolver_reclaims_reused_pid_schema_v2_claim(tmp_path: Path) -> None:
+    """A reused PID must not permanently block a stale diagnostic claim."""
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "schema_version": 2,
+            "pid": int(pid),
+            "process_start": "linux:0",
+            "token": "a" * 64,
+        },
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+python3 - "${UPGRADE_LOCK_FILE}" <<'PY'
+import json
+import sys
+
+claim = json.loads(open(sys.argv[1], encoding="utf-8").read())
+assert claim["schema_version"] == 2
+assert claim["process_start"] != "linux:0"
+PY
+release_upgrade_lock
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_schema1_live_pid_claim_fails_closed(tmp_path: Path) -> None:
+    """Platforms without a precise start identity never reclaim a live PID."""
+
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {"schema_version": 1, "pid": int(pid), "token": "a" * 64},
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert (data_home / ".upgrade-recovery" / "upgrade.lock").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_legacy_schema2_live_pid_claim_fails_closed(tmp_path: Path) -> None:
+    """Legacy second-resolution claims are not reclaimed while their PID lives."""
+
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "schema_version": 2,
+            "pid": int(pid),
+            "process_start": "Thu Jul 17 12:34:56 2026",
+            "token": "a" * 64,
+        },
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert (data_home / ".upgrade-recovery" / "upgrade.lock").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_preserves_nonempty_created_recovery_root_in_place(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = _posix_resolver_lock_harness() + """
+acquire_upgrade_lock
+printf '{"schema_version":4}\n' >"${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+chmod 600 "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+release_upgrade_lock
+test -d "${UPGRADE_RECOVERY_ROOT}"
+test -f "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+test ! -e "${UPGRADE_LOCK_FILE}"
+test ! -e "${UPGRADE_ADVISORY_LOCK_FILE}"
+"""
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recovery_root = data_home / ".upgrade-recovery"
+    assert (recovery_root / "phase-two-active.json").is_file()
+    assert not list(data_home.glob(".upgrade-recovery.released-*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resolver terminal proof")

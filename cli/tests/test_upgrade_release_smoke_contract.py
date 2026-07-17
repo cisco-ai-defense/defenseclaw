@@ -695,18 +695,44 @@ def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path:
 
 
 def test_v8_failure_tail_redacts_every_fixture_value(tmp_path: Path) -> None:
+    gateway_token = "a" * 64
     protected = (
         "upgrade-smoke-flat-protected-value",
         "upgrade-smoke-splunk-protected-value",
         "upgrade-smoke-http-protected-value",
         "Bearer upgrade-smoke-otlp-protected-value",
+        gateway_token,
+    )
+    smoke_home = tmp_path / "home"
+    evidence = smoke_home / "fixture-evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "environment.historical.source").write_text(
+        f"DEFENSECLAW_GATEWAY_TOKEN={gateway_token}\n",
+        encoding="utf-8",
     )
     log = tmp_path / "upgrade.log"
     log.write_text("\n".join(protected) + "\nordinary diagnostic\n", encoding="utf-8")
 
-    completed = _source_script('tail_v8_upgrade_log_secret_safe "$2"', str(log))
+    completed = _source_script(
+        'SMOKE_HOME="$2"; tail_v8_upgrade_log_secret_safe "$3"',
+        str(smoke_home),
+        str(log),
+    )
 
     assert completed.returncode == 0
     assert "ordinary diagnostic" in completed.stderr
     assert "[REDACTED]" in completed.stderr
     assert all(value not in completed.stderr for value in protected)
+
+
+def test_v8_known_regression_marker_uses_redacted_tail() -> None:
+    """A successful command with a regression marker must not leak v8 secrets."""
+    script = SCRIPT.read_text(encoding="utf-8")
+    function_start = script.index("run_upgrade()")
+    function_end = script.index("\nverify_upgrade()", function_start)
+    function_body = script[function_start:function_end]
+    marker_start = function_body.index('if grep -E "Traceback|AttributeError|Required migration')
+    marker_failure = function_body[marker_start:]
+
+    assert 'if target_uses_observability_v8; then\n            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"' in marker_failure
+    assert 'else\n            tail_log "${SMOKE_HOME}/upgrade.log"' in marker_failure

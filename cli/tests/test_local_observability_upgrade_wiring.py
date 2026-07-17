@@ -210,6 +210,17 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
         stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
         stack.enter_context(
             patch(
+                "defenseclaw.commands.cmd_upgrade._read_hard_cut_observability_preflight_binding",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
+            )
+        )
+        stack.enter_context(
+            patch(
                 "defenseclaw.commands.cmd_upgrade._download_checksums",
                 return_value={
                     "defenseclaw_9.9.9_darwin_arm64.tar.gz": "0" * 64,

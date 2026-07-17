@@ -750,6 +750,7 @@ func TestCompileObservabilityV8RejectsSecretBearingResourceAttributes(t *testing
 		{"service.api_key": "not-rendered"},
 		{"service.note": "Bearer not-rendered"},
 		{"service.endpoint": "https://user:not-rendered@example.test"},
+		{"service.note": "http://user:not-rendered@[malformed-resource-note]"},
 		{"service.note": "-----BEGIN PRIVATE KEY-----not-rendered"},
 	} {
 		_, err := CompileObservabilityV8(&ObservabilityV8Source{Resource: ObservabilityV8ResourceSource{Attributes: attributes}})

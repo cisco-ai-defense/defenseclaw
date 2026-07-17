@@ -38,6 +38,7 @@ const (
 	CorrelationProfileZeptoClawV1   CorrelationProfileVersion = "zeptoclaw-correlation-v1"
 	CorrelationProfileClaudeCodeV1  CorrelationProfileVersion = "claudecode-correlation-v1"
 	CorrelationProfileCodexV1       CorrelationProfileVersion = "codex-correlation-v1"
+	CorrelationProfileCodexV2       CorrelationProfileVersion = "codex-correlation-v2"
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
 	CorrelationProfileWindsurfV1    CorrelationProfileVersion = "windsurf-correlation-v1"
@@ -178,10 +179,15 @@ type CorrelationInferenceRule string
 
 const (
 	CorrelationInferencePromptBoundaryTurn CorrelationInferenceRule = "mint_turn_at_prompt_boundary"
-	CorrelationInferenceModelBoundary      CorrelationInferenceRule = "mint_model_request_at_model_boundary"
-	CorrelationInferenceSubagentIdentity   CorrelationInferenceRule = "derive_subagent_identity"
-	CorrelationInferenceUniquePendingTool  CorrelationInferenceRule = "unique_pending_tool"
-	CorrelationInferenceTraceLink          CorrelationInferenceRule = "w3c_trace_link"
+	// CorrelationInferenceUniqueActivePromptBoundary permits a native model
+	// observation that reports an exact session but no provider turn to attach
+	// causally to one durable, active hook prompt. It never authorizes a hook
+	// to mint a turn or grants exact logical-group merge authority.
+	CorrelationInferenceUniqueActivePromptBoundary CorrelationInferenceRule = "unique_active_prompt_boundary"
+	CorrelationInferenceModelBoundary              CorrelationInferenceRule = "mint_model_request_at_model_boundary"
+	CorrelationInferenceSubagentIdentity           CorrelationInferenceRule = "derive_subagent_identity"
+	CorrelationInferenceUniquePendingTool          CorrelationInferenceRule = "unique_pending_tool"
+	CorrelationInferenceTraceLink                  CorrelationInferenceRule = "w3c_trace_link"
 )
 
 type CorrelationLifecycle string
@@ -625,7 +631,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetSourceEvent, ns, "item", "item.id", "codex.item.id"),
 			reported(CorrelationTargetTool, ns, "tool_invocation", "call_id"),
 		)
-		return makeSpec(CorrelationProfileCodexV1, "codex-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "Codex hooks do not report stable parent/depth lineage or a provider response ID"))
+		return makeSpec(CorrelationProfileCodexV2, "codex-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceUniqueActivePromptBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "Codex hooks do not report stable parent/depth lineage or a provider response ID"))
 	case "claudecode":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id"),

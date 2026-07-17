@@ -405,6 +405,90 @@ cases:
               traces: {path: v1/traces}
             send: {signals: [traces], buckets: ['*']}
 
+  - name: http-signal-path-encoded-delimiters
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: /base%2Ftenant%3Fscope%23fragment}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-literal-query-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: '/base?tenant'}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-literal-fragment-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: '/base#fragment'}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-malformed-percent-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: /base%ZZtenant}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-control-character-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: "/base\u000btenant"}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-unicode-control-character-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: "/base\u0085tenant"}
+            send: {signals: [traces], buckets: ['*']}
+
   - name: resource-home-path-is-prohibited
     valid: false
     source: |
@@ -413,6 +497,36 @@ cases:
         resource:
           attributes:
             defenseclaw.claw.home_dir: /Users/operator/private
+
+  - name: malformed-url-like-resource-text-is-valid
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        resource:
+          attributes:
+            custom.note: 'http://[malformed-resource-note]'
+
+  - name: malformed-url-like-resource-userinfo-is-prohibited
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        resource:
+          attributes:
+            custom.note: 'http://review-user:review-secret@[malformed-resource-note]'
+
+  - name: otlp-empty-fragment-delimiter-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: 'https://collector.example.test#'
+            send: {signals: [traces], buckets: ['*']}
 
   - name: unknown-profile-reference
     valid: false
