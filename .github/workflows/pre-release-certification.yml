@@ -26,8 +26,8 @@ on:
         description: JSON versions selected by release behavior class.
         required: true
         type: string
-      historical_matrix:
-        description: JSON include matrix for authentic historical dependency canaries.
+      upgrade_cases:
+        description: JSON include matrix carrying behavior-specific upgrade canaries.
         required: true
         type: string
       min_upgrade_protocol:
@@ -98,7 +98,7 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
-          scripts/test-fresh-install-release.sh \
+          bash scripts/test-fresh-install-release.sh \
             "$GITHUB_WORKSPACE/release-candidate/dist" "$RELEASE_TAG"
 
   linux-upgrade:
@@ -107,8 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        baseline: ${{ fromJSON(inputs.baselines) }}
+      matrix: ${{ fromJSON(inputs.upgrade_cases) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -127,6 +126,8 @@ jobs:
           BASELINE: ${{ matrix.baseline }}
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
+          CANARY_START_SOURCE: ${{ matrix.start_source_gateway }}
+          REQUIRED_BRIDGE_VERSION: ${{ inputs.required_bridge_version }}
           UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
         run: |
           set -euo pipefail
@@ -138,12 +139,22 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
+          source_gateway_args=()
+          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
+            source_gateway_args+=(--start-source-gateway)
+          fi
+          baseline_dependency_args=()
+          if [[ -n "$REQUIRED_BRIDGE_VERSION" && "$BASELINE" == "$REQUIRED_BRIDGE_VERSION" ]]; then
+            baseline_dependency_args+=(--baseline-dependencies published)
+          fi
           scripts/test-upgrade-protocol-release.sh \
             --from-version "$BASELINE" \
             --target-version "$RELEASE_TAG" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
-            --health-timeout 60
+            --health-timeout 60 \
+            "${baseline_dependency_args[@]}" \
+            "${source_gateway_args[@]}"
 
   macos-upgrade:
     name: macOS signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
@@ -187,56 +198,6 @@ jobs:
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
             --health-timeout 60
-
-  historical-dependency-canary:
-    name: Published dependency canary ${{ matrix.baseline }} → ${{ inputs.version }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(inputs.historical_matrix) }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.13"
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
-      - name: Exercise authentic historical dependencies
-        env:
-          RELEASE_TAG: ${{ inputs.version }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-          BASELINE: ${{ matrix.baseline }}
-          CANARY_START_SOURCE: ${{ matrix.start_source_gateway }}
-          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
-        run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py verify \
-            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
-          python3 scripts/verify-sigstore-blob.py \
-            --certificate release-candidate/dist/checksums.txt.pem \
-            --signature release-candidate/dist/checksums.txt.sig \
-            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            release-candidate/dist/checksums.txt
-          source_gateway_args=()
-          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
-            source_gateway_args+=(--start-source-gateway)
-          fi
-          scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
-            --target-version "$RELEASE_TAG" \
-            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
-            --baseline-mode seed \
-            --baseline-dependencies published \
-            --success-path-only \
-            --health-timeout 60 \
-            "${source_gateway_args[@]}"
 
   windows-unpublished-refusal:
     name: Windows unpublished-runtime refusal
@@ -333,7 +294,6 @@ jobs:
       - posix-fresh-install
       - linux-upgrade
       - macos-upgrade
-      - historical-dependency-canary
       - windows-unpublished-refusal
       - live-continuity
     if: ${{ always() }}
@@ -346,12 +306,11 @@ jobs:
           POSIX: ${{ needs.posix-fresh-install.result }}
           LINUX: ${{ needs.linux-upgrade.result }}
           MACOS: ${{ needs.macos-upgrade.result }}
-          HISTORICAL: ${{ needs.historical-dependency-canary.result }}
           WINDOWS_REFUSAL: ${{ needs.windows-unpublished-refusal.result }}
           CONTINUITY: ${{ needs.live-continuity.result }}
         run: |
           set -euo pipefail
-          for result in "$POSIX" "$LINUX" "$MACOS" "$HISTORICAL" "$WINDOWS_REFUSAL" "$CONTINUITY"; do
+          for result in "$POSIX" "$LINUX" "$MACOS" "$WINDOWS_REFUSAL" "$CONTINUITY"; do
             test "$result" = success
           done
           echo "passed=true" >> "$GITHUB_OUTPUT"

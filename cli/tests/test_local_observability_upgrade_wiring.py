@@ -87,11 +87,15 @@ def test_target_interpreter_returns_validated_refresh_result(tmp_path: Path) -> 
     assert result["installed"] is True
     assert result["changed_paths"] == ["docker-compose.yml"]
     command = run.call_args.args[0]
-    assert command[0] == str(python)
-    assert command[4] == "refresh"
-    assert command[5] == str(data_dir)
-    assert command[6] == str(tmp_path / "backup")
-    assert command[7] == "8.0.0"
+    assert command[:4] == [str(python), "-I", "-B", "-c"]
+    operation_index = command.index("-c") + 2
+    assert command[operation_index:] == [
+        "refresh",
+        str(data_dir),
+        str(tmp_path / "backup"),
+        "8.0.0",
+        command[-1],
+    ]
 
 
 def test_local_stack_restart_occurs_only_when_preupgrade_stack_was_running() -> None:
@@ -148,21 +152,15 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=("darwin", "arm64"),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._download_release_provenance",
                 return_value=Mock(),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._enforce_upgrade_source_contract")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._enforce_upgrade_source_contract"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._manifest_release_artifact_names",
@@ -172,12 +170,8 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 ),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._is_bridge_to_hard_cut_phase", return_value=True)
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._is_bridge_to_hard_cut_phase", return_value=True))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._acquire_bridge_rollback_artifacts",
@@ -190,9 +184,7 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=({}, "/tmp/bridge.dcwheel", "/tmp/bridge.dcgateway"),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_bridge_checksums_provenance")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_bridge_checksums_provenance"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._materialize_bridge_source_wheel_for_preflight",
@@ -211,19 +203,22 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=tmp_path / "phase-two-active.json",
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._mark_hard_cut_bundle_mutation_intent")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._execute_hard_cut_rollback", return_value=True)
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._mark_hard_cut_bundle_mutation_intent"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._execute_hard_cut_rollback", return_value=True))
         stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
+        stack.enter_context(
+            patch(
+                "defenseclaw.commands.cmd_upgrade._read_hard_cut_observability_preflight_binding",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
+            )
+        )
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._download_checksums",

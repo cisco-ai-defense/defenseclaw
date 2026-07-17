@@ -57,6 +57,38 @@ def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
     )
 
 
+def test_explicit_target_gateway_bypasses_installed_binary_resolution() -> None:
+    payload = {
+        "wire_version": 2,
+        "kind": "validation",
+        "config_version": 8,
+        "source": "/tmp/candidate.yaml",
+        "data_dir": "/tmp/dc",
+        "gateway_api_port": 18970,
+        "plan_digest": "target-proof",
+        "network_validation": "offline_syntax_and_literal_policy_only",
+        "valid": True,
+    }
+    with (
+        patch.object(config_inspect, "resolve_gateway_binary") as resolve,
+        patch.object(
+            config_inspect.subprocess,
+            "run",
+            return_value=_completed(stdout=json.dumps(payload)),
+        ) as run,
+    ):
+        result = config_inspect.inspect_v8_config(
+            "validate",
+            config_path="/tmp/candidate.yaml",
+            data_dir="/tmp/dc",
+            gateway_binary="/tmp/downloaded-0.8.5/defenseclaw-gateway",
+        )
+
+    assert result.valid is True
+    resolve.assert_not_called()
+    assert run.call_args.args[0][0] == "/tmp/downloaded-0.8.5/defenseclaw-gateway"
+
+
 def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
     hidden = "DO-NOT-ECHO-SECRET"
     with (
@@ -133,6 +165,54 @@ def test_validation_environment_overrides_are_process_only_and_value_safe() -> N
     assert run.call_args.kwargs["env"] == {
         "PRESERVED": "ambient",
         "PROMOTED_SECRET": secret,
+    }
+
+
+def test_validation_environment_drops_execution_control_from_ambient_and_overrides() -> None:
+    payload = {
+        "wire_version": 2,
+        "kind": "validation",
+        "config_version": 8,
+        "source": "/tmp/config.yaml",
+        "data_dir": "/tmp/dc",
+        "gateway_api_port": 18970,
+        "plan_digest": "abc123",
+        "network_validation": "offline_syntax_and_literal_policy_only",
+        "valid": True,
+    }
+    with (
+        patch.object(config_inspect, "resolve_gateway_binary", return_value="/safe/gateway"),
+        patch.dict(
+            config_inspect.os.environ,
+            {
+                "PRESERVED": "ambient",
+                "PATH": "/ambient/attacker-path",
+                "LD_PRELOAD": "/ambient/attacker.so",
+                "DYLD_INSERT_LIBRARIES": "/ambient/attacker.dylib",
+            },
+            clear=True,
+        ),
+        patch.object(
+            config_inspect.subprocess,
+            "run",
+            return_value=_completed(stdout=json.dumps(payload)),
+        ) as run,
+    ):
+        result = config_inspect.inspect_v8_config(
+            "validate",
+            config_path="/tmp/config.yaml",
+            environment_overrides={
+                "SAFE_TOKEN": "protected",
+                "LD_LIBRARY_PATH": "/override/attacker",
+                "PYTHONPATH": "/override/python",
+            },
+        )
+
+    assert result.valid is True
+    assert run.call_args.args[0][0] == "/safe/gateway"
+    assert run.call_args.kwargs["env"] == {
+        "PRESERVED": "ambient",
+        "SAFE_TOKEN": "protected",
     }
 
 

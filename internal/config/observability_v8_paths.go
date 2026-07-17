@@ -131,10 +131,13 @@ func normalizeObservabilityV8EffectiveFilePaths(source *ObservabilityV8Source) e
 				return err
 			}
 		}
-		if err := normalize(
-			fmt.Sprintf("observability.destinations[%d].tls.ca_cert", index),
-			&destination.TLS.CACert,
-		); err != nil {
+		caCertPath := fmt.Sprintf("observability.destinations[%d].tls.ca_cert", index)
+		if destination.Kind == ObservabilityV8DestinationOTLP &&
+			destination.TLS.CACert != "" &&
+			!filepath.IsAbs(destination.TLS.CACert) {
+			return fmt.Errorf("%s: must be an absolute path", caCertPath)
+		}
+		if err := normalize(caCertPath, &destination.TLS.CACert); err != nil {
 			return err
 		}
 	}

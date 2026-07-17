@@ -726,7 +726,7 @@ def test_explicit_otel_environment_transport_is_materialized_with_precedence() -
     remote = _destination(document, "local-observability")
 
     assert remote["protocol"] == "http/protobuf"
-    assert remote["signal_overrides"] == {"traces": {"endpoint": "http://127.0.0.1:4318/v1/traces"}}
+    assert remote["signal_overrides"] == {"traces": {"endpoint": "http://127.0.0.1:4318", "path": "/v1/traces"}}
     assert remote["network_safety"] == {"allow_private_networks": True}
     observability = document["observability"]
     assert isinstance(observability, dict)
@@ -947,11 +947,12 @@ otel:
 
 @pytest.mark.parametrize(("value", "enabled"), [("true", True), ("1", True), ("0", False), ("false", False)])
 def test_otel_enabled_and_tls_environment_inputs_are_materialized(value: str, enabled: bool) -> None:
+    endpoint = "http://collector.example.test" if enabled else "https://collector.example.test"
     result = _convert(
         "config_version: 7\notel: {enabled: false}\n",
         {
             "DEFENSECLAW_OTEL_ENABLED": value,
-            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "https://collector.example.test",
+            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": endpoint,
             "OPENCLAW_OTEL_TLS_INSECURE": value,
         },
     )
@@ -1025,10 +1026,11 @@ def test_empty_otel_enabled_environment_is_effectively_unset() -> None:
 
 @pytest.mark.parametrize(("value", "expected"), [("yes", True), ("on", True), ("no", False), ("off", False)])
 def test_otel_tls_environment_keeps_its_distinct_v7_vocabulary(value: str, expected: bool) -> None:
+    endpoint = "http://collector.example.test" if expected else "https://collector.example.test"
     result = _convert(
         "config_version: 7\notel: {enabled: false}\n",
         {
-            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "https://collector.example.test",
+            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": endpoint,
             "OPENCLAW_OTEL_TLS_INSECURE": value,
         },
     )
@@ -1041,11 +1043,485 @@ def test_both_legacy_tls_insecure_aliases_are_materialized(alias: str) -> None:
     result = _convert(
         "config_version: 7\notel: {enabled: true}\n",
         {
-            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "https://collector.example.test",
+            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "http://collector.example.test",
             alias: "true",
         },
     )
     assert _destination(_document(result), "generic-otlp")["tls"]["insecure"] is True
+
+
+def test_plaintext_flat_otel_endpoint_materializes_v8_tls_mode() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  protocol: http
+  endpoint: http://127.0.0.1:4318
+  traces: {enabled: true}
+  logs: {enabled: true}
+  metrics: {enabled: true}
+"""
+    )
+
+    destination = _destination(_document(result), "local-observability")
+    assert destination["protocol"] == "http/protobuf"
+    assert destination["endpoint"] == "http://127.0.0.1:4318"
+    assert destination["tls"] == {"insecure": True}
+    assert destination["network_safety"] == {"allow_private_networks": True}
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    ("source", "placement"),
+    [
+        (
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: http://collector.example.test:4318
+      logs: {enabled: true}
+""",
+            "destination",
+        ),
+        (
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      logs: {enabled: true, endpoint: http://collector.example.test:4318}
+""",
+            "signal_override",
+        ),
+    ],
+)
+def test_plaintext_named_otel_endpoints_materialize_v8_tls_mode(source: str, placement: str) -> None:
+    result = _convert(source)
+    destination = _destination(_document(result), "backend")
+
+    assert destination["tls"] == {"insecure": True}
+    if placement == "destination":
+        assert destination["endpoint"] == "http://collector.example.test:4318"
+        assert "signal_overrides" not in destination
+    else:
+        assert "endpoint" not in destination
+        assert destination["signal_overrides"] == {"logs": {"endpoint": "http://collector.example.test:4318"}}
+    load_validate_v8(result.candidate)
+
+
+def test_mixed_secure_and_plaintext_signal_endpoints_split_by_tls_mode() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318
+      traces: {enabled: true}
+      logs: {enabled: true, endpoint: http://logs.example.test:4318}
+"""
+    )
+    document = _document(result)
+    secure = _destination(document, "backend")
+    plaintext = _destination(document, "backend-logs")
+
+    assert secure["endpoint"] == "https://collector.example.test:4318"
+    assert "tls" not in secure
+    assert {tuple(route["signals"]) for route in secure["routes"]} == {("traces",)}
+    assert plaintext["signal_overrides"] == {"logs": {"endpoint": "http://logs.example.test:4318"}}
+    assert plaintext["tls"] == {"insecure": True}
+    assert {tuple(route["signals"]) for route in plaintext["routes"]} == {("logs",)}
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "configured_insecure", "expected_endpoint", "expected_insecure"),
+    [
+        ("https://collector.example.test:4318", True, "http://collector.example.test:4318", True),
+        ("http://collector.example.test:4318", False, "http://collector.example.test:4318", True),
+        ("collector.example.test:4317", False, "collector.example.test:4317", False),
+    ],
+)
+def test_legacy_endpoint_transport_precedence_is_preserved(
+    endpoint: str,
+    configured_insecure: bool,
+    expected_endpoint: str,
+    expected_insecure: bool,
+) -> None:
+    result = _convert(
+        f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: {"grpc" if "://" not in endpoint else "http"}
+      endpoint: {endpoint}
+      tls: {{insecure: {str(configured_insecure).lower()}}}
+      traces: {{enabled: true}}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["endpoint"] == expected_endpoint
+    assert destination["tls"]["insecure"] is expected_insecure
+    load_validate_v8(result.candidate)
+
+
+def test_plaintext_otel_with_ca_cert_fails_at_exact_v7_path() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            """config_version: 7
+otel:
+  enabled: true
+  protocol: http
+  endpoint: http://collector.example.test:4318
+  tls: {ca_cert: /tmp/collector-ca.pem}
+  traces: {enabled: true}
+"""
+        )
+
+    assert captured.value.code == "conflicting_v7_otel_tls"
+    assert captured.value.path == "$.otel.tls.ca_cert"
+
+
+def test_grpc_ca_credentials_override_plaintext_url_hint() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      endpoint: http://collector.example.test:4317
+      tls: {ca_cert: /tmp/collector-ca.pem}
+      traces: {enabled: true}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["endpoint"] == "https://collector.example.test:4317"
+    assert destination["tls"] == {"ca_cert": "/tmp/collector-ca.pem"}
+    load_validate_v8(result.candidate)
+
+
+def test_grpc_explicit_plaintext_omits_ca_ignored_by_v7_runtime() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      endpoint: https://collector.example.test:4317
+      tls: {insecure: true, ca_cert: /tmp/collector-ca.pem}
+      traces: {enabled: true}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["endpoint"] == "http://collector.example.test:4317"
+    assert destination["tls"] == {"insecure": True}
+    assert "legacy_plaintext_otlp_ca_ignored:backend" in result.warnings
+    load_validate_v8(result.candidate)
+
+
+def test_disabled_plaintext_http_destination_drops_inapplicable_ca_without_blocking_upgrade() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: false
+      protocol: http
+      endpoint: http://collector.example.test:4318
+      tls: {ca_cert: /tmp/collector-ca.pem}
+      logs: {enabled: true}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["enabled"] is False
+    assert destination["tls"] == {"insecure": True}
+    assert "legacy_plaintext_otlp_ca_ignored:backend" in result.warnings
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    ("signal", "expected_path"),
+    [
+        ("traces: {enabled: true}", "/base/tenant%3Fscope%23fragment"),
+        ("traces: {enabled: true, url_path: v1/custom}", "/v1/custom"),
+        (
+            "traces: {enabled: true, url_path: '/base%2Ftenant?scope#fragment'}",
+            "/base%252Ftenant%3Fscope%23fragment",
+        ),
+    ],
+)
+def test_http_endpoint_paths_materialize_v7_effective_path_without_query_or_fragment(
+    signal: str,
+    expected_path: str,
+) -> None:
+    result = _convert(
+        f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318/base%2Ftenant%3Fscope%23fragment?ignored=yes#fragment
+      {signal}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["endpoint"] == "https://collector.example.test:4318"
+    assert destination["signal_overrides"] == {"traces": {"path": expected_path}}
+    load_validate_v8(result.candidate)
+
+
+def test_http_endpoint_literal_spaces_preserve_v7_wire_path() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: 'https://collector.example.test:4318/tenant name?ignored=hello world#note here'
+      traces: {enabled: true}
+"""
+    )
+
+    destination = _destination(_document(result), "backend")
+    assert destination["endpoint"] == "https://collector.example.test:4318"
+    assert destination["signal_overrides"] == {"traces": {"path": "/tenant%20name"}}
+    load_validate_v8(result.candidate)
+
+
+def test_http_endpoint_path_with_malformed_percent_escape_fails_closed() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318/base%ZZtenant
+      traces: {enabled: true}
+"""
+        )
+
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == "$.otel.destinations[0].endpoint"
+
+
+def test_signal_endpoint_path_with_malformed_percent_escape_has_exact_source_path() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318
+      traces:
+        enabled: true
+        endpoint: https://traces.example.test:4318/base%ZZtenant
+"""
+        )
+
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == "$.otel.destinations[0].traces.endpoint"
+
+
+@pytest.mark.parametrize(
+    ("signal", "legacy_path", "expected_path"),
+    [
+        ("traces", ".", None),
+        ("metrics", "   ", None),
+        ("traces", "  /tenant  ", "/tenant"),
+        ("metrics", "tenant  ", "/tenant"),
+        ("logs", ".", "/."),
+        ("logs", "   ", "/%20%20%20"),
+        ("logs", "  /tenant  ", "/%20%20/tenant%20%20"),
+    ],
+)
+def test_explicit_http_paths_preserve_each_v7_exporter_cleaning_contract(
+    signal: str,
+    legacy_path: str,
+    expected_path: str | None,
+) -> None:
+    result = _convert(
+        f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318
+      {signal}:
+        enabled: true
+        url_path: {legacy_path!r}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    if expected_path is None:
+        assert "signal_overrides" not in destination
+    else:
+        assert destination["signal_overrides"] == {signal: {"path": expected_path}}
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    ("signal", "expected_path"),
+    [
+        ("traces", "/tenant"),
+        ("metrics", "/tenant"),
+        ("logs", "/tenant%20%20"),
+    ],
+)
+def test_endpoint_http_paths_preserve_each_v7_exporter_cleaning_contract(
+    signal: str,
+    expected_path: str,
+) -> None:
+    result = _convert(
+        f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test:4318/tenant%20%20
+      {signal}: {{enabled: true}}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["signal_overrides"] == {signal: {"path": expected_path}}
+    load_validate_v8(result.candidate)
+
+
+def test_grpc_endpoint_and_signal_paths_ignored_by_v7_are_removed() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      endpoint: https://collector.example.test:4317/ignored?query=yes#fragment
+      traces: {enabled: true, url_path: /also-ignored}
+"""
+    )
+    destination = _destination(_document(result), "backend")
+
+    assert destination["endpoint"] == "https://collector.example.test:4317"
+    assert "signal_overrides" not in destination
+    assert "legacy_grpc_path_ignored:backend:traces" in result.warnings
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected_endpoint", "expected_tls", "expected_overrides"),
+    [
+        ("http", "https://collector.example.test:4318", None, {"traces": {"path": "/legacy"}}),
+        ("grpc", "http://collector.example.test:4318", {"insecure": True}, None),
+    ],
+)
+def test_nonstandard_scheme_and_ignored_invalid_query_preserve_v7_wire_behavior(
+    protocol: str,
+    expected_endpoint: str,
+    expected_tls: dict[str, bool] | None,
+    expected_overrides: dict[str, dict[str, str]] | None,
+) -> None:
+    result = _convert(
+        f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: {protocol}
+      endpoint: 'ftp://collector.example.test:4318/legacy?ignored=%ZZ#fragment'
+      traces: {{enabled: true}}
+"""
+    )
+
+    destination = _destination(_document(result), "backend")
+    assert destination["endpoint"] == expected_endpoint
+    assert destination.get("tls") == expected_tls
+    assert destination.get("signal_overrides") == expected_overrides
+    if protocol == "grpc":
+        assert "legacy_grpc_path_ignored:backend:traces" in result.warnings
+    load_validate_v8(result.candidate)
+
+
+def test_relative_legacy_otel_ca_cert_fails_with_exact_remediation() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      endpoint: collector.example.test:4317
+      tls: {ca_cert: relative/collector-ca.pem}
+      traces: {enabled: true}
+"""
+        )
+
+    assert captured.value.code == "relative_v7_otel_ca_cert"
+    assert captured.value.path == "$.otel.destinations[0].tls.ca_cert"
+
+
+def test_grpc_ca_keeps_mixed_endpoint_schemes_in_one_secure_transport_group() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      endpoint: https://collector.example.test:4317
+      tls: {ca_cert: /tmp/collector-ca.pem}
+      traces: {enabled: true}
+      logs: {enabled: true, endpoint: http://logs.example.test:4317}
+"""
+    )
+    document = _document(result)
+    destinations = [item for item in document["observability"]["destinations"] if item["kind"] == "otlp"]
+    destination = _destination(document, "backend")
+
+    assert len(destinations) == 1
+    assert destination["endpoint"] == "https://collector.example.test:4317"
+    assert destination["signal_overrides"] == {"logs": {"endpoint": "https://logs.example.test:4317"}}
+    assert destination["tls"] == {"ca_cert": "/tmp/collector-ca.pem"}
+    load_validate_v8(result.candidate)
 
 
 def test_otel_exporter_header_environment_is_not_invented_for_v7() -> None:
@@ -1291,9 +1767,10 @@ def test_every_legacy_otel_endpoint_alias_has_a_materialized_disposition(alias: 
     )
     destination = _destination(_document(result), "generic-otlp")
     if signal is None:
-        assert destination["endpoint"] == "https://collector.example.test/otlp"
+        assert destination["endpoint"] == "https://collector.example.test"
     else:
-        assert destination["signal_overrides"][signal]["endpoint"] == "https://collector.example.test/otlp"
+        assert destination["signal_overrides"][signal]["endpoint"] == "https://collector.example.test"
+    assert f"legacy_grpc_path_ignored:generic-otlp:{signal or 'logs'}" in result.warnings
     assert any(warning.startswith("environment_decision:OTEL") for warning in result.warnings)
 
 
@@ -2183,6 +2660,38 @@ otel:
     assert other["batch"]["scheduled_delay_ms"] == 5000
 
 
+@pytest.mark.parametrize(
+    ("destination_protocol", "trace_protocol", "expected_path"),
+    [
+        ("grpc", "", "$.otel.destinations[0].protocol"),
+        ("http", "protocol: grpc", "$.otel.destinations[0].traces.protocol"),
+    ],
+)
+def test_galileo_trace_protocol_fails_at_the_exact_legacy_source_field(
+    destination_protocol: str,
+    trace_protocol: str,
+    expected_path: str,
+) -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: galileo
+      preset: galileo
+      enabled: true
+      endpoint: https://api.galileo.ai/otel/traces
+      protocol: {destination_protocol}
+      traces: {{enabled: true, {trace_protocol}}}
+"""
+        )
+
+    assert captured.value.code == "unsupported_galileo_protocol"
+    assert captured.value.path == expected_path
+    assert "http or http/protobuf" in captured.value.action
+
+
 def test_galileo_without_traces_remains_generic_instead_of_inventing_trace_export() -> None:
     result = _convert(
         """config_version: 7
@@ -3069,6 +3578,274 @@ otel:
     with pytest.raises(V8MigrationError) as captured:
         _convert(source)
     assert captured.value.code == "invalid_endpoint"
+    assert canary not in str(captured.value)
+    assert canary not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_path"),
+    [
+        ("destination", "$.otel.destinations[0].endpoint"),
+        ("signal", "$.otel.destinations[0].traces.endpoint"),
+    ],
+)
+def test_named_malformed_endpoint_diagnostic_is_value_safe(placement: str, expected_path: str) -> None:
+    canary = "malformed-named-host-canary"
+    if placement == "destination":
+        endpoint_block = f"      endpoint: http://[{canary}]\n      traces: {{enabled: true}}"
+    else:
+        endpoint_block = f"      traces: {{enabled: true, endpoint: 'http://[{canary}]'}}"
+    source = f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+{endpoint_block}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == expected_path
+    assert canary not in str(captured.value)
+    assert canary not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_path"),
+    [
+        ("destination", "$.otel.destinations[0].endpoint"),
+        ("signal", "$.otel.destinations[0].traces.endpoint"),
+    ],
+)
+def test_flat_destination_does_not_shift_named_source_diagnostic_path(
+    placement: str,
+    expected_path: str,
+) -> None:
+    canary = "mixed-flat-named-malformed-canary"
+    if placement == "destination":
+        endpoint_block = f"      endpoint: http://[{canary}]\n      traces: {{enabled: true}}"
+    else:
+        endpoint_block = f"      traces: {{enabled: true, endpoint: 'http://[{canary}]'}}"
+    source = f"""config_version: 7
+otel:
+  enabled: true
+  protocol: grpc
+  endpoint: 127.0.0.1:4317
+  traces: {{enabled: true}}
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: http
+{endpoint_block}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == expected_path
+    assert canary not in str(captured.value)
+    assert canary not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "placement", "expected_path"),
+    [
+        ("[malformed-grpc-host:4317", "destination", "$.otel.destinations[0].endpoint"),
+        ("collector.example.test:not-a-port", "signal", "$.otel.destinations[0].traces.endpoint"),
+    ],
+)
+def test_named_malformed_grpc_authority_has_exact_source_path(
+    endpoint: str, placement: str, expected_path: str
+) -> None:
+    if placement == "destination":
+        endpoint_block = f"      endpoint: '{endpoint}'\n      traces: {{enabled: true}}"
+    else:
+        endpoint_block = f"      traces: {{enabled: true, endpoint: '{endpoint}'}}"
+    source = f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+{endpoint_block}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == expected_path
+    assert endpoint not in str(captured.value)
+    assert endpoint not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("protocol", "endpoint"),
+    [
+        ("grpc", "collector.example.test"),
+        ("grpc", "collector.example.test:0"),
+        ("grpc", "bad host.example.test:4317"),
+        ("grpc", "collector.example.test:4317/path"),
+        ("grpc", "collector.example.test:4317?tenant=review"),
+        ("grpc", " collector.example.test:4317 "),
+        ("grpc", "https://collector.example.test:4317/%ZZ"),
+        ("http", "https://bad host.example.test:4318"),
+        ("http", " https://collector.example.test:4318"),
+        ("http", "https://-bad.example.test:4318"),
+        ("http", "https://collector.example.test:0"),
+        ("http", "https://collector.example.test:4318/%ZZ"),
+    ],
+)
+def test_named_unrepresentable_endpoint_fails_before_candidate_construction(protocol: str, endpoint: str) -> None:
+    source = f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: {protocol}
+      endpoint: '{endpoint}'
+      traces: {{enabled: true}}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == "$.otel.destinations[0].endpoint"
+    assert endpoint not in str(captured.value)
+    assert endpoint not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "global_endpoint",
+    [
+        "",
+        "  endpoint: 127.0.0.1:4317\n",
+        "  endpoint: collector.example.test:4317\n",
+    ],
+)
+def test_flat_signal_malformed_endpoint_has_exact_source_path(global_endpoint: str) -> None:
+    source = f"""config_version: 7
+otel:
+  enabled: true
+{global_endpoint}  protocol: grpc
+  traces: {{enabled: true, endpoint: 'traces.example.test:not-a-port'}}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == "$.otel.traces.endpoint"
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_path"),
+    [
+        (
+            """config_version: 7
+otel:
+  enabled: true
+  protocol: grpc
+  traces: {enabled: true}
+""",
+            "$.otel.traces.endpoint",
+        ),
+        (
+            """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+      traces: {enabled: true}
+""",
+            "$.otel.destinations[0].traces.endpoint",
+        ),
+    ],
+)
+def test_missing_enabled_signal_endpoint_has_exact_source_path(source: str, expected_path: str) -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_v7_otel"
+    assert captured.value.path == expected_path
+    assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "placement", "expected_path"),
+    [
+        ("review-user:review-secret@collector.example.test:4317", "destination", "$.otel.destinations[0].endpoint"),
+        (
+            "https://review-user:review-secret@collector.example.test:4317",
+            "signal",
+            "$.otel.destinations[0].traces.endpoint",
+        ),
+    ],
+)
+def test_named_endpoint_userinfo_is_rejected_at_exact_source_path(
+    endpoint: str, placement: str, expected_path: str
+) -> None:
+    if placement == "destination":
+        endpoint_block = f"      endpoint: '{endpoint}'\n      traces: {{enabled: true}}"
+    else:
+        endpoint_block = f"      traces: {{enabled: true, endpoint: '{endpoint}'}}"
+    source = f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: backend
+      enabled: true
+      protocol: grpc
+{endpoint_block}
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "invalid_endpoint"
+    assert captured.value.path == expected_path
+    assert "review-secret" not in str(captured.value)
+    assert "review-secret" not in repr(captured.value)
+    assert captured.value.__cause__ is None
+
+
+def test_malformed_url_like_resource_attribute_remains_arbitrary_text() -> None:
+    value = "http://[malformed-resource-note]"
+    result = _convert(
+        f"""config_version: 7
+otel:
+  resource:
+    attributes:
+      custom.note: '{value}'
+"""
+    )
+
+    document = _document(result)
+    assert document["observability"]["resource"]["attributes"]["custom.note"] == value
+    load_validate_v8(result.candidate)
+
+
+def test_malformed_url_like_resource_userinfo_is_rejected_value_safely() -> None:
+    canary = "review-user:review-secret"
+    source = f"""config_version: 7
+otel:
+  resource:
+    attributes:
+      custom.note: 'http://{canary}@[malformed-resource-note]'
+"""
+
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "candidate_validation_failed"
     assert canary not in str(captured.value)
     assert canary not in repr(captured.value)
     assert captured.value.__cause__ is None

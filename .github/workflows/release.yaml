@@ -149,7 +149,7 @@ jobs:
       latest_stable: ${{ needs.release-mode.outputs.latest_stable }}
       baselines: ${{ steps.baselines.outputs.baselines }}
       certification_baselines: ${{ steps.selection.outputs.versions }}
-      historical_matrix: ${{ steps.selection.outputs.matrix }}
+      certification_cases: ${{ steps.selection.outputs.matrix }}
       workflow_version: ${{ steps.selection.outputs.workflow_version }}
       platform_set: ${{ steps.selection.outputs.platform_set }}
       windows_baselines: ${{ steps.baselines.outputs.windows_baselines }}
@@ -1167,7 +1167,7 @@ jobs:
       version: ${{ needs.release-preflight.outputs.tag }}
       commit: ${{ needs.release-preflight.outputs.commit }}
       baselines: ${{ needs.release-preflight.outputs.certification_baselines }}
-      historical_matrix: ${{ needs.release-preflight.outputs.historical_matrix }}
+      upgrade_cases: ${{ needs.release-preflight.outputs.certification_cases }}
       min_upgrade_protocol: ${{ needs.assemble-release-candidate.outputs.min_upgrade_protocol }}
       required_bridge_version: ${{ needs.assemble-release-candidate.outputs.required_bridge_version }}
       windows_prebridge_baselines: ${{ needs.assemble-release-candidate.outputs.windows_prebridge_baselines }}

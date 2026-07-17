@@ -158,9 +158,7 @@ def test_version_canary_requires_one_exact_semver_token(
 
 def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    canary = source[
-        source.index("start_source_gateway_canary()") : source.index("parse_args()")
-    ]
+    canary = source[source.index("start_source_gateway_canary()") : source.index("parse_args()")]
 
     assert "http://127.0.0.1:18970/health" in canary
     assert 'gateway.get("state") not in {"running", "disabled"}' in canary
@@ -226,9 +224,7 @@ def test_protected_release_test_artifact_rejects_checksum_mismatch_without_outpu
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "defenseclaw-0.8.4-2-py3-none-any.dcwheel"
-    source.write_bytes(
-        b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in b"wheel")
-    )
+    source.write_bytes(b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in b"wheel"))
     checksums = tmp_path / "checksums.txt"
     checksums.write_text(f"{'0' * 64}  {source.name}\n")
     custody = tmp_path / "custody"
@@ -247,11 +243,7 @@ def test_protected_release_test_artifact_rejects_checksum_mismatch_without_outpu
 
 
 def test_upgrade_failure_guidance_does_not_restore_gateway_jsonl_ownership() -> None:
-    lines = [
-        line
-        for line in UPGRADE_SCRIPT.read_text(encoding="utf-8").splitlines()
-        if "gateway.jsonl" in line
-    ]
+    lines = [line for line in UPGRADE_SCRIPT.read_text(encoding="utf-8").splitlines() if "gateway.jsonl" in line]
     assert lines
     for line in lines:
         normalized = line.lower()
@@ -280,8 +272,7 @@ def test_only_hard_cut_targets_select_the_forward_v8_contract(target: str, expec
 def _seed_fixture(tmp_path: Path, version: str) -> Path:
     home = tmp_path / "home"
     completed = _source_script(
-        'SMOKE_HOME="$2"; FROM_VERSION="$3"; mkdir -p "$SMOKE_HOME"; '
-        "seed_v8_observability_fixture",
+        'SMOKE_HOME="$2"; FROM_VERSION="$3"; mkdir -p "$SMOKE_HOME"; seed_v8_observability_fixture',
         str(home),
         version,
     )
@@ -401,8 +392,7 @@ def test_materialized_policy_accepts_config_8_but_not_newer_than_candidate(
     policy.write_text(json.dumps(effective), encoding="utf-8")
 
     accepted = _source_script(
-        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
-        'published_baseline_config_version "$3"',
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; published_baseline_config_version "$3"',
         str(policy),
         "0.8.5",
     )
@@ -412,8 +402,7 @@ def test_materialized_policy_accepts_config_8_but_not_newer_than_candidate(
     effective["published_baseline_config_versions"]["0.8.5"] = 9
     policy.write_text(json.dumps(effective), encoding="utf-8")
     rejected = _source_script(
-        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
-        'published_baseline_config_version "$3"',
+        'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; published_baseline_config_version "$3"',
         str(policy),
         "0.8.5",
     )
@@ -445,9 +434,7 @@ def test_future_candidate_dispatches_fixture_by_authenticated_source_family(
     expected_fixture: str,
 ) -> None:
     policy = (
-        BASELINE_POLICY
-        if source_version == "0.8.4"
-        else _policy_with_baseline(tmp_path, source_version, source_config)
+        BASELINE_POLICY if source_version == "0.8.4" else _policy_with_baseline(tmp_path, source_version, source_config)
     )
     completed = _source_script(
         'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=8; '
@@ -469,9 +456,9 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
     policy = _policy_with_baseline(tmp_path, "0.8.6", 9)
     completed = _source_script(
         'UPGRADE_BASELINE_POLICY="$2"; CANDIDATE_RUNTIME_CONFIG_VERSION=9; '
-        'TARGET_VERSION=0.8.7; FROM_VERSION=0.8.6; '
-        'seed_v8_observability_fixture() { exit 91; }; '
-        'seed_native_v8_observability_fixture() { exit 92; }; '
+        "TARGET_VERSION=0.8.7; FROM_VERSION=0.8.6; "
+        "seed_v8_observability_fixture() { exit 91; }; "
+        "seed_native_v8_observability_fixture() { exit 92; }; "
         "seed_upgrade_fixture",
         str(policy),
     )
@@ -490,7 +477,7 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     baseline_python.parent.mkdir(parents=True)
     baseline_python.write_text(
         f"""#!/bin/sh
-exec "{ROOT / '.venv/bin/python'}" "$@"
+exec "{ROOT / ".venv/bin/python"}" "$@"
 """,
         encoding="utf-8",
     )
@@ -517,9 +504,7 @@ exec "{ROOT / '.venv/bin/python'}" "$@"
     source = load_validate_v8(config_before, source_name=str(config_path)).source
     assert source["config_version"] == 8
     assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
-    destinations = {
-        item["name"]: item for item in source["observability"]["destinations"]
-    }
+    destinations = {item["name"]: item for item in source["observability"]["destinations"]}
     assert set(destinations) == {"existing-otlp", "v8-http-protected"}
     assert destinations["existing-otlp"]["headers"] == {
         "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
@@ -528,9 +513,7 @@ exec "{ROOT / '.venv/bin/python'}" "$@"
     assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_before
     assert (home / "fixture-evidence/environment.historical.source").read_bytes() == environment_before
     baseline_bundle_manifest = json.loads(
-        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(encoding="utf-8")
     )
     assert baseline_bundle_manifest["bundle_version"] == "0.8.5"
 
@@ -552,9 +535,7 @@ exec "{ROOT / '.venv/bin/python'}" "$@"
 
 def test_harnesses_accept_one_materialized_policy_snapshot() -> None:
     posix = SCRIPT.read_text(encoding="utf-8")
-    windows = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
-        encoding="utf-8"
-    )
+    windows = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(encoding="utf-8")
 
     assert 'UPGRADE_BASELINE_POLICY="${UPGRADE_BASELINE_POLICY:-' in posix
     assert "[string]$BaselinePolicy" in windows
@@ -634,7 +615,8 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
-    assert 'cosign_path="$(abs_path "$(command -v cosign)")"' in script
+    assert 'cosign_command="$(command -v cosign)"' in script
+    assert 'cosign_path="$(abs_path "${cosign_command}")"' in script
     for path in (SCRIPT, DEVELOPER_ACTIVATION_SCRIPT):
         lines = path.read_text(encoding="utf-8").splitlines()
         programs: list[str] = []
@@ -682,7 +664,7 @@ def test_prepare_only_windows_candidate_validates_zip_and_plain_refusal_envelope
 
     assert "windows/amd64|windows/arm64" in script
     assert 'extension = "zip" if os_name == "windows" else "tar.gz"' in script
-    assert 'with zipfile.ZipFile(gateway_source) as archive:' in script
+    assert "with zipfile.ZipFile(gateway_source) as archive:" in script
     assert 'Path(member.filename.replace("\\\\", "/")).is_absolute()' in script
     assert 'Path(member.filename.replace("\\\\", "/")).name == "defenseclaw.exe"' in script
     assert "canonical Windows gateway refusal envelope became installable" in script
@@ -692,10 +674,7 @@ def test_bridge_candidate_refusal_contract_uses_bridge_specific_message() -> Non
     script = SCRIPT.read_text(encoding="utf-8")
 
     assert 'if version == "0.8.4":' in script
-    assert (
-        "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver."
-        in script
-    )
+    assert "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver." in script
 
 
 def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:
@@ -716,18 +695,44 @@ def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path:
 
 
 def test_v8_failure_tail_redacts_every_fixture_value(tmp_path: Path) -> None:
+    gateway_token = "a" * 64
     protected = (
         "upgrade-smoke-flat-protected-value",
         "upgrade-smoke-splunk-protected-value",
         "upgrade-smoke-http-protected-value",
         "Bearer upgrade-smoke-otlp-protected-value",
+        gateway_token,
+    )
+    smoke_home = tmp_path / "home"
+    evidence = smoke_home / "fixture-evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "environment.historical.source").write_text(
+        f"DEFENSECLAW_GATEWAY_TOKEN={gateway_token}\n",
+        encoding="utf-8",
     )
     log = tmp_path / "upgrade.log"
     log.write_text("\n".join(protected) + "\nordinary diagnostic\n", encoding="utf-8")
 
-    completed = _source_script('tail_v8_upgrade_log_secret_safe "$2"', str(log))
+    completed = _source_script(
+        'SMOKE_HOME="$2"; tail_v8_upgrade_log_secret_safe "$3"',
+        str(smoke_home),
+        str(log),
+    )
 
     assert completed.returncode == 0
     assert "ordinary diagnostic" in completed.stderr
     assert "[REDACTED]" in completed.stderr
     assert all(value not in completed.stderr for value in protected)
+
+
+def test_v8_known_regression_marker_uses_redacted_tail() -> None:
+    """A successful command with a regression marker must not leak v8 secrets."""
+    script = SCRIPT.read_text(encoding="utf-8")
+    function_start = script.index("run_upgrade()")
+    function_end = script.index("\nverify_upgrade()", function_start)
+    function_body = script[function_start:function_end]
+    marker_start = function_body.index('if grep -E "Traceback|AttributeError|Required migration')
+    marker_failure = function_body[marker_start:]
+
+    assert 'if target_uses_observability_v8; then\n            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"' in marker_failure
+    assert 'else\n            tail_log "${SMOKE_HOME}/upgrade.log"' in marker_failure

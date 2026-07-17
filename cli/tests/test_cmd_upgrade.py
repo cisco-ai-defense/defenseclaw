@@ -25,6 +25,7 @@ from click.testing import CliRunner
 from defenseclaw.commands.cmd_upgrade import (
     _INSTALLED_HEALTH_SCRIPT,
     _INSTALLED_MIGRATION_SCRIPT,
+    _MACOS_GATEWAY_CODESIGN_IDENTIFIER,
     _acquire_bridge_rollback_artifacts,
     _api_bind_host,
     _assert_gateway_quiesced,
@@ -66,6 +67,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _poll_health,
     _poll_installed_health,
     _preflight_check,
+    _preflight_hard_cut_observability_migration,
     _preflight_installed_source_coherence,
     _preflight_staged_target_controller_source,
     _preflight_target_wheel_migrations,
@@ -77,14 +79,14 @@ from defenseclaw.commands.cmd_upgrade import (
     _release_download_base,
     _require_bridge_checksums_provenance,
     _require_hard_cut_dependency_contract,
-    _require_hard_cut_preexisting_jsonschema,
     _require_hard_cut_manifest_contract,
+    _require_hard_cut_preexisting_promoted_runtime,
     _require_release_owned_hard_cut_handoff,
     _require_target_phase_two_mutator_wrapper,
+    _resolve_upgrade_source_version,
     _restore_hard_cut_backup_root_contract,
     _restore_rollback_file,
     _restore_windows_rollback_file,
-    _resolve_upgrade_source_version,
     _RollbackFileSnapshot,
     _run_installed_local_observability_operation,
     _run_installed_migrations,
@@ -93,6 +95,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _start_and_verify_services,
     _target_migration_capabilities,
     _TargetMigrationCapabilities,
+    _validate_hard_cut_promoted_runtime_probe,
     _validate_staged_bridge_artifact_set,
     _validate_target_migration_capabilities,
     _validate_upgrade_manifest,
@@ -106,6 +109,7 @@ from defenseclaw.commands.cmd_upgrade import (
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
 from defenseclaw.context import AppContext
+from defenseclaw.migrations import ObservabilityV8PreflightBinding
 from defenseclaw.upgrade_receipt import (
     UPGRADE_RECEIPT_DIRECTORY,
     begin_upgrade_receipt,
@@ -375,8 +379,9 @@ class TestUpgradeVersionValidation(unittest.TestCase):
             (exact_environment, True, "0.8.6"),
         )
         for environment, target_was_explicit, target_version in invalid_cases:
-            with self.subTest(environment=environment, target=target_version), patch.dict(
-                os.environ, environment, clear=True
+            with (
+                self.subTest(environment=environment, target=target_version),
+                patch.dict(os.environ, environment, clear=True),
             ):
                 with self.assertRaises(SystemExit):
                     _resolve_upgrade_source_version(
@@ -414,8 +419,9 @@ class TestUpgradeVersionValidation(unittest.TestCase):
                 "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
             }
 
-            with patch.dict(os.environ, environment, clear=True), patch.object(
-                cmd_upgrade_module.sys, "prefix", str(target_venv)
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(cmd_upgrade_module.sys, "prefix", str(target_venv)),
             ):
                 _preflight_staged_target_controller_source(
                     source_version="0.8.4",
@@ -424,8 +430,9 @@ class TestUpgradeVersionValidation(unittest.TestCase):
                     recovery_home=str(recovery_home),
                 )
 
-            with patch.dict(os.environ, environment, clear=True), patch.object(
-                cmd_upgrade_module.sys, "prefix", str(installed_venv)
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(cmd_upgrade_module.sys, "prefix", str(installed_venv)),
             ):
                 with self.assertRaises(SystemExit):
                     _preflight_staged_target_controller_source(
@@ -476,9 +483,7 @@ class TestUpgradeVersionValidation(unittest.TestCase):
             },
         )
         for environment in environments:
-            with self.subTest(environment=environment), patch.dict(
-                os.environ, environment, clear=True
-            ):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
                 with self.assertRaises(SystemExit):
                     _require_release_owned_hard_cut_handoff(
                         source_version="0.8.4",
@@ -942,7 +947,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             self.assertEqual(executable, expected_python)
             self.assertEqual(
                 arguments,
-                [expected_python, "-I", "-m", "defenseclaw.main", "upgrade", "--yes"],
+                [expected_python, "-I", "-B", "-m", "defenseclaw.main", "upgrade", "--yes"],
             )
             self.assertEqual(child_environment["DEFENSECLAW_HOME"], plan.recovery_home)
             self.assertEqual(child_environment["DEFENSECLAW_CONFIG"], config_path)
@@ -1137,6 +1142,74 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             self._prepare_plan(root, active_gateway_payload=b"different bridge gateway")
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS codesign coherence contract")
+    def test_macos_rollback_signature_accepts_authenticated_adhoc_fallback_identifier(self):
+        with TemporaryDirectory() as root:
+            gateway = Path(root, "published-unsigned-gateway")
+            gateway.write_bytes(Path("/usr/bin/true").read_bytes())
+            os.chmod(gateway, 0o755)
+            subprocess.run(
+                ["/usr/bin/codesign", "--remove-signature", str(gateway)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "/usr/bin/codesign",
+                    "--force",
+                    "--sign",
+                    "-",
+                    "--identifier",
+                    "a.out",
+                    str(gateway),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            _verify_macos_rollback_gateway_signature(str(gateway))
+
+    def test_macos_rollback_signature_keeps_identifier_gate_for_non_adhoc_signatures(self):
+        valid = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        signed_details = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="",
+            stderr="Signature size=9000\nAuthority=Developer ID Application: Example\nTeamIdentifier=TEAM123\n",
+        )
+        rejected = subprocess.CalledProcessError(3, ["/usr/bin/codesign"])
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                side_effect=(valid, signed_details, rejected),
+            ) as run,
+            self.assertRaisesRegex(OSError, "signature identifier is invalid"),
+        ):
+            _verify_macos_rollback_gateway_signature("/private/rollback/gateway")
+
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("-R", run.call_args_list[-1].args[0])
+        self.assertIn(_MACOS_GATEWAY_CODESIGN_IDENTIFIER, run.call_args_list[-1].args[0][-2])
+
+    def test_macos_rollback_signature_rejects_ambiguous_adhoc_metadata(self):
+        valid = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        ambiguous = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="",
+            stderr="Signature=adhoc\nAuthority=Unexpected\nTeamIdentifier=not set\n",
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                side_effect=(valid, ambiguous),
+            ),
+            self.assertRaisesRegex(OSError, "ad-hoc signature metadata is invalid"),
+        ):
+            _verify_macos_rollback_gateway_signature("/private/rollback/gateway")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS codesign coherence contract")
     def test_macos_coherence_canonicalization_accepts_native_signature_layout(self):
         with TemporaryDirectory() as root:
             fixture = Path("/usr/bin/true").read_bytes()
@@ -1278,14 +1351,10 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                     return_value=Mock(returncode=0),
                 ) as bootstrap_run,
             ):
-                _validate_staged_bridge_artifact_set(
-                    staged, "0.8.4", "linux", "amd64"
-                )
+                _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
 
             bootstrap.assert_called_once()
-            self.assertEqual(
-                bootstrap_run.call_args.args[0][0], "/tmp/authenticated-cosign"
-            )
+            self.assertEqual(bootstrap_run.call_args.args[0][0], "/tmp/authenticated-cosign")
 
             with (
                 patch("defenseclaw.commands.cmd_upgrade.shutil.which", return_value=None),
@@ -1295,9 +1364,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(OSError, "signature verification failed"),
             ):
-                _validate_staged_bridge_artifact_set(
-                    staged, "0.8.4", "linux", "amd64"
-                )
+                _validate_staged_bridge_artifact_set(staged, "0.8.4", "linux", "amd64")
 
             with (
                 patch(
@@ -2802,6 +2869,8 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                 {
                     "HOME": home,
                     "DEFENSECLAW_HOME": os.path.join(home, "custom-defenseclaw"),
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "stale-value",
+                    "DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "b" * 32,
                 },
             ),
             patch("shutil.which", return_value="/usr/bin/uv"),
@@ -2864,7 +2933,11 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             write_wheel(
                 target,
                 "0.8.5",
-                ["requests>=2.32", "jsonschema<5,>=4.23.0"],
+                [
+                    "requests>=2.32",
+                    "jsonschema<5,>=4.23.0",
+                    'mcp<2,>=1.28.1; python_version >= "3.11"',
+                ],
             )
             _require_hard_cut_dependency_contract(
                 str(source),
@@ -2876,7 +2949,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             write_wheel(
                 target,
                 "0.8.5",
-                ["requests>=2.33", "jsonschema<5,>=4.23.0"],
+                ["requests>=2.32", "jsonschema<5,>=4.23.0"],
             )
             with self.assertRaisesRegex(ValueError, "Requires-Dist differs"):
                 _require_hard_cut_dependency_contract(
@@ -2886,15 +2959,157 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                     target_version="0.8.5",
                 )
 
-    def test_hard_cut_requires_preexisting_jsonschema_in_bridge_venv(self):
-        with patch("subprocess.run", return_value=Mock(returncode=0)) as run_mock:
-            _require_hard_cut_preexisting_jsonschema("/managed/bridge/bin/python")
+            write_wheel(
+                target,
+                "0.8.5",
+                [
+                    "requests>=2.32",
+                    "jsonschema<5,>=4.23.0",
+                    'mcp<2,>=1.28.0; python_version >= "3.11"',
+                ],
+            )
+            with self.assertRaisesRegex(ValueError, "Requires-Dist differs"):
+                _require_hard_cut_dependency_contract(
+                    str(source),
+                    str(target),
+                    source_version="0.8.4",
+                    target_version="0.8.5",
+                )
+
+    @staticmethod
+    def _valid_hard_cut_promoted_runtime_probe() -> dict[str, object]:
+        return {
+            "python_version": "3.11.0",
+            "jsonschema_version": "4.23.0",
+            "jsonschema_draft": "https://json-schema.org/draft/2020-12/schema",
+            "mcp_version": "1.28.1",
+            "mcp_import": True,
+        }
+
+    def test_hard_cut_requires_preexisting_promoted_runtime_in_bridge_venv(self):
+        probe = self._valid_hard_cut_promoted_runtime_probe()
+        with patch(
+            "subprocess.run",
+            return_value=Mock(returncode=0, stdout=json.dumps(probe)),
+        ) as run_mock:
+            _require_hard_cut_preexisting_promoted_runtime("/managed/bridge/bin/python")
 
         args = run_mock.call_args.args[0]
-        self.assertEqual(args[:3], ["/managed/bridge/bin/python", "-I", "-c"])
-        self.assertIn("Draft202012Validator", args[3])
+        self.assertEqual(args[:4], ["/managed/bridge/bin/python", "-I", "-B", "-c"])
+        self.assertIn("Draft202012Validator", args[4])
+        self.assertIn("import mcp", args[4])
+        self.assertIn('version("mcp")', args[4])
+        self.assertIn("sys.version_info >= (3, 11)", args[4])
         self.assertTrue(run_mock.call_args.kwargs["check"])
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 10)
+
+    def test_hard_cut_promoted_runtime_accepts_exact_floors(self):
+        _validate_hard_cut_promoted_runtime_probe(self._valid_hard_cut_promoted_runtime_probe())
+
+    def test_hard_cut_promoted_runtime_accepts_pep440_post_and_local_builds(self):
+        for jsonschema_version, mcp_version in (
+            ("4.23.0.post1", "1.28.1.post1"),
+            ("4.23.0+vendor.1", "1.28.1+vendor.1"),
+            ("4.23", "1.28.1.0"),
+        ):
+            probe = self._valid_hard_cut_promoted_runtime_probe()
+            probe.update(
+                {
+                    "jsonschema_version": jsonschema_version,
+                    "mcp_version": mcp_version,
+                }
+            )
+            with self.subTest(jsonschema=jsonschema_version, mcp=mcp_version):
+                _validate_hard_cut_promoted_runtime_probe(probe)
+
+    def test_hard_cut_promoted_runtime_allows_python_310_without_marker_gated_mcp(self):
+        probe = self._valid_hard_cut_promoted_runtime_probe()
+        probe.update(
+            {
+                "python_version": "3.10.14",
+                "mcp_version": None,
+                "mcp_import": None,
+            }
+        )
+
+        _validate_hard_cut_promoted_runtime_probe(probe)
+
+    def test_hard_cut_promoted_runtime_rejects_version_and_import_boundaries(self):
+        cases = {
+            "python_below_floor": ({"python_version": "3.9.20"}, "Python runtime"),
+            "jsonschema_below_floor": ({"jsonschema_version": "4.22.9"}, "jsonschema runtime"),
+            "jsonschema_upper_bound": ({"jsonschema_version": "5.0.0"}, "jsonschema runtime"),
+            "jsonschema_prerelease": ({"jsonschema_version": "4.23.0rc1"}, "not a supported PEP 440"),
+            "jsonschema_malformed": ({"jsonschema_version": "release-4.23.0"}, "not a supported PEP 440"),
+            "jsonschema_wrong_draft": ({"jsonschema_draft": "draft-07"}, "Draft 2020-12"),
+            "mcp_below_floor": ({"mcp_version": "1.28.0"}, "mcp runtime"),
+            "mcp_upper_bound": ({"mcp_version": "2.0.0"}, "mcp runtime"),
+            "mcp_prerelease": ({"mcp_version": "1.28.1rc1"}, "not a supported PEP 440"),
+            "mcp_import_failed": ({"mcp_import": False}, "cannot be imported"),
+        }
+        for name, (override, message) in cases.items():
+            probe = self._valid_hard_cut_promoted_runtime_probe()
+            probe.update(override)
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                _validate_hard_cut_promoted_runtime_probe(probe)
+
+    def test_hard_cut_preflight_rejects_missing_promoted_runtime_before_uv(self):
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": home}),
+            patch("shutil.which", return_value="/usr/bin/uv"),
+            patch("os.path.isfile", return_value=True),
+            patch("defenseclaw.commands.cmd_upgrade._preflight_target_wheel_migrations"),
+            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_dependency_contract"),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preexisting_promoted_runtime",
+                side_effect=ValueError("installed mcp runtime is outside 1.28.1 <= version < 2"),
+            ),
+            patch("subprocess.run") as run_mock,
+        ):
+            with self.assertRaises(SystemExit):
+                _preflight_wheel_install(
+                    "/tmp/target.whl",
+                    "linux",
+                    target_version="0.8.5",
+                    hard_cut_source_wheel="/tmp/source.whl",
+                    source_version="0.8.4",
+                )
+
+        run_mock.assert_not_called()
+
+    def test_hard_cut_preflight_reports_promoted_runtime_timeout_before_uv(self):
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": home}),
+            patch("shutil.which", return_value="/usr/bin/uv"),
+            patch("os.path.isfile", return_value=True),
+            patch("defenseclaw.commands.cmd_upgrade._preflight_target_wheel_migrations"),
+            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_dependency_contract"),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preexisting_promoted_runtime",
+                side_effect=subprocess.TimeoutExpired(["bridge-python", "-I", "-B"], 10),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._fail_wheel_preflight",
+                side_effect=SystemExit(1),
+            ) as fail_mock,
+            patch("subprocess.run") as run_mock,
+        ):
+            with self.assertRaises(SystemExit):
+                _preflight_wheel_install(
+                    "/tmp/target.whl",
+                    "linux",
+                    target_version="0.8.5",
+                    hard_cut_source_wheel="/tmp/source.whl",
+                    source_version="0.8.4",
+                )
+
+        fail_mock.assert_called_once_with(
+            "Hard-cut target cannot preserve the authenticated bridge dependency environment.",
+            None,
+        )
+        run_mock.assert_not_called()
 
     def test_restored_bridge_verifies_exact_package_metadata(self):
         with TemporaryDirectory() as root:
@@ -3006,11 +3221,107 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(count, 1)
         call = run_mock.call_args.args[0]
         self.assertEqual(call[0], venv_python)
-        self.assertEqual(call[1:3], ["-I", "-c"])
-        self.assertIn("inspect.signature(run_migrations).parameters", call[3])
-        self.assertIn('kwargs["upgrade_handles_local_bundle"] = True', call[3])
-        self.assertNotIn("upgrade_handles_local_bundle=True", call[3])
-        self.assertEqual(call[4:8], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
+        self.assertEqual(call[1:4], ["-I", "-B", "-c"])
+        self.assertIn("inspect.signature(run_migrations).parameters", call[4])
+        self.assertIn('kwargs["upgrade_handles_local_bundle"] = True', call[4])
+        self.assertNotIn("upgrade_handles_local_bundle=True", call[4])
+        self.assertEqual(call[5:9], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
+        child_environment = run_mock.call_args.kwargs["env"]
+        self.assertNotIn(
+            "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING",
+            child_environment,
+        )
+        self.assertNotIn("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", child_environment)
+
+    def test_run_installed_migrations_binds_hard_cut_token_and_preflight(self):
+        binding = ObservabilityV8PreflightBinding(
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_file_present=True,
+            environment_file_sha256="3" * 64,
+            environment_dependencies_sha256="4" * 64,
+            environment_edits_sha256="5" * 64,
+        )
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home,
+                    "DEFENSECLAW_HOME": os.path.join(home, "custom-defenseclaw"),
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "stale-value",
+                },
+                clear=True,
+            ),
+            patch("subprocess.run") as run_mock,
+        ):
+            venv_python = os.path.join(
+                os.environ["DEFENSECLAW_HOME"],
+                ".venv",
+                "bin",
+                "python",
+            )
+            os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+            Path(venv_python).write_text("# python", encoding="utf-8")
+
+            def run_child(args, **_kwargs):
+                Path(args[-1]).write_text(
+                    json.dumps({"count": 1}),
+                    encoding="utf-8",
+                )
+                return Mock(returncode=0)
+
+            run_mock.side_effect = run_child
+            count = _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                os_name="darwin",
+                mutation_token="a" * 32,
+                observability_v8_preflight_binding=binding,
+            )
+
+        self.assertEqual(count, 1)
+        child_environment = run_mock.call_args.kwargs["env"]
+        self.assertEqual(
+            child_environment["DEFENSECLAW_UPGRADE_MUTATION_TOKEN"],
+            "a" * 32,
+        )
+        self.assertEqual(
+            json.loads(
+                child_environment[
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
+                ]
+            ),
+            binding.to_payload(),
+        )
+
+    def test_run_installed_migrations_rejects_unpaired_hard_cut_authority(self):
+        binding = ObservabilityV8PreflightBinding(
+            source_sha256="1" * 64,
+            candidate_sha256="2" * 64,
+            environment_file_present=False,
+            environment_file_sha256="3" * 64,
+            environment_dependencies_sha256="4" * 64,
+            environment_edits_sha256="5" * 64,
+        )
+        with self.assertRaises(ValueError):
+            _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                observability_v8_preflight_binding=binding,
+            )
+        with self.assertRaises(ValueError):
+            _run_installed_migrations(
+                "0.8.4",
+                "0.8.5",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                mutation_token="a" * 32,
+            )
 
     def test_bundle_child_uses_custom_home_isolated_python_and_sanitized_environment(self):
         with TemporaryDirectory() as home:
@@ -3052,7 +3363,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
 
         self.assertTrue(result["installed"])
         argv = run_mock.call_args.args[0]
-        self.assertEqual(argv[:3], [venv_python, "-I", "-c"])
+        self.assertEqual(argv[:4], [venv_python, "-I", "-B", "-c"])
         child_env = run_mock.call_args.kwargs["env"]
         self.assertNotIn("PYTHONHOME", child_env)
         self.assertNotIn("PYTHONPATH", child_env)
@@ -3199,6 +3510,7 @@ class TestUpgradeFreshProcessHandoff(unittest.TestCase):
             [
                 expected_python,
                 "-I",
+                "-B",
                 "-m",
                 "defenseclaw.main",
                 "upgrade",
@@ -3522,6 +3834,8 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         upgrade_manifest=None,
         rollback_plan=None,
         rollback_result: bool = True,
+        preflight_binding_side_effect=None,
+        recovery_journal_removal_side_effect=None,
         unset_config_data_dir: bool = False,
         controller_home_override: bool = False,
     ):
@@ -3565,9 +3879,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract"))
-            stack.enter_context(
-                patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff")
-            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff"))
             stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade._acquire_bridge_rollback_artifacts",
@@ -3626,6 +3938,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 )
             )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
+            self.read_migration_preflight = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._read_hard_cut_observability_preflight_binding",
+                    return_value=None,
+                    side_effect=preflight_binding_side_effect,
+                )
+            )
             stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade._install_gateway",
@@ -3659,6 +3978,11 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                     return_value=rollback_plan,
                 )
             )
+            self.require_stable_preflight_source = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
+                )
+            )
             self.write_recovery_journal = stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade._write_hard_cut_recovery_journal",
@@ -3669,7 +3993,10 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime")
             )
             self.remove_recovery_journal = stack.enter_context(
-                patch("defenseclaw.commands.cmd_upgrade._remove_hard_cut_recovery_journal")
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._remove_hard_cut_recovery_journal",
+                    side_effect=recovery_journal_removal_side_effect,
+                )
             )
             self.execute_rollback = stack.enter_context(
                 patch(
@@ -3807,6 +4134,70 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(receipt.status, "pending")
         self.assertIn("Upgrade Rolled Back", result.output)
         self.assertNotIn("Upgrade Complete", result.output)
+
+    def test_final_full_preflight_rejects_metadata_drift_before_service_stop(self):
+        manifest = {
+            "minimum_source_version": "9.9.8",
+            "required_bridge_version": "9.9.8",
+            "auto_bridge_from": ["9.9.7"],
+        }
+        plan = Mock(name="rollback-plan")
+        result, receipt, poll_health = self._invoke_upgrade(
+            upgrade_manifest=manifest,
+            rollback_plan=plan,
+            preflight_binding_side_effect=(
+                None,
+                None,
+                OSError("fixture parent metadata changed after rollback capture"),
+            ),
+        )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertEqual(self.read_migration_preflight.call_count, 3)
+        self.write_recovery_journal.assert_called_once()
+        self.remove_recovery_journal.assert_called_once()
+        self.require_stable_preflight_source.assert_called_once()
+        self.run_silent.assert_not_called()
+        self.execute_rollback.assert_not_called()
+        poll_health.assert_not_called()
+        self.assertEqual(receipt.status, "failed")
+        self.assertEqual(receipt.failure_code, "install_failed")
+        self.assertIn("refusing to stop services", result.output)
+        self.assertIn("No service stop, artifact install, or migration", result.output)
+        self.assertNotIn("Stopping Services", result.output)
+
+    def test_final_preflight_refusal_survives_recovery_journal_cleanup_failure(self):
+        manifest = {
+            "minimum_source_version": "9.9.8",
+            "required_bridge_version": "9.9.8",
+            "auto_bridge_from": ["9.9.7"],
+        }
+        plan = Mock(name="rollback-plan")
+        result, receipt, poll_health = self._invoke_upgrade(
+            upgrade_manifest=manifest,
+            rollback_plan=plan,
+            preflight_binding_side_effect=(
+                None,
+                None,
+                OSError("fixture parent metadata changed after rollback capture"),
+            ),
+            recovery_journal_removal_side_effect=OSError("journal directory fsync failed"),
+        )
+
+        final_preflight_call = self.read_migration_preflight.call_args_list[-1]
+        staging_dir = final_preflight_call.kwargs["candidate_directory"]
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.remove_recovery_journal.assert_called_once()
+        self.run_silent.assert_not_called()
+        self.execute_rollback.assert_not_called()
+        poll_health.assert_not_called()
+        self.assertEqual(receipt.status, "failed")
+        self.assertEqual(receipt.failure_code, "install_failed")
+        self.assertFalse(os.path.exists(staging_dir))
+        self.assertIn("stale recovery-journal cleanup was deferred", result.output)
+        self.assertIn("refusing to stop services", result.output)
+        self.assertIn("No service stop, artifact install, or migration", result.output)
+        self.assertNotIn("Stopping Services", result.output)
 
     def test_surviving_timed_out_mutator_defers_rollback_and_retains_authority(self):
         manifest = {
@@ -3977,9 +4368,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             )
 
         self.assertEqual(client.health.call_count, 3)
-        ok.assert_called_once_with(
-            "Gateway API is healthy; fleet uplink is disabled by configuration"
-        )
+        ok.assert_called_once_with("Gateway API is healthy; fleet uplink is disabled by configuration")
 
     def test_restart_and_health_use_fresh_post_migration_config_and_dotenv(self):
         app = AppContext()
@@ -4198,6 +4587,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             [
                 expected_python,
                 "-I",
+                "-B",
                 "-c",
                 _INSTALLED_HEALTH_SCRIPT,
                 "/private/data",
@@ -4941,6 +5331,79 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertEqual(manifest["platform_tested_source_versions"], {"windows": []})
         _require_hard_cut_manifest_contract(manifest, target_version="0.8.5", required=True)
 
+    def test_hard_cut_migration_preflight_failure_is_bounded_and_pre_stop(self):
+        from defenseclaw.observability.v8_migration import V8MigrationError
+
+        runner = CliRunner()
+        failure = V8MigrationError(
+            "invalid_endpoint",
+            "$.otel.destinations[1].endpoint",
+            "correct the endpoint and retry",
+        )
+        with runner.isolation() as (out, _err, _):
+            with (
+                patch(
+                    "defenseclaw.migrations.preflight_observability_v8_upgrade",
+                    side_effect=failure,
+                ),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                _preflight_hard_cut_observability_migration(
+                    data_dir="/active/data",
+                    config_path="/active/config.yaml",
+                    gateway_binary="/staged/defenseclaw-gateway",
+                    candidate_directory="/staged",
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("$.otel.destinations[1].endpoint", output)
+        self.assertIn("No backup, receipt, service stop, artifact install, or migration", output)
+
+    def test_hard_cut_migration_preflight_forwards_authenticated_target(self):
+        with patch("defenseclaw.migrations.preflight_observability_v8_upgrade") as preflight:
+            _preflight_hard_cut_observability_migration(
+                data_dir="/active/data",
+                config_path="/active/config.yaml",
+                gateway_binary="/staged/defenseclaw-gateway",
+                candidate_directory="/staged",
+                announce=False,
+            )
+
+        preflight.assert_called_once_with(
+            data_dir="/active/data",
+            config_path="/active/config.yaml",
+            gateway_binary="/staged/defenseclaw-gateway",
+            candidate_directory="/staged",
+        )
+
+    def test_hard_cut_migration_preflight_rejects_binding_drift_for_yes_path(self):
+        initial = object()
+        changed = object()
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, _):
+            with (
+                patch(
+                    "defenseclaw.migrations.preflight_observability_v8_upgrade",
+                    return_value=changed,
+                ),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                _preflight_hard_cut_observability_migration(
+                    data_dir="/active/data",
+                    config_path="/active/config.yaml",
+                    gateway_binary="/staged/defenseclaw-gateway",
+                    candidate_directory="/staged",
+                    expected_binding=initial,
+                    enforce_binding=True,
+                    announce=False,
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("preflight_source_changed", output)
+        self.assertIn("No backup, receipt, service stop, artifact install, or migration", output)
+
     def test_hard_cut_contract_is_mandatory_even_with_unsafe_override(self):
         runner = CliRunner()
         app = AppContext()
@@ -5072,9 +5535,7 @@ class TestUpgradeManifest(unittest.TestCase):
             self._hard_cut_manifest(auto_bridge_from=["0.8.3", "0.8.3"]),
             self._hard_cut_manifest(auto_bridge_from=["0.8.4"]),
             self._hard_cut_manifest(minimum_source_version="0.9.0", required_bridge_version="0.9.0"),
-            self._hard_cut_manifest(
-                platform_tested_source_versions={"windows": ["0.8.3"]}
-            ),
+            self._hard_cut_manifest(platform_tested_source_versions={"windows": ["0.8.3"]}),
         ]
         partial = self._hard_cut_manifest()
         del partial["required_bridge_version"]
@@ -5288,9 +5749,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 )
             )
             stack.enter_context(patch("defenseclaw.__version__", "0.8.4"))
-            stack.enter_context(
-                patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence")
-            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence"))
             stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade._detect_platform",
@@ -5327,9 +5786,7 @@ class TestUpgradeManifest(unittest.TestCase):
                     side_effect=RuntimeError("rollback acquisition reached"),
                 )
             )
-            gateway_download = stack.enter_context(
-                patch("defenseclaw.commands.cmd_upgrade._download_gateway")
-            )
+            gateway_download = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._download_gateway"))
             backup = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._create_backup"))
             services = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
 
@@ -5876,6 +6333,48 @@ class TestRunSilentSurfaceErrors(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Did not start", output)
         self.assertIn("port 18970 already in use", output)
+
+    def test_zero_exit_with_declared_failure_marker_is_not_reported_as_success(self):
+        runner = CliRunner()
+        with patch(
+            "defenseclaw.commands.cmd_upgrade.subprocess.run",
+            return_value=Mock(
+                returncode=0,
+                stderr="",
+                stdout="Gateway service disabled. Start with: openclaw gateway install\n",
+            ),
+        ):
+            with runner.isolation() as (out, _err, _):
+                ok = _run_silent(
+                    ["openclaw", "gateway", "restart"],
+                    "OpenClaw gateway restarted",
+                    "Could not restart OpenClaw gateway automatically",
+                    failure_output_markers=("gateway service disabled",),
+                )
+                output = out.getvalue().decode()
+
+        self.assertFalse(ok)
+        self.assertIn("Could not restart OpenClaw gateway automatically", output)
+        self.assertIn("Gateway service disabled", output)
+        self.assertNotIn("OpenClaw gateway restarted", output)
+
+    def test_zero_exit_output_is_ignored_without_a_declared_failure_marker(self):
+        runner = CliRunner()
+        with patch(
+            "defenseclaw.commands.cmd_upgrade.subprocess.run",
+            return_value=Mock(
+                returncode=0,
+                stderr="",
+                stdout="Gateway service disabled. Start with: openclaw gateway install\n",
+            ),
+        ):
+            with runner.isolation() as (out, _err, _):
+                ok = _run_silent(["other-command"], "Started", "Did not start")
+                output = out.getvalue().decode()
+
+        self.assertTrue(ok)
+        self.assertIn("Started", output)
+        self.assertNotIn("Did not start", output)
 
     def test_file_not_found_surfaces_exception_message(self):
         runner = CliRunner()

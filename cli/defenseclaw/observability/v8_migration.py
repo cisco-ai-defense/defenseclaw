@@ -42,8 +42,8 @@ from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Final
-from urllib.parse import urlsplit
+from typing import Any, Final, NoReturn
+from urllib.parse import quote_from_bytes, unquote_to_bytes, urlsplit, urlunsplit
 
 import yaml
 from yaml.events import (
@@ -67,8 +67,11 @@ from defenseclaw.observability.v8_config import (
     BUCKETS,
     CONFIGURABLE_CORE_RESOURCE_ATTRIBUTE_KEYS,
     ENDPOINT_HOST_CGNAT,
+    ENDPOINT_HOST_INVALID,
     ENDPOINT_HOST_LOCALHOST,
+    ENDPOINT_HOST_METADATA,
     ENDPOINT_HOST_PRIVATE,
+    ENDPOINT_HOST_PROHIBITED,
     MAX_MAPPING_ENTRIES,
     MAX_ROUTES_PER_DESTINATION,
     MAX_SOURCE_BYTES,
@@ -1424,9 +1427,12 @@ def _convert_otel(
     flat_destination: Mapping[str, Any] | None,
     ctx: _Context,
 ) -> tuple[list[dict[str, Any]], tuple[str, ...], str]:
-    raw_destinations = list(otel.get("destinations", []) or [])
+    raw_destinations = [
+        (raw, f"$.otel.destinations[{index}]")
+        for index, raw in enumerate(otel.get("destinations", []) or [])
+    ]
     if flat_destination is not None:
-        raw_destinations.insert(0, flat_destination)
+        raw_destinations.insert(0, (flat_destination, "$.otel"))
     if master_enabled and not raw_destinations:
         raise _error(
             ctx,
@@ -1441,10 +1447,10 @@ def _convert_otel(
     local_coverage: list[bool] = []
     global_batch = _mapping(otel.get("batch"), "$.otel.batch", ctx) if "batch" in otel else {}
     effective_global_batch = _effective_otel_batch(global_batch, {}, "$.otel.batch", ctx)
-    for index, raw in enumerate(raw_destinations):
-        source = dict(_mapping(raw, f"$.otel.destinations[{index}]", ctx))
+    for raw, source_path in raw_destinations:
+        source = dict(_mapping(raw, source_path, ctx))
         destination_batch = (
-            _mapping(source.get("batch"), f"$.otel.destinations[{index}].batch", ctx) if "batch" in source else {}
+            _mapping(source.get("batch"), f"{source_path}.batch", ctx) if "batch" in source else {}
         )
         source["__scheduled_delay_explicit"] = (
             _legacy_positive_value(destination_batch.get("scheduled_delay_ms")) is not None
@@ -1453,11 +1459,11 @@ def _convert_otel(
         source["batch"] = _effective_otel_batch(
             destination_batch,
             effective_global_batch,
-            f"$.otel.destinations[{index}].batch",
+            f"{source_path}.batch",
             ctx,
         )
         converted, active, local_full = _convert_otel_destination(
-            source, master_enabled, findings, ai_otel, profile, index, ctx
+            source, master_enabled, findings, ai_otel, profile, source_path, ctx
         )
         result.extend(converted)
         active_signals.update(active)
@@ -1527,11 +1533,18 @@ def _flat_otel_destination(otel: Mapping[str, Any], ctx: _Context) -> dict[str, 
         flat_name = f"generic-otlp-{suffix}"
         suffix += 1
     name = "local-observability" if preset == "local-otlp" else (flat_name if preset == "generic-otlp" else preset)
-    configured_endpoints = [endpoint for endpoint in (global_endpoint, *signal_endpoints.values()) if endpoint]
+    configured_endpoints: list[tuple[str, str]] = []
+    if global_endpoint:
+        configured_endpoints.append((global_endpoint, "$.otel.endpoint"))
+    configured_endpoints.extend(
+        (endpoint, f"$.otel.{signal}.endpoint")
+        for signal, endpoint in signal_endpoints.items()
+        if endpoint
+    )
     if (
         preset == "generic-otlp"
         and configured_endpoints
-        and all(_endpoint_is_loopback(endpoint, ctx) for endpoint in configured_endpoints)
+        and all(_endpoint_is_loopback(endpoint, ctx, endpoint_path) for endpoint, endpoint_path in configured_endpoints)
     ):
         preset = "local-otlp"
         name = "local-observability"
@@ -1622,10 +1635,9 @@ def _convert_otel_destination(
     findings: bool,
     ai_otel: bool,
     profile: str,
-    index: int,
+    path: str,
     ctx: _Context,
 ) -> tuple[list[dict[str, Any]], tuple[str, ...], bool | None]:
-    path = f"$.otel.destinations[{index}]"
     raw_name = source.get("name", "")
     base_name = _normalize_destination_name(raw_name, f"{path}.name", ctx)
     preset = source.get("preset", "")
@@ -1647,6 +1659,13 @@ def _convert_otel_destination(
         if value.get("enabled") is True:
             enabled_signals.append(signal)
     is_flat = source.get("__flat_otel_destination") is True
+
+    def endpoint_source_path(signal: str | None = None, *, override: bool = False) -> str:
+        if is_flat:
+            return f"$.otel.{signal}.endpoint" if override and signal else "$.otel.endpoint"
+        return f"{path}.{signal}.endpoint" if override and signal else f"{path}.endpoint"
+
+    tls_parent_path = "$.otel" if is_flat else path
     if not enabled_signals and is_flat and source.get("endpoint"):
         enabled_signals = list(_SIGNALS)
     if source.get("enabled") is True and not enabled_signals:
@@ -1662,7 +1681,7 @@ def _convert_otel_destination(
                 raise _error(
                     ctx,
                     "invalid_v7_otel",
-                    f"{path}.{signal}.endpoint",
+                    endpoint_source_path(signal, override=True),
                     "configure an endpoint for every enabled signal before upgrading",
                 )
 
@@ -1695,25 +1714,86 @@ def _convert_otel_destination(
             )
 
     global_protocol = _protocol(source.get("protocol") or ("http/protobuf" if is_galileo else "grpc"), path, ctx)
-    by_protocol: dict[str, list[str]] = {}
+    source_tls = _tls(source.get("tls", {}), tls_parent_path, ctx)
+    if source_tls.pop("insecure_skip_verify", None) is not None:
+        ctx.warning(f"legacy_otlp_insecure_skip_verify_ignored:{base_name}")
+    configured_insecure = source_tls.get("insecure") is True
+    ca_cert = source_tls.get("ca_cert", "")
+    if ca_cert and not Path(ca_cert).is_absolute():
+        raise _error(
+            ctx,
+            "relative_v7_otel_ca_cert",
+            f"{tls_parent_path}.tls.ca_cert",
+            "replace the legacy OTLP CA certificate with an absolute path before upgrading",
+        )
+    by_transport: dict[tuple[str, bool], list[str]] = {}
     for signal in enabled_signals:
         protocol = _protocol(signals[signal].get("protocol") or global_protocol, f"{path}.{signal}.protocol", ctx)
-        by_protocol.setdefault(protocol, []).append(signal)
-    groups: list[tuple[str, list[str], bool]] = []
+        signal_endpoint_override = signals[signal].get("endpoint")
+        resolved_endpoint = signal_endpoint_override or source.get("endpoint")
+        resolved_endpoint_path = endpoint_source_path(signal, override=bool(signal_endpoint_override))
+        insecure = _legacy_otlp_endpoint_insecure(
+            resolved_endpoint,
+            protocol,
+            configured_insecure,
+            ca_cert,
+            ctx=ctx,
+            path=resolved_endpoint_path,
+        )
+        by_transport.setdefault((protocol, insecure), []).append(signal)
+    groups: list[tuple[str, list[str], bool, bool]] = []
+    global_insecure = _legacy_otlp_endpoint_insecure(
+        source.get("endpoint"),
+        global_protocol,
+        configured_insecure,
+        ca_cert,
+        ctx=ctx,
+        path=endpoint_source_path(),
+    )
+
+    def ordered_transport_keys() -> list[tuple[str, bool]]:
+        keys = list(by_transport)
+        global_key = (global_protocol, global_insecure)
+        if source.get("endpoint") and global_key in by_transport:
+            keys.remove(global_key)
+            return [global_key, *keys]
+        return [item for item in keys if item[0] == global_protocol] + [
+            item for item in keys if item[0] != global_protocol
+        ]
+
     if is_galileo and "traces" in enabled_signals:
         trace_protocol = _protocol(signals["traces"].get("protocol") or global_protocol, f"{path}.traces.protocol", ctx)
-        groups.append((trace_protocol, ["traces"], True))
-        for protocol in ([global_protocol] if global_protocol in by_protocol else []) + [
-            item for item in by_protocol if item != global_protocol
-        ]:
-            non_trace = [signal for signal in by_protocol[protocol] if signal != "traces"]
+        if trace_protocol != "http/protobuf":
+            protocol_path = (
+                f"{path}.traces.protocol" if signals["traces"].get("protocol") else f"{path}.protocol"
+            )
+            if is_flat:
+                protocol_path = (
+                    "$.otel.traces.protocol" if signals["traces"].get("protocol") else "$.otel.protocol"
+                )
+            raise _error(
+                ctx,
+                "unsupported_galileo_protocol",
+                protocol_path,
+                "set the Galileo trace protocol to http or http/protobuf before upgrading",
+            )
+        trace_endpoint = signals["traces"].get("endpoint") or source.get("endpoint")
+        trace_insecure = _legacy_otlp_endpoint_insecure(
+            trace_endpoint,
+            trace_protocol,
+            configured_insecure,
+            ca_cert,
+            ctx=ctx,
+            path=endpoint_source_path("traces", override=bool(signals["traces"].get("endpoint"))),
+        )
+        groups.append((trace_protocol, ["traces"], True, trace_insecure))
+        for protocol, insecure in ordered_transport_keys():
+            non_trace = [signal for signal in by_transport[(protocol, insecure)] if signal != "traces"]
             if non_trace:
-                groups.append((protocol, non_trace, False))
+                groups.append((protocol, non_trace, False, insecure))
     else:
-        for protocol in ([global_protocol] if global_protocol in by_protocol else []) + [
-            item for item in by_protocol if item != global_protocol
-        ]:
-            groups.append((protocol, by_protocol[protocol], False))
+        for protocol, insecure in ordered_transport_keys():
+            groups.append((protocol, by_transport[(protocol, insecure)], False, insecure))
 
     if is_local:
         # The runtime binds the local-observability-v1 trace projection to the
@@ -1727,7 +1807,7 @@ def _convert_otel_destination(
 
     split = len(groups) > 1
     result: list[dict[str, Any]] = []
-    for group_index, (protocol, group, galileo_group) in enumerate(groups):
+    for group_index, (protocol, group, galileo_group, insecure) in enumerate(groups):
         suffix = "-" + "-".join(group) if split and group_index > 0 else ""
         name = _unique_name(_bounded_name(base_name + suffix), ctx)
         target: dict[str, Any] = {"name": name, "kind": "otlp", "protocol": protocol}
@@ -1736,12 +1816,42 @@ def _convert_otel_destination(
         if galileo_group:
             target["preset"] = "galileo"
         endpoint = source.get("endpoint")
-        if endpoint:
-            target["endpoint"] = _text(endpoint, f"{path}.endpoint", ctx)
+        group_endpoint = ""
+        if endpoint and _legacy_otlp_endpoint_insecure(
+            endpoint,
+            protocol,
+            configured_insecure,
+            ca_cert,
+            ctx=ctx,
+            path=endpoint_source_path(),
+        ) == insecure:
+            group_endpoint, _ = _normalize_legacy_otlp_endpoint(
+                endpoint,
+                protocol,
+                insecure,
+                ctx=ctx,
+                path=endpoint_source_path(),
+            )
+            target["endpoint"] = _text(group_endpoint, f"{path}.endpoint", ctx)
         headers = _convert_headers(source.get("headers", {}), name, ctx)
         if headers:
             target["headers"] = headers
-        if tls := _tls(source.get("tls", {}), path, ctx):
+        tls = copy.deepcopy(source_tls)
+        if insecure:
+            if tls.get("ca_cert"):
+                group_active = any(signal in active_signals for signal in group)
+                if protocol.startswith("grpc") or not group_active:
+                    tls.pop("ca_cert", None)
+                    ctx.warning(f"legacy_plaintext_otlp_ca_ignored:{name}")
+                else:
+                    raise _error(
+                        ctx,
+                        "conflicting_v7_otel_tls",
+                        f"{tls_parent_path}.tls.ca_cert",
+                        "remove ca_cert or use only TLS-secured OTLP endpoints before upgrading",
+                    )
+            tls["insecure"] = True
+        if tls:
             target["tls"] = tls
         if batch := _batch(source.get("batch", {}), path, ctx):
             target["batch"] = batch
@@ -1751,11 +1861,37 @@ def _convert_otel_destination(
         overrides: dict[str, Any] = {}
         for signal in group:
             override: dict[str, Any] = {}
-            signal_endpoint = signals[signal].get("endpoint")
-            if signal_endpoint and signal_endpoint != endpoint:
-                override["endpoint"] = _text(signal_endpoint, f"{path}.{signal}.endpoint", ctx)
-            if url_path := signals[signal].get("url_path"):
-                override["path"] = _text(url_path, f"{path}.{signal}.url_path", ctx)
+            signal_endpoint_override = signals[signal].get("endpoint")
+            signal_endpoint = signal_endpoint_override or endpoint
+            signal_endpoint_path = endpoint_source_path(signal, override=bool(signal_endpoint_override))
+            normalized_endpoint, endpoint_path = _normalize_legacy_otlp_endpoint(
+                signal_endpoint,
+                protocol,
+                insecure,
+                ctx=ctx,
+                path=signal_endpoint_path,
+            )
+            if normalized_endpoint and normalized_endpoint != group_endpoint:
+                override["endpoint"] = _text(normalized_endpoint, signal_endpoint_path, ctx)
+            raw_url_path = signals[signal].get("url_path")
+            if protocol.startswith("http"):
+                effective_path = ""
+                if raw_url_path:
+                    effective_path = _normalize_legacy_otlp_url_path(
+                        _text(raw_url_path, f"{path}.{signal}.url_path", ctx),
+                        signal,
+                    )
+                elif endpoint_path:
+                    effective_path = _normalize_legacy_otlp_endpoint_path(
+                        endpoint_path,
+                        signal,
+                        signal_endpoint_path,
+                        ctx,
+                    )
+                if effective_path:
+                    override["path"] = effective_path
+            elif raw_url_path or endpoint_path:
+                ctx.warning(f"legacy_grpc_path_ignored:{name}:{signal}")
             if override:
                 overrides[signal] = override
         if overrides:
@@ -2629,15 +2765,20 @@ def _endpoint_host(endpoint: str, ctx: _Context, path: str) -> str:
     try:
         parsed = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
         host = parsed.hostname
+        has_inline_credentials = parsed.username is not None
+        # urllib defers malformed and out-of-range port errors until access.
+        # Force that check here so callers always receive a bounded migration
+        # diagnostic instead of a later generic candidate-validation failure.
+        _ = parsed.port
     except ValueError:
         raise _error(ctx, "invalid_endpoint", path, "use a syntactically valid collector endpoint") from None
-    if not host:
-        raise _error(ctx, "invalid_endpoint", path, "use a collector endpoint with a host")
+    if not host or has_inline_credentials:
+        raise _error(ctx, "invalid_endpoint", path, "use a collector endpoint with a host and no inline credentials")
     return host
 
 
-def _endpoint_is_loopback(endpoint: str, ctx: _Context) -> bool:
-    host = _endpoint_host(endpoint, ctx, "$.otel.endpoint")
+def _endpoint_is_loopback(endpoint: str, ctx: _Context, path: str) -> bool:
+    host = _endpoint_host(endpoint, ctx, path)
     if classify_endpoint_host(host) == ENDPOINT_HOST_LOCALHOST:
         return True
     try:
@@ -2647,6 +2788,53 @@ def _endpoint_is_loopback(endpoint: str, ctx: _Context) -> bool:
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
     return address.is_loopback
+
+
+def _validate_legacy_otlp_endpoint(endpoint: str, protocol: str, ctx: _Context, path: str) -> None:
+    def reject() -> NoReturn:
+        raise _error(ctx, "invalid_endpoint", path, "use a syntactically valid collector endpoint")
+
+    value = endpoint
+    if (
+        not value
+        or len(value) > 2_048
+        or value[0].isspace()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        reject()
+    try:
+        if "://" in value:
+            parsed = urlsplit(value)
+            port = parsed.port
+            if (
+                not parsed.hostname
+                or parsed.username is not None
+                or _INVALID_PERCENT_ESCAPE.search(parsed.netloc)
+                or _INVALID_PERCENT_ESCAPE.search(parsed.path)
+                or _INVALID_PERCENT_ESCAPE.search(parsed.fragment)
+            ):
+                reject()
+        else:
+            if (
+                any(character.isspace() for character in value)
+                or any(character in value for character in "@/?#")
+                or _INVALID_PERCENT_ESCAPE.search(value)
+            ):
+                reject()
+            parsed = urlsplit(f"//{value}")
+            port = parsed.port
+            if not parsed.hostname or (protocol.startswith("grpc") and port is None):
+                reject()
+    except ValueError:
+        reject()
+    if port is not None and not 1 <= port <= 65_535:
+        reject()
+    if classify_endpoint_host(parsed.hostname or "") in {
+        ENDPOINT_HOST_INVALID,
+        ENDPOINT_HOST_METADATA,
+        ENDPOINT_HOST_PROHIBITED,
+    }:
+        reject()
 
 
 def _tls(value: Any, path: str, ctx: _Context) -> dict[str, Any]:
@@ -2663,6 +2851,119 @@ def _tls(value: Any, path: str, ctx: _Context) -> dict[str, Any]:
     if ca_cert := source.get("ca_cert"):
         result["ca_cert"] = _text(ca_cert, f"{path}.tls.ca_cert", ctx)
     return result
+
+
+def _legacy_otlp_endpoint_insecure(
+    endpoint: Any,
+    protocol: str,
+    configured_insecure: bool,
+    ca_cert: Any,
+    *,
+    ctx: _Context,
+    path: str,
+) -> bool:
+    if isinstance(endpoint, str) and endpoint:
+        # Validate target representability before any TLS shortcut. Otherwise
+        # configured plaintext/CA modes can bypass parsing until candidate
+        # validation, lose the exact v7 source path, or silently discard an
+        # invalid gRPC URL path during normalization.
+        _validate_legacy_otlp_endpoint(endpoint, protocol, ctx, path)
+    if configured_insecure:
+        return True
+    if protocol.startswith("grpc") and isinstance(ca_cert, str) and ca_cert:
+        return False
+    if not isinstance(endpoint, str) or "://" not in endpoint:
+        return False
+    try:
+        scheme = urlsplit(endpoint).scheme.lower()
+    except ValueError:
+        raise _error(ctx, "invalid_endpoint", path, "use a syntactically valid collector endpoint") from None
+    if protocol.startswith("grpc"):
+        return scheme != "https"
+    return scheme == "http"
+
+
+def _normalize_legacy_otlp_endpoint(
+    endpoint: Any,
+    protocol: str,
+    insecure: bool,
+    *,
+    ctx: _Context,
+    path: str,
+) -> tuple[str, str]:
+    if not isinstance(endpoint, str) or not endpoint:
+        return "", ""
+    if "://" in endpoint:
+        try:
+            parsed = urlsplit(endpoint)
+        except ValueError:
+            raise _error(ctx, "invalid_endpoint", path, "use a syntactically valid collector endpoint") from None
+        scheme = "http" if insecure else "https"
+        normalized = urlunsplit((scheme, parsed.netloc, "", "", ""))
+        path = parsed.path if parsed.path not in {"", "/"} else ""
+        if protocol.startswith("grpc"):
+            return normalized, path
+        return normalized, path
+    if protocol.startswith("http"):
+        scheme = "http" if insecure else "https"
+        return f"{scheme}://{endpoint}", ""
+    return endpoint, ""
+
+
+_GO_URL_PATH_SAFE = "/$&+,:;=@"
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _normalize_legacy_otlp_endpoint_path(
+    value: str,
+    signal: str,
+    path: str,
+    ctx: _Context,
+) -> str:
+    """Reproduce the wire path emitted by the published v7 Go exporter."""
+
+    if _INVALID_PERCENT_ESCAPE.search(value):
+        raise _error(
+            ctx,
+            "invalid_endpoint",
+            path,
+            "use valid percent-encoding in the collector URL path",
+        )
+    # v7 parsed the endpoint into url.URL.Path (decoding %HH), discarded
+    # RawPath, then passed Path through the signal exporter's WithURLPath.
+    # Trace/metric v1.43 cleaned the path; log v0.19 preserved it literally.
+    decoded = unquote_to_bytes(value).decode("utf-8", "surrogateescape")
+    normalized = _clean_legacy_otlp_path(decoded, signal)
+    if not normalized:
+        return ""
+    # Go re-escaped only bytes unsafe in a whole URL path: %2F became '/',
+    # while encoded '?' and '#' stayed escaped on the wire.
+    return quote_from_bytes(
+        normalized.encode("utf-8", "surrogateescape"),
+        safe=_GO_URL_PATH_SAFE,
+    )
+
+
+def _normalize_legacy_otlp_url_path(value: str, signal: str) -> str:
+    """Reproduce v7 url.URL{Path: value}.EscapedPath for explicit paths."""
+
+    normalized = _clean_legacy_otlp_path(value, signal)
+    if not normalized:
+        return ""
+    # Explicit url_path was a decoded Go Path string, so a literal '%' was not
+    # an escape introducer and must become %25 in the v8 RawPath spelling.
+    return quote_from_bytes(normalized.encode("utf-8"), safe=_GO_URL_PATH_SAFE)
+
+
+def _clean_legacy_otlp_path(value: str, signal: str) -> str:
+    """Apply the exact path cleanup used by each published v7 exporter."""
+
+    if signal in {"traces", "metrics"}:
+        value = value.strip()
+        if value in {"", "."}:
+            # Omitting the v8 override selects the same /v1/<signal> default.
+            return ""
+    return value if value.startswith("/") else f"/{value}"
 
 
 def _batch(value: Any, path: str, ctx: _Context) -> dict[str, int]:

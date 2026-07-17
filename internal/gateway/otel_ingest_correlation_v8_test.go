@@ -83,6 +83,14 @@ func codexCorrelationResponseRequest(now time.Time, responseID string) *collecto
 }
 
 func codexCorrelationToolRequest(now time.Time, toolCallID string) *collectortracepb.ExportTraceServiceRequest {
+	attributes := []*commonpb.KeyValue{
+		otlpClassifierStringAttribute("gen_ai.operation.name", "execute_tool"),
+		otlpClassifierStringAttribute("gen_ai.tool.name", "shell"),
+		otlpClassifierStringAttribute("gen_ai.conversation.id", "conversation-native-tool-1"),
+	}
+	if toolCallID != "" {
+		attributes = append(attributes, otlpClassifierStringAttribute("gen_ai.tool.call.id", toolCallID))
+	}
 	return &collectortracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
 			otlpClassifierStringAttribute("service.name", "codex_cli_rs"),
@@ -96,12 +104,7 @@ func codexCorrelationToolRequest(now time.Time, toolCallID string) *collectortra
 				Kind:              tracepb.Span_SPAN_KIND_INTERNAL,
 				StartTimeUnixNano: uint64(now.Add(-time.Second).UnixNano()),
 				EndTimeUnixNano:   uint64(now.UnixNano()),
-				Attributes: []*commonpb.KeyValue{
-					otlpClassifierStringAttribute("gen_ai.operation.name", "execute_tool"),
-					otlpClassifierStringAttribute("gen_ai.tool.name", "shell"),
-					otlpClassifierStringAttribute("gen_ai.tool.call.id", toolCallID),
-					otlpClassifierStringAttribute("gen_ai.conversation.id", "conversation-native-tool-1"),
-				},
+				Attributes:        attributes,
 			}},
 		}},
 	}}}
@@ -140,6 +143,36 @@ func correlateCodexToolStartWithoutNativeID(
 	if correlated.ToolInvocationID == "" || correlated.SemanticEventID == "" ||
 		correlated.LogicalEventID == "" {
 		t.Fatalf("hook start did not mint durable operation identity: %+v", correlated)
+	}
+	return correlated
+}
+
+func correlateCodexActivePromptBoundary(
+	t *testing.T,
+	ctx context.Context,
+	api *APIServer,
+	sessionID, turnID, agentID string,
+) agentHookRequest {
+	t.Helper()
+	profile := api.hookProfileForConnector("codex")
+	payload := map[string]interface{}{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      sessionID,
+		"turn_id":         turnID,
+	}
+	if agentID != "" {
+		payload["agent_id"] = agentID
+	}
+	req := normalizeAgentHookRequestWithProfile("codex", payload, profile)
+	_, correlated, err := api.correlateHookOccurrence(
+		ctx, profile, req, []byte("codex-active-prompt:"+sessionID+":"+turnID+":"+agentID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correlated.SessionID != sessionID || correlated.TurnID != turnID ||
+		correlated.AgentID == "" || correlated.SemanticEventID == "" {
+		t.Fatalf("active prompt did not persist durable context: %+v", correlated)
 	}
 	return correlated
 }
@@ -323,7 +356,7 @@ func TestNativeOTLPIdenticalLogsRemainDistinctAndSourceProvenCodexCallIDJoinsHoo
 	}
 }
 
-func TestNativeOTLPNoSharedToolIDLinksUniquePendingWithoutCollapse(t *testing.T) {
+func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 	installCorrelationHMACForTest()
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
@@ -333,11 +366,8 @@ func TestNativeOTLPNoSharedToolIDLinksUniquePendingWithoutCollapse(t *testing.T)
 	hook := correlateCodexToolStartWithoutNativeID(
 		t, t.Context(), api, "conversation-native-tool-1", "unique",
 	)
-	if hook.ToolInvocationID == "provider-tool-call-unshared" {
-		t.Fatal("test hook unexpectedly shared the provider tool-call identity")
-	}
 	accounting, err := api.importDecodedOTLPRequestV8(
-		t.Context(), codexCorrelationToolRequest(now, "provider-tool-call-unshared"),
+		t.Context(), codexCorrelationToolRequest(now, ""),
 		otelSignalTraces, "codex", now,
 	)
 	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
@@ -382,7 +412,7 @@ func TestNativeOTLPNoSharedToolIDLinksUniquePendingWithoutCollapse(t *testing.T)
 	}
 }
 
-func TestNativeOTLPNoSharedToolIDAmbiguityRemainsUnresolved(t *testing.T) {
+func TestNativeOTLPIDlessToolAmbiguityRemainsUnresolved(t *testing.T) {
 	installCorrelationHMACForTest()
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
@@ -399,7 +429,7 @@ func TestNativeOTLPNoSharedToolIDAmbiguityRemainsUnresolved(t *testing.T) {
 		t.Fatalf("independent pending operations reused identity %q", first.ToolInvocationID)
 	}
 	accounting, err := api.importDecodedOTLPRequestV8(
-		t.Context(), codexCorrelationToolRequest(now, "provider-tool-call-ambiguous"),
+		t.Context(), codexCorrelationToolRequest(now, ""),
 		otelSignalTraces, "codex", now,
 	)
 	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
@@ -424,6 +454,257 @@ func TestNativeOTLPNoSharedToolIDAmbiguityRemainsUnresolved(t *testing.T) {
 	if events != 3 || groups != 3 || semanticEdges != 0 || activePending != 2 {
 		t.Fatalf("ambiguous join events=%d groups=%d semantic_edges=%d active_pending=%d",
 			events, groups, semanticEdges, activePending)
+	}
+}
+
+func TestNativeOTLPReportedDifferentToolIDDoesNotLinkPendingHookOperation(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newCodexNativeOTLPFixture(t)
+	api := &APIServer{store: fixture.store}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+
+	hook := correlateCodexToolStartWithoutNativeID(
+		t, t.Context(), api, "conversation-native-tool-1", "reported-id-mismatch",
+	)
+	accounting, err := api.importDecodedOTLPRequestV8(
+		t.Context(), codexCorrelationToolRequest(now, "provider-tool-call-different"),
+		otelSignalTraces, "codex", now,
+	)
+	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
+		t.Fatalf("native tool accounting=%+v err=%v", accounting, err)
+	}
+
+	database := openCorrelationDB(t, fixture.path)
+	var causalEdges, activePending, matchingNativeProjection int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_relationships
+		WHERE relationship_type='caused_by' AND rule_id='unique-compatible-native-pending'`).Scan(&causalEdges); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations
+		WHERE operation_id=? AND status='active'`, hook.ToolInvocationID).Scan(&activePending); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_observations observation
+		JOIN correlation_events event ON event.semantic_event_id=observation.semantic_event_id
+		WHERE event.source_rail='native_otlp' AND observation.tool_invocation_id='provider-tool-call-different'`).Scan(&matchingNativeProjection); err != nil {
+		t.Fatal(err)
+	}
+	if causalEdges != 0 || activePending != 1 || matchingNativeProjection == 0 {
+		t.Fatalf("reported tool mismatch causal_edges=%d active_pending=%d native_projection=%d",
+			causalEdges, activePending, matchingNativeProjection)
+	}
+}
+
+func TestNativeOTLPReportedOperationIdentityPreventsPendingFallback(t *testing.T) {
+	tests := []struct {
+		name   string
+		target connector.CorrelationTarget
+		req    agentHookRequest
+		want   bool
+	}{
+		{
+			name: "reported tool", target: connector.CorrelationTargetTool,
+			req: agentHookRequest{ToolInvocationID: "call-native", CorrelationOrigins: map[connector.CorrelationTarget]connector.CorrelationOrigin{
+				connector.CorrelationTargetTool: connector.CorrelationOriginReported,
+			}}, want: true,
+		},
+		{
+			name: "minted tool", target: connector.CorrelationTargetTool,
+			req: agentHookRequest{ToolInvocationID: "call-minted", CorrelationOrigins: map[connector.CorrelationTarget]connector.CorrelationOrigin{
+				connector.CorrelationTargetTool: connector.CorrelationOriginMinted,
+			}}, want: false,
+		},
+		{
+			name: "reported model request", target: connector.CorrelationTargetModelRequest,
+			req: agentHookRequest{ModelRequestID: "request-native", CorrelationOrigins: map[connector.CorrelationTarget]connector.CorrelationOrigin{
+				connector.CorrelationTargetModelRequest: connector.CorrelationOriginReported,
+			}}, want: true,
+		},
+		{
+			name: "reported model response", target: connector.CorrelationTargetModelRequest,
+			req: agentHookRequest{ModelResponseID: "response-native", CorrelationOrigins: map[connector.CorrelationTarget]connector.CorrelationOrigin{
+				connector.CorrelationTargetModelResponse: connector.CorrelationOriginReported,
+			}}, want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nativeOTLPHasReportedOperationIdentity(test.req, test.target); got != test.want {
+				t.Fatalf("reported operation identity=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newCodexNativeOTLPFixture(t)
+	hookAPI := &APIServer{store: fixture.store}
+	profile := hookAPI.hookProfileForConnector("codex")
+	start := normalizeAgentHookRequestWithProfile("codex", map[string]interface{}{
+		"hook_event_name": "SessionStart", "session_id": "conversation-native-1",
+	}, profile)
+	_, start, err := hookAPI.correlateHookOccurrence(
+		t.Context(), profile, start, []byte("codex-session-start:conversation-native-1"),
+	)
+	if err != nil || start.AgentID == "" {
+		t.Fatalf("session start=%+v err=%v", start, err)
+	}
+	prompt := correlateCodexActivePromptBoundary(
+		t, t.Context(), hookAPI, "conversation-native-1", "codex-hook-turn-1", start.AgentID,
+	)
+
+	// A fresh API has no process-local hook-session state. The native response
+	// must recover its context solely from the persisted cursor.
+	nativeAPI := &APIServer{store: fixture.store}
+	nativeAPI.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	accounting, err := nativeAPI.importDecodedOTLPRequestV8(
+		t.Context(), codexCorrelationResponseRequest(now, ""), otelSignalLogs, "codex", now,
+	)
+	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
+		t.Fatalf("native response accounting=%+v err=%v", accounting, err)
+	}
+
+	database := openCorrelationDB(t, fixture.path)
+	var nativeSemantic, nativeLogical string
+	if err := database.QueryRow(`SELECT semantic_event_id, logical_group_id
+		FROM correlation_events WHERE source_rail='native_otlp'`).Scan(&nativeSemantic, &nativeLogical); err != nil {
+		t.Fatal(err)
+	}
+	if nativeLogical == prompt.LogicalEventID {
+		t.Fatalf("derived prompt boundary collapsed logical groups: native=%q hook=%q", nativeLogical, prompt.LogicalEventID)
+	}
+	var events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection int
+	if err := database.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT logical_group_id) FROM correlation_events`).Scan(&events, &groups); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_relationships
+		WHERE from_kind='semantic_event' AND from_id=?
+		  AND to_kind='semantic_event' AND to_id=?
+		  AND relationship_type='caused_by' AND method='derived'
+		  AND rule_id='unique-active-prompt-boundary' AND rule_version='codex-correlation-v2'
+		  AND confidence=95 AND status='active'`, nativeSemantic, prompt.SemanticEventID).Scan(&causedBy); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_relationships
+		WHERE relationship_type IN ('same_as','duplicate_of')`).Scan(&exactMerges); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
+		WHERE semantic_event_id=? AND origin='derived'
+		  AND identifier_kind IN ('turn','agent')
+		  AND source_field IN ('correlation_cursor.active_turn_id','correlation_cursor.agent_id')`, nativeSemantic).Scan(&derivedMembership); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_observations
+		WHERE semantic_event_id=? AND signal='logs'
+		  AND event_name<>'correlation.relationship.changed'
+		  AND session_id=? AND turn_id=? AND agent_id=?`, nativeSemantic,
+		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&nativeProjection); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events
+		WHERE event_name='correlation.relationship.changed'
+		  AND session_id=? AND turn_id=? AND agent_id=?`,
+		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&relationshipProjection); err != nil {
+		t.Fatal(err)
+	}
+	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 2 ||
+		nativeProjection == 0 || relationshipProjection == 0 {
+		t.Fatalf("durable prompt join events=%d groups=%d caused_by=%d exact_merges=%d derived_membership=%d native_projection=%d relationship_projection=%d",
+			events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection)
+	}
+}
+
+func TestNativeOTLPCodexResponseLeavesAmbiguousPromptBoundariesUnresolved(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newCodexNativeOTLPFixture(t)
+	hookAPI := &APIServer{store: fixture.store}
+	first := correlateCodexActivePromptBoundary(
+		t, t.Context(), hookAPI, "conversation-native-1", "codex-hook-turn-a", "codex-hook-agent-a",
+	)
+	second := correlateCodexActivePromptBoundary(
+		t, t.Context(), hookAPI, "conversation-native-1", "codex-hook-turn-b", "codex-hook-agent-b",
+	)
+	if first.AgentID == second.AgentID {
+		t.Fatalf("independent prompt cursors reused agent identity %q", first.AgentID)
+	}
+
+	nativeAPI := &APIServer{store: fixture.store}
+	nativeAPI.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	accounting, err := nativeAPI.importDecodedOTLPRequestV8(
+		t.Context(), codexCorrelationResponseRequest(now, ""), otelSignalLogs, "codex", now,
+	)
+	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
+		t.Fatalf("ambiguous native response accounting=%+v err=%v", accounting, err)
+	}
+
+	database := openCorrelationDB(t, fixture.path)
+	var events, groups, causalEdges, derivedMembership int
+	if err := database.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT logical_group_id) FROM correlation_events`).Scan(&events, &groups); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_relationships
+		WHERE relationship_type='caused_by' AND rule_id='unique-active-prompt-boundary'`).Scan(&causalEdges); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
+		WHERE source_field IN ('correlation_cursor.active_turn_id','correlation_cursor.agent_id')`).Scan(&derivedMembership); err != nil {
+		t.Fatal(err)
+	}
+	if events != 3 || groups != 3 || causalEdges != 0 || derivedMembership != 0 {
+		t.Fatalf("ambiguous prompt join events=%d groups=%d causal_edges=%d derived_membership=%d",
+			events, groups, causalEdges, derivedMembership)
+	}
+}
+
+func TestNativeOTLPCodexResponseWithReportedTurnDoesNotJoinActivePrompt(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newCodexNativeOTLPFixture(t)
+	hookAPI := &APIServer{store: fixture.store}
+	_ = correlateCodexActivePromptBoundary(
+		t, t.Context(), hookAPI, "conversation-native-1", "codex-hook-turn-1", "codex-hook-agent-1",
+	)
+
+	nativeAPI := &APIServer{store: fixture.store}
+	nativeAPI.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	request := codexCorrelationResponseRequest(now, "")
+	request.ResourceLogs[0].ScopeLogs[0].LogRecords[0].Attributes = append(
+		request.ResourceLogs[0].ScopeLogs[0].LogRecords[0].Attributes,
+		otlpClassifierStringAttribute("turn.id", "codex-native-turn-2"),
+	)
+	accounting, err := nativeAPI.importDecodedOTLPRequestV8(
+		t.Context(), request, otelSignalLogs, "codex", now,
+	)
+	if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
+		t.Fatalf("native response accounting=%+v err=%v", accounting, err)
+	}
+
+	database := openCorrelationDB(t, fixture.path)
+	var causalEdges, derivedMembership, nativeTurnProjection int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_relationships
+		WHERE relationship_type='caused_by' AND rule_id='unique-active-prompt-boundary'`).Scan(&causalEdges); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
+		WHERE source_field IN ('correlation_cursor.active_turn_id','correlation_cursor.agent_id')`).Scan(&derivedMembership); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_observations observation
+		JOIN correlation_events event ON event.semantic_event_id=observation.semantic_event_id
+		WHERE event.source_rail='native_otlp' AND observation.turn_id='codex-native-turn-2'`).Scan(&nativeTurnProjection); err != nil {
+		t.Fatal(err)
+	}
+	// One accepted native leaf projects to multiple governed observations. The
+	// safety property is that every projection retains the reported native turn
+	// and none gained a cursor-derived causal edge or identifier.
+	if causalEdges != 0 || derivedMembership != 0 || nativeTurnProjection == 0 {
+		t.Fatalf("reported native turn causality=%d derived_membership=%d projection=%d",
+			causalEdges, derivedMembership, nativeTurnProjection)
 	}
 }
 
@@ -465,7 +746,7 @@ func TestNativeOTLPSharedTraceAddsTopologyWithoutBusinessIdentity(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
-	var traceMembers, sameAs, derivedCause, traceBusinessIdentity int
+	var traceMembers, sameAs, derivedCause, traceBusinessIdentity, activePending int
 	if err := database.QueryRow(`SELECT COUNT(DISTINCT from_id)
 		FROM correlation_relationships
 		WHERE from_kind='semantic_event' AND to_kind='trace' AND to_id=?
@@ -489,10 +770,16 @@ func TestNativeOTLPSharedTraceAddsTopologyWithoutBusinessIdentity(t *testing.T) 
 		  AND method='trace_exact'`).Scan(&traceBusinessIdentity); err != nil {
 		t.Fatal(err)
 	}
+	// The shared trace preserves topology, but cannot prove that the native
+	// provider tool ID completes the hook's separately minted pending operation.
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations
+		WHERE operation_id=? AND status='active'`, hook.ToolInvocationID).Scan(&activePending); err != nil {
+		t.Fatal(err)
+	}
 	if nativeLogical == hook.LogicalEventID || traceMembers != 2 || sameAs != 0 ||
-		derivedCause != 1 || traceBusinessIdentity != 0 {
-		t.Fatalf("W3C topology native_group=%q hook_group=%q trace_members=%d same_as=%d derived=%d trace_business=%d",
-			nativeLogical, hook.LogicalEventID, traceMembers, sameAs, derivedCause, traceBusinessIdentity)
+		derivedCause != 0 || traceBusinessIdentity != 0 || activePending != 1 {
+		t.Fatalf("W3C topology native_group=%q hook_group=%q trace_members=%d same_as=%d derived=%d trace_business=%d active_pending=%d",
+			nativeLogical, hook.LogicalEventID, traceMembers, sameAs, derivedCause, traceBusinessIdentity, activePending)
 	}
 }
 

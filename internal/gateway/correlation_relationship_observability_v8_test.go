@@ -38,8 +38,13 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 	semantic := audit.SemanticEventID("019b2b7b-9f8c-7ea0-8757-3e064bcd9991")
 	logical := audit.LogicalEventID("019b2b7b-9f8c-7ea0-8757-3e064bcd9992")
 	instance := audit.ConnectorInstanceID("019b2b7b-9f8c-7ea0-8757-3e064bcd9993")
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		TraceID: "0123456789abcdef0123456789abcdef", RequestID: "request-1",
+		SessionID: "session-1", TurnID: "turn-1", AgentID: "agent-1",
+		AgentInstanceID: "agent-instance-1", PolicyID: "policy-1", ToolID: "tool-1",
+	})
 	err := emitCorrelationRelationshipsV8WithEmitter(
-		t.Context(), capture, observability.SourceConnector, "codex", semantic, logical, instance,
+		ctx, capture, observability.SourceConnector, "codex", semantic, logical, instance,
 		[]audit.CorrelationRelationship{{
 			RelationshipID: "rel-0123456789abcdef", FromKind: audit.CorrelationNodeSemanticEvent,
 			FromID: string(semantic), ToKind: audit.CorrelationNodeSemanticEvent,
@@ -65,6 +70,21 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 	if correlation.SemanticEventID != string(semantic) || correlation.LogicalEventID != string(logical) ||
 		correlation.ConnectorInstanceID != string(instance) {
 		t.Fatalf("correlation=%+v", correlation)
+	}
+	for field, want := range map[string]string{
+		"trace": "0123456789abcdef0123456789abcdef", "request": "request-1",
+		"session": "session-1", "turn": "turn-1", "agent": "agent-1",
+		"agent instance": "agent-instance-1", "policy": "policy-1", "tool": "tool-1",
+	} {
+		got := map[string]string{
+			"trace": correlation.TraceID, "request": correlation.RequestID,
+			"session": correlation.SessionID, "turn": correlation.TurnID,
+			"agent": correlation.AgentID, "agent instance": correlation.AgentInstanceID,
+			"policy": correlation.PolicyID, "tool": correlation.ToolInvocationID,
+		}[field]
+		if got != want {
+			t.Errorf("%s=%q want %q", field, got, want)
+		}
 	}
 	body, ok := record.Body()
 	if !ok {

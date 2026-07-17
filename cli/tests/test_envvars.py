@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import defenseclaw.envvars as envvars
 
 from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
@@ -71,6 +74,24 @@ class RegistryStructureTests(unittest.TestCase):
         source = root / "internal" / "envvars" / "registry.json"
         bundled = root / "cli" / "defenseclaw" / "_data" / "envvars" / "registry.json"
         self.assertEqual(json.loads(bundled.read_text()), json.loads(source.read_text()))
+
+    def test_source_registry_wins_over_stale_editable_bundle(self) -> None:
+        """An editable checkout must not load a leftover package-data copy."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "internal" / "envvars" / "registry.json"
+            source.parent.mkdir(parents=True)
+            source.write_text('{"source": true}\n', encoding="utf-8")
+            module_file = root / "cli" / "defenseclaw" / "envvars.py"
+            module_file.parent.mkdir(parents=True)
+            module_file.touch()
+            bundled = module_file.parent / "_data" / "envvars" / "registry.json"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_text('{"source": false}\n', encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}):
+                with mock.patch.object(envvars, "__file__", str(module_file)):
+                    self.assertEqual(envvars._registry_path(), source.resolve())
 
     def test_names_use_canonical_prefix(self) -> None:
         for e in self.registry.entries:

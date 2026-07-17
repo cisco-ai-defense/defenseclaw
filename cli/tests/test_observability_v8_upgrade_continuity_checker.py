@@ -36,6 +36,58 @@ def _series_pairs(values: list[tuple[str, float]]) -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("c009b9d8e91e9e26e67a72b93840888", "0c009b9d8e91e9e26e67a72b93840888"),
+        ("0C009B9D8E91E9E26E67A72B93840888", "0c009b9d8e91e9e26e67a72b93840888"),
+        ("1", "00000000000000000000000000000001"),
+        ("0", None),
+        ("00000000000000000000000000000000", None),
+        ("", None),
+        (" 1", None),
+        ("1 ", None),
+        (1, None),
+        (b"1", None),
+        ("not-hex", None),
+        ("1" * 33, None),
+    ],
+)
+def test_tempo_trace_id_canonicalization(value: object, expected: str | None) -> None:
+    assert checker._canonical_tempo_trace_id(value) == expected
+
+
+def test_tempo_search_normalizes_shortened_trace_ids_before_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+    shortened = "c009b9d8e91e9e26e67a72b93840888"
+    canonical = f"0{shortened}"
+
+    monkeypatch.setattr(
+        checker.dashboards,
+        "request_json",
+        lambda *_args, **_kwargs: {
+            "traces": [
+                {"traceID": shortened},
+                {"traceID": canonical.upper()},
+                {"traceID": "0"},
+                {"traceID": "not-hex"},
+            ],
+        },
+    )
+
+    def fetch(trace_id: str, *, timeout_seconds: float) -> list[dict[str, object]]:
+        requested.append(trace_id)
+        assert timeout_seconds == 60
+        return [{"trace_id": trace_id}]
+
+    monkeypatch.setattr(checker.dashboards, "_tempo_trace_spans", fetch)
+
+    assert checker._tempo_spans(("1", "2"), 60) == [{"trace_id": canonical}]
+    assert requested == [canonical]
+
+
 def test_metric_continuity_uses_bounded_roles_and_straddles_cutover(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 

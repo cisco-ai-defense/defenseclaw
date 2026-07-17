@@ -327,10 +327,7 @@ class RequirementPredicateTests(unittest.TestCase):
                         "kind": "otlp",
                         "preset": "galileo",
                         "protocol": "http/protobuf",
-                        "endpoint": (
-                            "https://api.galileo.ai/tenant/path-secret-canary"
-                            "?access_token=query-secret#fragment-secret"
-                        ),
+                        "endpoint": "https://api.galileo.ai/tenant/path-secret-canary",
                         "headers": {
                             "Galileo-API-Key": {"env": "MY_GALILEO_KEY"},
                             "project": "defenseclaw",
@@ -345,8 +342,18 @@ class RequirementPredicateTests(unittest.TestCase):
                 self.assertIsNotNone(spec)
                 bound = spec.resolve_bound_endpoint(cfg)
                 self.assertEqual(bound, "https://api.galileo.ai")
+                self.assertNotIn("path-secret-canary", bound)
+
+                # Query and fragment data are invalid in a v8 OTLP endpoint,
+                # but the authority projection remains fail-safe for any raw
+                # value presented by a non-v8 caller.
+                raw_bound = C._credential_endpoint_authority(
+                    "https://api.galileo.ai/tenant/path-secret-canary"
+                    "?access_token=query-secret#fragment-secret"
+                )
+                self.assertEqual(raw_bound, "https://api.galileo.ai")
                 for secret in ("path-secret-canary", "query-secret", "fragment-secret"):
-                    self.assertNotIn(secret, bound)
+                    self.assertNotIn(secret, raw_bound)
 
     def test_defenseclaw_llm_key_not_used_when_nothing_uses_llm(self):
         cfg = _make_cfg("/tmp/dc-test")

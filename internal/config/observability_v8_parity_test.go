@@ -59,7 +59,7 @@ func TestObservabilityV8SharedValidationCorpus(t *testing.T) {
 			_, err := ParseCompileObservabilityV8(
 				"parity-case.yaml",
 				[]byte(test.Source),
-				ObservabilityV8CompileOptions{DefaultDataDir: "/var/lib/defenseclaw"},
+				ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()},
 			)
 			if test.Valid && err != nil {
 				t.Fatalf("Go rejected shared valid case: %v", err)

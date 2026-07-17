@@ -53,6 +53,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,11 @@ from typing import Final
 import yaml
 
 from defenseclaw import windows_acl
-from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_lock import (
+    FileLockTimeoutError,
+    locked_file_update,
+    probe_file_lock_available,
+)
 from defenseclaw.observability.v8_migration import (
     EnvironmentDependency,
     EnvironmentEdit,
@@ -73,6 +78,8 @@ _CONFIG_ENV: Final = "DEFENSECLAW_CONFIG"
 _HOME_ENV: Final = "DEFENSECLAW_HOME"
 _DEFAULT_HOME: Final = ".defenseclaw"
 _CONFIG_NAME: Final = "config.yaml"
+_PREFLIGHT_LOCK_TIMEOUT_SECONDS: Final = 0.5
+_ACTIVATION_LOCK_TIMEOUT_SECONDS: Final = 10.0
 _ENV_NAME: Final = ".env"
 _DEPLOYMENT_MODE_ENV: Final = "DEFENSECLAW_DEPLOYMENT_MODE"
 _BACKUP_SCHEMA: Final = 1
@@ -232,6 +239,7 @@ def activate_v8_migration(
     backup_root: str | os.PathLike[str] | None = None,
     tighten_legacy_backup_root: bool = False,
     environment: Mapping[str, str] | None = None,
+    preflight_source_binding: tuple[str, bool, str] | None = None,
     fault_injector: FaultInjector | None = None,
 ) -> V8ActivationResult:
     """Validate, back up, and atomically activate one prepared migration.
@@ -240,6 +248,13 @@ def activate_v8_migration(
     canonical v8 compiler.  Its second argument contains only protected values
     that must override the child process environment for that validation.  A
     validator exception is converted to a value-safe :class:`V8ActivationError`.
+
+    ``preflight_source_binding`` is the value-free config/dotenv identity
+    proven by the release controller before it stops the bridge.  When
+    supplied, it is checked again while both update locks are held, before any
+    permission tightening, backup, validation, or publication.  This closes
+    the otherwise unavoidable gap between controller preflight and target
+    activation.
 
     ``fault_injector`` exists for deterministic boundary testing.  Production
     callers omit it.
@@ -303,7 +318,25 @@ def activate_v8_migration(
     _assert_secure_parent_chain(active_environment, trusted_uids)
     if migration.changed:
         _assert_secure_parent_chain(backups, trusted_uids, target_may_be_directory=True)
-        if tighten_legacy_backup_root and os.path.lexists(backups):
+    _assert_no_inheritable_read_acl(os.path.dirname(active_environment) or ".")
+    if migration.changed:
+        backup_acl_parent = backups if os.path.isdir(backups) else os.path.dirname(backups) or "."
+        _assert_no_inheritable_read_acl(backup_acl_parent)
+
+    with _migration_update_locks(active_config, active_environment):
+        config_snapshot = _snapshot_regular_file(active_config, required=True)
+        _assert_leaf_owner(config_snapshot, trusted_owners)
+        environment_snapshot = _snapshot_regular_file(active_environment, required=False)
+        _assert_leaf_owner(environment_snapshot, trusted_owners)
+        _assert_locked_preflight_source_binding(
+            config_snapshot,
+            environment_snapshot,
+            preflight_source_binding,
+        )
+        _validate_migration_result(migration, config_snapshot)
+        _assert_all_environment_dependencies(env, migration.environment_dependencies)
+        _assert_all_ambient_environments_compatible(env, migration.environment_edits)
+        if migration.changed and tighten_legacy_backup_root and os.path.lexists(backups):
             try:
                 _tighten_existing_backup_root(backups, trusted_owners)
             except OSError:
@@ -312,19 +345,6 @@ def activate_v8_migration(
                     "prepare_backup_root",
                     target_path=backups,
                 ) from None
-    _assert_no_inheritable_read_acl(os.path.dirname(active_environment) or ".")
-    if migration.changed:
-        backup_acl_parent = backups if os.path.isdir(backups) else os.path.dirname(backups) or "."
-        _assert_no_inheritable_read_acl(backup_acl_parent)
-
-    with locked_file_update(active_config), locked_file_update(active_environment):
-        config_snapshot = _snapshot_regular_file(active_config, required=True)
-        _assert_leaf_owner(config_snapshot, trusted_owners)
-        _validate_migration_result(migration, config_snapshot)
-        _assert_all_environment_dependencies(env, migration.environment_dependencies)
-        _assert_all_ambient_environments_compatible(env, migration.environment_edits)
-        environment_snapshot = _snapshot_regular_file(active_environment, required=False)
-        _assert_leaf_owner(environment_snapshot, trusted_owners)
         environment_write_metadata = (
             environment_snapshot
             if environment_snapshot.existed
@@ -538,6 +558,292 @@ def activate_v8_migration(
             environment_before_sha256=environment_snapshot.sha256,
             environment_after_sha256=environment_candidate_sha256,
         )
+
+
+@contextmanager
+def _migration_update_locks(
+    active_config: str,
+    active_environment: str,
+) -> Iterator[None]:
+    """Bound target lock acquisition so a post-stop race can roll back."""
+
+    try:
+        with locked_file_update(
+            active_config,
+            timeout_seconds=_ACTIVATION_LOCK_TIMEOUT_SECONDS,
+        ), locked_file_update(
+            active_environment,
+            timeout_seconds=_ACTIVATION_LOCK_TIMEOUT_SECONDS,
+        ):
+            yield
+    except FileLockTimeoutError:
+        raise V8ActivationError(
+            "lock_unavailable",
+            "acquire_update_lock",
+            target_path=active_config,
+        ) from None
+
+
+def preflight_v8_migration_activation(
+    migration: V8MigrationResult,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    config_path: str | os.PathLike[str] | None = None,
+    environment_path: str | os.PathLike[str] | None = None,
+    backup_root: str | os.PathLike[str] | None = None,
+    tighten_legacy_backup_root: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Read-only validation of deterministic activation prerequisites.
+
+    The release controller calls this before it stops the bridge gateway. It
+    intentionally performs no lock-file creation, backup-root chmod, recovery
+    backup, or managed-file replacement. It does exercise the same bounded
+    same-directory atomic primitives with private probe files that are removed
+    before return. The target activation still owns the transaction itself.
+    """
+
+    env = os.environ if environment is None else environment
+    if migration.effective_data_dir is None:
+        if migration.changed:
+            raise V8ActivationError("effective_data_dir_invalid", "resolve_paths")
+        resolved_data_dir = _resolve_data_dir(data_dir=data_dir, environment=env)
+    elif not os.path.isabs(migration.effective_data_dir):
+        raise V8ActivationError("effective_data_dir_invalid", "resolve_paths")
+    else:
+        resolved_data_dir = _absolute_path(migration.effective_data_dir)
+    if (
+        migration.effective_data_dir is not None
+        and data_dir is not None
+        and not _same_path(_absolute_path(os.fspath(data_dir)), resolved_data_dir)
+    ):
+        raise V8ActivationError(
+            "effective_data_dir_mismatch",
+            "resolve_paths",
+            target_path=resolved_data_dir,
+        )
+
+    active_config = _absolute_path(
+        os.fspath(config_path)
+        if config_path is not None
+        else resolve_active_config_path(data_dir=data_dir, environment=environment)
+    )
+    expected_environment = _absolute_path(os.path.join(resolved_data_dir, _ENV_NAME))
+    active_environment = (
+        _absolute_path(os.fspath(environment_path))
+        if environment_path is not None
+        else expected_environment
+    )
+    if environment_path is not None and not _same_path(
+        active_environment,
+        expected_environment,
+    ):
+        raise V8ActivationError(
+            "environment_path_mismatch",
+            "resolve_paths",
+            target_path=active_environment,
+        )
+    if os.path.normcase(active_config) == os.path.normcase(active_environment):
+        raise V8ActivationError("path_alias", "resolve_paths", target_path=active_config)
+    backups = _absolute_path(
+        os.fspath(backup_root)
+        if backup_root is not None
+        else os.path.join(resolved_data_dir, "backups")
+    )
+    if migration.changed and (
+        _same_path(backups, active_config)
+        or _same_path(backups, active_environment)
+    ):
+        raise V8ActivationError("path_alias", "resolve_paths", target_path=backups)
+
+    trusted_owners = _trusted_owner_pairs(env)
+    trusted_uids = _trusted_owner_ids(active_config, resolved_data_dir, env)
+    _assert_secure_parent_chain(active_config, trusted_uids)
+    _assert_secure_parent_chain(active_environment, trusted_uids)
+    if migration.changed:
+        _assert_secure_parent_chain(
+            backups,
+            trusted_uids,
+            target_may_be_directory=True,
+        )
+    _assert_no_inheritable_read_acl(os.path.dirname(active_environment) or ".")
+    if migration.changed:
+        backup_acl_parent = (
+            backups if os.path.isdir(backups) else os.path.dirname(backups) or "."
+        )
+        _assert_no_inheritable_read_acl(backup_acl_parent)
+
+    _preflight_existing_update_lock(active_config + ".lock", trusted_owners)
+    _preflight_existing_update_lock(active_environment + ".lock", trusted_owners)
+
+    config_snapshot = _snapshot_regular_file(active_config, required=True)
+    _assert_leaf_owner(config_snapshot, trusted_owners)
+    _validate_migration_result(migration, config_snapshot)
+    _assert_all_environment_dependencies(env, migration.environment_dependencies)
+    _assert_all_ambient_environments_compatible(env, migration.environment_edits)
+    environment_snapshot = _snapshot_regular_file(active_environment, required=False)
+    _assert_leaf_owner(environment_snapshot, trusted_owners)
+    environment_write_metadata = (
+        environment_snapshot
+        if environment_snapshot.existed
+        else _new_environment_metadata(environment_snapshot, resolved_data_dir, env)
+    )
+    environment_candidate = _build_environment_candidate(
+        environment_snapshot.payload,
+        migration.environment_edits,
+    )
+    if _is_windows() and migration.environment_edits and environment_snapshot.existed:
+        try:
+            if environment_snapshot.windows_security is None:
+                raise windows_acl.WindowsAclError("environment DACL is unavailable")
+            windows_acl.assert_not_broadly_readable(
+                environment_snapshot.windows_security,
+            )
+        except windows_acl.WindowsAclError:
+            raise V8ActivationError(
+                "environment_permissions_unsafe",
+                "validate_environment_permissions",
+                target_path=active_environment,
+            ) from None
+    if (
+        not _is_windows()
+        and migration.environment_edits
+        and environment_snapshot.mode is not None
+        and environment_snapshot.mode & 0o077
+    ):
+        raise V8ActivationError(
+            "environment_permissions_unsafe",
+            "validate_environment_permissions",
+            target_path=active_environment,
+        )
+    if migration.changed:
+        try:
+            _assert_config_write_allowed(active_config, env)
+            _preflight_atomic_replace(config_snapshot, default_mode=0o600)
+            if environment_candidate != environment_snapshot.payload:
+                _preflight_atomic_replace(
+                    environment_snapshot,
+                    default_mode=0o600,
+                    metadata=environment_write_metadata,
+                )
+            _assert_snapshot_current(config_snapshot, "read_only_preflight_config_cas")
+            _assert_snapshot_current(
+                environment_snapshot,
+                "read_only_preflight_environment_cas",
+            )
+            _preflight_backup_root_write(
+                backups,
+                trusted_owners,
+                tighten_legacy_backup_root=tighten_legacy_backup_root,
+            )
+        except Exception:
+            raise V8ActivationError(
+                "permission_preflight_failed",
+                "read_only_activation_preflight",
+                target_path=active_config,
+            ) from None
+
+
+def _preflight_existing_update_lock(
+    path: str,
+    trusted_owners: frozenset[tuple[int, int]],
+) -> None:
+    """Prove an existing advisory-lock leaf is safely openable for update."""
+
+    snapshot = _snapshot_regular_file(path, required=False)
+    if not snapshot.existed:
+        return
+    _assert_leaf_owner(snapshot, trusted_owners)
+    if len(snapshot.payload) > 64 * 1024:
+        raise V8ActivationError("lock_file_invalid", "read_only_activation_preflight")
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise V8ActivationError(
+            "lock_file_unwritable",
+            "read_only_activation_preflight",
+            target_path=path,
+        ) from None
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != snapshot.device
+            or opened.st_ino != snapshot.inode
+        ):
+            raise V8ActivationError(
+                "lock_file_changed",
+                "read_only_activation_preflight",
+                target_path=path,
+            )
+        if _is_windows():
+            current_security = windows_acl.capture_fd(descriptor)
+            if current_security != snapshot.windows_security:
+                raise V8ActivationError(
+                    "lock_file_changed",
+                    "read_only_activation_preflight",
+                    target_path=path,
+                )
+        lock_stream = os.fdopen(os.dup(descriptor), "r+")
+        try:
+            probe_file_lock_available(
+                lock_stream,
+                timeout_seconds=_PREFLIGHT_LOCK_TIMEOUT_SECONDS,
+            )
+        except FileLockTimeoutError:
+            raise V8ActivationError(
+                "lock_file_busy",
+                "read_only_activation_preflight",
+                target_path=path,
+            ) from None
+        finally:
+            lock_stream.close()
+    finally:
+        os.close(descriptor)
+
+
+def _preflight_backup_root_write(
+    backups: str,
+    trusted_owners: frozenset[tuple[int, int]],
+    *,
+    tighten_legacy_backup_root: bool,
+) -> None:
+    """Model target backup-root creation/narrowing without mutating it."""
+
+    if not os.path.lexists(backups):
+        parent = os.path.dirname(backups) or "."
+        if not os.access(parent, os.W_OK | os.X_OK):
+            raise PermissionError
+        return
+    info = os.lstat(backups)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISDIR(info.st_mode)
+    ):
+        raise PermissionError
+    if tighten_legacy_backup_root:
+        if _is_windows():
+            return
+        if not _trusted_private_owner(
+            getattr(info, "st_uid", None),
+            getattr(info, "st_gid", None),
+            stat.S_IMODE(info.st_mode),
+            trusted_owners,
+        ):
+            raise PermissionError
+        effective_uid = getattr(os, "geteuid", lambda: getattr(os, "getuid", lambda: -1)())()
+        if effective_uid not in {0, getattr(info, "st_uid", None)}:
+            raise PermissionError
+        return
+    if not os.access(backups, os.W_OK | os.X_OK):
+        raise PermissionError
 
 
 def _resolve_data_dir(
@@ -923,6 +1229,44 @@ def _new_environment_metadata(
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _assert_locked_preflight_source_binding(
+    config_snapshot: _FileSnapshot,
+    environment_snapshot: _FileSnapshot,
+    expected: tuple[str, bool, str] | None,
+) -> None:
+    """Refuse a source change observed after controller preflight.
+
+    A missing dotenv is deliberately bound to the digest of empty bytes, so a
+    create/delete transition cannot look equivalent to an unchanged empty
+    file.  This check must remain directly after both lock-held snapshots and
+    before any activation-side mutation.
+    """
+
+    if expected is None:
+        return
+    expected_config_sha256, expected_environment_present, expected_environment_sha256 = expected
+    observed_environment_sha256 = (
+        environment_snapshot.sha256
+        if environment_snapshot.existed
+        else _sha256(b"")
+    )
+    if config_snapshot.sha256 != expected_config_sha256:
+        raise V8ActivationError(
+            "preflight_source_changed",
+            "locked_preflight_binding",
+            target_path=config_snapshot.path,
+        )
+    if (
+        environment_snapshot.existed != expected_environment_present
+        or observed_environment_sha256 != expected_environment_sha256
+    ):
+        raise V8ActivationError(
+            "preflight_source_changed",
+            "locked_preflight_binding",
+            target_path=environment_snapshot.path,
+        )
 
 
 def _snapshot_regular_file(path: str, *, required: bool) -> _FileSnapshot:
