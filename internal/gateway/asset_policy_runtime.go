@@ -287,6 +287,13 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 ) (config.AssetPolicyDecision, bool) {
 	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
 	state := audit.RuntimeAssetSelected
+	// Claude's native expansion event is emitted only after the selected
+	// skill/command content has actually been expanded into the prompt. That
+	// is a proven load boundary. Codex UserPromptSubmit is earlier and remains
+	// a selection-only attestation.
+	if provenance == runtimeProvenanceClaudeExpansion {
+		state = audit.RuntimeAssetLoaded
+	}
 	if matched && decision.Action == "block" {
 		state = audit.RuntimeAssetBlocked
 	}

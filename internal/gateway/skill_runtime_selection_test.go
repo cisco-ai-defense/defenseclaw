@@ -162,3 +162,53 @@ func TestClaudeNativePromptExpansionHonorsScopedRuntimeDisable(t *testing.T) {
 		t.Fatalf("runtime state = %#v", state)
 	}
 }
+
+func TestClaudeNativePromptExpansionRecordsLoadedAttestation(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{store: store, logger: logger}
+
+	decision, matched := api.evaluateNativeRuntimeSkillSelection(
+		context.Background(), "claudecode", "loaded-session",
+		"UserPromptExpansion", runtimeProvenanceClaudeExpansion,
+		skillRuntimeProbe{
+			TargetType: "skill", SkillName: "review-pr",
+			SourcePath: "skill", Surface: "prompt_expansion", Matched: true,
+		},
+	)
+	if matched || decision.Action != "" {
+		t.Fatalf("unexpected policy decision = %#v matched=%t", decision, matched)
+	}
+	state, err := store.GetRuntimeAssetState(
+		context.Background(), "claudecode", "loaded-session", "skill", "review-pr",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.State != audit.RuntimeAssetLoaded ||
+		state.Provenance != runtimeProvenanceClaudeExpansion {
+		t.Fatalf("runtime state = %#v, want loaded expansion attestation", state)
+	}
+}
+
+func TestCodexNativePromptRemainsSelectionAttestation(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{store: store, logger: logger}
+
+	_, _ = api.evaluateNativeRuntimeSkillSelection(
+		context.Background(), "codex", "selected-session",
+		"UserPromptSubmit", runtimeProvenanceCodexPromptSelection,
+		skillRuntimeProbe{
+			TargetType: "skill", SkillName: "review-pr",
+			Surface: "prompt_selection", Matched: true,
+		},
+	)
+	state, err := store.GetRuntimeAssetState(
+		context.Background(), "codex", "selected-session", "skill", "review-pr",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.State != audit.RuntimeAssetSelected {
+		t.Fatalf("runtime state = %#v, want selected attestation", state)
+	}
+}
