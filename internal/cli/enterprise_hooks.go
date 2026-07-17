@@ -238,13 +238,13 @@ type enterpriseHookReconcileRow struct {
 }
 
 type enterpriseHookReconcileRun struct {
-	Manifest              string
-	Rows                  []enterpriseHookReconcileRow
-	Failures              int
-	StateErr              error
-	WatchDirs             []string
-	WatchExclusiveFiles   []string // DC-only writers: react to any event
-	WatchSharedFiles      []string // agent + DC writers: react only to Remove/Rename
+	Manifest            string
+	Rows                []enterpriseHookReconcileRow
+	Failures            int
+	StateErr            error
+	WatchDirs           []string
+	WatchExclusiveFiles []string // DC-only writers: react to any event
+	WatchSharedFiles    []string // agent + DC writers: react only to Remove/Rename
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {

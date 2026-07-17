@@ -149,22 +149,22 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 // expected writer, so the watch loop can react appropriately to each
 // class of event.
 //
-//   ExclusiveWriter files are ones only DefenseClaw ever writes to:
-//     hook scripts, _hardening.sh, .hook-<connector>.token sidecars,
-//     backup archives, generated executables. ANY event on these
-//     (Write, Chmod, Remove, Rename) is a real signal — either user
-//     tampering or the guardian's own reconcile tail, both worth
-//     acting on.
+//	ExclusiveWriter files are ones only DefenseClaw ever writes to:
+//	  hook scripts, _hardening.sh, .hook-<connector>.token sidecars,
+//	  backup archives, generated executables. ANY event on these
+//	  (Write, Chmod, Remove, Rename) is a real signal — either user
+//	  tampering or the guardian's own reconcile tail, both worth
+//	  acting on.
 //
-//   SharedWriter files are ones the agent itself writes to during
-//     normal use in addition to DefenseClaw's patches:
-//     ~/.codex/config.toml (Codex updates MRU model, plugin state,
-//     session prefs), ~/.claude/settings.json (Claude Code writes
-//     project-scoped settings), ~/.cursor/hooks.json (Cursor rewrites
-//     for extensions). Write and Chmod on these are almost always
-//     the agent updating its own state, NOT a tamper — so we only
-//     react to Remove and Rename, and let the 5-min backstop
-//     reconcile catch any pathological in-place rewrite.
+//	SharedWriter files are ones the agent itself writes to during
+//	  normal use in addition to DefenseClaw's patches:
+//	  ~/.codex/config.toml (Codex updates MRU model, plugin state,
+//	  session prefs), ~/.claude/settings.json (Claude Code writes
+//	  project-scoped settings), ~/.cursor/hooks.json (Cursor rewrites
+//	  for extensions). Write and Chmod on these are almost always
+//	  the agent updating its own state, NOT a tamper — so we only
+//	  react to Remove and Rename, and let the 5-min backstop
+//	  reconcile catch any pathological in-place rewrite.
 //
 // The rationale: without this split, every session Codex opens will
 // touch config.toml, fire an fsnotify Write, pass the ownership
@@ -350,9 +350,9 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		// user replacing it with a wrong token disables inspection
 		// silently.
 		sharedSidecars := map[string]struct{}{
-			".token":         {},
-			".hookcfg":       {},
-			"_hardening.sh":  {},
+			".token":        {},
+			".hookcfg":      {},
+			"_hardening.sh": {},
 		}
 		sidecarFiles, sidecarErr := hookSidecarFiles(dataDir, conn.Name())
 		if sidecarErr != nil {
