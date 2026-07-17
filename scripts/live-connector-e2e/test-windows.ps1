@@ -881,6 +881,17 @@ try {
         $wizardAcceptance -match 'Assert-OnlyInstalledGatewayProcesses' -and
         $wizardAcceptance -notmatch "@\('watchdog', 'start'\)") `
         'wizard lifecycle requires STARTGATEWAY to auto-start an owned gateway and watchdog'
+    $legacyLauncherAcceptance = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Assert-WizardCodexLegacyLauncherNeedsRepair\b.*?(?=\r?\nfunction )'
+    ).Value
+    $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
+    $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
+    $legacyFixture = $legacyLauncherAcceptance.IndexOf('Set-WizardCodexLegacyNonWaitingHook', [StringComparison]::Ordinal)
+    $legacyDoctor = $legacyLauncherAcceptance.IndexOf("@('doctor', '--json-output')", [StringComparison]::Ordinal)
+    Assert-True ($legacyWatchdogStop -ge 0 -and $legacyGatewayStop -gt $legacyWatchdogStop -and
+        $legacyFixture -gt $legacyGatewayStop -and $legacyDoctor -gt $legacyFixture) `
+        'wizard legacy-launcher validation pauses watchdog and gateway self-heal before staging the fixture'
     $autoStartAssertion = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-GatewayAutoStart\b.*?(?=\r?\nfunction )'
@@ -1218,6 +1229,18 @@ try {
     Assert-True ($harnessText -notmatch '(?i)dangerously-bypass-hook-trust|bypass-hook-trust') `
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
+    $doctorSetupContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorHookRegistration\b.*?\n\}').Value
+    $synchronousCodexHookContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Assert-CodexSynchronousWindowsHookCommand\b.*?\n\}'
+    ).Value
+    Assert-True ($doctorContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
+        $doctorSetupContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
+        $synchronousCodexHookContract -match 'Start-Process' -and
+        $synchronousCodexHookContract -match '-NoNewWindow\\s\+\-Wait\\s\+\-PassThru' -and
+        $synchronousCodexHookContract -match '\$hookProcess\\\.ExitCode' -and
+        $synchronousCodexHookContract -match '\$LASTEXITCODE') `
+        'Codex Doctor contracts require the synchronous native launcher and reject stale LASTEXITCODE handling'
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)
     $doctorTamper = $doctorContract.IndexOf('$tamperedConfig =', [StringComparison]::Ordinal)

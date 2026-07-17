@@ -2509,10 +2509,24 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
 
 function Assert-WizardCodexLegacyLauncherNeedsRepair(
     [string]$Launcher,
+    [string]$Gateway,
     [object]$Specification,
     [string]$Logs
 ) {
     if ($Specification.Connector -ne 'codex') { return }
+
+    # The configured gateway and watchdog continuously repair managed hook
+    # registrations. Pause both before staging the deliberately stale launcher
+    # so Doctor observes the fixture instead of racing connector self-heal.
+    Invoke-Installed $Gateway @('watchdog', 'stop') @(0, 1) 90 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-watchdog-stop.log') | Out-Null
+    Invoke-Installed $Gateway @('stop') @(0, 1) 90 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-gateway-stop.log') | Out-Null
+    $stopped = Invoke-Installed $Gateway @('status') @(1) 30 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-gateway-status.log')
+    if ($stopped.ExitCode -eq 0) {
+        throw 'cannot stage legacy Codex hook while connector self-heal is running'
+    }
 
     Set-WizardCodexLegacyNonWaitingHook $Specification
     $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
@@ -2705,7 +2719,7 @@ function Invoke-WizardConnectorAcceptance(
         $beforeWatchdog.ProcessId
     )
     Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'before-repair'
-    Assert-WizardCodexLegacyLauncherNeedsRepair $launcher $specification $Logs
+    Assert-WizardCodexLegacyLauncherNeedsRepair $launcher $gateway $specification $Logs
 
     $preserved = Join-Path $DataRoot "wizard-$ConnectorName-preservation.txt"
     Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
