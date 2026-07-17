@@ -6,6 +6,8 @@
 package winpath
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,5 +80,82 @@ func TestExtendedRejectsEmptyAndNUL(t *testing.T) {
 		if _, err := Extended(path); err == nil {
 			t.Fatalf("Extended(%q) succeeded", path)
 		}
+	}
+}
+
+func TestRejectReparseChainAllowsOrdinaryAndMissingLeafPaths(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing.txt")
+	if err := os.WriteFile(existing, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	for _, path := range []string{
+		existing,
+		filepath.Join(root, "missing", "leaf.txt"),
+	} {
+		if err := RejectReparseChain(path); err != nil {
+			t.Fatalf("RejectReparseChain(%q): %v", path, err)
+		}
+	}
+}
+
+func TestRejectReparseChainRejectsSymlinkPaths(t *testing.T) {
+	t.Run("leaf file", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target.txt")
+		if err := os.WriteFile(target, []byte("fixture"), 0o600); err != nil {
+			t.Fatalf("write target: %v", err)
+		}
+		link := filepath.Join(root, "link.txt")
+		requireWinpathSymlink(t, target, link)
+		if err := RejectReparseChain(link); err == nil {
+			t.Fatal("leaf file symlink was accepted")
+		}
+	})
+
+	t.Run("parent with existing descendant", func(t *testing.T) {
+		target := t.TempDir()
+		if err := os.WriteFile(filepath.Join(target, "child.txt"), []byte("fixture"), 0o600); err != nil {
+			t.Fatalf("write target child: %v", err)
+		}
+		link := filepath.Join(t.TempDir(), "link")
+		requireWinpathSymlink(t, target, link)
+		if err := RejectReparseChain(filepath.Join(link, "child.txt")); err == nil {
+			t.Fatal("symlink parent with existing descendant was accepted")
+		}
+	})
+
+	t.Run("parent with missing descendant", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "link")
+		requireWinpathSymlink(t, target, link)
+		if err := RejectReparseChain(filepath.Join(link, "missing", "child.txt")); err == nil {
+			t.Fatal("symlink parent with missing descendant was accepted")
+		}
+	})
+}
+
+func TestRejectReparseChainRejectsJunction(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir()
+	junction := filepath.Join(root, "junction")
+	output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", junction, target).CombinedOutput()
+	if err != nil {
+		t.Skipf("junction creation unavailable: %v: %s", err, output)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(junction); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove junction: %v", err)
+		}
+	})
+	if err := RejectReparseChain(filepath.Join(junction, "missing", "leaf.txt")); err == nil {
+		t.Fatal("junction was accepted")
+	}
+}
+
+func requireWinpathSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
 	}
 }
