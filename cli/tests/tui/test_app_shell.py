@@ -5227,6 +5227,9 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
         def __init__(self) -> None:
             self.stats_calls = 0
 
+        def audit_data_version(self) -> int:
+            return 1
+
         def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
             return list(events[-limit:])
 
