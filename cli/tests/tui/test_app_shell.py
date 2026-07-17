@@ -6616,6 +6616,9 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
 
         periodic_refresh()
         await _wait_for_panel_render(app, "overview")
+        # Bottom anchoring is intentionally resolved after Textual lays out
+        # the taller body and publishes its new max_scroll_y.
+        await pilot.pause()
 
         assert update_calls == 1
         assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()
