@@ -281,13 +281,26 @@ class TestReleaseInvariants(unittest.TestCase):
             },
         )
 
-    def test_upgrade_baselines_are_single_strictly_descending_support_matrix(self):
+    def test_reviewed_upgrade_baselines_are_single_strictly_descending_floor(self):
         generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
         baselines = generator["published_upgrade_baselines"]()
-        self.assertEqual(baselines[0], "0.8.5")
-        self.assertIn("0.8.3", baselines)
-        self.assertEqual(baselines[-1], "0.4.0")
+        baseline_policy = __import__("json").loads(
+            (_REPO_ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(baselines, baseline_policy["published_baselines"])
+        self.assertTrue(baselines)
         self.assertEqual(baselines, sorted(set(baselines), key=_ver_tuple, reverse=True))
+        self.assertEqual(
+            set(baseline_policy["published_baseline_config_versions"]),
+            set(baselines),
+        )
+        for platform_baselines in baseline_policy["platform_published_baselines"].values():
+            self.assertTrue(set(platform_baselines).issubset(baselines))
+            self.assertEqual(
+                platform_baselines,
+                sorted(set(platform_baselines), key=_ver_tuple, reverse=True),
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

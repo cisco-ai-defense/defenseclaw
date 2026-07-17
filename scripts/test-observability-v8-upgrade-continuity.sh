@@ -35,6 +35,7 @@ RELEASE_ROOT=""
 RELEASE_DIR=""
 PRE_STAMP=""
 POST_STAMP=""
+METRIC_CUTOVER_SECONDS=""
 OWNED_STACK="0"
 LOCAL_CANDIDATE_PROVENANCE_FIXTURE="0"
 
@@ -281,7 +282,6 @@ wait_for_pre_upgrade_metrics() {
     local stamp="$1"
     log "Waiting for the baseline Prometheus scrape to persist ${stamp}"
     .venv/bin/python - "${stamp}" <<'PY'
-import re
 import sys
 import time
 
@@ -289,11 +289,11 @@ sys.path.insert(0, "scripts")
 import check_grafana_dashboards as dashboards
 
 stamp = sys.argv[1]
-expected = {f"golden-agent-{role}-{stamp}" for role in ("root", "direct", "nested")}
+expected = {"root", "direct", "nested"}
+minimum_fixture_time = int(stamp) / 1_000_000_000 - 30
 query = (
-    'defenseclaw_agent_last_seen_seconds{gen_ai_agent_id=~"'
-    f'golden-agent-(root|direct|nested)-{re.escape(stamp)}'
-    '"}'
+    'defenseclaw_agent_last_seen_seconds{connector="codex",'
+    'gen_ai_agent_type=~"root|direct|nested"}'
 )
 deadline = time.monotonic() + 60
 last_error = "series not yet scraped"
@@ -301,9 +301,10 @@ while time.monotonic() < deadline:
     try:
         series = dashboards._prometheus_vector(query, timeout_seconds=15)
         observed = {
-            item.get("metric", {}).get("gen_ai_agent_id")
+            item.get("metric", {}).get("gen_ai_agent_type")
             for item in series
             if dashboards._positive_prometheus_series(item)
+            and float(item.get("value", [0, 0])[-1]) >= minimum_fixture_time
         }
         if expected.issubset(observed):
             raise SystemExit(0)
@@ -778,6 +779,7 @@ PY
     .venv/bin/python scripts/check_observability_v8_upgrade_continuity.py \
         --pre-stamp "${PRE_STAMP}" \
         --post-stamp "${POST_STAMP}" \
+        --metric-cutover-seconds "${METRIC_CUTOVER_SECONDS}" \
         --lookback-hours 2 \
         --wait-seconds 90 \
         --dashboard-deadline-seconds 300 \
@@ -834,6 +836,7 @@ main_continuity() {
 
     emit_continuity_phase pre "${PRE_STAMP}"
     wait_for_pre_upgrade_metrics "${PRE_STAMP}"
+    METRIC_CUTOVER_SECONDS="$(python3 -c 'import time; print(time.time())')"
     run_live_upgrade
     assert_local_candidate_provenance_verified
     verify_target_activation

@@ -14,7 +14,7 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
-UPGRADE_SMOKE_FROM ?= 0.8.5 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
+UPGRADE_SMOKE_FROM ?= 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -66,7 +66,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check check-grafana-dashboards check-observability-v8-hard-cut check-observability-v8-spec check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
-        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
+        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
         _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
@@ -909,6 +909,9 @@ upgrade-smoke-matrix:
 	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" --refusal-contract-only $(ARGS)
 
 upgrade-refusal-contract-matrix: upgrade-smoke-matrix
+
+upgrade-developer-activation:
+	@scripts/test-developer-target-activation.sh $(ARGS)
 
 upgrade-legacy-smoke:
 	@scripts/test-upgrade-release.sh $(ARGS)

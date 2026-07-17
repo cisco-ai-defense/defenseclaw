@@ -131,9 +131,9 @@ _BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
 _TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class WindowsFileSecurity:
-    """Authorization-relevant file security, safe to compare exactly."""
+    """Authorization-relevant file security, safe to compare structurally."""
 
     owner: bytes = field(repr=False)
     dacl: bytes = field(repr=False)
@@ -144,6 +144,32 @@ class WindowsFileSecurity:
     def __post_init__(self) -> None:
         if self.mandatory_label is not None and _normalize_mandatory_label_acl(self.mandatory_label) is None:
             raise WindowsAclError("an empty mandatory-label ACL must be represented as absent")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WindowsFileSecurity):
+            return NotImplemented
+        if (
+            self.owner != other.owner
+            or self.dacl_protected != other.dacl_protected
+            or self.mandatory_label != other.mandatory_label
+            or self.sacl_protected != other.sacl_protected
+        ):
+            return False
+        if self.dacl_protected:
+            return self.dacl == other.dacl
+        return _stable_unprotected_dacl(self.dacl) == _stable_unprotected_dacl(other.dacl)
+
+    def __hash__(self) -> int:
+        dacl = self.dacl if self.dacl_protected else _stable_unprotected_dacl(self.dacl)
+        return hash(
+            (
+                self.owner,
+                dacl,
+                self.dacl_protected,
+                self.mandatory_label,
+                self.sacl_protected,
+            )
+        )
 
     def staging_copy(self) -> WindowsFileSecurity:
         """Protect a staged copy without rewriting its DACL representation.
@@ -237,6 +263,117 @@ class WindowsAclError(OSError):
     """A native security operation was unavailable, unsafe, or failed."""
 
 
+def _stable_unprotected_dacl(dacl: bytes) -> bytes:
+    """Collapse only the kernel's exact mirrored auto-inheritance suffix.
+
+    A legacy unprotected DACL can contain explicit ACEs without a materialized
+    inherited suffix.  Updating that descriptor through the supported Windows
+    file-security APIs stabilizes it by appending the parent's matching ACEs,
+    marked only with ``INHERITED_ACE``.  The stable form preserves the explicit
+    entries (and therefore their future access) while enabling the inheritance
+    the original unprotected descriptor already requested.
+
+    Treat only a complete, byte-identical mirror as the same authorization
+    state.  Different access masks, SIDs, ACE types, propagation flags, order,
+    or additional entries remain observable and fail exact verification.
+    Invalid ACLs are returned unchanged so comparison never hides corruption.
+    """
+
+    if len(dacl) < 8:
+        return dacl
+    revision, reserved, acl_size, ace_count, reserved2 = struct.unpack_from("<BBHHH", dacl, 0)
+    if acl_size != len(dacl) or ace_count == 0 or ace_count % 2:
+        return dacl
+    aces: list[bytes] = []
+    cursor = 8
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            return dacl
+        ace_size = struct.unpack_from("<H", dacl, cursor + 2)[0]
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            return dacl
+        aces.append(dacl[cursor : cursor + ace_size])
+        cursor += ace_size
+    if cursor != acl_size:
+        return dacl
+
+    midpoint = ace_count // 2
+    explicit = aces[:midpoint]
+    inherited = aces[midpoint:]
+    for explicit_ace, inherited_ace in zip(explicit, inherited, strict=True):
+        if explicit_ace[1] & _INHERITED_ACE or not inherited_ace[1] & _INHERITED_ACE:
+            return dacl
+        normalized_inherited = bytearray(inherited_ace)
+        normalized_inherited[1] &= ~_INHERITED_ACE
+        if bytes(normalized_inherited) != explicit_ace:
+            return dacl
+
+    explicit_size = 8 + sum(len(ace) for ace in explicit)
+    return struct.pack("<BBHHH", revision, reserved, explicit_size, midpoint, reserved2) + b"".join(explicit)
+
+
+def _acl_shape(acl: bytes | None) -> str:
+    """Describe ACL structure without exposing access masks or SIDs."""
+
+    if acl is None:
+        return "absent"
+    if len(acl) < 8:
+        return f"invalid(len={len(acl)},reason=truncated-header)"
+    revision, _reserved, acl_size, ace_count, _reserved2 = struct.unpack_from("<BBHHH", acl, 0)
+    if acl_size != len(acl):
+        return (
+            f"invalid(len={len(acl)},revision={revision},declared_size={acl_size},"
+            f"ace_count={ace_count},reason=size-mismatch)"
+        )
+    cursor = 8
+    ace_shapes: list[str] = []
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            return (
+                f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+                f"parsed_aces={len(ace_shapes)},reason=truncated-ace-header)"
+            )
+        ace_type, ace_flags, ace_size = struct.unpack_from("<BBH", acl, cursor)
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            return (
+                f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+                f"parsed_aces={len(ace_shapes)},reason=invalid-ace-size-{ace_size})"
+            )
+        ace_shapes.append(f"{ace_type:#04x}:{ace_flags:#04x}:{ace_size}")
+        cursor += ace_size
+    if cursor != acl_size:
+        return (
+            f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+            f"parsed_aces={len(ace_shapes)},reason=trailing-bytes-{acl_size - cursor})"
+        )
+    return (
+        f"len={len(acl)},revision={revision},ace_count={ace_count},"
+        f"aces=[{','.join(ace_shapes)}]"
+    )
+
+
+def _security_mismatch_summary(
+    expected: WindowsFileSecurity,
+    actual: WindowsFileSecurity,
+) -> str:
+    """Return a public-log-safe structural summary of descriptor drift."""
+
+    return "; ".join(
+        (
+            f"owner_equal={actual.owner == expected.owner}",
+            f"owner_lengths=expected:{len(expected.owner)},actual:{len(actual.owner)}",
+            f"dacl_equal={actual.dacl == expected.dacl}",
+            f"dacl_protected=expected:{expected.dacl_protected},actual:{actual.dacl_protected}",
+            f"dacl_expected=({_acl_shape(expected.dacl)})",
+            f"dacl_actual=({_acl_shape(actual.dacl)})",
+            f"mandatory_label_equal={actual.mandatory_label == expected.mandatory_label}",
+            f"mandatory_label_expected=({_acl_shape(expected.mandatory_label)})",
+            f"mandatory_label_actual=({_acl_shape(actual.mandatory_label)})",
+            f"sacl_protected=expected:{expected.sacl_protected},actual:{actual.sacl_protected}",
+        )
+    )
+
+
 def _dacl_with_inherited_markers_cleared(dacl: bytes) -> bytes:
     """Clear only provenance markers while preserving every other DACL byte."""
 
@@ -316,22 +453,22 @@ def _explicit_dacl_copy(dacl: bytes) -> bytes:
 
 
 def _dacl_for_set_security(
-    _current: WindowsFileSecurity,
+    current: WindowsFileSecurity,
     requested: WindowsFileSecurity,
 ) -> bytes:
-    """Build the DACL input without converting inherited ACEs to explicit.
+    """Build the DACL input for the requested inheritance transition.
 
-    ``UNPROTECTED_DACL_SECURITY_INFORMATION`` asks the file-system security
-    provider to reconstruct inheritance from the current parent.  Supplying
-    the snapshot's inherited ACEs as well can make some Windows kernels retain
-    or duplicate them as explicit ACEs when a protected staged file is made
-    inheriting again.  Pass only the snapshot's explicit ACEs for every
-    unprotected target and keep the exact descriptor check after the call.
-    A changed parent therefore still fails closed instead of silently
-    broadening the restored file.
+    Windows treats an unprotected-to-unprotected update differently from a
+    protected-to-unprotected transition.  In the former case the kernel
+    retains/reconstructs inherited ACEs, so only the requested explicit ACEs
+    may be supplied.  In the latter case the current protected descriptor is
+    discarded and the caller is responsible for supplying the complete DACL,
+    including the inherited markers.  Selecting the input from the descriptor
+    that is actually installed keeps both paths byte-exact across Windows
+    client and hosted-runner kernels.
     """
 
-    if requested.dacl_protected:
+    if requested.dacl_protected or current.dacl_protected:
         return requested.dacl
     return _explicit_dacl_copy(requested.dacl)
 
@@ -1191,8 +1328,10 @@ def apply_fd(fd: int, security: WindowsFileSecurity) -> None:
     api = _get_api()
     handle = msvcrt.get_osfhandle(fd)
     api.set_security(handle, security)
-    if api.get_security(handle) != security:
-        raise WindowsAclError("Windows security did not match after SetSecurityInfo")
+    actual = api.get_security(handle)
+    if actual != security:
+        summary = _security_mismatch_summary(security, actual)
+        raise WindowsAclError(f"Windows security did not match after SetSecurityInfo: {summary}")
 
 
 def flush_fd(fd: int) -> None:
@@ -1225,7 +1364,8 @@ def apply_path(path: str, security: WindowsFileSecurity, *, directory: bool = Fa
         api.set_security(handle, security)
         actual = api.get_security(handle)
         if actual != security:
-            raise WindowsAclError("Windows security did not match after SetSecurityInfo")
+            summary = _security_mismatch_summary(security, actual)
+            raise WindowsAclError(f"Windows security did not match after SetSecurityInfo: {summary}")
     finally:
         api.close_handle(handle)
 

@@ -380,7 +380,7 @@ def test_unprotected_update_omits_inherited_aces_when_target_already_inherits() 
     )
 
 
-def test_unprotect_transition_omits_inherited_aces_from_protected_target() -> None:
+def test_unprotect_transition_supplies_complete_dacl_with_inherited_markers() -> None:
     requested = WindowsFileSecurity(
         OWNER,
         _dacl(
@@ -392,9 +392,82 @@ def test_unprotect_transition_omits_inherited_aces_from_protected_target() -> No
     current = requested.staging_copy()
 
     assert current.dacl_protected is True
-    assert windows_acl._dacl_for_set_security(current, requested) == _dacl(
-        (0, 0x03, 0x001F01FF, OWNER),
+    assert windows_acl._dacl_for_set_security(current, requested) == requested.dacl
+
+
+def test_unprotected_security_accepts_only_exact_mirrored_inheritance_suffix() -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+        ),
+        False,
     )
+    stabilized = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+            (0, 0x10, 0x001F01FF, OWNER),
+            (0, 0x13, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+
+    assert expected.dacl != stabilized.dacl
+    assert expected == stabilized
+    assert hash(expected) == hash(stabilized)
+
+
+@pytest.mark.parametrize(
+    "inherited_aces",
+    (
+        (
+            (0, 0x10, 0x001F01FE, OWNER),
+            (0, 0x13, 0x00020089, SYSTEM),
+        ),
+        (
+            (0, 0x13, 0x00020089, SYSTEM),
+            (0, 0x10, 0x001F01FF, OWNER),
+        ),
+        (
+            (0, 0x10, 0x001F01FF, OWNER),
+        ),
+    ),
+)
+def test_unprotected_security_rejects_nonidentical_inheritance_suffix(
+    inherited_aces: tuple[tuple[int, int, int, bytes], ...],
+) -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+        ),
+        False,
+    )
+    drifted = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x00, 0x001F01FF, OWNER),
+            (0, 0x03, 0x00020089, SYSTEM),
+            *inherited_aces,
+        ),
+        False,
+    )
+
+    assert expected != drifted
+
+
+def test_protected_security_keeps_mirrored_suffix_byte_exact() -> None:
+    explicit = _dacl((0, 0x00, 0x001F01FF, OWNER))
+    mirrored = _dacl(
+        (0, 0x00, 0x001F01FF, OWNER),
+        (0, 0x10, 0x001F01FF, OWNER),
+    )
+
+    assert WindowsFileSecurity(OWNER, explicit, True) != WindowsFileSecurity(OWNER, mirrored, True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
@@ -623,6 +696,37 @@ def test_apply_path_verifies_owner_dacl_and_protection(monkeypatch: pytest.Monke
 
     assert api.security[7] == PRIVATE
     assert ("set", PRIVATE) in api.events
+
+
+def test_apply_path_reports_safe_structural_security_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _FakeApi()
+    api.paths["config.yaml"] = 7
+    actual = WindowsFileSecurity(
+        SYSTEM,
+        _dacl((0, 0x10, 0x00020089, SYSTEM)),
+        False,
+        HIGH_MANDATORY_LABEL,
+        True,
+    )
+    api.security[7] = actual
+    api.set_security = Mock()
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    with pytest.raises(WindowsAclError) as caught:
+        windows_acl.apply_path("config.yaml", PRIVATE)
+
+    message = str(caught.value)
+    assert "owner_equal=False" in message
+    assert "dacl_equal=False" in message
+    assert "dacl_protected=expected:True,actual:False" in message
+    assert "dacl_expected=(len=" in message
+    assert "aces=[0x00:0x00:" in message
+    assert "dacl_actual=(len=" in message
+    assert "aces=[0x00:0x10:" in message
+    assert "mandatory_label_equal=False" in message
+    assert "sacl_protected=expected:False,actual:True" in message
+    assert repr(OWNER) not in message
+    assert repr(PRIVATE.dacl) not in message
 
 
 def test_private_directory_acl_requests_object_and_container_inheritance(

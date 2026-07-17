@@ -144,12 +144,12 @@ def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> N
     assert "warning-and-continue" not in text.lower()
 
 
-def test_release_publishes_offline_sigstore_verification_material() -> None:
+def test_release_publishes_offline_material_after_bounded_sigstore_authentication() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     bundle = "--bundle=release-candidate/dist/checksums.txt.bundle"
     assert "cosign sign-blob" in workflow
-    assert workflow.count(bundle) >= 2
-    assert "--offline" in workflow
+    assert workflow.count(bundle) == 1
+    assert "scripts/verify-sigstore-blob.py" in workflow
     assert "scripts/release_candidate.py list-assets" in workflow
 
 
