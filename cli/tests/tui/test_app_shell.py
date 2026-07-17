@@ -1919,12 +1919,20 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
     logs.filter_mode = ""
     logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
     app = DefenseClawTUI(logs_model=logs)
+    # The assertion measures a delta within one stable render generation.
+    # Keep the independent two-second refresh timer from starting another
+    # generation while the full suite is instrumented.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         await _wait_for_background(lambda: table.row_count == 200)
+        # The responsive renderer exposes its final row batch one event-loop
+        # turn before it commits the matching generation signature.
+        await _wait_for_panel_render(app, "logs")
+        await pilot.pause()
         previous_second_row = list(table.rows.values())[1]
         logs.set_cursor(50)
         app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
@@ -5258,6 +5266,10 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
     store = HookStatsStore()
     audit = AuditPanelModel(store)
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+    # This contract measures cache reuse inside the cold-start generation.
+    # A periodic refresh is a new, legitimate sampling generation and is not
+    # part of the before/after-health comparison below.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
