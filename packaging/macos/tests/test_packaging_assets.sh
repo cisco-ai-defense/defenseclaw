@@ -449,6 +449,25 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }
 
+t_install_treats_lonely_install_log_as_fresh_host() {
+  # Regression guard: install.sh's log-sink tee (added for the
+  # observability fixes) creates ${LOGS_DIR}/install.log immediately
+  # after the euid check, BEFORE the fresh-host preflight enumerates
+  # existing install markers. Without a special case, the preflight
+  # then sees ${LOGS_DIR} exists and refuses with "existing DefenseClaw
+  # installation detected at /Library/Logs/Cisco/SecureClient/DefenseClaw"
+  # — which locks the operator out of reinstalling after a --purge
+  # cycle. The special-case allow-list-of-one accepts LOGS_DIR when
+  # its ONLY child is install.log (i.e. the residue we just created
+  # for our own logging), and rejects it when any other file remains
+  # (gateway.log, hook-guardian.log, etc. from a real prior install).
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
+  assert_contains "${body}" 'if [[ "${_marker}" == "${LOGS_DIR}" ]] && [[ -d "${_marker}" ]]; then' \
+    "install.sh must special-case LOGS_DIR in the fresh-host preflight so a lonely install.log does not block reinstall"
+  assert_contains "${body}" '! -name install.log' \
+    "the LOGS_DIR special case must exempt install.log specifically (not blanket-skip LOGS_DIR)"
+}
+
 t_install_does_not_precreate_cmid_log_file() {
   # Running the daemon as root means the managed cloud auth provider
   # can create its own log file without any installer help. The earlier
@@ -556,6 +575,7 @@ run_case "render-targets.sh present + executable + parses" t_render_targets_sh_e
 run_case "install.sh bootstraps guardian + enumerator daemons" t_install_bootstraps_guardian_and_enumerator
 run_case "install.sh no longer inline-calls 'enterprise hooks install'" t_install_no_longer_hardcodes_single_target_user
 run_case "plist references managed paths" t_plist_contains_managed_paths
+run_case "install.sh treats lonely install.log as fresh-host (no self-lockout)"     t_install_treats_lonely_install_log_as_fresh_host
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file

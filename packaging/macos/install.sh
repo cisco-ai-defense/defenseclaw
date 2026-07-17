@@ -539,6 +539,21 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
 fi
 for _marker in "${_existing_install_markers[@]}"; do
   if [[ -e "${_marker}" || -L "${_marker}" ]]; then
+    # Special case: LOGS_DIR containing ONLY install.log is a benign
+    # leftover from a previous install session's log-sink tee (we open
+    # install.log for append right after the euid check, BEFORE this
+    # preflight fires). A real broken install leaves gateway.log +
+    # gateway.err.log + hook-guardian.log + hook-enumerator.log too.
+    # Treat "only install.log survived the previous uninstall" as
+    # fresh-host, not "existing install detected".
+    if [[ "${_marker}" == "${LOGS_DIR}" ]] && [[ -d "${_marker}" ]]; then
+      _residual="$(find "${_marker}" -mindepth 1 -maxdepth 1 ! -name install.log -print -quit 2>/dev/null)"
+      if [[ -z "${_residual}" ]]; then
+        unset _residual
+        continue
+      fi
+      unset _residual
+    fi
     die "existing DefenseClaw installation detected at ${_marker}; no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
   fi
 done
