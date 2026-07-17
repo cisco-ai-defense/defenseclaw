@@ -153,7 +153,7 @@ rules:
     confidence: 0.85
     tags: [network, reverse-shell]
   - id: CMD-CURL-UPLOAD
-    pattern: '(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)'
+    pattern: '(?i)\bcurl\b\s+.*(?:--upload-file(?:\s+|=)?|-T(?:\s+|\S)|--data(?:\s+|=)?@|-d@|-F(?:\s+|=)?\S+=@)'
     title: "curl file upload"
     severity: HIGH
     confidence: 0.85
@@ -183,7 +183,7 @@ rules:
     confidence: 0.65
     tags: [archive, correlation]
   - id: CMD-ARCHIVE-EXFIL
-    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b)).*(?:&&?|\|\||;).*(?:\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@)|\bwget\b\s+.*--post-(?:data|file)|\bscp\b\s+\S+.*[:@]|\brsync\b\s+\S+.*:)'
+    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b)).*(?:&&?|\|\||;).*(?:\bcurl\b\s+.*(?:--upload-file(?:\s+|=)?|-T(?:\s+|\S)|--data(?:\s+|=)?@|-d@)|\bwget\b\s+.*--post-(?:data|file)|\bscp\b\s+\S+.*[:@]|\brsync\b\s+\S+.*:)'
     title: "Workspace archive-then-upload chain"
     severity: HIGH
     confidence: 0.88

@@ -29,10 +29,8 @@ const artifactEvidencePrefix = "artifact:"
 const workspaceArchivePattern = `(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b))`
 
 var (
-	archiveArtifactRe    = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+(\S+)\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
-	curlUploadArtifactRe = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*(?:--upload-file|-T)\s+(\S+)`)
-	curlDataAtRe         = regexp.MustCompile(`(?i)\bcurl\b[^;&|]*--data\s+@(\S+)`)
-	wgetPostArtifactRe   = regexp.MustCompile(`(?i)\bwget\b[^;&|]*--post-file=(\S+)`)
+	archiveArtifactRe  = regexp.MustCompile(`(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+(\S+)\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)(\S+)\s+\.|\bgit\s+bundle\s+create\b\s+(\S+))`)
+	wgetPostArtifactRe = regexp.MustCompile(`(?i)\bwget\b[^;&|]*--post-file=(\S+)`)
 
 	curlSegmentRe = regexp.MustCompile(`(?i)\bcurl\b[^;&|#]*`)
 	wgetSegmentRe = regexp.MustCompile(`(?i)\bwget\b[^;&|#]*`)
@@ -53,7 +51,7 @@ var rsyncFlagsWithArg = map[string]bool{
 }
 
 var curlLongFlagsWithArg = map[string]bool{
-	"upload-file": true, "data": true, "data-binary": true, "data-raw": true,
+	"upload-file": true, "data": true, "data-binary": true, "data-raw": true, "form": true,
 	"referer": true, "proxy": true, "proxy-user": true, "proxy-header": true,
 	"header": true, "user": true, "cookie": true, "cookie-jar": true,
 	"cert": true, "key": true, "cacert": true, "capath": true, "crlfile": true,
@@ -149,9 +147,10 @@ func extractArchiveArtifact(text string) string {
 }
 
 func extractUploadArtifact(text string) string {
-	for _, re := range []*regexp.Regexp{
-		curlUploadArtifactRe, curlDataAtRe, wgetPostArtifactRe,
-	} {
+	if art := extractCurlUploadArtifact(text); art != "" {
+		return art
+	}
+	for _, re := range []*regexp.Regexp{wgetPostArtifactRe} {
 		if m := re.FindStringSubmatch(text); len(m) > 1 && m[1] != "" {
 			return normalizeArtifactName(m[1])
 		}
@@ -250,9 +249,93 @@ func extractCurlUploadHosts(text string) []string {
 }
 
 func isCurlUploadSegment(seg string) bool {
-	lower := strings.ToLower(seg)
-	return strings.Contains(lower, "-t ") || strings.Contains(lower, "--upload-file") ||
-		strings.Contains(lower, "--data @") || strings.Contains(lower, "--data-binary @")
+	return extractCurlUploadArtifactFromArgs(tokenizeShellArgs(strings.TrimSpace(seg[4:]))) != ""
+}
+
+func extractCurlUploadArtifact(text string) string {
+	for _, seg := range curlSegmentRe.FindAllString(text, -1) {
+		if art := extractCurlUploadArtifactFromArgs(tokenizeShellArgs(strings.TrimSpace(seg[4:]))); art != "" {
+			return art
+		}
+	}
+	return ""
+}
+
+func extractCurlUploadArtifactFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, hasValue := splitLongFlag(arg)
+			switch name {
+			case "upload-file":
+				if hasValue {
+					return normalizeArtifactName(value)
+				}
+				if i+1 < len(args) {
+					return normalizeArtifactName(args[i+1])
+				}
+			case "data", "data-binary", "data-raw":
+				if hasValue && strings.HasPrefix(value, "@") {
+					return normalizeArtifactName(strings.TrimPrefix(value, "@"))
+				}
+				if !hasValue && i+1 < len(args) && strings.HasPrefix(args[i+1], "@") {
+					return normalizeArtifactName(strings.TrimPrefix(args[i+1], "@"))
+				}
+			case "form":
+				if hasValue {
+					if art := formUploadArtifact(value); art != "" {
+						return art
+					}
+				} else if i+1 < len(args) {
+					if art := formUploadArtifact(args[i+1]); art != "" {
+						return art
+					}
+				}
+			}
+			continue
+		}
+		for j := 1; j < len(arg); j++ {
+			switch arg[j] {
+			case 'T':
+				if j+1 < len(arg) {
+					return normalizeArtifactName(arg[j+1:])
+				}
+				if i+1 < len(args) {
+					return normalizeArtifactName(args[i+1])
+				}
+			case 'd':
+				if j+1 < len(arg) && strings.HasPrefix(arg[j+1:], "@") {
+					return normalizeArtifactName(strings.TrimPrefix(arg[j+1:], "@"))
+				}
+				if j+1 == len(arg) && i+1 < len(args) && strings.HasPrefix(args[i+1], "@") {
+					return normalizeArtifactName(strings.TrimPrefix(args[i+1], "@"))
+				}
+			case 'F':
+				if j+1 < len(arg) {
+					if art := formUploadArtifact(arg[j+1:]); art != "" {
+						return art
+					}
+				}
+				if j+1 == len(arg) && i+1 < len(args) {
+					if art := formUploadArtifact(args[i+1]); art != "" {
+						return art
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func formUploadArtifact(value string) string {
+	idx := strings.Index(value, "=@")
+	if idx < 0 {
+		return ""
+	}
+	return normalizeArtifactName(value[idx+2:])
 }
 
 func curlDestinationHosts(args []string) []string {
@@ -284,7 +367,10 @@ func curlDestinationHosts(args []string) []string {
 			consumed := 0
 			for j := 1; j < len(arg); j++ {
 				if curlShortFlagsWithArg[arg[j]] {
-					consumed = 1
+					if j+1 == len(arg) {
+						consumed = 1
+					}
+					break
 				}
 			}
 			if consumed > 0 && i+consumed < len(args) {
