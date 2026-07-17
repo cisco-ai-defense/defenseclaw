@@ -350,7 +350,8 @@ func TestEvaluateClaudeCodeHook_NamespacedPluginUserPromptExpansionPolicy(t *tes
 			cfg.AssetPolicy.Mode = "action"
 			enablePluginRuntimeDetection(cfg)
 			tc.configure(cfg)
-			api := &APIServer{scannerCfg: cfg}
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 
 			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
 				HookEventName: "UserPromptExpansion",

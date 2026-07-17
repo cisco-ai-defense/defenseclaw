@@ -242,7 +242,8 @@ func TestClaudeCodeNamespacedPluginCommandAssetPolicyLookup(t *testing.T) {
 			cfg.AssetPolicy.Mode = "action"
 			enablePluginRuntimeDetection(cfg)
 			tc.configure(cfg)
-			api := &APIServer{scannerCfg: cfg}
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 
 			decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
 				HookEventName: "UserPromptExpansion",
