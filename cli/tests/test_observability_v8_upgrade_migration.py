@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -508,17 +510,55 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def test_preflight_rejects_nonregular_config_without_blocking(self) -> None:
         os.unlink(self.config_path)
         os.mkfifo(self.config_path)
-        convert = Mock()
-        with patch("defenseclaw.migrations.convert_v7_observability_to_v8", convert):
-            with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
-                preflight_observability_v8_upgrade(
-                    data_dir=self.data_dir,
-                    config_path=self.config_path,
-                    gateway_binary="/staged/0.8.5/defenseclaw-gateway",
-                    candidate_directory=self.root.name,
-                )
-        self.assertEqual(raised.exception.code, "source_read_failed")
-        convert.assert_not_called()
+        probe = """
+import sys
+from unittest.mock import Mock, patch
+
+from defenseclaw.migrations import (
+    ObservabilityV8UpgradeMigrationError,
+    preflight_observability_v8_upgrade,
+)
+
+convert = Mock()
+try:
+    with patch("defenseclaw.migrations.convert_v7_observability_to_v8", convert):
+        preflight_observability_v8_upgrade(
+            data_dir=sys.argv[1],
+            config_path=sys.argv[2],
+            gateway_binary="/staged/0.8.5/defenseclaw-gateway",
+            candidate_directory=sys.argv[3],
+        )
+except ObservabilityV8UpgradeMigrationError as error:
+    if error.code != "source_read_failed":
+        raise AssertionError(f"unexpected error code: {error.code}") from error
+else:
+    raise AssertionError("non-regular config was accepted")
+convert.assert_not_called()
+"""
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    probe,
+                    self.data_dir,
+                    self.config_path,
+                    self.root.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("preflight blocked while inspecting a FIFO config")
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"child preflight failed:\n{completed.stdout}\n{completed.stderr}",
+        )
 
     def test_preflight_large_source_is_bounded_and_reports_source_limit(self) -> None:
         with open(self.config_path, "wb") as config_file:

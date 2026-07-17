@@ -2769,7 +2769,7 @@ def _endpoint_host(endpoint: str, ctx: _Context, path: str) -> str:
         # urllib defers malformed and out-of-range port errors until access.
         # Force that check here so callers always receive a bounded migration
         # diagnostic instead of a later generic candidate-validation failure.
-        parsed.port
+        _ = parsed.port
     except ValueError:
         raise _error(ctx, "invalid_endpoint", path, "use a syntactically valid collector endpoint") from None
     if not host or has_inline_credentials:

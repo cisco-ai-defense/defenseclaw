@@ -524,6 +524,7 @@ def test_permission_preflight_failure_occurs_before_backup_or_mutation(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission-mode assertion")
 @pytest.mark.parametrize("legacy_mode", [0o500, 0o555])
 def test_read_only_preflight_accepts_legacy_backup_root_target_can_tighten(
     tmp_path: Path,

@@ -3835,6 +3835,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         rollback_plan=None,
         rollback_result: bool = True,
         preflight_binding_side_effect=None,
+        recovery_journal_removal_side_effect=None,
         unset_config_data_dir: bool = False,
         controller_home_override: bool = False,
     ):
@@ -3992,7 +3993,10 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime")
             )
             self.remove_recovery_journal = stack.enter_context(
-                patch("defenseclaw.commands.cmd_upgrade._remove_hard_cut_recovery_journal")
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._remove_hard_cut_recovery_journal",
+                    side_effect=recovery_journal_removal_side_effect,
+                )
             )
             self.execute_rollback = stack.enter_context(
                 patch(
@@ -4158,6 +4162,39 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         poll_health.assert_not_called()
         self.assertEqual(receipt.status, "failed")
         self.assertEqual(receipt.failure_code, "install_failed")
+        self.assertIn("refusing to stop services", result.output)
+        self.assertIn("No service stop, artifact install, or migration", result.output)
+        self.assertNotIn("Stopping Services", result.output)
+
+    def test_final_preflight_refusal_survives_recovery_journal_cleanup_failure(self):
+        manifest = {
+            "minimum_source_version": "9.9.8",
+            "required_bridge_version": "9.9.8",
+            "auto_bridge_from": ["9.9.7"],
+        }
+        plan = Mock(name="rollback-plan")
+        result, receipt, poll_health = self._invoke_upgrade(
+            upgrade_manifest=manifest,
+            rollback_plan=plan,
+            preflight_binding_side_effect=(
+                None,
+                None,
+                OSError("fixture parent metadata changed after rollback capture"),
+            ),
+            recovery_journal_removal_side_effect=OSError("journal directory fsync failed"),
+        )
+
+        final_preflight_call = self.read_migration_preflight.call_args_list[-1]
+        staging_dir = final_preflight_call.kwargs["candidate_directory"]
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.remove_recovery_journal.assert_called_once()
+        self.run_silent.assert_not_called()
+        self.execute_rollback.assert_not_called()
+        poll_health.assert_not_called()
+        self.assertEqual(receipt.status, "failed")
+        self.assertEqual(receipt.failure_code, "install_failed")
+        self.assertFalse(os.path.exists(staging_dir))
+        self.assertIn("stale recovery-journal cleanup was deferred", result.output)
         self.assertIn("refusing to stop services", result.output)
         self.assertIn("No service stop, artifact install, or migration", result.output)
         self.assertNotIn("Stopping Services", result.output)

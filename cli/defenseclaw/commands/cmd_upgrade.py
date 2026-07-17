@@ -788,10 +788,20 @@ def upgrade(
             _require_hard_cut_preflight_state_unchanged(rollback_plan)
         except BaseException:
             _record_failed_upgrade_receipt(receipt_path, "install_failed")
-            if hard_cut_recovery_journal is not None:
-                _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
-                hard_cut_recovery_journal = None
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            try:
+                if hard_cut_recovery_journal is not None:
+                    try:
+                        _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
+                    except OSError:
+                        ux.warn(
+                            "Pre-stop refusal is durable, but stale recovery-journal cleanup "
+                            "was deferred to the next release-owned resolver run.",
+                            indent="  ",
+                        )
+                    else:
+                        hard_cut_recovery_journal = None
+            finally:
+                shutil.rmtree(staging_dir, ignore_errors=True)
             ux.err(
                 "Configuration changed after rollback custody was committed; "
                 "refusing to stop services.",

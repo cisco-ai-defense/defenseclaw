@@ -259,7 +259,9 @@ def _assert_decision(records: list[dict[str, Any]], stamp: str) -> None:
 def _canonical_tempo_trace_id(value: object) -> str | None:
     """Restore Tempo search IDs to the canonical 16-byte W3C spelling."""
 
-    raw = str(value).strip()
+    if not isinstance(value, str) or value != value.strip():
+        return None
+    raw = value
     if re.fullmatch(r"[0-9a-fA-F]{1,32}", raw) is None:
         return None
     canonical = raw.lower().zfill(32)
