@@ -622,8 +622,7 @@ func main() {
 			defer cancel()
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
-			cmd.Env = append(
-				os.Environ(),
+			cmd.Env = minimalWindowsHookTestEnvironment(
 				"DC_TEST_CONNECTOR="+testCase.connector,
 				fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
 			)
@@ -687,7 +686,7 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := windowsNativePowerShellTestProcess(ctx, "antigravity", command)
-	cmd.Env = isolatedDefenseClawHookEnvironment(
+	cmd.Env = minimalWindowsHookTestEnvironment(
 		"DEFENSECLAW_HOME="+home,
 		"DEFENSECLAW_STRICT_AVAILABILITY=1",
 		"DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:1",
@@ -731,14 +730,22 @@ func windowsProcessExitCodeForTest(t *testing.T, err error) int {
 	return exitErr.ExitCode()
 }
 
-func isolatedDefenseClawHookEnvironment(overrides ...string) []string {
-	env := make([]string, 0, len(os.Environ())+len(overrides))
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(strings.ToUpper(name), "DEFENSECLAW_") {
-			continue
+func minimalWindowsHookTestEnvironment(overrides ...string) []string {
+	allowedNames := [...]string{
+		"COMSPEC",
+		"PATH",
+		"PATHEXT",
+		"SystemDrive",
+		"SystemRoot",
+		"TEMP",
+		"TMP",
+		"WINDIR",
+	}
+	env := make([]string, 0, len(allowedNames)+len(overrides))
+	for _, name := range allowedNames {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
 		}
-		env = append(env, entry)
 	}
 	return append(env, overrides...)
 }
