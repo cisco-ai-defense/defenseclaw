@@ -48,8 +48,9 @@ type skillRuntimeProbe struct {
 	SourcePath string
 	// RawName preserves the unnormalized input the SkillName was
 	// derived from when path-stripping occurred (e.g. SkillName came
-	// from filepath.Base on a "/path/to/<name>/SKILL.md"). Empty when
-	// SkillName == raw input.
+	// from filepath.Base on a "/path/to/<name>/SKILL.md") or when a
+	// plugin slash command was reduced from "plugin-id:command-id" to
+	// "plugin-id" for policy lookup. Empty when SkillName == raw input.
 	RawName string
 	Surface string
 	Matched bool
@@ -96,7 +97,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 	if targetType == "" {
 		return nil
 	}
-	name := normalizeSkillRuntimeName(req.CommandName)
+	name, rawName := claudeCodeSlashCommandAssetName(targetType, req.CommandName)
 	if name == "" {
 		return nil
 	}
@@ -104,6 +105,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		TargetType: targetType,
 		SkillName:  name,
 		ToolName:   strings.TrimSpace(req.CommandName),
+		RawName:    rawName,
 		SourcePath: strings.TrimSpace(req.CommandSource),
 		Surface:    "prompt_expansion",
 		Matched:    true,
@@ -376,12 +378,16 @@ func (a *APIServer) emitRuntimeSkillAssetPolicyDecision(ctx context.Context, dec
 	targetType := runtimeSkillAssetTargetType(probe)
 	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, targetType, connector, hookEvent)
 	if a.logger != nil {
-		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
-			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
+		details := runtimeSkillAssetPolicyAuditDetails(decision, connector, hookEvent, probe)
 		details = appendHookEvaluationDetails(details, evalCtx)
 		a.logAssetPolicyAudit(ctx, connector, targetType+":"+decision.TargetName, details)
 	}
 	a.dispatchAssetPolicyNotification(decision, targetType, connector, hookEvent, evalCtx)
+}
+
+func runtimeSkillAssetPolicyAuditDetails(decision config.AssetPolicyDecision, connector, hookEvent string, probe skillRuntimeProbe) string {
+	return fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
+		decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
 }
 
 func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) bool {
@@ -502,6 +508,24 @@ func slashCommandAssetType(commandSource string) string {
 	default:
 		return ""
 	}
+}
+
+// claudeCodeSlashCommandAssetName returns the asset identifier used for
+// runtime-disable and asset-policy lookup plus the original command name when
+// canonicalization changed it. Claude Code identifies plugin commands as
+// "plugin-id:command-id", while plugin policies are keyed by the bare plugin id.
+// Skill slash-command names retain their existing semantics.
+func claudeCodeSlashCommandAssetName(targetType, commandName string) (string, string) {
+	name := normalizeSkillRuntimeName(commandName)
+	if !strings.EqualFold(strings.TrimSpace(targetType), "plugin") {
+		return name, ""
+	}
+	pluginID, commandID, namespaced := strings.Cut(name, ":")
+	pluginID = strings.TrimSpace(pluginID)
+	if !namespaced || pluginID == "" || strings.TrimSpace(commandID) == "" {
+		return name, ""
+	}
+	return pluginID, strings.TrimSpace(commandName)
 }
 
 func mcpPromptServerName(commandSource, commandName string) string {
