@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -2531,32 +2532,36 @@ func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 		return false
 	}
 	endpoint, _ := otlpHTTP["endpoint"].(string)
-	if codexScopedOTLPEndpointLooksManaged(endpoint, opts) {
+	if codexScopedOTLPEndpointLooksManaged(endpoint) {
 		return true
-	}
-	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
-	if endpoint != directBase+"logs" && endpoint != directBase+"traces" && endpoint != directBase+"metrics" {
-		return false
 	}
 	headers, _ := otlpHTTP["headers"].(map[string]interface{})
 	if headers == nil {
 		return false
 	}
-	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	sourceMarker := headers["x-defenseclaw-source"] == "codex"
+	clientMarker := headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
+	if endpoint == directBase+"logs" || endpoint == directBase+"traces" || endpoint == directBase+"metrics" {
+		return sourceMarker || clientMarker
+	}
+	// Older releases used the unscoped /v1/<signal> receiver. A later
+	// operator change to gateway.api_port must not strand that registration,
+	// but port-independent ownership is deliberately stronger: require the
+	// exact pair of product markers and a strict loopback OTLP URL.
+	return sourceMarker && clientMarker && codexLegacyDirectOTLPEndpointLooksManaged(endpoint)
 }
 
-func codexScopedOTLPEndpointLooksManaged(endpoint string, opts SetupOpts) bool {
+func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
 		return false
 	}
-	base, err := url.Parse("http://" + strings.TrimSpace(opts.APIAddr))
-	if err != nil || base.Host == "" {
-		return false
-	}
-	sameConfiguredAuthority := parsed.Host == base.Host
-	equivalentLoopbackAuthority := parsed.Port() != "" && parsed.Port() == base.Port() && codexLoopbackHost(parsed.Hostname())
-	if !sameConfiguredAuthority && !equivalentLoopbackAuthority {
+	// The random connector-scoped path and the loopback-only authority are the
+	// durable ownership boundary. The API port is mutable configuration, so it
+	// cannot be part of teardown identity. Requiring an explicit port avoids
+	// claiming a generic local HTTP path that the product never emits.
+	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
@@ -2569,6 +2574,30 @@ func codexScopedOTLPEndpointLooksManaged(endpoint string, opts SetupOpts) bool {
 	default:
 		return false
 	}
+}
+
+func codexLegacyDirectOTLPEndpointLooksManaged(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
+		return false
+	}
+	switch parsed.Path {
+	case "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexLoopbackOTLPAuthorityLooksManaged(parsed *url.URL) bool {
+	if parsed == nil || !codexLoopbackHost(parsed.Hostname()) {
+		return false
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	return err == nil && port > 0 && port <= 65535
 }
 
 func codexLoopbackHost(host string) bool {

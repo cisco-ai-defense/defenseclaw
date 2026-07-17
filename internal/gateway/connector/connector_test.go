@@ -5278,6 +5278,46 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
 		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
 	}
+	portDrift := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(portDrift, opts) {
+		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
+	}
+	legacyPortDrift := map[string]interface{}{
+		"metrics_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:43189/v1/metrics",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
+		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
+	}
+	for marker, headers := range map[string]map[string]interface{}{
+		"source only": {"x-defenseclaw-source": "codex"},
+		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
+	} {
+		ambiguousLegacyDrift := map[string]interface{}{
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:43189/v1/logs",
+					"headers":  headers,
+				},
+			},
+		}
+		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
+			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
+		}
+	}
 
 	user := map[string]interface{}{
 		"exporter": map[string]interface{}{
@@ -5297,12 +5337,61 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
 		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
 		"other scope":       "http://127.0.0.1:18970/otlp/geminicli/" + strings.Repeat("a", 64) + "/v1/logs",
+		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
 		"shared no headers": "http://127.0.0.1:18970/v1/logs",
 	} {
 		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
 		if codexOtelBlockLooksManaged(candidate, opts) {
 			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
 		}
+	}
+}
+
+func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *testing.T) {
+	cfg := map[string]interface{}{
+		"otel": map[string]interface{}{
+			"log_user_prompt":  true,
+			"operator_setting": "preserve",
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("d", 64) + "/v1/logs",
+					"protocol": "json",
+					"headers": map[string]interface{}{
+						"authorization":        "Bearer redacted-test-token",
+						"x-defenseclaw-client": "codex-otel/1.0",
+						"x-defenseclaw-source": "codex",
+					},
+				},
+			},
+		},
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: json.RawMessage(`{"environment":"staging"}`),
+	}
+
+	// Native acceptance changes gateway.api_port before uninstall. Exercise
+	// the surgical restore directly: the old scoped exporter is still owned,
+	// while current operator fields and displaced original fields survive.
+	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	restored, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(restored)), "defenseclaw") {
+		t.Fatalf("surgical restore left a product registration after API port drift: %s", restored)
+	}
+	otel, ok := cfg["otel"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("surgical restore removed the operator OTel table: %#v", cfg)
+	}
+	if otel["operator_setting"] != "preserve" || otel["environment"] != "staging" {
+		t.Fatalf("surgical restore discarded operator/original fields: %#v", otel)
+	}
+	if _, exists := otel["exporter"]; exists {
+		t.Fatalf("surgical restore retained the old managed exporter: %#v", otel)
 	}
 }
 
