@@ -64,6 +64,9 @@ PRIVATE = WindowsFileSecurity(
 HIGH_MANDATORY_LABEL = _dacl(
     (0x11, 0, 0x00000003, _sid(0x3000, authority=16)),
 )
+MEDIUM_MANDATORY_LABEL = _dacl(
+    (0x11, 0, 0x00000003, _sid(0x2000, authority=16)),
+)
 
 
 class _FakeApi:
@@ -74,7 +77,7 @@ class _FakeApi:
         self.next_handle = 10
         self.change_after_write = False
         self.create_security_override: WindowsFileSecurity | None = None
-        self.ignore_set_security = False
+        self.ignore_exact_set_security = False
         self.private_flags: list[int] = []
 
     def open_path(self, path: str, *, access: int, directory: bool = False) -> int:
@@ -99,7 +102,16 @@ class _FakeApi:
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None:
         self.events.append(("set", security))
-        if not self.ignore_set_security:
+        self.security[handle] = security
+
+    def set_new_file_security_exact(
+        self,
+        handle: int,
+        current: WindowsFileSecurity,
+        security: WindowsFileSecurity,
+    ) -> None:
+        self.events.append(("set-exact-new", (current, security)))
+        if not self.ignore_exact_set_security:
             self.security[handle] = security
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int:
@@ -170,7 +182,7 @@ def test_write_new_file_repairs_create_security_before_first_payload_byte(
     windows_acl.write_new_file("candidate.tmp", b"secret-payload", requested)
 
     handle = api.paths["candidate.tmp"]
-    set_index = api.events.index(("set", staged))
+    set_index = api.events.index(("set-exact-new", (api.create_security_override, staged)))
     write_index = api.events.index(("write", b"secret-payload"))
     flush_index = api.events.index(("flush", handle))
     final_get_index = max(index for index, event in enumerate(api.events) if event == ("get", handle))
@@ -189,7 +201,7 @@ def test_write_new_file_rejects_unrepaired_create_security_before_payload(
         _dacl((0, 0, 0x001F01FF, USERS)),
         False,
     )
-    api.ignore_set_security = True
+    api.ignore_exact_set_security = True
     unrelated_security = WindowsFileSecurity(
         PRIVATE.owner,
         _dacl((0, 0, 0x00020089, SYSTEM)),
@@ -293,6 +305,30 @@ def test_native_staged_file_round_trips_unprotected_security(tmp_path) -> None:
     assert windows_acl.capture_path(str(staged)) == requested
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows mandatory labels")
+def test_native_exact_new_file_security_sets_and_clears_mandatory_label(tmp_path) -> None:
+    path = tmp_path / "candidate.tmp"
+    requested = windows_acl.private_security_for_directory(str(tmp_path))
+    api = windows_acl._get_api()
+    handle = api.create_file(str(path), requested)
+    try:
+        initial = api.get_security(handle)
+        labeled = WindowsFileSecurity(
+            requested.owner,
+            requested.dacl,
+            requested.dacl_protected,
+            MEDIUM_MANDATORY_LABEL,
+            requested.sacl_protected,
+        )
+        api.set_new_file_security_exact(handle, initial, labeled)
+        assert api.get_security(handle) == labeled
+
+        api.set_new_file_security_exact(handle, labeled, requested)
+        assert api.get_security(handle) == requested
+    finally:
+        api.close_handle(handle)
+
+
 def test_write_new_file_fails_closed_when_acl_changes_during_write(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _FakeApi()
     api.change_after_write = True
@@ -331,6 +367,73 @@ def test_mandatory_label_normalization_rejects_unrepresentable_sacl_data() -> No
     audit_acl = _dacl((2, 0, 0x00000001, OWNER))
     with pytest.raises(WindowsAclError, match="unsupported SACL data"):
         windows_acl._normalize_mandatory_label_acl(audit_acl)
+
+
+def test_general_security_setter_leaves_absent_label_out_of_existing_file_update() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    api.get_security = Mock(return_value=PRIVATE)
+    set_security_info = Mock(return_value=windows_acl._ERROR_SUCCESS)
+    api._set_security_info = set_security_info
+
+    api.set_security(31, PRIVATE)
+
+    arguments = set_security_info.call_args.args
+    information = arguments[2]
+    assert information & windows_acl._DACL_SECURITY_INFORMATION
+    assert information & windows_acl._PROTECTED_DACL_SECURITY_INFORMATION
+    assert not information & windows_acl._LABEL_SECURITY_INFORMATION
+    assert arguments[6] is None
+    api.get_security.assert_called_once_with(31)
+
+
+@pytest.mark.parametrize(
+    ("mandatory_label", "current_sacl_protected", "sacl_protected", "expected_sacl_flag"),
+    [
+        (None, False, False, 0),
+        (HIGH_MANDATORY_LABEL, False, True, windows_acl._PROTECTED_SACL_SECURITY_INFORMATION),
+        (None, True, False, windows_acl._UNPROTECTED_SACL_SECURITY_INFORMATION),
+    ],
+)
+def test_exact_new_file_security_setter_replaces_every_requested_component(
+    mandatory_label: bytes | None,
+    current_sacl_protected: bool,
+    sacl_protected: bool,
+    expected_sacl_flag: int,
+) -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    api.get_security = Mock(side_effect=AssertionError("must not merge current candidate security"))
+    set_security_info = Mock(return_value=windows_acl._ERROR_SUCCESS)
+    api._set_security_info = set_security_info
+    requested = WindowsFileSecurity(
+        PRIVATE.owner,
+        PRIVATE.dacl,
+        True,
+        mandatory_label,
+        sacl_protected,
+    )
+    current = WindowsFileSecurity(
+        PRIVATE.owner,
+        _dacl((0, 0, 0x001F01FF, USERS)),
+        False,
+        MEDIUM_MANDATORY_LABEL,
+        current_sacl_protected,
+    )
+
+    api.set_new_file_security_exact(32, current, requested)
+
+    arguments = set_security_info.call_args.args
+    information = arguments[2]
+    assert information == (
+        windows_acl._OWNER_SECURITY_INFORMATION
+        | windows_acl._DACL_SECURITY_INFORMATION
+        | windows_acl._LABEL_SECURITY_INFORMATION
+        | windows_acl._PROTECTED_DACL_SECURITY_INFORMATION
+        | expected_sacl_flag
+    )
+    assert ctypes.string_at(arguments[5], len(PRIVATE.dacl)) == PRIVATE.dacl
+    expected_label = mandatory_label if mandatory_label is not None else windows_acl._EMPTY_ACL
+    assert ctypes.string_at(arguments[6], len(expected_label)) == expected_label
+    api.get_security.assert_not_called()
 
 
 def test_native_security_descriptor_includes_mandatory_label_and_protection() -> None:

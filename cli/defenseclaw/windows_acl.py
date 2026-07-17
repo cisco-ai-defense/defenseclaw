@@ -95,6 +95,7 @@ _OBJECT_INHERIT_ACE = 0x01
 _CONTAINER_INHERIT_ACE = 0x02
 _INHERIT_ONLY_ACE = 0x08
 _INHERITED_ACE = 0x10
+_EMPTY_ACL = struct.pack("<BBHHH", _ACL_REVISION, 0, 8, 0, 0)
 
 _FILE_WRITE_DATA = 0x00000002
 _FILE_APPEND_DATA = 0x00000004
@@ -176,6 +177,13 @@ class _WindowsApi(Protocol):
     def get_security(self, handle: int) -> WindowsFileSecurity: ...
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None: ...
+
+    def set_new_file_security_exact(
+        self,
+        handle: int,
+        current: WindowsFileSecurity,
+        security: WindowsFileSecurity,
+    ) -> None: ...
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int: ...
 
@@ -668,6 +676,52 @@ class _CtypesWindowsApi:
         if status != _ERROR_SUCCESS:
             self._raise_status("SetSecurityInfo", int(status))
 
+    def set_new_file_security_exact(
+        self,
+        handle: int,
+        current: WindowsFileSecurity,
+        security: WindowsFileSecurity,
+    ) -> None:
+        """Replace every represented security component on one exclusive empty file."""
+
+        owner_buffer = ctypes.create_string_buffer(security.owner)
+        dacl_buffer = ctypes.create_string_buffer(security.dacl)
+        # LABEL_SECURITY_INFORMATION with an empty ACL explicitly removes a
+        # provider-added mandatory label. The general existing-file mutator
+        # deliberately omits label information when none was requested.
+        label = security.mandatory_label if security.mandatory_label is not None else _EMPTY_ACL
+        label_buffer = ctypes.create_string_buffer(label)
+        information = (
+            _OWNER_SECURITY_INFORMATION
+            | _DACL_SECURITY_INFORMATION
+            | _LABEL_SECURITY_INFORMATION
+            | (
+                _PROTECTED_DACL_SECURITY_INFORMATION
+                if security.dacl_protected
+                else _UNPROTECTED_DACL_SECURITY_INFORMATION
+            )
+        )
+        # SACL protection changes can require privileges even when no SACL
+        # contents are supplied, so request only an observed state transition.
+        # The caller still verifies the complete security snapshot afterward.
+        if current.sacl_protected != security.sacl_protected:
+            information |= (
+                _PROTECTED_SACL_SECURITY_INFORMATION
+                if security.sacl_protected
+                else _UNPROTECTED_SACL_SECURITY_INFORMATION
+            )
+        status = self._set_security_info(
+            handle,
+            _SE_FILE_OBJECT,
+            information,
+            owner_buffer,
+            None,
+            dacl_buffer,
+            label_buffer,
+        )
+        if status != _ERROR_SUCCESS:
+            self._raise_status("SetSecurityInfo(exact new file)", int(status))
+
     def _absolute_descriptor(self, security: WindowsFileSecurity):
         owner_buffer = ctypes.create_string_buffer(security.owner)
         dacl_buffer = ctypes.create_string_buffer(security.dacl)
@@ -1150,7 +1204,7 @@ def write_new_file(path: str, payload: bytes, security: WindowsFileSecurity) -> 
         # claimed handle, then keep the exact comparison as the write gate.
         actual_security = api.get_security(handle)
         if actual_security != staged_security:
-            api.set_security(handle, staged_security)
+            api.set_new_file_security_exact(handle, actual_security, staged_security)
             actual_security = api.get_security(handle)
             if actual_security != staged_security:
                 # The exclusive candidate still contains zero payload bytes.
