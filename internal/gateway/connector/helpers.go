@@ -463,7 +463,27 @@ func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) s
 		// does not synchronously await through its native call operator. Start the
 		// launcher without a new window so it inherits the agent's standard
 		// handles, waits, and returns the process exit code instead of stale
-		// LASTEXITCODE.
+		// LASTEXITCODE. Qualify the built-in module so a fresh PowerShell 5.1
+		// process does not perform a broad first-use module discovery scan.
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(arguments, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary reconstructs
+// the exact synchronous command emitted before the Start-Process module was
+// qualified. It remains owned for repair and teardown, but is never generated.
+func legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
+	arguments := []string{
+		powershellQuoteLiteral("hook"),
+		powershellQuoteLiteral("--connector"),
+		powershellQuoteLiteral(connector),
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
 		"$hookProcess=Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
 			" -ArgumentList @(" + strings.Join(arguments, ",") + ") -NoNewWindow -Wait -PassThru",
 		"exit $hookProcess.ExitCode",
@@ -528,6 +548,7 @@ func isNativeHookCommand(cmd string) bool {
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
 			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
+				cmd == legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
 				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
 				return true
 			}

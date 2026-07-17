@@ -67,7 +67,7 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 }
 
 func windowsNativePowerShellStartForTest(hookBinary, connector string) string {
-	return "$hookProcess=Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+	return "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
 		" -ArgumentList @('hook','--connector'," + powershellQuoteLiteral(connector) + ") -NoNewWindow -Wait -PassThru"
 }
 
@@ -380,46 +380,60 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, hookBinary)
-	legacy := legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)
 	current := windowsNativePowerShellHookCommandForBinary("codex", hookBinary)
-	if legacy == current || !isNativeHookCommand(legacy) {
-		t.Fatalf("legacy command ownership is not repairable: legacy=%q current=%q", legacy, current)
+	legacyCommands := []struct {
+		name    string
+		command string
+	}{
+		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
+		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 	}
+	for _, testCase := range legacyCommands {
+		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.command == current || !isNativeHookCommand(testCase.command) {
+				t.Fatalf("legacy command ownership is not repairable: legacy=%q current=%q", testCase.command, current)
+			}
 
-	existing := []interface{}{
-		map[string]interface{}{
-			"hooks": []interface{}{
+			existing := []interface{}{
 				map[string]interface{}{
-					"type":            "command",
-					"command":         legacy,
-					"command_windows": legacy,
-					"timeout":         30,
+					"hooks": []interface{}{
+						map[string]interface{}{
+							"type":            "command",
+							"command":         testCase.command,
+							"command_windows": testCase.command,
+							"timeout":         30,
+						},
+					},
 				},
-			},
-		},
+			}
+			generated := buildCodexHooksTable(filepath.Join(t.TempDir(), "managed_config.toml"), "")
+			replacement := generated["PreToolUse"].([]interface{})
+			repaired, err := replaceOwnedCodexHookInPlace(existing, replacement, t.TempDir())
+			if err != nil {
+				t.Fatalf("repair legacy Codex hook: %v", err)
+			}
+			if len(repaired) != 1 {
+				t.Fatalf("repaired group count = %d, want 1", len(repaired))
+			}
+			handlers := repaired[0].(map[string]interface{})["hooks"].([]interface{})
+			if len(handlers) != 1 {
+				t.Fatalf("repaired handler count = %d, want 1", len(handlers))
+			}
+			handler := handlers[0].(map[string]interface{})
+			if got := handler["command"]; got != current {
+				t.Fatalf("repaired command = %q, want %q", got, current)
+			}
+			if got := handler["command_windows"]; got != current {
+				t.Fatalf("repaired command_windows = %q, want %q", got, current)
+			}
+		})
 	}
-	generated := buildCodexHooksTable(filepath.Join(t.TempDir(), "managed_config.toml"), "")
-	replacement := generated["PreToolUse"].([]interface{})
-	repaired, err := replaceOwnedCodexHookInPlace(existing, replacement, t.TempDir())
-	if err != nil {
-		t.Fatalf("repair legacy Codex hook: %v", err)
-	}
-	if len(repaired) != 1 {
-		t.Fatalf("repaired group count = %d, want 1", len(repaired))
-	}
-	handlers := repaired[0].(map[string]interface{})["hooks"].([]interface{})
-	if len(handlers) != 1 {
-		t.Fatalf("repaired handler count = %d, want 1", len(handlers))
-	}
-	handler := handlers[0].(map[string]interface{})
-	if got := handler["command"]; got != current {
-		t.Fatalf("repaired command = %q, want %q", got, current)
-	}
-	if got := handler["command_windows"]; got != current {
-		t.Fatalf("repaired command_windows = %q, want %q", got, current)
-	}
-	if decoded := decodePowerShellEncodedCommandForTest(t, current); strings.Contains(decoded, "$LASTEXITCODE") {
+	decoded := decodePowerShellEncodedCommandForTest(t, current)
+	if strings.Contains(decoded, "$LASTEXITCODE") {
 		t.Fatalf("repaired command still depends on stale LASTEXITCODE: %s", decoded)
+	}
+	if !strings.Contains(decoded, "Microsoft.PowerShell.Management\\Start-Process") {
+		t.Fatalf("repaired command does not bypass broad module discovery: %s", decoded)
 	}
 }
 
@@ -558,7 +572,7 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 // exact emitted command across both supported agent launch boundaries. The
 // probe uses the same GUI subsystem as release defenseclaw-hook.exe so this
 // catches PowerShell returning before the process exits.
-const windowsNativePowerShellTestTimeout = 2 * time.Minute
+const windowsNativePowerShellTestTimeout = time.Minute
 
 func TestWindowsNativePowerShellHookCommandPropagatesProcessResults(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -625,6 +639,7 @@ func main() {
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
 			cmd.Env = minimalWindowsHookTestEnvironment(
+				"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
 				"DC_TEST_CONNECTOR="+testCase.connector,
 				fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
 			)
@@ -646,6 +661,9 @@ func main() {
 			}
 			if got, want := stderr.String(), "probe stderr "+testCase.connector; !strings.Contains(got, want) {
 				t.Fatalf("generated command stderr = %q, want marker %q", got, want)
+			}
+			if strings.Contains(stderr.String(), "Preparing modules for first use") {
+				t.Fatalf("generated command performed broad first-use module discovery: %q", stderr.String())
 			}
 		})
 	}
@@ -693,6 +711,7 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 	defer cancel()
 	cmd := windowsNativePowerShellTestProcess(ctx, "antigravity", command)
 	cmd.Env = minimalWindowsHookTestEnvironment(
+		"PSModuleAnalysisCachePath="+filepath.Join(root, "module-analysis-cache"),
 		"DEFENSECLAW_HOME="+home,
 		"DEFENSECLAW_STRICT_AVAILABILITY=1",
 		"DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:1",
@@ -917,7 +936,7 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	command := hookInvocationCommandFor("windows", "codex", "")
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
 	wantInvocation := windowsNativePowerShellStartForTest(defenseclawHookBinary(), "codex")
-	probeInvocation := "$hookProcess=Start-Process -FilePath 'where.exe' -ArgumentList @('cmd.exe') -NoNewWindow -Wait -PassThru"
+	probeInvocation := "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath 'where.exe' -ArgumentList @('cmd.exe') -NoNewWindow -Wait -PassThru"
 	probeScript := strings.Replace(decoded, wantInvocation, probeInvocation, 1)
 	if probeScript == decoded {
 		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)

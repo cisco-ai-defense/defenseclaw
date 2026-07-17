@@ -1450,7 +1450,7 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
     first_base = ntpath.basename(parts[0]).casefold()
     if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
-        legacy_target = ""
+        owned_target = ""
         if "-encodedcommand" in lowered:
             encoded_index = lowered.index("-encodedcommand")
             if (
@@ -1464,17 +1464,27 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                         match = re.fullmatch(
                             r"\$ErrorActionPreference='Stop'; "
                             r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                            r"& '((?:[^']|'')+)' hook --connector "
+                            r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                            r"-ArgumentList @\('hook','--connector','"
                             + re.escape(connector)
-                            + r"; exit \$LASTEXITCODE",
+                            + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
                             script,
                         )
+                        if not match:
+                            match = re.fullmatch(
+                                r"\$ErrorActionPreference='Stop'; "
+                                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                                r"& '((?:[^']|'')+)' hook --connector "
+                                + re.escape(connector)
+                                + r"; exit \$LASTEXITCODE",
+                                script,
+                            )
                         if match:
-                            legacy_target = match.group(1).replace("''", "'")
+                            owned_target = match.group(1).replace("''", "'")
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
-        if legacy_target:
-            target = legacy_target
+        if owned_target:
+            target = owned_target
             args = ["hook", "--connector", connector]
         else:
             try:
@@ -2082,7 +2092,8 @@ def _command_target(
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
+                r"-FilePath '((?:[^']|'')+)' "
                 r"-ArgumentList @\('hook','--connector','"
                 + re.escape(connector)
                 + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
@@ -2091,6 +2102,20 @@ def _command_target(
             if match:
                 target = match.group(1).replace("''", "'")
                 return target, ["hook", "--connector", connector], "direct"
+            unqualified = re.fullmatch(
+                r"\$ErrorActionPreference='Stop'; "
+                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                r"-ArgumentList @\('hook','--connector','"
+                + re.escape(connector)
+                + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                script,
+            )
+            if unqualified:
+                raise _InspectionError(
+                    "stale",
+                    "PowerShell EncodedCommand hook uses an unqualified Start-Process launcher",
+                )
             legacy = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
