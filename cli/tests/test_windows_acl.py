@@ -309,6 +309,37 @@ def test_apply_path_verifies_owner_dacl_and_protection(monkeypatch: pytest.Monke
     assert ("set", PRIVATE) in api.events
 
 
+def test_apply_path_reports_safe_structural_security_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _FakeApi()
+    api.paths["config.yaml"] = 7
+    actual = WindowsFileSecurity(
+        SYSTEM,
+        _dacl((0, 0x10, 0x00020089, SYSTEM)),
+        False,
+        HIGH_MANDATORY_LABEL,
+        True,
+    )
+    api.security[7] = actual
+    api.set_security = Mock()
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    with pytest.raises(WindowsAclError) as caught:
+        windows_acl.apply_path("config.yaml", PRIVATE)
+
+    message = str(caught.value)
+    assert "owner_equal=False" in message
+    assert "dacl_equal=False" in message
+    assert "dacl_protected=expected:True,actual:False" in message
+    assert "dacl_expected=(len=" in message
+    assert "aces=[0x00:0x00:" in message
+    assert "dacl_actual=(len=" in message
+    assert "aces=[0x00:0x10:" in message
+    assert "mandatory_label_equal=False" in message
+    assert "sacl_protected=expected:False,actual:True" in message
+    assert repr(OWNER) not in message
+    assert repr(PRIVATE.dacl) not in message
+
+
 def test_private_directory_acl_requests_object_and_container_inheritance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -204,6 +204,68 @@ class WindowsAclError(OSError):
     """A native security operation was unavailable, unsafe, or failed."""
 
 
+def _acl_shape(acl: bytes | None) -> str:
+    """Describe ACL structure without exposing access masks or SIDs."""
+
+    if acl is None:
+        return "absent"
+    if len(acl) < 8:
+        return f"invalid(len={len(acl)},reason=truncated-header)"
+    revision, _reserved, acl_size, ace_count, _reserved2 = struct.unpack_from("<BBHHH", acl, 0)
+    if acl_size != len(acl):
+        return (
+            f"invalid(len={len(acl)},revision={revision},declared_size={acl_size},"
+            f"ace_count={ace_count},reason=size-mismatch)"
+        )
+    cursor = 8
+    ace_shapes: list[str] = []
+    for _index in range(ace_count):
+        if cursor + 4 > acl_size:
+            return (
+                f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+                f"parsed_aces={len(ace_shapes)},reason=truncated-ace-header)"
+            )
+        ace_type, ace_flags, ace_size = struct.unpack_from("<BBH", acl, cursor)
+        if ace_size < 4 or cursor + ace_size > acl_size:
+            return (
+                f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+                f"parsed_aces={len(ace_shapes)},reason=invalid-ace-size-{ace_size})"
+            )
+        ace_shapes.append(f"{ace_type:#04x}:{ace_flags:#04x}:{ace_size}")
+        cursor += ace_size
+    if cursor != acl_size:
+        return (
+            f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
+            f"parsed_aces={len(ace_shapes)},reason=trailing-bytes-{acl_size - cursor})"
+        )
+    return (
+        f"len={len(acl)},revision={revision},ace_count={ace_count},"
+        f"aces=[{','.join(ace_shapes)}]"
+    )
+
+
+def _security_mismatch_summary(
+    expected: WindowsFileSecurity,
+    actual: WindowsFileSecurity,
+) -> str:
+    """Return a public-log-safe structural summary of descriptor drift."""
+
+    return "; ".join(
+        (
+            f"owner_equal={actual.owner == expected.owner}",
+            f"owner_lengths=expected:{len(expected.owner)},actual:{len(actual.owner)}",
+            f"dacl_equal={actual.dacl == expected.dacl}",
+            f"dacl_protected=expected:{expected.dacl_protected},actual:{actual.dacl_protected}",
+            f"dacl_expected=({_acl_shape(expected.dacl)})",
+            f"dacl_actual=({_acl_shape(actual.dacl)})",
+            f"mandatory_label_equal={actual.mandatory_label == expected.mandatory_label}",
+            f"mandatory_label_expected=({_acl_shape(expected.mandatory_label)})",
+            f"mandatory_label_actual=({_acl_shape(actual.mandatory_label)})",
+            f"sacl_protected=expected:{expected.sacl_protected},actual:{actual.sacl_protected}",
+        )
+    )
+
+
 def _protected_dacl_copy(dacl: bytes) -> bytes:
     """Return the exact explicit-ACE form Windows stores on a protected DACL.
 
@@ -1093,8 +1155,10 @@ def apply_fd(fd: int, security: WindowsFileSecurity) -> None:
     api = _get_api()
     handle = msvcrt.get_osfhandle(fd)
     api.set_security(handle, security)
-    if api.get_security(handle) != security:
-        raise WindowsAclError("Windows security did not match after SetSecurityInfo")
+    actual = api.get_security(handle)
+    if actual != security:
+        summary = _security_mismatch_summary(security, actual)
+        raise WindowsAclError(f"Windows security did not match after SetSecurityInfo: {summary}")
 
 
 def flush_fd(fd: int) -> None:
@@ -1127,7 +1191,8 @@ def apply_path(path: str, security: WindowsFileSecurity, *, directory: bool = Fa
         api.set_security(handle, security)
         actual = api.get_security(handle)
         if actual != security:
-            raise WindowsAclError("Windows security did not match after SetSecurityInfo")
+            summary = _security_mismatch_summary(security, actual)
+            raise WindowsAclError(f"Windows security did not match after SetSecurityInfo: {summary}")
     finally:
         api.close_handle(handle)
 
