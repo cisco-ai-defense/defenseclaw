@@ -568,13 +568,32 @@ func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *
 	// audit ticker rather than the ordinary fsnotify processing path.
 	guard := NewHookConfigGuard(nil, nil, time.Hour)
 	guard.policyAudit = 20 * time.Millisecond
+	healed := make(chan []string, 1)
+	guard.SetHealNotifier(func(_ string, paths []string) {
+		healed <- append([]string(nil), paths...)
+	})
 	guard.Start(ctx, conn, opts)
 	t.Cleanup(guard.Stop)
 
 	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("strip Claude hooks: %v", err)
 	}
-	waitForPresence(t, conn, opts, true, 3*time.Second)
+	// The notifier is the completion barrier for Setup and its effective-policy
+	// verification. Polling OwnedHooksPresent while Setup atomically replaces the
+	// file races the repair on Windows.
+	select {
+	case paths := <-healed:
+		if len(paths) != 1 || paths[0] != "periodic effective-policy audit" {
+			t.Fatalf("heal notifier paths = %v, want periodic effective-policy audit", paths)
+		}
+	case <-time.After(5 * time.Second):
+		present, err := connector.OwnedHooksPresent(conn, opts)
+		t.Fatalf("periodic policy audit did not report a completed repair (present=%v err=%v)", present, err)
+	}
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil || !present {
+		t.Fatalf("periodic policy audit reported repair without an effective hook contract (present=%v err=%v)", present, err)
+	}
 }
 
 func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {
