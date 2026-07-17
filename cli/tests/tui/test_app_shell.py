@@ -1482,7 +1482,8 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
 
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
-        assert "defenseclaw alerts dismiss --severity HIGH" in screen.preview.masked_display
+        assert "defenseclaw alerts dismiss --id a1" in screen.preview.masked_display
+        assert "--severity" not in screen.preview.masked_display
 
 
 @pytest.mark.asyncio

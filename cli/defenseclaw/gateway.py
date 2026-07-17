@@ -126,23 +126,36 @@ class OrchestratorClient:
         self,
         *,
         operation_id: str,
+        audit_db_identity: str,
         disposition: str,
-        severity: str,
+        selector: Mapping[str, Any],
+        preview: bool,
+        selection_digest: str | None = None,
     ) -> dict[str, Any]:
-        """Apply protected alert-review state through the canonical CAS API."""
+        """Preview or apply protected alert-review state through the CAS API."""
 
+        payload: dict[str, Any] = {
+            "operation_id": operation_id,
+            "audit_db_identity": audit_db_identity,
+            "disposition": disposition,
+            "selector": dict(selector),
+            "preview": preview,
+        }
+        if selection_digest:
+            payload["selection_digest"] = selection_digest
         resp = self._session.post(
             f"{self.base_url}/api/v1/alerts/disposition",
-            json={
-                "operation_id": operation_id,
-                "disposition": disposition,
-                "severity": severity,
-            },
+            json=payload,
             timeout=self.timeout,
             allow_redirects=False,
         )
-        resp.raise_for_status()
-        return resp.json()
+        if resp.status_code not in {200, 409, 503}:
+            resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed alert disposition response")
+        data["_http_status"] = resp.status_code
+        return data
 
     def close(self) -> None:
         self._session.close()

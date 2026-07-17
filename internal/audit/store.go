@@ -3306,16 +3306,32 @@ type AlertAcknowledgementTarget struct {
 	ProjectionVersion int64
 }
 
-// ListAlertAcknowledgementTargets returns immutable alert occurrences which
-// remain unreviewed. Mutations must be performed by AlertAcknowledgementWriter;
-// this query never rewrites event severity.
-func (s *Store) ListAlertAcknowledgementTargets(
+// AlertAcknowledgementSelector is the storage boundary for alert-review
+// previews. AlertIDs are an exact, repeatable mode; all other fields select
+// only currently active (unreviewed) alerts.
+type AlertAcknowledgementSelector struct {
+	AlertIDs  []string
+	Connector string
+	Target    string
+	Severity  string
+	Since     time.Time
+	Before    time.Time
+}
+
+// SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
+// the projection versions that must be included in the caller's preview
+// digest. Every caller-controlled value is bound as a SQL parameter.
+func (s *Store) SelectAlertAcknowledgementTargets(
 	ctx context.Context,
-	severityFilter string,
+	selector AlertAcknowledgementSelector,
 ) ([]AlertAcknowledgementTarget, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("audit: alert acknowledgement context is required")
 	}
+	if len(selector.AlertIDs) > 0 {
+		return s.selectExactAlertAcknowledgementTargets(ctx, selector.AlertIDs)
+	}
+
 	query := `SELECT event.id, COALESCE(projection.projection_version, 0)
 		FROM audit_events AS event
 		LEFT JOIN alert_acknowledgement_projection AS projection ON projection.alert_id = event.id
@@ -3332,13 +3348,75 @@ func (s *Store) ListAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
-	if severityFilter == "" || severityFilter == "all" {
-		query += ` AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`
+	if selector.Severity == "" || selector.Severity == "all" {
+		query += ` AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','MEDIUM','LOW')`
 	} else {
 		query += ` AND UPPER(COALESCE(event.severity,'')) = ?`
-		args = append(args, severityFilter)
+		args = append(args, selector.Severity)
 	}
-	query += ` ORDER BY event.timestamp DESC, event.id`
+	if selector.Connector != "" {
+		query += ` AND LOWER(COALESCE(event.connector,'')) = LOWER(?)`
+		args = append(args, selector.Connector)
+	}
+	if selector.Target != "" {
+		query += ` AND event.target = ?`
+		args = append(args, selector.Target)
+	}
+	if !selector.Since.IsZero() {
+		query += ` AND julianday(event.timestamp) >= julianday(?)`
+		args = append(args, selector.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if !selector.Before.IsZero() {
+		query += ` AND julianday(event.timestamp) < julianday(?)`
+		args = append(args, selector.Before.UTC().Format(time.RFC3339Nano))
+	}
+	query += ` ORDER BY event.id`
+	return s.queryAlertAcknowledgementTargets(ctx, query, args...)
+}
+
+func (s *Store) selectExactAlertAcknowledgementTargets(
+	ctx context.Context,
+	alertIDs []string,
+) ([]AlertAcknowledgementTarget, error) {
+	values := strings.TrimSuffix(strings.Repeat("(?),", len(alertIDs)), ",")
+	legacyActions := legacyAlertEligibleActions()
+	actionPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	query := `WITH requested(alert_id) AS (VALUES ` + values + `)
+		SELECT requested.alert_id, COALESCE(projection.projection_version, 0)
+		FROM requested
+		LEFT JOIN audit_events AS event ON event.id = requested.alert_id
+		LEFT JOIN alert_acknowledgement_projection AS projection
+			ON projection.alert_id = requested.alert_id
+		WHERE projection.alert_id IS NOT NULL
+		   OR EXISTS (SELECT 1 FROM alert_acknowledgement_operations
+		              WHERE alert_id = requested.alert_id)
+		   OR EXISTS (SELECT 1 FROM alert_acknowledgement_baselines
+		              WHERE alert_id = requested.alert_id)
+		   OR EXISTS (SELECT 1 FROM alert_acknowledgement_health
+		              WHERE alert_id = requested.alert_id)
+		   OR (event.id IS NOT NULL AND (
+		       (event.bucket = ? AND event.event_name = 'finding.observed')
+		       OR (event.bucket IS NULL AND event.action IN (` + actionPlaceholders + `)
+		           AND UPPER(COALESCE(event.severity,'')) IN
+		               ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
+		   ))
+		ORDER BY requested.alert_id`
+	args := make([]any, 0, len(alertIDs)+1+len(legacyActions))
+	for _, alertID := range alertIDs {
+		args = append(args, alertID)
+	}
+	args = append(args, string(observability.BucketSecurityFinding))
+	for _, action := range legacyActions {
+		args = append(args, action)
+	}
+	return s.queryAlertAcknowledgementTargets(ctx, query, args...)
+}
+
+func (s *Store) queryAlertAcknowledgementTargets(
+	ctx context.Context,
+	query string,
+	args ...any,
+) ([]AlertAcknowledgementTarget, error) {
 	rows, err := s.queryDB(ctx, "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list alert acknowledgement targets: %w", err)
@@ -3353,6 +3431,18 @@ func (s *Store) ListAlertAcknowledgementTargets(
 		targets = append(targets, target)
 	}
 	return targets, rows.Err()
+}
+
+// ListAlertAcknowledgementTargets returns immutable alert occurrences which
+// remain unreviewed. Mutations must be performed by AlertAcknowledgementWriter;
+// this query never rewrites event severity.
+func (s *Store) ListAlertAcknowledgementTargets(
+	ctx context.Context,
+	severityFilter string,
+) ([]AlertAcknowledgementTarget, error) {
+	return s.SelectAlertAcknowledgementTargets(ctx, AlertAcknowledgementSelector{
+		Severity: severityFilter,
+	})
 }
 
 func (s *Store) ListAlerts(limit int) ([]Event, error) {
