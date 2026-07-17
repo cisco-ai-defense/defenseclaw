@@ -120,6 +120,24 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
     """`setup rotate-token` rewrites .env then refreshes ALL active connectors
     via a single gateway restart (the shared token must stay in lockstep)."""
 
+    def setUp(self) -> None:
+        # rotate_token_cmd intentionally installs the rotated token in the
+        # current process before restarting the gateway. Keep that production
+        # behavior, but never let one unit test's generated secret become the
+        # inherited token for an unrelated subprocess test later in the shard.
+        self._gateway_env = {
+            name: os.environ.get(name)
+            for name in ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
+        }
+        self.addCleanup(self._restore_gateway_env)
+
+    def _restore_gateway_env(self) -> None:
+        for name, value in self._gateway_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
     def test_restart_refreshes_every_active_connector(self) -> None:
         from tempfile import TemporaryDirectory
 

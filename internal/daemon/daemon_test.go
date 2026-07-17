@@ -429,6 +429,51 @@ func TestChildEnvUsesLegacyDotenvGatewayTokenOverStaleParent(t *testing.T) {
 	}
 }
 
+func TestChildEnvUsesWindowsCaseInsensitiveDotenvTokenOverStaleParent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment names are case-insensitive")
+	}
+	dir := t.TempDir()
+	d := New(dir)
+	dotenvPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(dotenvPath, []byte("defenseclaw_gateway_token=mixed-case-dotenv\n"), 0o600); err != nil {
+		t.Fatalf("write dotenv: %v", err)
+	}
+
+	env := d.childEnv([]string{
+		"DefenseClaw_Gateway_Token=stale-parent",
+		"OpenClaw_Gateway_Token=legacy-parent",
+		EnvDaemon + "=0",
+		EnvDataDir + "=C:\\wrong",
+	})
+	got := envMap(env)
+
+	if got["DEFENSECLAW_GATEWAY_TOKEN"] != "mixed-case-dotenv" {
+		t.Errorf("DEFENSECLAW_GATEWAY_TOKEN = %q, want mixed-case dotenv token", got["DEFENSECLAW_GATEWAY_TOKEN"])
+	}
+	for key := range got {
+		if key != "DEFENSECLAW_GATEWAY_TOKEN" && isGatewayTokenEnvironmentKey(key) {
+			t.Errorf("stale mixed-case token environment key %q was preserved", key)
+		}
+	}
+	if got[EnvDaemon] != "1" {
+		t.Errorf("%s = %q, want 1", EnvDaemon, got[EnvDaemon])
+	}
+	if got[EnvDataDir] != dir {
+		t.Errorf("%s = %q, want %q", EnvDataDir, got[EnvDataDir], dir)
+	}
+}
+
+func TestEnvironmentKeyComparisonMatchesPlatformSemantics(t *testing.T) {
+	got := environmentKeyEqual("defenseclaw_gateway_token", "DEFENSECLAW_GATEWAY_TOKEN")
+	if runtime.GOOS == "windows" && !got {
+		t.Fatal("Windows environment key comparison is case-sensitive")
+	}
+	if runtime.GOOS != "windows" && got {
+		t.Fatal("POSIX environment key comparison is unexpectedly case-insensitive")
+	}
+}
+
 func envMap(env []string) map[string]string {
 	out := map[string]string{}
 	for _, kv := range env {

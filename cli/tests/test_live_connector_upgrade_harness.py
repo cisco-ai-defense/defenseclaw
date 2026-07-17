@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -23,12 +24,30 @@ MACOS_PERSISTENCE_ONLY = pytest.mark.skipif(
 )
 
 
+def _bash_executable() -> str:
+    """Select Git Bash on Windows instead of the WSL app alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    if git := shutil.which("git"):
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        if root := os.environ.get(variable):
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX upgrade-regression contract on Windows")
+
+
 def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     merged = os.environ.copy()
     if env:
         merged.update(env)
     return subprocess.run(
-        ["bash", "-c", script],
+        [_bash_executable(), "-c", script],
         cwd=REPO,
         env=merged,
         text=True,
@@ -39,7 +58,7 @@ def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.Compl
 
 def test_harness_cli_exposes_workflow_contract() -> None:
     proc = subprocess.run(
-        ["bash", str(HARNESS), "--help"],
+        [_bash_executable(), str(HARNESS), "--help"],
         cwd=REPO,
         text=True,
         capture_output=True,

@@ -2162,7 +2162,12 @@ class DefenseClawTUI(App[None]):
         activity.set_class(panel != "activity", "hidden")
         overview_visible = panel == "overview"
         scroller.set_class(overview_visible, "overview-scroll")
-        self._render_panel_control_visibility()
+        # The acknowledgement frame is intentionally cheap, but any control
+        # bar it reveals must already reflect the current model.  Deferring
+        # button visibility/disabled state to the later content snapshot made
+        # Activity briefly offer Cancel with no command and AI Discovery show
+        # both Enable and Disable on slower Windows renders.
+        self._render_panel_controls()
 
         cached_overview = self._overview_render_snapshot if overview_visible else None
         cached_panel = self._panel_content_cache.get(panel)

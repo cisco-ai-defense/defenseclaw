@@ -532,10 +532,6 @@ func (d *Daemon) waitForChildPIDRegistration(
 func (d *Daemon) childEnv(parentEnv []string) []string {
 	dotenv := readGatewayTokenDotenv(filepath.Join(d.dataDir, ".env"))
 	hasDotenvToken := len(dotenv) > 0
-	tokenKeys := make(map[string]struct{}, len(gatewayTokenEnvNames))
-	for _, key := range gatewayTokenEnvNames {
-		tokenKeys[key] = struct{}{}
-	}
 
 	cleanEnv := make([]string, 0, len(parentEnv)+2+len(dotenv))
 	for _, kv := range parentEnv {
@@ -547,10 +543,8 @@ func (d *Daemon) childEnv(parentEnv []string) []string {
 		if key == EnvDataDir || key == EnvDaemon {
 			continue
 		}
-		if _, isToken := tokenKeys[key]; isToken {
-			if hasDotenvToken {
-				continue
-			}
+		if hasDotenvToken && isGatewayTokenEnvironmentKey(key) {
+			continue
 		}
 		cleanEnv = append(cleanEnv, kv)
 	}
@@ -569,10 +563,6 @@ func readGatewayTokenDotenv(path string) map[string]string {
 	if err != nil {
 		return values
 	}
-	wanted := make(map[string]struct{}, len(gatewayTokenEnvNames))
-	for _, key := range gatewayTokenEnvNames {
-		wanted[key] = struct{}{}
-	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -583,7 +573,8 @@ func readGatewayTokenDotenv(path string) map[string]string {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		if _, ok := wanted[key]; !ok {
+		canonicalKey, ok := canonicalGatewayTokenEnvironmentKey(key)
+		if !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -591,10 +582,31 @@ func readGatewayTokenDotenv(path string) map[string]string {
 			value = value[1 : len(value)-1]
 		}
 		if value != "" {
-			values[key] = value
+			values[canonicalKey] = value
 		}
 	}
 	return values
+}
+
+func environmentKeyEqual(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func canonicalGatewayTokenEnvironmentKey(key string) (string, bool) {
+	for _, candidate := range gatewayTokenEnvNames {
+		if environmentKeyEqual(key, candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func isGatewayTokenEnvironmentKey(key string) bool {
+	_, ok := canonicalGatewayTokenEnvironmentKey(key)
+	return ok
 }
 
 func (d *Daemon) Stop(timeout time.Duration) error {

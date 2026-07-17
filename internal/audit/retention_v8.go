@@ -1273,6 +1273,12 @@ func installRetentionScanIntegrityTriggers(ex dbExecer) error {
 }
 
 func ensureRetentionTimestampInfrastructure(db *sql.DB) error {
+	return retryBusy(context.Background(), "ensure-retention-timestamp-infrastructure", func() error {
+		return ensureRetentionTimestampInfrastructureOnce(db)
+	})
+}
+
+func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin retention timestamp infrastructure verification: %w", err)
