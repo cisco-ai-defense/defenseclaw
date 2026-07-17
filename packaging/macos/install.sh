@@ -456,8 +456,11 @@ fi
 # Per-user hook wiring is no longer scoped to a single TARGET_USER: the
 # installer renders a machine-wide `targets.yaml` covering every eligible
 # local user, and the hook-guardian LaunchDaemon reconciles that manifest
-# every 5 minutes (fresh users after install are picked up by the
-# hook-enumerator daemon that re-renders the same manifest). --user is
+# reactively via fsnotify — user tampering with a hook config or hook
+# script under a watched dir triggers a repair within ~1 s. A 5 min
+# periodic reconcile is retained as a backstop for missed events. Fresh
+# users added after install are picked up by the hook-enumerator daemon
+# that re-renders the same manifest on its own 5 min tick. --user is
 # preserved as a backward-compat no-op so operators / CI that still pass
 # it don't error out; --agent-version is likewise ignored (each user's
 # agent version is discovered per-connector by installer_lib.sh at
@@ -706,7 +709,8 @@ install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 
 # Guardian + enumerator plists: the two subsystems together do all
 # per-user hook wiring (enumerator re-renders targets.yaml on a 5 min
-# tick; guardian reconciles the manifest on its own 5 min tick).
+# tick; guardian is long-running under `enterprise hooks watch` — fsnotify
+# on every per-user hook artifact with a 5-min periodic backstop).
 [[ -f "${GUARDIAN_PLIST_SRC}" ]] \
   || die "hook-guardian plist source not found (expected ${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist)"
 [[ -f "${ENUMERATOR_PLIST_SRC}" ]] \
@@ -762,12 +766,15 @@ fi
 # one user even when populated. The customer-shipping pkg therefore
 # wired hooks for nobody on a multi-user Mac.
 #
-# The current flow uses the hook-guardian LaunchDaemon (5-min reconcile,
-# already shipped) with a machine-wide `targets.yaml` manifest that lists
-# every eligible local user × requested connector. A companion
-# hook-enumerator LaunchDaemon (5-min tick) re-renders the manifest so
-# users provisioned AFTER install are picked up on the next reconcile
-# without any per-user login-time action.
+# The current flow uses the hook-guardian LaunchDaemon (long-running
+# `enterprise hooks watch`: fsnotify on every per-user hook artifact +
+# 5-min backstop reconcile) with a machine-wide `targets.yaml` manifest
+# that lists every eligible local user × requested connector. A
+# companion hook-enumerator LaunchDaemon (5-min tick) re-renders the
+# manifest so users provisioned AFTER install are picked up on the next
+# reconcile without any per-user login-time action. User tampering with
+# a hook config or the per-user hook scripts is repaired within ~1 s of
+# the fsnotify event.
 #
 # Bootstrapping order:
 #   1. Render an initial targets.yaml so the guardian's RunAtLoad has
@@ -834,9 +841,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   launchctl enable "system/${GUARDIAN_LAUNCHD_LABEL}"
 
   # Kick both daemons so the first reconcile happens immediately rather
-  # than at the next 5-min tick (RunAtLoad already fired, but kickstart
-  # is a defence-in-depth in case the daemon was already loaded from a
-  # previous state).
+  # than at the next tick (RunAtLoad already fired, but kickstart is a
+  # defence-in-depth in case the daemon was already loaded from a
+  # previous state). For the guardian this also forces re-registration
+  # of the fsnotify watch set against the freshly rendered manifest.
   log "kickstarting hook-enumerator + hook-guardian for immediate first pass"
   launchctl kickstart -k "system/${ENUMERATOR_LAUNCHD_LABEL}" 2>/dev/null || true
   launchctl kickstart -k "system/${GUARDIAN_LAUNCHD_LABEL}"   2>/dev/null || true

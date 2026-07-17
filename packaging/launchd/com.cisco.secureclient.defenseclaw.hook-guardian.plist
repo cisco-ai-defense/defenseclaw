@@ -4,14 +4,36 @@
 <dict>
   <key>Label</key>
   <string>com.cisco.secureclient.defenseclaw.hook-guardian</string>
+  <!--
+    Runs `enterprise hooks watch` (not `reconcile`) so per-user hook
+    tampering (delete, rewrite, chmod) is detected via fsnotify and
+    healed within ~1 s of the event.
+
+    --interval 60s is the periodic backstop for tamper vectors the
+    fsnotify path intentionally can't catch:
+      - SharedWriter Write/Chmod (native agent configs — Codex rewrites
+        config.toml constantly, so we only watch Remove/Rename on it).
+      - Generic hook helpers (_hardening.sh, inspect-*.sh) which are
+        excluded from the watch allowlist because per-connector template
+        rendering makes them rewrite-storm on every reconcile.
+    Tightening from 5m to 60s drops worst-case bypass detection from
+    ~5 min to ~1 min at no additional resource cost — same long-running
+    process, one extra Timer tick per minute.
+
+    `watch` is long-running, so `StartInterval` is intentionally absent
+    (it would pointlessly relaunch the process); `KeepAlive` below is
+    what restarts the daemon if it exits.
+  -->
   <key>ProgramArguments</key>
   <array>
     <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway</string>
     <string>enterprise</string>
     <string>hooks</string>
-    <string>reconcile</string>
+    <string>watch</string>
     <string>--manifest</string>
     <string>/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml</string>
+    <string>--interval</string>
+    <string>60s</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/opt/cisco/secureclient/defenseclaw</string>
@@ -28,8 +50,14 @@
   </dict>
   <key>RunAtLoad</key>
   <true/>
-  <key>StartInterval</key>
-  <integer>300</integer>
+  <!--
+    KeepAlive (not StartInterval) is the right restart policy for the
+    long-running `watch` mode. If the process exits (crash, OOM, panic),
+    launchd relaunches it immediately. A stale periodic StartInterval
+    here would just spawn duplicate long-running processes every 5 min.
+  -->
+  <key>KeepAlive</key>
+  <true/>
   <key>Umask</key>
   <integer>63</integer>
   <key>StandardOutPath</key>

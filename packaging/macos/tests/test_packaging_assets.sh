@@ -42,9 +42,28 @@ t_guardian_and_enumerator_plists_exist_and_parse() {
   body="$(cat "${g}")"
   assert_contains "${body}" "enterprise" "guardian invokes enterprise subcommand"
   assert_contains "${body}" "hooks"      "guardian invokes hooks subcommand"
-  assert_contains "${body}" "reconcile"  "guardian runs reconcile"
+  # The guardian runs the long-running `watch` mode so tampering with a
+  # per-user hook config or hook script is fsnotify-detected and healed
+  # within ~1 s. If this ever regresses back to `reconcile`, heal
+  # latency silently blows out to ~5 min.
+  assert_contains "${body}" "<string>watch</string>" "guardian runs long-running watch mode"
+  assert_not_contains "${body}" "<string>reconcile</string>" \
+    "guardian must not use one-shot reconcile (regresses fsnotify auto-heal)"
+  # --interval 60s is the periodic backstop *inside* watch; it is NOT a
+  # substitute for real fsnotify reactivity. Both must be present.
+  # 60s (was 5m) tightens worst-case tamper-detection for SharedWriter
+  # Write tampers (native agent configs) and generic-script Writes to
+  # ~1 min. No additional resource cost — same long-running process.
+  assert_contains "${body}" "<string>--interval</string>" "guardian passes --interval flag"
+  assert_contains "${body}" "<string>60s</string>"        "guardian backstop interval is 60s"
   assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml" \
     "guardian points at the installer-rendered manifest path"
+  # Restart policy: KeepAlive (right for long-running watch) NOT
+  # StartInterval (would relaunch every N seconds — pointless with a
+  # long-running process and would spawn duplicates).
+  assert_contains "${body}" "<key>KeepAlive</key>" "guardian uses KeepAlive"
+  assert_not_contains "${body}" "<key>StartInterval</key>" \
+    "guardian must not use StartInterval in watch mode (would relaunch long-running process)"
 }
 
 t_render_targets_sh_exists_and_is_executable() {

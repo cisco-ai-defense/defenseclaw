@@ -18,6 +18,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +53,7 @@ var (
 	enterpriseHookJSON          bool
 	enterpriseHookWatchInterval time.Duration
 	enterpriseHookWatchDebounce time.Duration
+	enterpriseHookWatchSettle   time.Duration
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -150,6 +153,8 @@ func init() {
 		"Periodic reconcile backstop interval")
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchDebounce, "debounce", 750*time.Millisecond,
 		"Filesystem-event debounce before reconcile")
+	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchSettle, "settle", 2*time.Second,
+		"Post-reconcile quiet window: fsnotify events observed within this window after a reconcile completes are ignored (the guardian's own writes into watched dirs would otherwise loop-trigger reconcile forever)")
 
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
@@ -233,11 +238,13 @@ type enterpriseHookReconcileRow struct {
 }
 
 type enterpriseHookReconcileRun struct {
-	Manifest  string
-	Rows      []enterpriseHookReconcileRow
-	Failures  int
-	StateErr  error
-	WatchDirs []string
+	Manifest              string
+	Rows                  []enterpriseHookReconcileRow
+	Failures              int
+	StateErr              error
+	WatchDirs             []string
+	WatchExclusiveFiles   []string // DC-only writers: react to any event
+	WatchSharedFiles      []string // agent + DC writers: react only to Remove/Rename
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
@@ -317,6 +324,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
 	watchDirs := map[string]struct{}{}
+	exclusiveFiles := map[string]struct{}{}
+	sharedFiles := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -358,6 +367,14 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					watchDirs[dir] = struct{}{}
 				}
 			}
+			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+				for _, f := range own.ExclusiveWriter {
+					exclusiveFiles[f] = struct{}{}
+				}
+				for _, f := range own.SharedWriter {
+					sharedFiles[f] = struct{}{}
+				}
+			}
 			var result enterprisehooks.InstallResult
 			result, err = enterprisehooks.Install(ctx, opts)
 			if err == nil {
@@ -380,6 +397,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.Failures = failures
 	run.StateErr = stateErr
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
+	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
+	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
 	return run, nil
 }
 
@@ -397,25 +416,127 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	defer fsw.Close()
 
 	watched := map[string]struct{}{}
-	reconcile := func(reason string) error {
+	// Owned-file allowlists, split by expected writer. fsnotify on
+	// macOS reports events at directory granularity — watching
+	// ~/.codex/ to see config.toml also sees every session log,
+	// sqlite WAL rotation, and history append the agent itself
+	// performs. We split further because the "owned" file itself may
+	// be written by the agent too (Codex rewrites its own config.toml
+	// constantly). See WatchOwnership doc for the reaction policy per
+	// class; both maps are rebuilt from the run's WatchExclusiveFiles
+	// / WatchSharedFiles after each reconcile.
+	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
+	sharedOwned := map[string]struct{}{}    // agent + DC writers — only Remove/Rename triggers
+	// Post-reconcile guards against the self-trigger loop. Every
+	// reconcile writes into watched dirs (chmod on hook configs and
+	// hook scripts inside hardenInstallFootprint, plus writing
+	// hook_guardian_state.json / protected_targets.json). Those writes
+	// fire fsnotify events on the dirs we watch, which — with no guard
+	// — schedule another reconcile ~750 ms later, whose writes fire
+	// more events, forever.
+	//
+	// Two layered defences:
+	//
+	//   settleUntil    - short (default 2 s) window that suppresses
+	//                    every fsnotify event observed immediately
+	//                    after a reconcile completes; the vast
+	//                    majority of self-writes land here.
+	//
+	//   lastRowsHash   - SHA-256 of the reconcile row set. After each
+	//                    reconcile we compare against the previous
+	//                    hash; when unchanged we log a single
+	//                    reason=fsnotify_no_change line and skip
+	//                    re-arming the debounce timer even if events
+	//                    kept leaking past settleUntil (macOS
+	//                    FSEvents can batch chmod events with several
+	//                    seconds of latency, which is longer than any
+	//                    reasonable settle window). This breaks the
+	//                    tail-chasing loop even under adverse fs
+	//                    event timing.
+	settleUntil := time.Time{}
+	droppedInSettle := 0
+	var lastRowsHash string
+	// Track the fsnotify event that most recently armed the debounce.
+	// Included in the next reconcile log line so a `no_change=true`
+	// churn can be traced to the specific file+op that keeps firing.
+	// Cleared on every reconcile (fsnotify OR interval).
+	var lastTriggerPath string
+	var lastTriggerOp fsnotify.Op
+	reconcile := func(reason string) (bool, error) {
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
-			return err
+			return false, err
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
 		syncEnterpriseHookWatchDirs(cmd, fsw, watched, dirs)
+		// Rebuild the owned-file allowlists from this run. The
+		// manifest itself is treated as exclusive-writer: only the
+		// installer / operator ever edits it, so any change is a real
+		// signal (new user added, connector disabled).
+		for k := range exclusiveOwned {
+			delete(exclusiveOwned, k)
+		}
+		for k := range sharedOwned {
+			delete(sharedOwned, k)
+		}
+		exclusiveOwned[filepath.Clean(enterpriseHookManifest)] = struct{}{}
+		for _, f := range run.WatchExclusiveFiles {
+			exclusiveOwned[filepath.Clean(f)] = struct{}{}
+		}
+		for _, f := range run.WatchSharedFiles {
+			sharedOwned[filepath.Clean(f)] = struct{}{}
+		}
 		status := "ok"
 		if run.Failures > 0 || run.StateErr != nil {
 			status = "attention"
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d\n", reason, status, len(run.Rows), run.Failures, len(watched))
+		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
+		changed := rowsHash != lastRowsHash
+		lastRowsHash = rowsHash
+		triggerTag := ""
+		if reason == "fsnotify" && lastTriggerPath != "" {
+			// Attribute the reconcile to the specific fsnotify event
+			// that armed the debounce. When a `no_change=true` cycle
+			// keeps recurring, this reveals which path is generating
+			// the noise so it can be reclassified or filtered.
+			triggerTag = fmt.Sprintf(" trigger_path=%q trigger_op=%s", lastTriggerPath, lastTriggerOp)
+		}
+		if changed {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+		} else {
+			// Log at DEBUG-ish cadence: one line per no-change
+			// reconcile is fine and load-bearing for triage (we still
+			// want to know the guardian is alive), but keep it
+			// distinguishable from a real repair.
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d no_change=true%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+		}
+		lastTriggerPath = ""
+		lastTriggerOp = 0
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
-		return nil
+		// When the row set is byte-identical to the previous run,
+		// any Write/Chmod events still leaking past the normal
+		// settle window are tail-writes from our own reconcile
+		// (macOS FSEvents can batch chmod with 3-5 s latency).
+		// Widen the settle window modestly — enough to cover
+		// FSEvents batching, NOT enough to swallow a real subsequent
+		// tamper. Cap at 3x settle so the widened window stays in
+		// seconds, not minutes. Remove/Rename events are exempt from
+		// suppression by enterpriseHookWatchEventInSettleWindow, so
+		// widening the window here does not risk missing a "user
+		// deleted the hook config" event even if the previous
+		// reconcile classified as no_change.
+		settle := enterpriseHookWatchSettle
+		if !changed {
+			settle = enterpriseHookWatchSettle * 3
+		}
+		settleUntil = time.Now().Add(settle)
+		droppedInSettle = 0
+		return changed, nil
 	}
 
-	if err := reconcile("startup"); err != nil {
+	if _, err := reconcile("startup"); err != nil {
 		return err
 	}
 
@@ -438,6 +559,93 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if !enterpriseHookWatchEventRelevant(event) {
 				continue
 			}
+			// Only react to events on paths DefenseClaw itself owns.
+			// Two policies apply depending on who writes to the file:
+			//
+			//   * ExclusiveWriter (hook scripts, .token sidecars,
+			//     _hardening.sh, backup files, the manifest): only DC
+			//     writes here, so any event is meaningful.
+			//   * SharedWriter (the native agent config —
+			//     ~/.codex/config.toml, ~/.claude/settings.json,
+			//     ~/.cursor/hooks.json): the agent itself constantly
+			//     rewrites these during normal use. Only Remove /
+			//     Rename is a real tamper signal; Write and Chmod are
+			//     the agent doing its own thing and the 5-min backstop
+			//     handles any in-place stripping.
+			//
+			// Events on unowned paths (agent session state, sqlite
+			// WAL churn, cache writes, workspace snapshots) are
+			// silently dropped — no log, no debounce — because they
+			// happen continuously and previously dominated the log.
+			//
+			// Empty maps means we haven't run a reconcile yet (only
+			// possible pre-startup); fall through so the startup
+			// reconcile flow is unaffected.
+			if len(exclusiveOwned) > 0 || len(sharedOwned) > 0 {
+				cleaned := filepath.Clean(event.Name)
+				_, isExclusive := exclusiveOwned[cleaned]
+				_, isShared := sharedOwned[cleaned]
+				if !isExclusive && !isShared {
+					continue
+				}
+				if isShared && !isExclusive {
+					// Shared-writer file: skip Write and Chmod events
+					// entirely — the agent is updating its own
+					// unrelated state. Any Remove/Rename falls
+					// through to the settle/reconcile path below.
+					if event.Op&(fsnotify.Remove|fsnotify.Rename) == 0 {
+						continue
+					}
+				}
+			}
+			// Drop events observed inside the post-reconcile settle
+			// window: they are almost certainly the tail of writes the
+			// reconcile itself just made (chmod / state file rewrite,
+			// or a rename that macOS surfaces as REMOVE on the
+			// destination — see enterpriseHookWatchEventInSettleWindow
+			// for the design rationale).
+			//
+			// Exception: a Remove/Rename observation inside the window
+			// where the file is ACTUALLY missing on disk is a real
+			// user tamper that raced with our reconcile, not our own
+			// atomic-write tail. rename(2) atomically replaces the
+			// destination so the file is present immediately after —
+			// a Stat call ~microseconds after the fsnotify event
+			// distinguishes the two cases deterministically. Without
+			// this carve-out, back-to-back user tampers get eaten by
+			// the previous tamper's widened settle window.
+			if enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op) {
+				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					if _, statErr := os.Lstat(event.Name); os.IsNotExist(statErr) {
+						// File genuinely gone — real user rm, fall
+						// through and reconcile.
+					} else {
+						droppedInSettle++
+						continue
+					}
+				} else {
+					droppedInSettle++
+					continue
+				}
+			}
+			// Log once when the first non-suppressed event lands after
+			// a settle window closed — helps operators tell "user
+			// tampered" from "guardian saw its own tail" during
+			// triage.
+			if droppedInSettle > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] settled: suppressed %d self-write event(s) within %s of last reconcile\n", droppedInSettle, enterpriseHookWatchSettle)
+				droppedInSettle = 0
+			}
+			// Record which specific event armed the debounce so the
+			// resulting reconcile log line names the culprit path.
+			// Preserve the FIRST event of a burst rather than
+			// overwriting; that's the one that actually caused the
+			// debounce arm, subsequent events during the 750ms window
+			// are already-scheduled noise.
+			if lastTriggerPath == "" {
+				lastTriggerPath = filepath.Clean(event.Name)
+				lastTriggerOp = event.Op
+			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
 		case err, ok := <-fsw.Errors:
@@ -448,16 +656,81 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
-				if err := reconcile("fsnotify"); err != nil {
+				if _, err := reconcile("fsnotify"); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after fsnotify failed: %s\n", err)
 				}
 			}
 		case <-ticker.C:
-			if err := reconcile("interval"); err != nil {
+			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
 		}
 	}
+}
+
+// enterpriseHookWatchEventInSettleWindow reports whether an fsnotify
+// event observed at now should be suppressed because it lands inside
+// the post-reconcile settle window. A zero settleUntil (never
+// reconciled yet, or explicitly disabled) always returns false: never
+// suppress.
+//
+// All event ops (Write, Chmod, Remove, Rename) are suppressed inside
+// the window. The guardian's Install pass writes files via a
+// tempfile+rename dance (atomicWriteFile → os.Rename), and on macOS
+// rename(2) over an existing destination fires an fsnotify REMOVE
+// event on the destination path. So a REMOVE observed within the
+// settle window is our own atomic-write finishing, not a user
+// tamper. Real user Removes happen outside the settle window and
+// still trigger reconcile promptly (worst case: settle window
+// duration, default 2 s).
+func enterpriseHookWatchEventInSettleWindow(now, settleUntil time.Time, op fsnotify.Op) bool {
+	if settleUntil.IsZero() {
+		return false
+	}
+	return now.Before(settleUntil)
+}
+
+// enterpriseHookReconcileRowsHash is a content fingerprint over the
+// stable subset of a reconcile row set. It is used by the watch loop
+// to distinguish a "nothing actually changed" tick (guardian saw its
+// own tail) from a real repair (user tampered with a file). Only the
+// fields that describe the target's identity and outcome are hashed;
+// volatile Result payload internals are intentionally excluded so
+// benign per-run details (timestamps, transient path lookups) do not
+// flip the hash.
+func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
+	if len(rows) == 0 {
+		return "0"
+	}
+	type hashRow struct {
+		User      string `json:"u"`
+		UserHome  string `json:"h"`
+		Connector string `json:"c"`
+		OK        bool   `json:"o"`
+		Error     string `json:"e,omitempty"`
+	}
+	stable := make([]hashRow, 0, len(rows))
+	for _, r := range rows {
+		stable = append(stable, hashRow{
+			User:      r.User,
+			UserHome:  r.UserHome,
+			Connector: r.Connector,
+			OK:        r.OK,
+			Error:     r.Error,
+		})
+	}
+	sort.Slice(stable, func(i, j int) bool {
+		if stable[i].Connector != stable[j].Connector {
+			return stable[i].Connector < stable[j].Connector
+		}
+		return stable[i].User < stable[j].User
+	})
+	data, err := json.Marshal(stable)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
