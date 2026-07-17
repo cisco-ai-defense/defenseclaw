@@ -73,6 +73,7 @@ except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
 import yaml
 
 from defenseclaw.file_permissions import (
+    UnsafePathError,
     atomic_write_private_bytes,
     delete_file_durable,
     make_private_directory,
@@ -1522,7 +1523,10 @@ def set_mcp_server(
         return
     if name_n == "claudecode":
         path = os.path.join(claude_config_dir(), "settings.json")
-        _set_claudecode_mcp_server(path, name, entry)
+        try:
+            _set_claudecode_mcp_server(path, name, entry)
+        except UnsafePathError as exc:
+            raise ValueError(str(exc)) from exc
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
@@ -1620,7 +1624,10 @@ def unset_mcp_server(
         return
     if name_n == "claudecode":
         path = os.path.join(claude_config_dir(), "settings.json")
-        _unset_claudecode_mcp_server(path, name)
+        try:
+            _unset_claudecode_mcp_server(path, name)
+        except UnsafePathError as exc:
+            raise ValueError(str(exc)) from exc
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)

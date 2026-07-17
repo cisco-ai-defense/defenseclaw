@@ -206,6 +206,22 @@ class TestClaudeCodeWrites:
 
         assert target.read_text(encoding="utf-8") == '{"theme":"unchanged"}'
 
+    def test_public_set_and_unset_normalize_unsafe_path_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(connector_paths, "claude_config_dir", lambda: str(tmp_path / ".claude"))
+
+        def refuse_unsafe_path(*_args):
+            raise file_permissions.UnsafePathError("refusing sensitive write through symlink")
+
+        monkeypatch.setattr(connector_paths, "_set_claudecode_mcp_server", refuse_unsafe_path)
+        with pytest.raises(ValueError, match="symlink") as set_error:
+            set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+        assert isinstance(set_error.value.__cause__, file_permissions.UnsafePathError)
+
+        monkeypatch.setattr(connector_paths, "_unset_claudecode_mcp_server", refuse_unsafe_path)
+        with pytest.raises(ValueError, match="symlink") as unset_error:
+            unset_mcp_server("claudecode", "demo")
+        assert isinstance(unset_error.value.__cause__, file_permissions.UnsafePathError)
+
     def test_unset_removes_key(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         settings = tmp_path / ".claude" / "settings.json"
