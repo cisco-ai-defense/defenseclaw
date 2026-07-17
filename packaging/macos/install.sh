@@ -190,32 +190,15 @@ log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Persistent log sink. Under `.pkg` postinstall / installd, the caller's
-# stderr is closed and every warn/die from install.sh disappears — that
-# is exactly what let the "no target user; skipping per-user hook wiring"
-# silent-skip bug ship undetected. Mirror both streams to a file beside
-# gateway.log so admins have a durable record of what the installer did.
-#
-# Requires root to create /Library/Logs/... — non-root invocations (tests,
-# --help) skip the tee. The file is root:wheel 0640 so it never becomes a
-# reader-writable side channel.
-if [[ $EUID -eq 0 ]] && [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
-  _install_log_dir="/Library/Logs/Cisco/SecureClient/DefenseClaw"
-  _install_log_path="${_install_log_dir}/install.log"
-  if mkdir -p "${_install_log_dir}" 2>/dev/null; then
-    # Create/touch the file with restrictive perms BEFORE tee opens it for
-    # append. Ownership is set explicitly so a pre-existing world-readable
-    # file left by a bad install doesn't leak WARN payloads.
-    touch "${_install_log_path}" 2>/dev/null || true
-    chown root:wheel "${_install_log_path}" 2>/dev/null || true
-    chmod 0640       "${_install_log_path}" 2>/dev/null || true
-    printf '\n===== install.sh start %s (argv: %s) =====\n' "$(date -u +%FT%TZ)" "$*" \
-      >> "${_install_log_path}" 2>/dev/null || true
-    exec  > >(tee -a "${_install_log_path}")
-    exec 2> >(tee -a "${_install_log_path}" >&2)
-  fi
-  unset _install_log_dir _install_log_path
-fi
+# The persistent install.log sink is set up LATER (after the fresh-host
+# preflight passes and after LOGS_DIR has been created by
+# create_install_directory_no_replace). Creating LOGS_DIR before the
+# preflight would trip the "install directory appeared after fresh-host
+# preflight" check on the very next line, and creating install.log
+# before the preflight also required a special-case exemption that made
+# the preflight harder to reason about. See the "install.log sink" block
+# further down for the delayed setup.
+:
 
 INSTALL_TEMP_FILES=()
 cleanup_install_temporaries() {
@@ -539,21 +522,6 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
 fi
 for _marker in "${_existing_install_markers[@]}"; do
   if [[ -e "${_marker}" || -L "${_marker}" ]]; then
-    # Special case: LOGS_DIR containing ONLY install.log is a benign
-    # leftover from a previous install session's log-sink tee (we open
-    # install.log for append right after the euid check, BEFORE this
-    # preflight fires). A real broken install leaves gateway.log +
-    # gateway.err.log + hook-guardian.log + hook-enumerator.log too.
-    # Treat "only install.log survived the previous uninstall" as
-    # fresh-host, not "existing install detected".
-    if [[ "${_marker}" == "${LOGS_DIR}" ]] && [[ -d "${_marker}" ]]; then
-      _residual="$(find "${_marker}" -mindepth 1 -maxdepth 1 ! -name install.log -print -quit 2>/dev/null)"
-      if [[ -z "${_residual}" ]]; then
-        unset _residual
-        continue
-      fi
-      unset _residual
-    fi
     die "existing DefenseClaw installation detected at ${_marker}; no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
   fi
 done
@@ -676,6 +644,36 @@ for parent in /Library/Logs /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient
   ensure_shared_install_parent "${parent}"
 done
 create_install_directory_no_replace "${LOGS_DIR}" root wheel 0750
+
+# install.log sink — mirrored copy of every stdout / stderr line from
+# this point onward, beside gateway.log. Under `.pkg` postinstall /
+# installd the caller's stderr is closed and warn/die messages would
+# otherwise disappear; the tee gives admins a durable per-session
+# record of what the installer did.
+#
+# Only fires when running as root under a real install (we already
+# passed the fresh-host preflight above). Non-root test invocations and
+# DC_INSTALLER_SKIP_INSTALL_LOG=1 (bundle-fixture tests) leave the sink
+# off. File is root:wheel 0640 so it never becomes a
+# reader-writable side channel.
+#
+# NOT set up earlier: creating LOGS_DIR before the preflight would trip
+# "install directory appeared after fresh-host preflight" and creating
+# install.log there would require an ugly special case in the marker
+# loop. Uninstall wipes LOGS_DIR wholesale on --purge, which cleanly
+# removes install.log too — no persistence across install/uninstall
+# cycles is desired.
+if [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
+  _install_log_path="${LOGS_DIR}/install.log"
+  touch "${_install_log_path}" 2>/dev/null || true
+  chown root:wheel "${_install_log_path}" 2>/dev/null || true
+  chmod 0640       "${_install_log_path}" 2>/dev/null || true
+  printf '===== install.sh start %s (argv: %s) =====\n' "$(date -u +%FT%TZ)" "$*" \
+    >> "${_install_log_path}" 2>/dev/null || true
+  exec  > >(tee -a "${_install_log_path}")
+  exec 2> >(tee -a "${_install_log_path}" >&2)
+  unset _install_log_path
+fi
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \

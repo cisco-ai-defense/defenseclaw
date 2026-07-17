@@ -449,23 +449,32 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }
 
-t_install_treats_lonely_install_log_as_fresh_host() {
-  # Regression guard: install.sh's log-sink tee (added for the
-  # observability fixes) creates ${LOGS_DIR}/install.log immediately
-  # after the euid check, BEFORE the fresh-host preflight enumerates
-  # existing install markers. Without a special case, the preflight
-  # then sees ${LOGS_DIR} exists and refuses with "existing DefenseClaw
-  # installation detected at /Library/Logs/Cisco/SecureClient/DefenseClaw"
-  # — which locks the operator out of reinstalling after a --purge
-  # cycle. The special-case allow-list-of-one accepts LOGS_DIR when
-  # its ONLY child is install.log (i.e. the residue we just created
-  # for our own logging), and rejects it when any other file remains
-  # (gateway.log, hook-guardian.log, etc. from a real prior install).
-  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
-  assert_contains "${body}" 'if [[ "${_marker}" == "${LOGS_DIR}" ]] && [[ -d "${_marker}" ]]; then' \
-    "install.sh must special-case LOGS_DIR in the fresh-host preflight so a lonely install.log does not block reinstall"
-  assert_contains "${body}" '! -name install.log' \
-    "the LOGS_DIR special case must exempt install.log specifically (not blanket-skip LOGS_DIR)"
+t_install_log_sink_is_after_preflight() {
+  # Regression guard: install.sh's persistent log-sink tee must NOT
+  # fire before the fresh-host preflight. Setting it up earlier
+  # implicitly creates ${LOGS_DIR}/install.log which then trips both:
+  #   1. The fresh-host marker loop (LOGS_DIR appears "existing")
+  #   2. The `create_install_directory_no_replace ${LOGS_DIR}` at
+  #      line ~678 (the dir was already created by mkdir -p)
+  # Either failure locks the operator out of reinstall after
+  # uninstall --purge. Uninstall wipes LOGS_DIR wholesale so no
+  # persistence across install/uninstall cycles is desired anyway.
+  #
+  # This test enforces the ordering by grepping for both landmarks
+  # (the tee call + the LOGS_DIR creation) and asserting the tee
+  # appears AFTER the create_install_directory_no_replace line.
+  local install="${REPO_ROOT}/packaging/macos/install.sh"
+  local tee_line create_line
+  tee_line="$(grep -n 'tee -a "\${_install_log_path}"' "${install}" | head -1 | cut -d: -f1)"
+  create_line="$(grep -n 'create_install_directory_no_replace "\${LOGS_DIR}"' "${install}" | head -1 | cut -d: -f1)"
+  if [[ -z "${tee_line}" || -z "${create_line}" ]]; then
+    _fail "could not locate install.log tee (line=${tee_line:-?}) or LOGS_DIR creation (line=${create_line:-?}) in install.sh"
+    return 1
+  fi
+  if (( tee_line < create_line )); then
+    _fail "install.log tee at line ${tee_line} precedes LOGS_DIR creation at line ${create_line} — self-lockout on reinstall"
+    return 1
+  fi
 }
 
 t_install_does_not_precreate_cmid_log_file() {
@@ -575,7 +584,7 @@ run_case "render-targets.sh present + executable + parses" t_render_targets_sh_e
 run_case "install.sh bootstraps guardian + enumerator daemons" t_install_bootstraps_guardian_and_enumerator
 run_case "install.sh no longer inline-calls 'enterprise hooks install'" t_install_no_longer_hardcodes_single_target_user
 run_case "plist references managed paths" t_plist_contains_managed_paths
-run_case "install.sh treats lonely install.log as fresh-host (no self-lockout)"     t_install_treats_lonely_install_log_as_fresh_host
+run_case "install.log sink is set up AFTER fresh-host preflight + LOGS_DIR create" t_install_log_sink_is_after_preflight
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file
