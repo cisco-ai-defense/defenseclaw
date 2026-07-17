@@ -588,6 +588,58 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
         with open(cursor_path, "rb") as cursor_file:
             self.assertEqual(cursor_file.read(), before)
 
+    def test_strict_same_version_success_persists_deferred_bootstrap(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-same-version-data")
+        os.makedirs(cursor_dir)
+        required = tuple(version for version, _description, _migration in MIGRATIONS)
+
+        applied = run_migrations(
+            "0.8.6",
+            "0.8.6",
+            self.ctx.openclaw_home,
+            cursor_dir,
+            strict_required=required,
+        )
+
+        state = migration_state.load(cursor_dir)
+        self.assertEqual(applied, 0)
+        self.assertIsNotNone(state)
+        self.assertTrue(all(migration_state.is_applied(state, version) for version in required))
+
+    def test_strict_missing_requirement_refuses_before_cursor_persistence(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-missing-requirement-data")
+        os.makedirs(cursor_dir)
+
+        with self.assertRaisesRegex(RuntimeError, "required migrations are missing: 9.9.9"):
+            run_migrations(
+                "0.8.6",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=("9.9.9",),
+            )
+
+        self.assertFalse(os.path.exists(migration_state.state_path(cursor_dir)))
+
+    def test_strict_deferred_bootstrap_save_failure_is_fatal(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-bootstrap-save-failure-data")
+        os.makedirs(cursor_dir)
+        required = tuple(version for version, _description, _migration in MIGRATIONS)
+
+        with (
+            patch("defenseclaw.migration_state.save", side_effect=OSError("synthetic write refusal")),
+            self.assertRaisesRegex(OSError, "synthetic write refusal"),
+        ):
+            run_migrations(
+                "0.8.6",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=required,
+            )
+
+        self.assertFalse(os.path.exists(migration_state.state_path(cursor_dir)))
+
 
 class TestObservabilityV8CandidateFile(unittest.TestCase):
     def test_owner_only_candidate_is_removed_after_success(self) -> None:

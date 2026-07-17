@@ -2947,6 +2947,7 @@ def run_migrations(
     # ``from_version`` so we don't replay history on a host that's
     # already in steady state.
     state = migration_state.load(data_dir)
+    deferred_strict_bootstrap = state is None and bool(strict)
     if state is None:
         # ``load`` collapses several cases to ``None``. Most of them
         # (missing / empty / corrupt cursor) are safe to bootstrap. But a
@@ -3055,5 +3056,20 @@ def run_migrations(
             if ver in strict:
                 raise
             ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
+
+    if deferred_strict_bootstrap:
+        missing_required = sorted(
+            version for version in strict if not migration_state.is_applied(state, version)
+        )
+        if missing_required:
+            raise RuntimeError(
+                "required migrations are missing: " + ", ".join(missing_required)
+            )
+        # Strict native Setup must preserve refusal atomicity, including for a
+        # host with no prior cursor. Persist the bootstrap only after every
+        # required migration has either completed or been conservatively
+        # recorded by bootstrap. This also covers a same-version packaged run
+        # where no registry callable executes and therefore cannot save state.
+        migration_state.save(data_dir, state)
 
     return applied_count
