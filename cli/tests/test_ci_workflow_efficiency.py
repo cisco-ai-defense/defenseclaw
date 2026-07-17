@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    exhaustive = (ROOT / ".github/workflows/telemetry-registry.yml").read_text(encoding="utf-8")
 
     assert "name: Python Test (shard ${{ matrix.shard }})" in workflow
     assert "shard: [0, 1, 2, 3]" in workflow
@@ -30,16 +31,16 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
         "cli/tests/test_telemetry_registry_candidate_renderer.py",
     ):
         assert workflow.count(f"--exclude {isolated}") == 1
-        assert workflow.count(f"test_file: {isolated}") == 1
-    assert "name: Python Telemetry Test (${{ matrix.suite }})" in workflow
-    assert "--numprocesses=4" in workflow
-    assert "--dist=worksteal" in workflow
+        assert exhaustive.count(f"test_file: {isolated}") == 1
+    assert "name: Python Telemetry Test (${{ matrix.suite }})" not in workflow
+    assert "--numprocesses=4" in exhaustive
+    assert "--dist=worksteal" in exhaustive
     assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: [python-test, python-telemetry-test, python-lint]" in workflow
+    assert "needs: [python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
-    assert 'test "${#coverage_parts[@]}" -eq 6' in workflow
+    assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
     assert ".venv/bin/coverage combine" in workflow
     assert "name: make test (unified)" not in workflow
     assert "run: make test" not in workflow
