@@ -1450,14 +1450,41 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
     first_base = ntpath.basename(parts[0]).casefold()
     if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
-        try:
-            file_index = lowered.index("-file")
-        except ValueError:
-            return ""
-        if file_index + 1 >= len(parts):
-            return ""
-        target = parts[file_index + 1]
-        args = parts[file_index + 2 :]
+        legacy_target = ""
+        if "-encodedcommand" in lowered:
+            encoded_index = lowered.index("-encodedcommand")
+            if (
+                encoded_index + 2 == len(parts)
+                and lowered[1:encoded_index] == ["-nologo", "-noprofile", "-noninteractive"]
+            ):
+                try:
+                    encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
+                    if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
+                        script = encoded.decode("utf-16-le")
+                        match = re.fullmatch(
+                            r"\$ErrorActionPreference='Stop'; "
+                            r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                            r"& '((?:[^']|'')+)' hook --connector "
+                            + re.escape(connector)
+                            + r"; exit \$LASTEXITCODE",
+                            script,
+                        )
+                        if match:
+                            legacy_target = match.group(1).replace("''", "'")
+                except (binascii.Error, UnicodeError, ValueError):
+                    pass
+        if legacy_target:
+            target = legacy_target
+            args = ["hook", "--connector", connector]
+        else:
+            try:
+                file_index = lowered.index("-file")
+            except ValueError:
+                return ""
+            if file_index + 1 >= len(parts):
+                return ""
+            target = parts[file_index + 1]
+            args = parts[file_index + 2 :]
     else:
         target = parts[0]
         args = parts[1:]
@@ -2055,13 +2082,27 @@ def _command_target(
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                r"-ArgumentList @\('hook','--connector','"
+                + re.escape(connector)
+                + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                script,
+            )
+            if match:
+                target = match.group(1).replace("''", "'")
+                return target, ["hook", "--connector", connector], "direct"
+            legacy = re.fullmatch(
+                r"\$ErrorActionPreference='Stop'; "
+                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
                 r"& '((?:[^']|'')+)' hook --connector " + re.escape(connector) + r"; exit \$LASTEXITCODE",
                 script,
             )
-            if not match:
-                raise _InspectionError("malformed", "PowerShell EncodedCommand hook has an unsupported script body")
-            target = match.group(1).replace("''", "'")
-            return target, ["hook", "--connector", connector], "direct"
+            if legacy:
+                raise _InspectionError(
+                    "stale",
+                    "PowerShell EncodedCommand hook uses the legacy non-waiting launcher",
+                )
+            raise _InspectionError("malformed", "PowerShell EncodedCommand hook has an unsupported script body")
         try:
             file_index = lowered.index("-file")
         except ValueError as exc:

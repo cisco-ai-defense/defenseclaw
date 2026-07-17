@@ -2431,8 +2431,11 @@ function Assert-WizardHookRegistration(
         if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
         catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-        if ($script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
-            throw "wizard-selected Codex registration does not use its exact native hook command: $($Specification.ConfigPath)"
+        $startProcessPattern = '(?i)\$hookProcess=Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+        if ($script -notmatch $startProcessPattern -or
+            $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
+            $script -match '(?i)\$LASTEXITCODE') {
+            throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
         }
     } elseif ($Specification.Connector -eq 'claudecode') {
         try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
@@ -2464,6 +2467,66 @@ function Assert-WizardHookRegistration(
     }
     Assert-NoDefenseClawRegistration @($Specification.OtherConfigPath)
 }
+
+function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
+    if ($Specification.Connector -ne 'codex') { return }
+
+    $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
+    $encodedMatches = [regex]::Matches(
+        $registration,
+        '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)'
+    )
+    if ($encodedMatches.Count -eq 0) {
+        throw 'cannot stage legacy Codex hook: registration has no EncodedCommand'
+    }
+    $currentEncoded = $encodedMatches[0].Groups['encoded'].Value
+    try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
+    catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
+
+    $startPattern = '(?i)\$hookProcess=Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    $start = [regex]::Match($script, $startPattern)
+    if (-not $start.Success) {
+        throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
+    }
+    $legacyScript = $script.Replace(
+        $start.Value,
+        ('& ' + $start.Groups['file'].Value + ' hook --connector codex')
+    ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
+    if ($legacyScript -ceq $script) {
+        throw 'cannot stage legacy Codex hook: generated command did not change'
+    }
+    $legacyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($legacyScript))
+    $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    if ($updated -ceq $registration) {
+        throw 'cannot stage legacy Codex hook: registration bytes did not change'
+    }
+    [IO.File]::WriteAllText(
+        $Specification.ConfigPath,
+        $updated,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Assert-WizardCodexLegacyLauncherNeedsRepair(
+    [string]$Launcher,
+    [object]$Specification,
+    [string]$Logs
+) {
+    if ($Specification.Connector -ne 'codex') { return }
+
+    Set-WizardCodexLegacyNonWaitingHook $Specification
+    $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-doctor.json')
+    try { $doctor = $doctorResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "legacy-launcher doctor did not emit valid JSON: $($_.Exception.Message)" }
+    $hookRows = @($doctor.checks | Where-Object {
+        [string]::Equals([string]$_.label, $Specification.DoctorLabel, [StringComparison]::Ordinal)
+    })
+    if ($hookRows.Count -ne 1 -or [string]$hookRows[0].status -eq 'pass') {
+        throw "Doctor accepted the legacy non-waiting Codex launcher: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
+    }
+}
+
 
 function Assert-WizardConnectorHealth(
     [string]$Launcher,
@@ -2642,6 +2705,7 @@ function Invoke-WizardConnectorAcceptance(
         $beforeWatchdog.ProcessId
     )
     Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'before-repair'
+    Assert-WizardCodexLegacyLauncherNeedsRepair $launcher $specification $Logs
 
     $preserved = Join-Path $DataRoot "wizard-$ConnectorName-preservation.txt"
     Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii

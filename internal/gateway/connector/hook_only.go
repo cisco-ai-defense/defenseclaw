@@ -891,12 +891,17 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 	if c.name == "antigravity" {
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
-			structuredHookCommandReferences(cfg, []string{needle, legacyAntigravityWindowsHookCommand()}) {
+			structuredHookCommandReferences(cfg, []string{
+				needle,
+				legacyAntigravityWindowsHookCommand(),
+				legacyAntigravityNonWaitingWindowsHookCommand(),
+			}) {
 			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 		}
 	}
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
-		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) {
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	return nil
@@ -1026,7 +1031,12 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 	case "cursor", "windsurf", "copilot", "openhands":
 		return removeJSONHookReferences(path, hookScript)
 	case "antigravity":
-		return removeJSONHookReferences(path, hookScript, legacyAntigravityWindowsHookCommand())
+		return removeJSONHookReferences(
+			path,
+			hookScript,
+			legacyAntigravityWindowsHookCommand(),
+			legacyAntigravityNonWaitingWindowsHookCommand(),
+		)
 	default:
 		return nil
 	}
@@ -2026,6 +2036,10 @@ func containsHookScript(raw interface{}, hookScripts ...string) bool {
 
 func legacyAntigravityWindowsHookCommand() string {
 	return windowsHookBinaryName + " " + nativeHookFlag + "antigravity"
+}
+
+func legacyAntigravityNonWaitingWindowsHookCommand() string {
+	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {

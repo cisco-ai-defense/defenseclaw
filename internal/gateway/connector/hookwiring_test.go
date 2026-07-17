@@ -66,6 +66,11 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 	return ""
 }
 
+func windowsNativePowerShellStartForTest(hookBinary, connector string) string {
+	return "$hookProcess=Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+		" -ArgumentList @('hook','--connector'," + powershellQuoteLiteral(connector) + ") -NoNewWindow -Wait -PassThru"
+}
+
 func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
 	want := windowsSystemPowerShellExe()
 	t.Setenv("SystemRoot", filepath.Join(t.TempDir(), "poisoned-system-root"))
@@ -368,6 +373,56 @@ func TestNativeHookOwnershipRetainsLegacyUserInstall(t *testing.T) {
 	}
 }
 
+func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Codex Windows command repair is Windows-specific")
+	}
+
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	legacy := legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)
+	current := windowsNativePowerShellHookCommandForBinary("codex", hookBinary)
+	if legacy == current || !isNativeHookCommand(legacy) {
+		t.Fatalf("legacy command ownership is not repairable: legacy=%q current=%q", legacy, current)
+	}
+
+	existing := []interface{}{
+		map[string]interface{}{
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":            "command",
+					"command":         legacy,
+					"command_windows": legacy,
+					"timeout":         30,
+				},
+			},
+		},
+	}
+	generated := buildCodexHooksTable(filepath.Join(t.TempDir(), "managed_config.toml"), "")
+	replacement := generated["PreToolUse"].([]interface{})
+	repaired, err := replaceOwnedCodexHookInPlace(existing, replacement, t.TempDir())
+	if err != nil {
+		t.Fatalf("repair legacy Codex hook: %v", err)
+	}
+	if len(repaired) != 1 {
+		t.Fatalf("repaired group count = %d, want 1", len(repaired))
+	}
+	handlers := repaired[0].(map[string]interface{})["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		t.Fatalf("repaired handler count = %d, want 1", len(handlers))
+	}
+	handler := handlers[0].(map[string]interface{})
+	if got := handler["command"]; got != current {
+		t.Fatalf("repaired command = %q, want %q", got, current)
+	}
+	if got := handler["command_windows"]; got != current {
+		t.Fatalf("repaired command_windows = %q, want %q", got, current)
+	}
+	if decoded := decodePowerShellEncodedCommandForTest(t, current); strings.Contains(decoded, "$LASTEXITCODE") {
+		t.Fatalf("repaired command still depends on stale LASTEXITCODE: %s", decoded)
+	}
+}
+
 func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows native launcher contract")
@@ -423,14 +478,14 @@ func TestHookInvocationCommand(t *testing.T) {
 
 	// Codex passes this string to cmd.exe /C as one argument. The outer command
 	// uses an unquoted system PowerShell path and an encoded script; the decoded
-	// script invokes the stable absolute launcher with PowerShell's call operator.
+	// script synchronously starts the stable absolute GUI-subsystem launcher.
 	codex := hookInvocationCommandFor("windows", "codex", unix)
 	wantCodex := windowsNativePowerShellHookCommand("codex")
 	if codex != wantCodex {
 		t.Errorf("codex command = %q, want %q", codex, wantCodex)
 	}
 	decodedCodex := decodePowerShellEncodedCommandForTest(t, codex)
-	if want := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "codex"; !strings.Contains(decodedCodex, want) {
+	if want := windowsNativePowerShellStartForTest(windowsExe, "codex"); !strings.Contains(decodedCodex, want) {
 		t.Errorf("decoded codex command = %q, want invocation %q", decodedCodex, want)
 	}
 	if !isNativeHookCommand(codex) {
@@ -467,8 +522,7 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("antigravity command still contains vulnerable bare launcher: %q", agy)
 	}
 	decoded := decodePowerShellEncodedCommandForTest(t, agy)
-	if !strings.Contains(decoded, powershellQuoteLiteral(windowsExe)) ||
-		!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
+	if !strings.Contains(decoded, windowsNativePowerShellStartForTest(windowsExe, "antigravity")) ||
 		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
 		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
 	}
@@ -490,14 +544,188 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 			wantScript := strings.Join([]string{
 				"$ErrorActionPreference='Stop'",
 				"$env:NoDefaultCurrentDirectoryInExePath='1'",
-				"& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + connector,
-				"exit $LASTEXITCODE",
+				windowsNativePowerShellStartForTest(windowsExe, connector),
+				"exit $hookProcess.ExitCode",
 			}, "; ")
 			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
 				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
 			}
 		})
 	}
+}
+
+// TestWindowsNativePowerShellHookCommandPropagatesProcessResults executes the
+// exact emitted command across both supported agent launch boundaries. The
+// probe uses the same GUI subsystem as release defenseclaw-hook.exe so this
+// catches PowerShell returning before the process exits.
+func TestWindowsNativePowerShellHookCommandPropagatesProcessResults(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows GUI-subsystem process semantics are Windows-specific")
+	}
+
+	root := t.TempDir()
+	source := filepath.Join(root, "win-aud-069-probe.go")
+	helper := filepath.Join(root, "win-aud-069-probe.exe")
+	body := `package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"time"
+)
+
+func main() {
+	payload, _ := io.ReadAll(os.Stdin)
+	connector := os.Getenv("DC_TEST_CONNECTOR")
+	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != connector {
+		fmt.Fprintln(os.Stderr, "probe received wrong hook arguments")
+		os.Exit(9)
+	}
+	if string(payload) != "{\"tool\":\"win-aud-069\"}" {
+		fmt.Fprintln(os.Stderr, "probe received wrong stdin")
+		os.Exit(8)
+	}
+	exitCode, err := strconv.Atoi(os.Getenv("DC_TEST_EXIT_CODE"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "probe received invalid exit code")
+		os.Exit(7)
+	}
+	fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	fmt.Fprintln(os.Stderr, "probe stderr "+connector)
+	time.Sleep(500 * time.Millisecond)
+	os.Exit(exitCode)
+}
+`
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatalf("write GUI hook probe: %v", err)
+	}
+	build := exec.Command("go", "build", "-ldflags", "-H=windowsgui", "-o", helper, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build GUI hook probe: %v\n%s", err, output)
+	}
+	setHookBinaryOverride(t, helper)
+
+	cases := []struct {
+		connector string
+		exitCode  int
+	}{
+		{connector: "codex", exitCode: 0},
+		{connector: "codex", exitCode: 1},
+		{connector: "codex", exitCode: 2},
+		{connector: "antigravity", exitCode: 2},
+	}
+	for _, testCase := range cases {
+		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			command := windowsNativePowerShellHookCommand(testCase.connector)
+			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
+			cmd.Env = append(
+				os.Environ(),
+				"DC_TEST_CONNECTOR="+testCase.connector,
+				fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
+			)
+			cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if got := windowsProcessExitCodeForTest(t, err); got != testCase.exitCode {
+				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
+					got, testCase.exitCode, command, stdout.String(), stderr.String())
+			}
+			if got, want := strings.TrimSpace(stdout.String()), "probe stdout "+testCase.connector; got != want {
+				t.Fatalf("generated command stdout = %q, want %q", got, want)
+			}
+			if got, want := stderr.String(), "probe stderr "+testCase.connector; !strings.Contains(got, want) {
+				t.Fatalf("generated command stderr = %q, want marker %q", got, want)
+			}
+		})
+	}
+}
+
+// TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock runs the
+// actual native hook entrypoint against isolated state. A deliberately absent
+// token under strict availability produces the real action-blocking exit 2
+// without reading an installed profile or contacting a live sidecar.
+func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows hook integration is Windows-specific")
+	}
+
+	root := t.TempDir()
+	home := filepath.Join(root, "state")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("create isolated hook home: %v", err)
+	}
+	helper := filepath.Join(root, "win-aud-069-real-hook.exe")
+	hookPackage := filepath.Join("..", "..", "..", "cmd", "defenseclaw-hook")
+	build := exec.Command("go", "build", "-ldflags", "-H=windowsgui", "-o", helper, hookPackage)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build real GUI hook launcher: %v\n%s", err, output)
+	}
+	setHookBinaryOverride(t, helper)
+
+	command := windowsNativePowerShellHookCommand("antigravity")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := windowsNativePowerShellTestProcess(ctx, "antigravity", command)
+	cmd.Env = isolatedDefenseClawHookEnvironment(
+		"DEFENSECLAW_HOME="+home,
+		"DEFENSECLAW_STRICT_AVAILABILITY=1",
+		"DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:1",
+	)
+	cmd.Stdin = strings.NewReader(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if got := windowsProcessExitCodeForTest(t, err); got != 2 {
+		t.Fatalf("fail-closed generated command exit = %d, want 2\ncommand: %s\nstdout: %s\nstderr: %s",
+			got, command, stdout.String(), stderr.String())
+	}
+	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "blocking") ||
+		!strings.Contains(diagnostic, "missing gateway token") {
+		t.Fatalf("fail-closed diagnostic was not preserved on stderr: %q", stderr.String())
+	}
+}
+
+func windowsNativePowerShellTestProcess(ctx context.Context, connector, command string) *exec.Cmd {
+	if connector == "codex" {
+		comspec := os.Getenv("COMSPEC")
+		if comspec == "" {
+			comspec = "cmd.exe"
+		}
+		return exec.CommandContext(ctx, comspec, "/D", "/S", "/C", command)
+	}
+	argv := strings.Fields(command)
+	return exec.CommandContext(ctx, argv[0], argv[1:]...)
+}
+
+func windowsProcessExitCodeForTest(t *testing.T, err error) int {
+	t.Helper()
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("generated command did not return a process exit status: %v", err)
+	}
+	return exitErr.ExitCode()
+}
+
+func isolatedDefenseClawHookEnvironment(overrides ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "DEFENSECLAW_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, overrides...)
 }
 
 // TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
@@ -656,8 +884,9 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 
 	command := hookInvocationCommandFor("windows", "codex", "")
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
-	wantInvocation := "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "codex"
-	probeScript := strings.Replace(decoded, wantInvocation, "& 'where.exe' 'cmd.exe'", 1)
+	wantInvocation := windowsNativePowerShellStartForTest(defenseclawHookBinary(), "codex")
+	probeInvocation := "$hookProcess=Start-Process -FilePath 'where.exe' -ArgumentList @('cmd.exe') -NoNewWindow -Wait -PassThru"
+	probeScript := strings.Replace(decoded, wantInvocation, probeInvocation, 1)
 	if probeScript == decoded {
 		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)
 	}
@@ -1072,8 +1301,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
 				command := handlers[0].(map[string]interface{})["command_windows"].(string)
 				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
-					!strings.Contains(decoded, nativeHookFlag+connectorName) {
+				if !strings.Contains(decoded, windowsNativePowerShellStartForTest(defenseclawHookBinary(), connectorName)) {
 					t.Errorf("config missing native command_windows connector command for %s:\n%s", connectorName, text)
 				}
 			} else {

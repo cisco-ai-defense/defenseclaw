@@ -451,6 +451,31 @@ func windowsNativePowerShellHookCommand(connector string) string {
 }
 
 func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
+	arguments := []string{
+		powershellQuoteLiteral("hook"),
+		powershellQuoteLiteral("--connector"),
+		powershellQuoteLiteral(connector),
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		// Release builds use the Windows GUI subsystem, which Windows PowerShell
+		// does not synchronously await through its native call operator. Start the
+		// launcher without a new window so it inherits the agent's standard
+		// handles, waits, and returns the process exit code instead of stale
+		// LASTEXITCODE.
+		"$hookProcess=Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(arguments, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// legacyWindowsNativePowerShellHookCommandForBinary reconstructs the exact
+// non-waiting command emitted before WIN-AUD-069. It is never generated for a
+// new registration; ownership checks use it only to repair or remove an older
+// DefenseClaw command without claiming arbitrary encoded PowerShell.
+func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -502,7 +527,8 @@ func isNativeHookCommand(cmd string) bool {
 	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
-			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
+			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
+				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
 				return true
 			}
 		}
