@@ -272,22 +272,22 @@ def _explicit_dacl_copy(dacl: bytes) -> bytes:
 
 
 def _dacl_for_set_security(
-    _current: WindowsFileSecurity,
+    current: WindowsFileSecurity,
     requested: WindowsFileSecurity,
 ) -> bytes:
-    """Build the DACL input without converting inherited ACEs to explicit.
+    """Build the DACL input for the requested inheritance transition.
 
-    ``UNPROTECTED_DACL_SECURITY_INFORMATION`` asks the file-system security
-    provider to reconstruct inheritance from the current parent.  Supplying
-    the snapshot's inherited ACEs as well can make some Windows kernels retain
-    or duplicate them as explicit ACEs when a protected staged file is made
-    inheriting again.  Pass only the snapshot's explicit ACEs for every
-    unprotected target and keep the exact descriptor check after the call.
-    A changed parent therefore still fails closed instead of silently
-    broadening the restored file.
+    Windows treats an unprotected-to-unprotected update differently from a
+    protected-to-unprotected transition.  In the former case the kernel
+    retains/reconstructs inherited ACEs, so only the requested explicit ACEs
+    may be supplied.  In the latter case the current protected descriptor is
+    discarded and the caller is responsible for supplying the complete DACL,
+    including the inherited markers.  Selecting the input from the descriptor
+    that is actually installed keeps both paths byte-exact across Windows
+    client and hosted-runner kernels.
     """
 
-    if requested.dacl_protected:
+    if requested.dacl_protected or current.dacl_protected:
         return requested.dacl
     return _explicit_dacl_copy(requested.dacl)
 

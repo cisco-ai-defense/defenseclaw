@@ -199,7 +199,7 @@ def test_unprotected_update_omits_inherited_aces_when_target_already_inherits() 
     )
 
 
-def test_unprotect_transition_omits_inherited_aces_from_protected_target() -> None:
+def test_unprotect_transition_supplies_complete_dacl_with_inherited_markers() -> None:
     requested = WindowsFileSecurity(
         OWNER,
         _dacl(
@@ -211,9 +211,7 @@ def test_unprotect_transition_omits_inherited_aces_from_protected_target() -> No
     current = requested.staging_copy()
 
     assert current.dacl_protected is True
-    assert windows_acl._dacl_for_set_security(current, requested) == _dacl(
-        (0, 0x03, 0x001F01FF, OWNER),
-    )
+    assert windows_acl._dacl_for_set_security(current, requested) == requested.dacl
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACL inheritance")
