@@ -22,6 +22,7 @@ Mirrors internal/cli/status.go.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def _openshell_available(cfg) -> bool:
     help=(
         "Emit status as a JSON document (environment, scanners, enforcement, "
         "activity, and the full per-connector roster with effective mode). "
-        "Config/DB-derived; no live /health counters."
+        "Includes authenticated, profile-bound sidecar state when available."
     ),
 )
 @pass_ctx
@@ -227,13 +228,13 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Render the "Agents" roster uniformly — one section that lists every
     # active connector with its effective mode (and, when the sidecar is up,
-    # live /health counters per connector). The same code path drives a
-    # single-connector install (one row) and a fan-out install (N rows), so the
-    # output never branches on connector count.
-    if client.is_running():
+    # live counters from its identity-bound status snapshot). The same code
+    # path drives a single-connector install (one row) and a fan-out install
+    # (N rows), so the output never branches on connector count.
+    health = _fetch_runtime_bound_health(client, cfg)
+    if health is not None:
         _status_row("Sidecar", ux._style("running", fg="green"))
-        health = _fetch_health(bind, cfg.gateway.api_port)
-        _print_agents(cfg, bind, cfg.gateway.api_port, health=health)
+        _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_hook_guardian(cfg)
         hint(
@@ -302,8 +303,6 @@ def _connector_scope_text(cfg) -> str:
 
 def _print_agents(
     cfg,
-    host: str | None = None,
-    port: int | None = None,
     *,
     health: dict | None = None,
 ) -> None:
@@ -317,16 +316,15 @@ def _print_agents(
     single-connector install and N on a fan-out install, so the same loop
     drives both.
 
-    When ``host``/``port`` are supplied and the sidecar is up, *every*
-    connector is annotated with its own live state and counters (read from
-    ``/health`` ``connectors[]``). There is no privileged "primary" — each
-    active agent reports its own tally.
+    When a runtime-bound health snapshot is supplied, *every* connector is
+    annotated with its own live state and counters. There is no privileged
+    "primary" — each active agent reports its own tally.
     """
     try:
         manual_actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
     except Exception:
         manual_actives = []
-    health_map = _fetch_health_connectors(host, port, health=health) if (host and port) or health else {}
+    health_map = _fetch_health_connectors(health=health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -396,53 +394,69 @@ def _print_agents(
             ux.echo(f"                {dim_text}")
 
 
-def _fetch_health(host: str | None, port: int | None) -> dict | None:
-    """Return the parsed ``/health`` document (or ``None``).
-
-    Failures are intentionally swallowed — the sidecar may have just come up,
-    or the operator may be on an old gateway build. We never want
-    ``defenseclaw status`` to error because of an optional UX line.
-    """
-    if not host or not port:
+def _canonical_data_dir(value) -> str | None:
+    """Return the platform-canonical absolute form of a configured data dir."""
+    try:
+        raw = os.fspath(value)
+    except TypeError:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
         return None
     try:
-        import json as _json
-        import urllib.request as _urlreq
+        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
+    except (OSError, ValueError):
+        return None
 
-        url = f"http://{host}:{port}/health"
-        req = _urlreq.Request(url)
-        with _urlreq.urlopen(req, timeout=3) as resp:  # noqa: S310 — loopback only
-            data = _json.loads(resp.read().decode("utf-8"))
+
+def _fetch_runtime_bound_health(client, cfg) -> dict | None:
+    """Fetch health only from the sidecar owned by the resolved data dir.
+
+    ``/health`` is intentionally unauthenticated and a different profile may
+    already own the configured loopback port. The authenticated ``/status``
+    response includes both the health snapshot and ``runtime.data_dir``. Treat
+    missing, malformed, or mismatched identity as unavailable so status never
+    splices another profile's connectors or application-protection paths into
+    this profile's output.
+    """
+    try:
+        document = client.status()
     except Exception:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(document, dict):
+        return None
+    runtime = document.get("runtime")
+    health = document.get("health")
+    if not isinstance(runtime, dict) or not isinstance(health, dict):
+        return None
+    expected = _canonical_data_dir(getattr(cfg, "data_dir", None))
+    actual = _canonical_data_dir(runtime.get("data_dir"))
+    if expected is None or actual is None or expected != actual:
+        return None
+    return health
 
 
 def _fetch_health_connectors(
-    host: str | None,
-    port: int | None,
     *,
     health: dict | None = None,
 ) -> dict[str, dict]:
-    """Map ``connector-name`` → its ``ConnectorHealth`` from ``/health``.
+    """Map ``connector-name`` → its bound ``ConnectorHealth`` snapshot.
 
     Reads the per-connector ``connectors[]`` array so every active connector
     can render its own live counters. Falls back to folding in the singular
     ``connector`` field so an older gateway (which only reports the primary)
     still surfaces at least that connector's counters.
     """
-    data = health if isinstance(health, dict) else _fetch_health(host, port)
-    if not isinstance(data, dict):
+    if not isinstance(health, dict):
         return {}
     out: dict[str, dict] = {}
-    conns = data.get("connectors")
+    conns = health.get("connectors")
     if isinstance(conns, list):
         for c in conns:
             if isinstance(c, dict):
                 nm = str(c.get("name") or "").strip().lower()
                 if nm:
                     out[nm] = c
-    single = data.get("connector")
+    single = health.get("connector")
     if isinstance(single, dict):
         nm = str(single.get("name") or "").strip().lower()
         if nm and nm not in out:
@@ -829,7 +843,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         }
         for c in actives
     }
-    for name, hc in _fetch_health_connectors(None, None, health=health).items():
+    for name, hc in _fetch_health_connectors(health=health).items():
         source = str(hc.get("source") or "").strip().lower()
         if source != "automatic":
             continue
@@ -864,9 +878,9 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
 def _status_payload(app) -> dict:
     """Build the machine-readable status document for ``status --json`` (SU-13).
 
-    Config + audit-DB derived only (no live ``/health`` call) so the JSON is
-    fast and reliable for automation even when the sidecar is down. Includes a
-    cheap ``sidecar.running`` probe but not per-connector live counters.
+    Config + audit-DB data forms the reliable baseline for automation. Live
+    sidecar state is accepted only from an authenticated ``/status`` response
+    whose runtime data directory matches the resolved configuration.
     SU-05: audit-DB read failures surface as ``enforcement``/``activity`` =
     ``null`` plus an ``audit_db_error`` field, never a silent drop.
     """
@@ -907,18 +921,18 @@ def _status_payload(app) -> dict:
     bind = "127.0.0.1"
     if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
         bind = cfg.guardrail.host
-    try:
-        from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient
 
+    try:
         client = OrchestratorClient(
             host=bind,
             port=cfg.gateway.api_port,
             token=cfg.gateway.resolved_token(),
         )
-        running = bool(client.is_running())
+        health = _fetch_runtime_bound_health(client, cfg)
     except Exception:
-        running = False
-    health = _fetch_health(bind, cfg.gateway.api_port) if running else None
+        health = None
+    running = health is not None
     payload["sidecar"] = {"running": running}
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)

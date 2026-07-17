@@ -72,9 +72,9 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             return r"C:\managed\.venv\Scripts\skill-scanner.exe"
         return None
 
-    @patch("defenseclaw.gateway.OrchestratorClient.is_running", return_value=False)
+    @patch("defenseclaw.commands.cmd_status._fetch_runtime_bound_health", return_value=None)
     @patch("defenseclaw.commands.cmd_status.resolve_scanner_binary", side_effect=_resolve)
-    def test_status_human_and_json_share_resolution(self, _resolve_binary, _is_running):
+    def test_status_human_and_json_share_resolution(self, _resolve_binary, _bound_health):
         runner = CliRunner()
 
         human = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
