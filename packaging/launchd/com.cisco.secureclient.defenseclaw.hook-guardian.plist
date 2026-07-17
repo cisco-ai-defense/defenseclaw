@@ -9,16 +9,16 @@
     tampering (delete, rewrite, chmod) is detected via fsnotify and
     healed within ~1 s of the event.
 
-    --interval 60s is the periodic backstop for tamper vectors the
-    fsnotify path intentionally can't catch:
-      - SharedWriter Write/Chmod (native agent configs — Codex rewrites
+    The 60s ProgramArgument below is the periodic backstop interval
+    for tamper vectors the fsnotify path intentionally can't catch:
+      SharedWriter Write/Chmod (native agent configs; Codex rewrites
         config.toml constantly, so we only watch Remove/Rename on it).
-      - Generic hook helpers (_hardening.sh, inspect-*.sh) which are
+      Generic hook helpers (_hardening.sh, inspect-*.sh) which are
         excluded from the watch allowlist because per-connector template
         rendering makes them rewrite-storm on every reconcile.
     Tightening from 5m to 60s drops worst-case bypass detection from
-    ~5 min to ~1 min at no additional resource cost — same long-running
-    process, one extra Timer tick per minute.
+    ~5 min to ~1 min at no additional resource cost (same long-running
+    process, one extra Timer tick per minute).
 
     `watch` is long-running, so `StartInterval` is intentionally absent
     (it would pointlessly relaunch the process); `KeepAlive` below is
