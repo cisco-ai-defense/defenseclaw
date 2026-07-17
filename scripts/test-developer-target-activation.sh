@@ -287,9 +287,11 @@ PY
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${data_dir}" \
         DEFENSECLAW_CONFIG="${data_dir}/config.yaml" \
+        DEFENSECLAW_SIDECAR_DIAG=1 \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
         PATH="${install_dir}:${PATH}" \
             "${install_dir}/defenseclaw-gateway" start >>"${log_file}" 2>&1; then
+        tail_v8_upgrade_log_secret_safe "${data_dir}/gateway.log"
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "fresh target gateway failed to start"
     fi
@@ -314,6 +316,7 @@ _poll_health(configuration, int(sys.argv[2]), expected_version=sys.argv[3])
 print("developer_fresh_process_health=ok")
 PY
     then
+        tail_v8_upgrade_log_secret_safe "${data_dir}/gateway.log"
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "fresh target exact-version health check failed"
     fi

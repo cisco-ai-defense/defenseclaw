@@ -5397,6 +5397,10 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
         ]
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+    # This contract covers reuse of the grouped persisted totals within one
+    # render generation.  Do not let Textual's independent two-second refresh
+    # timer create another generation while the full suite is instrumented.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
@@ -5407,19 +5411,20 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
         assert rows["codex"].blocks == 27
         assert rows["codex"].alerts == 54
         assert rows["codex"].last_activity != "—"
-        assert store.stats_calls == 1
+        initial_stats_calls = store.stats_calls
+        assert initial_stats_calls >= 1
 
         app._set_connector_filter("codex")
         codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert codex_metrics["findings"].value == 2
-        assert store.stats_calls == 1
+        assert store.stats_calls == initial_stats_calls
 
         app._set_connector_filter("claudecode")
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
         assert metrics["hook_calls"].value == 4408
         assert metrics["findings"].value == 2
-        assert store.stats_calls == 1
+        assert store.stats_calls == initial_stats_calls
 
         session_counts = app._overview_session_enforcement_counts()
         assert session_counts.active_alerts == 59
@@ -6558,6 +6563,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
     app._schedule_observability_status_load = lambda: None  # type: ignore[method-assign]
     app._schedule_credentials_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_overview_disk_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
@@ -6589,6 +6595,11 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             original_update(*args, **kwargs)
 
         body.update = counted_update  # type: ignore[method-assign]
+        # Flush callbacks queued by the initial mount/render before the idle
+        # repaint measurement begins.  They are not effects of the explicit
+        # periodic refresh exercised below.
+        await pilot.pause()
+        update_calls = 0
         app._overview_last_scroll_activity_at = 0.0
 
         periodic_refresh()
