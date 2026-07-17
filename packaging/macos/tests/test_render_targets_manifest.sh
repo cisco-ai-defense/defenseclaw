@@ -145,6 +145,43 @@ t_rows_omit_data_dir() {
   assert_not_contains "${out}" "data_dir:" "data_dir must be omitted from targets.yaml"
 }
 
+t_hostile_agent_version_cannot_inject_targets() {
+  if ! command -v /usr/bin/python3 >/dev/null 2>&1; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (no python3)\n'; fi
+    return 0
+  fi
+  if ! /usr/bin/python3 -c "import yaml" 2>/dev/null; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (PyYAML not installed)\n'; fi
+    return 0
+  fi
+
+  discover_agent_version() {
+    printf '1.2.3"\n    enabled: false\n  - user: "victim"\n    user_home: "/Users/victim"\n    uid: 502\n    gid: 20\n    connector: "codex"\n    agent_version: "9.9.9'
+  }
+
+  local users out parsed
+  users="alice:501:20:/Users/alice"
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "${users}")"
+  parsed="$(printf '%s\n' "${out}" | /usr/bin/python3 -c '
+import sys, json, yaml
+doc = yaml.safe_load(sys.stdin) or {}
+targets = doc.get("targets") or []
+assert len(targets) == 1, "expected one rendered target, got %r" % (targets,)
+target = targets[0]
+assert target.get("user") == "alice", target
+assert target.get("enabled") is True, target
+assert target.get("agent_version") == "", target
+print(json.dumps(target, sort_keys=True))
+' 2>&1)" || {
+    _fail "hostile agent_version reshaped targets.yaml: ${parsed}
+Rendered:
+${out}"
+    return 1
+  }
+  assert_contains "${parsed}" '"user": "alice"' "only alice target remains after hostile version"
+  assert_not_contains "${parsed}" "victim" "hostile injected victim target not present"
+}
+
 run_case "multi-user × multi-connector cross-product"           t_multi_user_multi_connector_produces_cross_product
 run_case "unsupported connectors dropped"                       t_unsupported_connector_skipped
 run_case "empty user list still emits valid manifest"           t_empty_users_still_emits_valid_manifest
@@ -152,3 +189,4 @@ run_case "empty connector list still emits valid manifest"      t_empty_connecto
 run_case "rendered targets.yaml parses (schema round-trip)"     t_rendered_yaml_parses
 run_case "rows pin enabled + int uid/gid"                       t_rows_pin_enabled_and_int_uid_gid
 run_case "rows omit data_dir (per-user Install default is used)" t_rows_omit_data_dir
+run_case "hostile agent version cannot inject targets"          t_hostile_agent_version_cannot_inject_targets

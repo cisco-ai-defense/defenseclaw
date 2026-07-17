@@ -385,6 +385,16 @@ enumerate_local_users() {
 # version is rendered as an empty string — the guardian's reconcile will
 # emit a per-target failure surfaced in hook_guardian_state.json without
 # affecting other targets in the manifest.
+yaml_double_quoted_scalar() {
+  local value="$1"
+  case "${value}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
 render_targets_manifest() {
   local support_dir="$1"
   local connectors_csv="$2"
@@ -408,7 +418,7 @@ render_targets_manifest() {
     return 0
   fi
 
-  local line name uid gid home ver
+  local line name uid gid home ver q_name q_home q_connector q_ver
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     name="${line%%:*}"
@@ -418,10 +428,14 @@ render_targets_manifest() {
     gid="${rest%%:*}"
     home="${rest#*:}"
     [[ -n "${name}" && -n "${uid}" && -n "${gid}" && -n "${home}" ]] || continue
+    q_name="$(yaml_double_quoted_scalar "${name}")" || continue
+    q_home="$(yaml_double_quoted_scalar "${home}")" || continue
 
     for c in "${connectors[@]}"; do
       is_supported_connector "${c}" || continue
+      q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
+      q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
       # data_dir is intentionally omitted from each target block: the
       # guardian's validateUserDataDir requires the data_dir to be inside
       # the target user's home (internal/enterprisehooks/installer.go),
@@ -430,12 +444,12 @@ render_targets_manifest() {
       # correct — that is where the connector's hook script and scoped
       # token per-user artifacts live.
       cat <<EOF
-  - user: "${name}"
-    user_home: "${home}"
+  - user: ${q_name}
+    user_home: ${q_home}
     uid: ${uid}
     gid: ${gid}
-    connector: "${c}"
-    agent_version: "${ver}"
+    connector: ${q_connector}
+    agent_version: ${q_ver}
     enabled: true
 EOF
     done
