@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -28,6 +29,24 @@ DIGEST_CAPABLE_UPLOAD_ACTION = (
 COSIGN_INSTALLER_ACTION = (
     "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
 )
+
+
+def _bash_executable() -> str:
+    """Select Git Bash on Windows instead of the WSL launcher."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    if git := shutil.which("git"):
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        if root := os.environ.get(variable):
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX release-workflow contract on Windows")
 
 
 def _workflow() -> dict[str, object]:
@@ -689,7 +708,7 @@ def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) ->
     def run_helper() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
-                "bash",
+                _bash_executable(),
                 "-c",
                 (
                     'source "$1"; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.5"; '
@@ -722,7 +741,7 @@ def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) ->
 def test_empty_windows_matrix_uses_bridge_refusal_then_current_resolver() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             r'''
 source "$1"
@@ -780,7 +799,7 @@ def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
 
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             ('source "$1"; SMOKE_HOME="$2"; RELEASE_URL="$3"; patch_installed_upgrade_endpoint "$4"'),
             "historical-endpoint-patch-test",
@@ -851,7 +870,7 @@ def test_protocol_gate_treats_a_baseline_without_upgrade_module_as_no_schema_gat
 def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             'source "$1"; REFUSAL_SENTINEL_PIDS=(); WORKDIR=""; SERVER_PID=""; protocol_cleanup',
             "protocol-cleanup-test",
@@ -874,7 +893,7 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     (release_root / "0.8.4").mkdir(parents=True)
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             (
                 'source "$1"; set +e; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.4"; '
@@ -903,7 +922,7 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
 def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             (
                 'source "$1"; '
