@@ -193,6 +193,24 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert "sigstore/cosign-installer@" in assemble_rendered
     assert "cosign sign-blob" in assemble_rendered
     assert text.count("cosign sign-blob") == 1
+    candidate_upload_index = next(
+        index
+        for index, step in enumerate(assemble_job["steps"])
+        if step.get("id") == "upload"
+    )
+    candidate_upload = assemble_job["steps"][candidate_upload_index]
+    assert candidate_upload["uses"] == (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    assert assemble_job["outputs"]["artifact_digest"] == (
+        "${{ steps.upload.outputs.artifact-digest }}"
+    )
+    digest_guard = assemble_job["steps"][candidate_upload_index + 1]
+    assert digest_guard["name"] == "Require candidate artifact digest output"
+    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == (
+        "${{ steps.upload.outputs.artifact-digest }}"
+    )
+    assert "Missing candidate artifact digest" in digest_guard["run"]
 
     macos_job = str(jobs["macos-app"])
     assert "scripts/release_candidate.py extract-gateway" in macos_job

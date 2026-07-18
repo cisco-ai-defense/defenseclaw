@@ -1136,7 +1136,9 @@ jobs:
               )
           PY
 
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+      # v4.5.0+ is required here because certification binds the GitHub
+      # artifact archive through the action's artifact-digest output.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
           name: ${{ steps.names.outputs.candidate }}
@@ -1144,6 +1146,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Require candidate artifact digest output
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+            echo "::error title=Missing candidate artifact digest::The pinned upload action did not return a lowercase SHA-256 digest."
+            exit 1
+          fi
 
   full-certification:
     name: Run full signed pre-release certification
