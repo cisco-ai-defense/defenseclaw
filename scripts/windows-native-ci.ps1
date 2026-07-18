@@ -2206,7 +2206,7 @@ function Assert-NoDefenseClawRegistration([string[]]$Paths) {
     }
 }
 
-function Get-NativeConnectorCleanupAuthority([string]$DataRoot, [string]$Connector) {
+function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector) {
     $relativePaths = switch ($Connector) {
         'codex' {
             @(
@@ -2220,30 +2220,45 @@ function Get-NativeConnectorCleanupAuthority([string]$DataRoot, [string]$Connect
                 'connector_backups\claudecode\settings.json.json'
             )
         }
-        default { throw "unsupported native connector cleanup authority: $Connector" }
+        default { throw "unsupported native connector backup marker: $Connector" }
     }
     return @($relativePaths | Where-Object {
         Test-Path -LiteralPath (Join-Path $DataRoot $_) -PathType Leaf
     })
 }
 
-function Assert-NativeConnectorCleanupAuthorityPresent([string]$DataRoot) {
+function Assert-NativeConnectorCleanupAuthorityPresent(
+    [string]$DataRoot,
+    [string[]]$ConfiguredConnectors
+) {
+    $configured = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in @($ConfiguredConnectors)) {
+        if ([string]$name -notin @('codex', 'claudecode')) {
+            throw 'native Setup acceptance received an unsupported configured connector'
+        }
+        $null = $configured.Add([string]$name)
+    }
     foreach ($connector in @('codex', 'claudecode')) {
-        if (@(Get-NativeConnectorCleanupAuthority $DataRoot $connector).Count -eq 0) {
+        # Setup intentionally classifies uninstall work from the configured
+        # roster as well as active state and backup markers. Exact connector
+        # restoration can consume a marker before uninstall, so the validated
+        # target-runtime roster remains sufficient durable cleanup authority.
+        if (-not $configured.Contains($connector) -and
+            @(Get-NativeConnectorBackupMarkers $DataRoot $connector).Count -eq 0) {
             throw "native Setup acceptance lost $connector cleanup authority before uninstall"
         }
     }
 }
 
-function Assert-NativeConnectorCleanupAuthorityConsumed([string]$DataRoot) {
+function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
     $remaining = [Collections.Generic.List[string]]::new()
     foreach ($connector in @('codex', 'claudecode')) {
-        foreach ($relativePath in @(Get-NativeConnectorCleanupAuthority $DataRoot $connector)) {
+        foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
             $remaining.Add("$connector/$relativePath")
         }
     }
     if ($remaining.Count -ne 0) {
-        throw "native Setup uninstall left connector cleanup authority unconsumed: $($remaining -join ', ')"
+        throw "native Setup uninstall left connector backup markers unconsumed: $($remaining -join ', ')"
     }
 }
 
@@ -3235,13 +3250,13 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw 'setup repair did not preserve user data'
         }
 
-        Assert-NativeConnectorCleanupAuthorityPresent $dataRoot
+        Assert-NativeConnectorCleanupAuthorityPresent $dataRoot $repairedRoster
         Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
-        Assert-NativeConnectorCleanupAuthorityConsumed $dataRoot
+        Assert-NativeConnectorBackupMarkersConsumed $dataRoot
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Assert-NoGatewayAutoStart
         Assert-UserPathRegistrySnapshot $userPathBefore `
