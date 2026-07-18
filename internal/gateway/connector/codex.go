@@ -261,9 +261,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 			} else if _, exists := cfg["hooks"]; exists {
 				return fmt.Errorf("verify Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
 			}
-			if codexOtelBlockLooksManaged(cfg["otel"], opts) {
-				residual = append(residual, "config.toml [otel] still points at defenseclaw")
-			}
+			residual = append(residual, codexOtelResidueFields(cfg["otel"], opts)...)
 			if codexNotifyLooksManaged(cfg["notify"], opts) {
 				residual = append(residual, "config.toml notify still points at defenseclaw bridge")
 			}
@@ -2474,11 +2472,28 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 
 	for _, key := range codexOtelExporterKeys {
 		value, exists := current[key]
-		if !exists || !codexExporterLooksManaged(value, opts) {
+		if !exists {
+			continue
+		}
+		var saved interface{}
+		hadSaved := false
+		if original != nil {
+			saved, hadSaved = original[key]
+		}
+		if !codexExporterLooksManaged(value, opts) {
+			// Endpoint drift can make an exporter operator-owned while leaving the
+			// exact pair of DefenseClaw header markers Setup wrote. In that case,
+			// preserve the endpoint, protocol, and unrelated headers, and restore or
+			// remove only the three header entries proven by the paired markers.
+			// A single marker is deliberately not mutation authority; VerifyClean
+			// reports it as residue so uninstall remains fail-closed.
+			if codexExporterHasManagedHeaderPair(value) {
+				restoreCodexOwnedExporterHeaders(value, saved, hadSaved)
+			}
 			continue
 		}
 		if original != nil {
-			if saved, hadSaved := original[key]; hadSaved {
+			if hadSaved {
 				// Field-level backups from older releases may themselves be
 				// contaminated by a prior managed setup. Only restore a saved
 				// exporter after applying the same strict ownership test used
@@ -2567,6 +2582,96 @@ func codexOtelBlockLooksManaged(v interface{}, opts SetupOpts) bool {
 		}
 	}
 	return false
+}
+
+func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
+	otel, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	var residual []string
+	for _, key := range codexOtelExporterKeys {
+		exporter := otel[key]
+		if codexExporterLooksManaged(exporter, opts) {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
+		}
+		if !codexExporterHasManagedHeaderResidue(exporter) {
+			continue
+		}
+		headers := codexExporterHeaders(exporter)
+		if _, exists := headers["x-defenseclaw-source"]; exists {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-source retains DefenseClaw marker", key))
+		}
+		if _, exists := headers["x-defenseclaw-client"]; exists {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-client retains DefenseClaw marker", key))
+		}
+	}
+	if len(residual) > 0 {
+		residual = append([]string{"config.toml [otel] still contains DefenseClaw-owned fields"}, residual...)
+	}
+	return residual
+}
+
+func codexExporterHeaders(v interface{}) map[string]interface{} {
+	exporter, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	headers, _ := otlpHTTP["headers"].(map[string]interface{})
+	return headers
+}
+
+func codexExporterHasManagedHeaderResidue(v interface{}) bool {
+	headers := codexExporterHeaders(v)
+	if headers == nil {
+		return false
+	}
+	_, hasSource := headers["x-defenseclaw-source"]
+	_, hasClient := headers["x-defenseclaw-client"]
+	return hasSource || hasClient
+}
+
+func codexExporterHasManagedHeaderPair(v interface{}) bool {
+	headers := codexExporterHeaders(v)
+	if headers == nil {
+		return false
+	}
+	_, hasSource := headers["x-defenseclaw-source"]
+	_, hasClient := headers["x-defenseclaw-client"]
+	return hasSource && hasClient
+}
+
+func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool) {
+	headers := codexExporterHeaders(current)
+	if headers == nil || !codexExporterHasManagedHeaderPair(current) {
+		return
+	}
+	delete(headers, "x-defenseclaw-source")
+	delete(headers, "x-defenseclaw-client")
+
+	// The product-namespaced pair above is ownership authority and must never
+	// survive cleanup. Authorization is generic, so restore it only from a
+	// saved exporter that was not itself a stale managed snapshot.
+	savedHeaders := map[string]interface{}(nil)
+	if hadSaved && !codexExporterHasManagedHeaderPair(saved) {
+		savedHeaders = codexExporterHeaders(saved)
+	}
+	if value, exists := savedHeaders["authorization"]; exists {
+		headers["authorization"] = value
+	} else {
+		delete(headers, "authorization")
+	}
+	exporter := current.(map[string]interface{})
+	otlpHTTP := exporter["otlp-http"].(map[string]interface{})
+	if len(headers) == 0 {
+		delete(otlpHTTP, "headers")
+	} else {
+		otlpHTTP["headers"] = headers
+	}
 }
 
 func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {

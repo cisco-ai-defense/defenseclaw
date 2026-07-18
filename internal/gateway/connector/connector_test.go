@@ -5395,6 +5395,136 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	}
 }
 
+func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testing.T) {
+	currentExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://operator.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer synthetic-product-token",
+				"x-defenseclaw-client": "codex-otel/1.0",
+				"x-defenseclaw-source": "codex",
+				"x-operator-header":    "preserve-current",
+			},
+		},
+	}
+	savedExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://original.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization": "Bearer synthetic-operator-token",
+			},
+		},
+	}
+	original, err := json.Marshal(map[string]interface{}{"exporter": savedExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{})
+
+	otel := cfg["otel"].(map[string]interface{})
+	exporter := otel["exporter"].(map[string]interface{})
+	http := exporter["otlp-http"].(map[string]interface{})
+	if http["endpoint"] != "https://operator.example.test/v1/logs" {
+		t.Fatalf("surgical cleanup replaced drifted operator endpoint: %#v", http)
+	}
+	headers := http["headers"].(map[string]interface{})
+	for key, want := range map[string]interface{}{
+		"authorization":     "Bearer synthetic-operator-token",
+		"x-operator-header": "preserve-current",
+	} {
+		if headers[key] != want {
+			t.Fatalf("restored header %s = %#v, want %#v: %#v", key, headers[key], want, headers)
+		}
+	}
+	for _, key := range []string{"x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := headers[key]; exists {
+			t.Fatalf("surgical cleanup restored product-owned header %s: %#v", key, headers)
+		}
+	}
+
+	contaminatedOriginal, err := json.Marshal(map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/v1/logs",
+				"headers": map[string]interface{}{
+					"authorization":        "Bearer synthetic-stale-backup-token",
+					"x-defenseclaw-client": "codex-otel/legacy",
+					"x-defenseclaw-source": "codex-legacy",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withContaminatedOriginal := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	currentHeaders := codexExporterHeaders(currentExporter)
+	currentHeaders["authorization"] = "Bearer synthetic-product-token"
+	currentHeaders["x-defenseclaw-client"] = "codex-otel/legacy"
+	currentHeaders["x-defenseclaw-source"] = "codex-legacy"
+	restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: contaminatedOriginal,
+	}, SetupOpts{})
+	cleaned := codexExporterHeaders(withContaminatedOriginal["otel"].(map[string]interface{})["exporter"])
+	for _, key := range []string{"authorization", "x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := cleaned[key]; exists {
+			t.Fatalf("surgical cleanup retained product header %s: %#v", key, cleaned)
+		}
+	}
+	if cleaned["x-operator-header"] != "preserve-current" {
+		t.Fatalf("surgical cleanup discarded unrelated header: %#v", cleaned)
+	}
+}
+
+func TestCodexVerifyCleanReportsExactDriftedHeaderResidueWithoutValues(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	config := `notify = ["operator-notify", "notify"]
+
+[otel.exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/logs"
+
+[otel.exporter.otlp-http.headers]
+authorization = "Bearer synthetic-secret-value"
+x-defenseclaw-client = "codex-otel/1.0"
+x-defenseclaw-source = "codex"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/metrics"
+
+[otel.metrics_exporter.otlp-http.headers]
+x-defenseclaw-client = "codex-otel/1.0"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil {
+		t.Fatal("VerifyClean accepted exact DefenseClaw header residue")
+	}
+	message := err.Error()
+	for _, path := range []string{
+		"otel.exporter.otlp-http.headers.x-defenseclaw-client",
+		"otel.exporter.otlp-http.headers.x-defenseclaw-source",
+		"otel.metrics_exporter.otlp-http.headers.x-defenseclaw-client",
+	} {
+		if !strings.Contains(message, path) {
+			t.Fatalf("VerifyClean diagnostic missing safe path %q: %s", path, message)
+		}
+	}
+	if strings.Contains(message, "synthetic-secret-value") || strings.Contains(message, "operator.example.test") {
+		t.Fatalf("VerifyClean diagnostic leaked configuration values: %s", message)
+	}
+}
+
 func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T) {
 	opts := SetupOpts{
 		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
