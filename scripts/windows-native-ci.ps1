@@ -2985,19 +2985,17 @@ function Invoke-SetupAcceptance {
         [IO.Directory]::CreateDirectory($hostileGatewayRoot) | Out-Null
         Copy-Item -LiteralPath $gateway `
             -Destination (Join-Path $hostileGatewayRoot 'defenseclaw-gateway.exe') -Force
-        try {
-            Invoke-Installed $launcher @(
-                'setup', 'codex', '--yes', '--restart', '--mode', 'observe'
-            ) -Timeout 300 -Log (Join-Path $logs 'setup-hostile-cwd-restart.log') `
-                -WorkingDirectory $hostileGatewayRoot | Out-Null
-            Assert-OwnedManagedProcess (Get-GatewayIdentity $dataRoot) $gateway `
-                'hostile-working-directory gateway restart'
-            Assert-OwnedManagedProcess (Get-WatchdogIdentity $dataRoot) $gateway `
-                'hostile-working-directory watchdog restart'
-        } finally {
-            Invoke-Installed $gateway @('stop') @(0, 1) 90 `
-                (Join-Path $logs 'setup-hostile-cwd-stop.log') | Out-Null
-        }
+        Invoke-Installed $launcher @(
+            'setup', 'codex', '--yes', '--restart', '--mode', 'observe'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-hostile-cwd-restart.log') `
+            -WorkingDirectory $hostileGatewayRoot | Out-Null
+        Assert-OwnedManagedProcess (Get-GatewayIdentity $dataRoot) $gateway `
+            'hostile-working-directory gateway restart'
+        Assert-OwnedManagedProcess (Get-WatchdogIdentity $dataRoot) $gateway `
+            'hostile-working-directory watchdog restart'
+        # Keep both owned services running: the seeded 0.8.0 upgrade below
+        # snapshots this exact prior state and must prove transactional restore.
+        # The enclosing finally block remains the failure-path cleanup authority.
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
         # installer acceptance must preserve the product's current support
