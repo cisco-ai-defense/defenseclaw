@@ -210,6 +210,19 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 		}
 	}
 	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
+	if !connectorManagedBackupExists(transaction.DataRoot, connectorName) {
+		// A predecessor or concurrent reconcile can discard its exact managed
+		// backup after detecting config drift while retaining the field-level
+		// cleanup authority. Installer state from a pre-home-binding release can
+		// then name only a stale override. The native data root is already bound
+		// to %USERPROFILE%\.defenseclaw, so its finite sibling is the only safe
+		// default-home fallback. Verification runs before any mutation, and the
+		// lifecycle command still rejects reparse points and unsafe ownership.
+		candidates = append(candidates, connectorDefaultHomeBesideDataRoot(
+			transaction.DataRoot,
+			connectorName,
+		))
+	}
 
 	homes := make([]string, 0, len(candidates))
 	for index, candidate := range candidates {
@@ -231,6 +244,37 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 		}
 	}
 	return homes
+}
+
+func connectorManagedBackupExists(dataRoot, connectorName string) bool {
+	logicalName := ""
+	switch connectorName {
+	case "codex":
+		logicalName = "config.toml"
+	case "claudecode":
+		logicalName = "settings.json"
+	default:
+		return false
+	}
+	backupName := strings.NewReplacer("/", "_", `\`, "_", ":", "_", " ", "_").Replace(logicalName)
+	return pathExists(filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json"))
+}
+
+func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
+	cleanDataRoot := filepath.Clean(dataRoot)
+	if !filepath.IsAbs(cleanDataRoot) || !strings.EqualFold(filepath.Base(cleanDataRoot), ".defenseclaw") {
+		return ""
+	}
+	directory := ""
+	switch connectorName {
+	case "codex":
+		directory = ".codex"
+	case "claudecode":
+		directory = ".claude"
+	default:
+		return ""
+	}
+	return filepath.Join(filepath.Dir(cleanDataRoot), directory)
 }
 
 func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, configHome string) []string {

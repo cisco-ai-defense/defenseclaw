@@ -2879,6 +2879,7 @@ function Invoke-SetupAcceptance {
         $fixtureSearchPath = [string]$agentFixtures.SearchPath
         $env:PATH = "$fixtureSearchPath;$processPathBefore"
     }
+    $acceptanceFailure = $null
     try {
         if ($disposableGithubRunner) {
             Invoke-WizardConfigureLaterAcceptance `
@@ -3263,6 +3264,9 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw "cached setup self-uninstall left installer cache behind: $cacheRoot"
         }
         Assert-NoGatewayAutoStart
+    } catch {
+        $acceptanceFailure = $_
+        throw
     } finally {
         $env:PATH = $processPathBefore
         Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
@@ -3290,12 +3294,34 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
             Start-Sleep -Milliseconds 250
         }
-        if (Test-Path -LiteralPath $cacheRoot) { throw "setup uninstall left installer cache behind: $cacheRoot" }
-        if ($disposableGithubRunner) {
-            Assert-NoDefenseClawRegistration $connectorConfigPaths
+        $finalValidationFailures = [Collections.Generic.List[string]]::new()
+        if (Test-Path -LiteralPath $cacheRoot) {
+            $finalValidationFailures.Add("setup uninstall left installer cache behind: $cacheRoot")
         }
-        Assert-UserPathRegistrySnapshot $userPathBefore `
-            'setup failure cleanup did not restore the original user PATH exactly'
+        if ($disposableGithubRunner) {
+            try {
+                Assert-NoDefenseClawRegistration $connectorConfigPaths
+            } catch {
+                $finalValidationFailures.Add($_.Exception.Message)
+            }
+        }
+        try {
+            Assert-UserPathRegistrySnapshot $userPathBefore `
+                'setup failure cleanup did not restore the original user PATH exactly'
+        } catch {
+            $finalValidationFailures.Add($_.Exception.Message)
+        }
+        if ($finalValidationFailures.Count -ne 0) {
+            if ($null -eq $acceptanceFailure) {
+                throw ($finalValidationFailures -join '; ')
+            }
+            # Preserve the first actionable Setup failure. Registration assertions
+            # emit only bounded field locations, never config values, so retaining
+            # cleanup failures as warnings is safe context without masking root cause.
+            foreach ($validationFailure in $finalValidationFailures) {
+                Write-Warning $validationFailure
+            }
+        }
     }
 }
 
