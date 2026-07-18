@@ -249,6 +249,8 @@ def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:
         "FROMVERSION=0.8.0",
         "config_version: 7",
         "temporality: delta",
+        '(otlp.get("tls") or {}).get("insecure") is True',
+        '(otlp.get("network_safety") or {}).get("allow_private_networks") is True',
         "config-v8', 'validate'",
         "setup-seeded-v8-contract.log",
         "'0.8.5' -notin @($migrationCursor.applied)",

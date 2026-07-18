@@ -22,12 +22,14 @@ import (
 const setupTransactionSchemaVersion = 1
 
 const (
-	setupJournalSchemaVersion = 1
-	setupPhaseIntent          = "intent"
-	setupPhasePublished       = "published"
-	setupPhaseCommitted       = "committed"
-	setupPhaseConverged       = "converged"
-	setupPhaseComplete        = "complete"
+	setupJournalLegacySchemaVersion = 1
+	setupJournalSchemaVersion       = 2
+	setupPhaseIntent                = "intent"
+	setupPhaseQuiescing             = "quiescing"
+	setupPhasePublished             = "published"
+	setupPhaseCommitted             = "committed"
+	setupPhaseConverged             = "converged"
+	setupPhaseComplete              = "complete"
 )
 
 var (
@@ -96,6 +98,7 @@ type setupJournal struct {
 }
 
 type setupRecoveryOps struct {
+	Abort      func(setupTransaction) error
 	Rollback   func(setupTransaction) error
 	Activate   func(setupTransaction) error
 	Converge   func(setupTransaction) error
@@ -980,7 +983,11 @@ func setupTransactionCommitSourcePhase(action string) (string, error) {
 }
 
 func markSetupTransactionPublished(transaction setupTransaction) error {
-	return transitionSetupJournal(transaction, setupPhaseIntent, setupPhasePublished)
+	return transitionSetupJournal(transaction, setupPhaseQuiescing, setupPhasePublished)
+}
+
+func markSetupTransactionQuiescing(transaction setupTransaction) error {
+	return transitionSetupJournal(transaction, setupPhaseIntent, setupPhaseQuiescing)
 }
 
 func markSetupTransactionConverged(transaction setupTransaction) error {
@@ -1173,11 +1180,15 @@ func readSetupJournal(path string) (*setupJournal, error) {
 	if err := readJSON(path, &journal); err != nil {
 		return nil, fmt.Errorf("read setup transaction journal %s: %w", path, err)
 	}
-	if journal.SchemaVersion != setupJournalSchemaVersion {
+	if journal.SchemaVersion != setupJournalLegacySchemaVersion && journal.SchemaVersion != setupJournalSchemaVersion {
 		return nil, fmt.Errorf("unsupported setup transaction journal schema %d", journal.SchemaVersion)
 	}
 	switch journal.Phase {
 	case setupPhaseIntent, setupPhasePublished, setupPhaseCommitted, setupPhaseConverged, setupPhaseComplete:
+	case setupPhaseQuiescing:
+		if journal.SchemaVersion == setupJournalLegacySchemaVersion {
+			return nil, fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase)
+		}
 	default:
 		return nil, fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase)
 	}
@@ -1235,6 +1246,7 @@ func recoverPendingSetupTransaction(installRoot, dataRoot string) error {
 	}
 	paths := journalPaths(root)
 	return recoverSetupTransactionAt(paths.Journal, expected, setupRecoveryOps{
+		Abort:    abortPreparedSetupTransaction,
 		Rollback: rollbackSetupTransaction,
 		Activate: activatePublishedSetupTransaction,
 		Converge: convergeCommittedSetupTransaction,
@@ -1268,6 +1280,7 @@ func preparePendingSetupTransactionForUninstall(opts options, installRoot, dataR
 		resumeUninstall: resumeUninstallIntentWithoutActivation,
 		recoverUninstall: func(journal setupJournal) error {
 			return recoverSetupJournalPhase(journal, setupRecoveryOps{
+				Abort:    abortPreparedSetupTransaction,
 				Rollback: rollbackSetupTransaction,
 				Activate: activatePublishedSetupTransaction,
 				Converge: convergeCommittedSetupTransaction,
@@ -1311,10 +1324,16 @@ func preparePendingSetupTransactionForUninstallAt(
 
 	switch journal.Phase {
 	case setupPhaseIntent:
+		if journal.SchemaVersion >= setupJournalSchemaVersion {
+			if err := ops.recoverUninstall(*journal); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
 		if err := ops.rollbackInstall(journal.Transaction); err != nil {
 			return nil, fmt.Errorf("prepare interrupted install for uninstall handoff: %w", err)
 		}
-	case setupPhasePublished:
+	case setupPhaseQuiescing, setupPhasePublished:
 		if err := ops.recoverUninstall(*journal); err != nil {
 			return nil, err
 		}
@@ -1401,10 +1420,24 @@ func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error 
 	case setupPhaseComplete:
 		return nil
 	case setupPhaseIntent:
+		if journal.SchemaVersion >= setupJournalSchemaVersion && transaction.Action == "install" {
+			if ops.Abort == nil {
+				return errors.New("abort prepared setup transaction operation is unavailable")
+			}
+			if err := ops.Abort(transaction); err != nil {
+				return fmt.Errorf("abort interrupted prepared setup transaction: %w", err)
+			}
+			return ops.Transition(transaction, setupPhaseIntent, setupPhaseComplete)
+		}
 		if err := ops.Rollback(transaction); err != nil {
 			return fmt.Errorf("roll back interrupted setup transaction: %w", err)
 		}
 		return ops.Transition(transaction, setupPhaseIntent, setupPhaseComplete)
+	case setupPhaseQuiescing:
+		if err := ops.Rollback(transaction); err != nil {
+			return fmt.Errorf("roll back interrupted quiescing setup transaction: %w", err)
+		}
+		return ops.Transition(transaction, setupPhaseQuiescing, setupPhaseComplete)
 	case setupPhasePublished:
 		if err := ops.Activate(transaction); err != nil {
 			if errors.Is(err, errPublishedActivationStateChanged) {
@@ -1461,6 +1494,65 @@ func finishCommittedSetupTransaction(transaction setupTransaction) (bool, error)
 		return false, err
 	}
 	return false, nil
+}
+
+func abortPreparedSetupTransaction(transaction setupTransaction) error {
+	if transaction.Action != "install" {
+		return errors.New("only an install transaction can abort prepared staging")
+	}
+	for _, managedPath := range []string{
+		transaction.InstallRoot,
+		transaction.MaintenancePath,
+		transaction.StagingPath,
+		transaction.BackupPath,
+		transaction.TrashPath,
+		transaction.MaintenanceNew,
+		transaction.MaintenanceBackup,
+	} {
+		if err := rejectReparseAncestors(managedPath); err != nil {
+			return err
+		}
+	}
+	for _, artifact := range []string{
+		transaction.BackupPath,
+		transaction.TrashPath,
+		transaction.MaintenanceNew,
+		transaction.MaintenanceBackup,
+	} {
+		if _, err := os.Lstat(artifact); err == nil {
+			return fmt.Errorf("refusing prepared-transaction abort after publication artifact appeared: %s", artifact)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+
+	_, installErr := os.Lstat(transaction.InstallRoot)
+	installPresent := installErr == nil
+	if installErr != nil && !errors.Is(installErr, os.ErrNotExist) {
+		return installErr
+	}
+	if transaction.HadInstall {
+		if !installPresent {
+			return errors.New("previous installation disappeared during prepared-transaction abort")
+		}
+		state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
+		if err != nil {
+			return err
+		}
+		if !installStateMatchesSnapshot(state, transaction.PreviousState) {
+			return errors.New("installed state changed during prepared-transaction abort")
+		}
+	} else if installPresent {
+		return errors.New("install path appeared during prepared-transaction abort")
+	}
+	if err := validateMaintenanceSnapshot(
+		transaction.MaintenancePath,
+		transaction.MaintenanceExisted,
+		transaction.PreviousMaintenanceSHA256,
+	); err != nil {
+		return fmt.Errorf("validate maintenance snapshot before prepared-transaction abort: %w", err)
+	}
+	return cleanupStagingTree(transaction)
 }
 
 func rollbackSetupTransaction(transaction setupTransaction) error {

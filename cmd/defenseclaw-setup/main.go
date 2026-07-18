@@ -479,11 +479,11 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
-	tryRestore := func(cause error) (int, error) {
-		return rollbackSetupIntent(transaction, cause)
+	tryAbort := func(cause error) (int, error) {
+		return abortSetupIntent(transaction, cause)
 	}
 	if err := checkSetupContext(ctx); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
 	}
 
 	if err := stageInstallTree(
@@ -498,10 +498,10 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		pathValueCreated,
 		opts,
 	); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
 	}
 	if err := checkSetupContext(ctx); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
 	}
 	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
 		if err := runPackagedMigrationPreflightWithEnv(
@@ -511,11 +511,23 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 			transaction.TargetVersion,
 			transactionChildEnv(transaction),
 		); err != nil {
-			return tryRestore(fmt.Errorf("preflight packaged migrations with staged target runtime: %w", err))
+			return tryAbort(fmt.Errorf("preflight packaged migrations with staged target runtime: %w", err))
 		}
 	}
 	if err := checkSetupContext(ctx); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
+	}
+	// The v2 intent phase authorizes staging only. Durably enter quiescing
+	// before the first service or live-tree mutation so recovery can distinguish
+	// a preflight refusal from an interrupted publication.
+	if err := markSetupTransactionQuiescing(transaction); err != nil {
+		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
+			return retryRequiredCode, fmt.Errorf("record quiescing setup transaction; recovery is required before retrying: %w", err)
+		}
+		return tryAbort(fmt.Errorf("record quiescing setup transaction: %w", err))
+	}
+	tryRestore := func(cause error) (int, error) {
+		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
 	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
@@ -615,6 +627,26 @@ func rollbackSetupIntent(transaction setupTransaction, cause error) (int, error)
 		transaction,
 		cause,
 		setupPhaseIntent,
+		rollbackSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func abortSetupIntent(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhaseIntent,
+		abortPreparedSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func rollbackQuiescingSetup(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhaseQuiescing,
 		rollbackSetupTransaction,
 		markSetupTransactionComplete,
 	)

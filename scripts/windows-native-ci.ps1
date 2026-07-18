@@ -3108,6 +3108,13 @@ document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 assert document.get("config_version") == 8
 observability = document.get("observability") or {}
 assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
+otlp = next(
+    destination
+    for destination in observability.get("destinations", [])
+    if destination.get("kind") == "otlp"
+)
+assert (otlp.get("tls") or {}).get("insecure") is True
+assert (otlp.get("network_safety") or {}).get("allow_private_networks") is True
 assert (document.get("guardrail") or {}).get("retain_judge_bodies") is True
 assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"codex", "claudecode"}
 '@
