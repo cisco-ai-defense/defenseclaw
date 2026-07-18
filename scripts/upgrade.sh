@@ -2594,6 +2594,10 @@ def cleanup_owned_temporaries() -> None:
     tagged_writer = re.compile(
         rf"^\..+\.upgrade-{re.escape(token)}\.[A-Za-z0-9_-]+\.tmp$"
     )
+    cleanup_quarantine = re.compile(
+        rf"^\.defenseclaw-cleanup-{re.escape(token)}-"
+        r"([0-9a-f]+)-([0-9a-f]+)-[0-9a-f]{32}\.quarantine$"
+    )
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -2635,23 +2639,95 @@ def cleanup_owned_temporaries() -> None:
         ):
             raise RuntimeError(f"phase-one {name} identity changed during temporary cleanup")
 
+    def quarantine_no_replace(
+        descriptor: int,
+        source_name: str,
+        inspected: os.stat_result,
+    ) -> str:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            function = library.renameatx_np
+            flag = 0x4  # RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            function = library.renameat2
+            flag = 0x1  # RENAME_NOREPLACE
+        else:
+            raise RuntimeError("phase-one temporary quarantine is unsupported")
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        for _attempt in range(16):
+            quarantine_name = (
+                f".defenseclaw-cleanup-{token}-"
+                f"{inspected.st_dev:x}-{inspected.st_ino:x}-"
+                f"{secrets.token_hex(16)}.quarantine"
+            )
+            result = function(
+                descriptor,
+                os.fsencode(source_name),
+                descriptor,
+                os.fsencode(quarantine_name),
+                flag,
+            )
+            if result == 0:
+                os.fsync(descriptor)
+                return quarantine_name
+            code = ctypes.get_errno()
+            if code in {errno.EEXIST, errno.ENOTEMPTY}:
+                continue
+            raise RuntimeError(
+                f"phase-one temporary quarantine failed with errno {code}"
+            )
+        raise RuntimeError("phase-one temporary quarantine name allocation was exhausted")
+
     def cleanup_descriptor(descriptor: int) -> None:
         with os.scandir(descriptor) as entries:
             members = list(entries)
         if len(members) > 100000:
             raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
         for entry in members:
+            quarantine_match = cleanup_quarantine.fullmatch(entry.name)
             owned = (
                 entry.name.startswith(generic_prefix)
                 or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
                 or tagged_writer.fullmatch(entry.name) is not None
+                or quarantine_match is not None
             )
             if not owned:
                 continue
             info = entry.stat(follow_symlinks=False)
             if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
                 raise RuntimeError("phase-one owned temporary has an unsafe identity")
-            os.unlink(entry.name, dir_fd=descriptor)
+            if quarantine_match is not None and (
+                info.st_dev != int(quarantine_match.group(1), 16)
+                or info.st_ino != int(quarantine_match.group(2), 16)
+            ):
+                os.fsync(descriptor)
+                raise RuntimeError(
+                    "phase-one cleanup quarantine identity changed before replay"
+                )
+            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)
+            quarantined = os.stat(
+                quarantine_name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(quarantined.st_mode)
+                or stat.S_ISLNK(quarantined.st_mode)
+                or quarantined.st_uid != uid
+                or not os.path.samestat(quarantined, info)
+            ):
+                os.fsync(descriptor)
+                raise RuntimeError(
+                    "phase-one owned temporary identity changed during quarantine"
+                )
+            os.unlink(quarantine_name, dir_fd=descriptor)
         os.fsync(descriptor)
 
     def cleanup_bound_root(name: str, path: str) -> None:
