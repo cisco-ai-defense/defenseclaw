@@ -1124,6 +1124,9 @@ func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *te
 }
 
 func TestLegacyConnectorHomesFollowValidatedOverridesWithoutManagedBinding(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows setup transaction connector-home resolution")
+	}
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
 		t.Fatal(err)
