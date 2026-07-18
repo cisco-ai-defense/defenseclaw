@@ -76,6 +76,8 @@ def test_installed_release_artifacts_mount_the_full_tui() -> None:
         assert marker in source
     assert "fresh_080_default_migration=ok" in smoke
     assert "legacy_unconfigured_generic_otlp_placeholder_omitted" in smoke
+    assert "load_packaged_v7_compatibility_selection" in smoke
+    assert "compatibility_selection=compatibility_selection" in smoke
     assert "post_status_mandatory_sqlite_write=ok" in smoke
 
 

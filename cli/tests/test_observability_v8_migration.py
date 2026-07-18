@@ -2315,6 +2315,38 @@ def test_named_release_placeholder_with_operator_field_is_not_silently_omitted()
 
 
 @pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        (
+            "  logs:\n    emit_individual_findings: false",
+            "  logs:\n    emit_individual_findings: true",
+        ),
+        (
+            "  logs:\n    emit_individual_findings: false",
+            "  batch: {scheduled_delay_ms: 1000}\n"
+            "  logs:\n"
+            "    emit_individual_findings: false",
+        ),
+        (
+            "  traces:\n    sampler: always_on",
+            "  traces:\n    sampler: parentbased_traceidratio",
+        ),
+    ),
+    ids=("inherited-logs", "inherited-batch", "inherited-traces"),
+)
+def test_named_release_placeholder_with_inherited_operator_change_fails_closed(
+    original: str,
+    replacement: str,
+) -> None:
+    source = _FRESH_080_NAMED_OTEL_CONFIG.replace(original, replacement, 1)
+    assert source != _FRESH_080_NAMED_OTEL_CONFIG
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(source)
+    assert captured.value.code == "candidate_validation_failed"
+    assert captured.value.path == "$.observability"
+
+
+@pytest.mark.parametrize(
     ("source", "original", "replacement"),
     (
         (_FRESH_080_DEFAULT_OTEL_CONFIG, "  enabled: false", "  enabled: 0"),

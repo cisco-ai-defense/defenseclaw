@@ -1796,6 +1796,7 @@ PY
 from pathlib import Path
 import sys
 
+from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatibility_selection
 from defenseclaw.observability.v8_config import load_validate_v8
 from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8
 
@@ -1858,10 +1859,12 @@ otel:
   resource:
     attributes: {}
 """
+compatibility_selection = load_packaged_v7_compatibility_selection()
 for label, historical_source in (("flat", source), ("named", named_source)):
     result = convert_v7_observability_to_v8(
         historical_source,
         {},
+        compatibility_selection=compatibility_selection,
         effective_data_dir=str(data_dir),
     )
     candidate = load_validate_v8(result.candidate).source

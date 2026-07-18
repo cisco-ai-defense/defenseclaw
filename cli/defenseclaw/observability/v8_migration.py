@@ -193,7 +193,7 @@ _V7_FRESH_080_FLAT_OTEL_PLACEHOLDER: Final = {
     },
     "resource": {"attributes": {}},
 }
-_V7_FRESH_080_NAMED_OTEL_PLACEHOLDER: Final = {
+_V7_FRESH_080_NAMED_OTEL_DESTINATION_PLACEHOLDER: Final = {
     "name": "generic-otlp",
     "preset": "generic-otlp",
     "enabled": False,
@@ -210,6 +210,13 @@ _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER: Final = {
         "url_path": "",
         "export_interval_s": 60,
     },
+}
+_V7_FRESH_080_NAMED_OTEL_PLACEHOLDER: Final = {
+    "enabled": False,
+    "traces": {"sampler": "always_on", "sampler_arg": "1.0"},
+    "logs": {"emit_individual_findings": False},
+    "destinations": [_V7_FRESH_080_NAMED_OTEL_DESTINATION_PLACEHOLDER],
+    "resource": {"attributes": {}},
 }
 
 
@@ -1523,10 +1530,18 @@ def _convert_otel(
     flat_destination: Mapping[str, Any] | None,
     ctx: _Context,
 ) -> tuple[list[dict[str, Any]], tuple[str, ...], str]:
-    raw_destinations = [
-        (raw, f"$.otel.destinations[{index}]")
-        for index, raw in enumerate(otel.get("destinations", []) or [])
-    ]
+    if _type_sensitive_equal(otel, _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER):
+        # The immutable 0.8.0 macOS installer wrote this complete second
+        # endpointless default shape. Match the whole OTel block: inherited
+        # batch, signal, and resource changes are operator state and must stay
+        # on the normal fail-closed conversion path.
+        ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
+        raw_destinations: list[tuple[Any, str]] = []
+    else:
+        raw_destinations = [
+            (raw, f"$.otel.destinations[{index}]")
+            for index, raw in enumerate(otel.get("destinations", []) or [])
+        ]
     if flat_destination is not None:
         raw_destinations.insert(0, (flat_destination, "$.otel"))
     if master_enabled and not raw_destinations:
@@ -1545,12 +1560,6 @@ def _convert_otel(
     effective_global_batch = _effective_otel_batch(global_batch, {}, "$.otel.batch", ctx)
     for raw, source_path in raw_destinations:
         source = dict(_mapping(raw, source_path, ctx))
-        if _type_sensitive_equal(source, _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER):
-            # The immutable 0.8.0 release installer wrote this second exact
-            # endpointless default shape. As with the flat quickstart shape,
-            # any additional or changed field stays fail closed.
-            ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
-            continue
         destination_batch = (
             _mapping(source.get("batch"), f"{source_path}.batch", ctx) if "batch" in source else {}
         )
