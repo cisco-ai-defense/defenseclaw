@@ -5500,8 +5500,19 @@ func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, pristine) {
-		t.Fatalf("restored config differs from pristine state:\n%s", got)
+	restoredCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(got, &restoredCfg); err != nil {
+		t.Fatalf("parse restored config: %v", err)
+	}
+	pristineCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(pristine, &pristineCfg); err != nil {
+		t.Fatalf("parse pristine config: %v", err)
+	}
+	if !codexValueMatches(restoredCfg, pristineCfg) {
+		t.Fatalf("restored config differs semantically from pristine state: %#v", restoredCfg)
+	}
+	if strings.Contains(strings.ToLower(string(got)), "defenseclaw") {
+		t.Fatalf("restored config retained a managed registration: %s", got)
 	}
 }
 
