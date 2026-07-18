@@ -1072,17 +1072,61 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	if !pathExists(gatewayPath) {
 		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
 	}
-	args := []string{
-		"connector", action,
-		"--connector", connectorName,
-		"--data-dir", dataRoot,
-		"--json",
+	args, err := connectorLifecycleCommandArgs(dataRoot, connectorName, action, env)
+	if err != nil {
+		return fmt.Errorf("connector %s %s config home: %w", connectorName, action, err)
 	}
 	output, err := runCapturedSetupCommand(setupControlCommandTimeout, env, gatewayPath, args...)
 	if err != nil {
 		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {
+	configHome, err := connectorLifecycleConfigHome(env, connectorName)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"connector", action,
+		"--connector", connectorName,
+		"--data-dir", dataRoot,
+		"--config-home", configHome,
+		"--json",
+	}, nil
+}
+
+func connectorLifecycleConfigHome(env []string, connectorName string) (string, error) {
+	variable := ""
+	switch connectorName {
+	case "codex":
+		variable = "CODEX_HOME"
+	case "claudecode":
+		variable = "CLAUDE_CONFIG_DIR"
+	default:
+		return "", fmt.Errorf("unsupported native connector %q", connectorName)
+	}
+	value := ""
+	found := false
+	for _, entry := range env {
+		name, candidate, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, variable) {
+			if found {
+				return "", fmt.Errorf("%s is duplicated", variable)
+			}
+			value = candidate
+			found = true
+		}
+	}
+	if value == "" {
+		return "", fmt.Errorf("%s is empty", variable)
+	}
+	if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") ||
+		!filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return "", fmt.Errorf("%s is not an absolute normalized path", variable)
+	}
+	return value, nil
 }
 
 type gatewayAutoStartSnapshot struct {
