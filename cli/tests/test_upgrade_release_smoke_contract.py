@@ -379,6 +379,11 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     assert resume.index("cleanup_owned_temporaries()") < resume.index(
         'print(f"bridge\\t{bridge_version}\\t{plan_id}")'
     )
+    cleanup_start = source.index("def cleanup_owned_temporaries() -> None:")
+    cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
+    cleanup = source[cleanup_start:cleanup_end]
+    assert "members = list(entries)" not in cleanup
+    assert "if len(members) == 100000:" in cleanup
 
 
 def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:

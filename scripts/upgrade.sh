@@ -2687,9 +2687,13 @@ def cleanup_owned_temporaries() -> None:
 
     def cleanup_descriptor(descriptor: int) -> None:
         with os.scandir(descriptor) as entries:
-            members = list(entries)
-        if len(members) > 100000:
-            raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
+            members = []
+            for entry in entries:
+                if len(members) == 100000:
+                    raise RuntimeError(
+                        "phase-one temporary cleanup exceeded its scan bound"
+                    )
+                members.append(entry)
         for entry in members:
             quarantine_match = cleanup_quarantine.fullmatch(entry.name)
             owned = (
