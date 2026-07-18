@@ -5395,6 +5395,71 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	}
 }
 
+func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	otel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           otel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", cfg)
+	}
+	if _, exists := cfg["notify"]; exists {
+		t.Fatalf("restore retained managed notify registration: %#v", cfg)
+	}
+	if _, exists := cfg["otel"]; exists {
+		t.Fatalf("restore retained managed OTel registration: %#v", cfg)
+	}
+
+	operatorOnly := []byte("model_provider = \"openai\"  # preserve spacing\nnotify = [\"operator-tool\", \"notify\"]\n")
+	unchanged, err := restoreOwnedCodexConfigFromTOML(
+		operatorOnly,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Remove || !bytes.Equal(unchanged.Data, operatorOnly) {
+		t.Fatalf("operator-only config was not byte-identical after restore:\n%s", unchanged.Data)
+	}
+}
+
 func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
@@ -5418,6 +5483,10 @@ func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) 
 	if err := connector.patchCodexConfig(first, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
 		t.Fatalf("first config patch: %v", err)
 	}
+	// Model an upgrade from a predecessor that wrote the field-level backup but
+	// not the newer managed-file snapshot. The candidate must not treat the
+	// already-managed current config as pristine and resurrect it on uninstall.
+	discardManagedFileBackup(dir, connector.Name(), "config.toml")
 	second := first
 	second.APIAddr = "127.0.0.1:43189"
 	if err := connector.patchCodexConfig(second, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {

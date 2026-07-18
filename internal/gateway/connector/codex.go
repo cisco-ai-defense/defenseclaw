@@ -1640,110 +1640,27 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	render := func(raw []byte, exists bool) error {
 		if exact, ok := managedFileBackupTransform(managedBackup, raw, exists); ok {
 			if !exact.Remove {
-				cleaned, changed, err := removeOwnedCodexHooksFromTOML(
+				cleaned, err := restoreOwnedCodexConfigFromTOML(
 					exact.Data,
+					true,
+					backup,
+					opts,
 					configPath,
-					filepath.Join(opts.DataDir, "hooks"),
 				)
 				if err != nil {
-					return fmt.Errorf("clean exact-restored Codex hooks: %w", err)
+					return fmt.Errorf("clean exact-restored Codex config: %w", err)
 				}
-				if changed {
-					exact.Data = cleaned
-					exact.Remove = len(cleaned) == 0
-				}
+				exact.Data = cleaned.Data
+				exact.Remove = cleaned.Remove
 			}
 			transformed = exact
 			return nil
 		}
-		if !exists {
-			transformed = atomicTransformResult{Remove: true}
-			return nil
-		}
-		cfg := map[string]interface{}{}
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
-			return fmt.Errorf("parse codex config: %w", err)
-		}
-
-		removedOwnedHooks := false
-		hookEventsRemain := false
-		if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
-			hooksDir := filepath.Join(opts.DataDir, "hooks")
-			// Trust keys are position-aware, so inspect and remove exactly owned
-			// records before filtering their corresponding handlers out of the table.
-			stateRemoved, err := removeOwnedCodexHookState(hooks, configPath, hooksDir)
-			if err != nil {
-				return fmt.Errorf("restore Codex hook trust: %w", err)
-			}
-			if stateRemoved {
-				removedOwnedHooks = true
-			}
-			for eventType, val := range hooks {
-				if eventType == "state" {
-					continue
-				}
-				if _, ok := val.([]interface{}); !ok {
-					return fmt.Errorf("restore Codex hooks.%s: unsupported type %T", eventType, val)
-				}
-				before := codexHookEntryCount(val)
-				remaining := removeOwnedHooks(val, hooksDir)
-				if before != len(remaining) || !codexValueMatches(val, remaining) {
-					removedOwnedHooks = true
-				}
-				if len(remaining) == 0 {
-					delete(hooks, eventType)
-				} else {
-					hooks[eventType] = remaining
-					hookEventsRemain = true
-				}
-			}
-			if len(hooks) == 0 {
-				delete(cfg, "hooks")
-			} else {
-				cfg["hooks"] = hooks
-			}
-		} else if _, exists := cfg["hooks"]; exists {
-			return fmt.Errorf("restore Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
-		} else if !backup.HadHooksKey {
-			delete(cfg, "hooks")
-		}
-
-		if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
-			if features, ok := cfg["features"].(map[string]interface{}); ok {
-				delete(features, "hooks")
-				delete(features, "codex_hooks")
-				if len(features) == 0 {
-					delete(cfg, "features")
-				} else {
-					cfg["features"] = features
-				}
-			}
-		}
-
-		// Restore OTel exporter entries independently. One managed sibling does not
-		// make the entire [otel] table ours: an operator may have replaced another
-		// exporter or added unrelated settings after Setup. Managed entries return to
-		// their saved value (or are deleted if Setup added them), while current
-		// operator-owned exporters/subtables survive verbatim. Ownership detection is
-		// structural and never loads or mints the scoped credential.
-		restoreCodexOtelEntries(cfg, backup, opts)
-
-		managedNotify := codexNotifyLooksManaged(cfg["notify"], opts)
-		if managedNotify && backup.HadNotify && len(backup.OriginalNotify) > 0 {
-			var orig interface{}
-			if err := json.Unmarshal(backup.OriginalNotify, &orig); err != nil {
-				return fmt.Errorf("restore original Codex notify config: %w", err)
-			}
-			cfg["notify"] = orig
-		} else if managedNotify {
-			delete(cfg, "notify")
-		}
-
-		out, err := toml.Marshal(cfg)
+		cleaned, err := restoreOwnedCodexConfigFromTOML(raw, exists, backup, opts, configPath)
 		if err != nil {
-			return fmt.Errorf("marshal restored codex config: %w", err)
+			return err
 		}
-		transformed = atomicTransformResult{Data: out}
+		transformed = cleaned
 		return nil
 	}
 	if err := withFileLock(configPath, func() error {
@@ -1759,6 +1676,123 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 
 	discardManagedFileBackup(opts.DataDir, c.Name(), "config.toml")
 	return c.cleanupCodexRestoreArtifacts(opts)
+}
+
+// restoreOwnedCodexConfigFromTOML removes or restores every config.toml field
+// DefenseClaw can own. Exact managed-file backups also pass through this filter:
+// an older release may have captured an already-managed file as its pristine
+// snapshot during upgrade. Returning raw unchanged when no owned field changes
+// preserves byte-exact restoration for operator-only configurations.
+func restoreOwnedCodexConfigFromTOML(
+	raw []byte,
+	exists bool,
+	backup codexConfigBackup,
+	opts SetupOpts,
+	configPath string,
+) (atomicTransformResult, error) {
+	if !exists {
+		return atomicTransformResult{Remove: true}, nil
+	}
+	cfg := map[string]interface{}{}
+	if len(raw) > 0 {
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			return atomicTransformResult{}, fmt.Errorf("parse codex config: %w", err)
+		}
+	}
+	originalShape, err := json.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("snapshot codex config shape: %w", err)
+	}
+
+	removedOwnedHooks := false
+	hookEventsRemain := false
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		// Trust keys are position-aware, so inspect and remove exactly owned
+		// records before filtering their corresponding handlers out of the table.
+		stateRemoved, err := removeOwnedCodexHookState(hooks, configPath, hooksDir)
+		if err != nil {
+			return atomicTransformResult{}, fmt.Errorf("restore Codex hook trust: %w", err)
+		}
+		if stateRemoved {
+			removedOwnedHooks = true
+		}
+		for eventType, val := range hooks {
+			if eventType == "state" {
+				continue
+			}
+			if _, ok := val.([]interface{}); !ok {
+				return atomicTransformResult{}, fmt.Errorf("restore Codex hooks.%s: unsupported type %T", eventType, val)
+			}
+			before := codexHookEntryCount(val)
+			remaining := removeOwnedHooks(val, hooksDir)
+			if before != len(remaining) || !codexValueMatches(val, remaining) {
+				removedOwnedHooks = true
+			}
+			if len(remaining) == 0 {
+				delete(hooks, eventType)
+			} else {
+				hooks[eventType] = remaining
+				hookEventsRemain = true
+			}
+		}
+		if len(hooks) == 0 {
+			delete(cfg, "hooks")
+		} else {
+			cfg["hooks"] = hooks
+		}
+	} else if _, present := cfg["hooks"]; present {
+		return atomicTransformResult{}, fmt.Errorf("restore Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
+	} else if !backup.HadHooksKey {
+		delete(cfg, "hooks")
+	}
+
+	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
+		if features, ok := cfg["features"].(map[string]interface{}); ok {
+			delete(features, "hooks")
+			delete(features, "codex_hooks")
+			if len(features) == 0 {
+				delete(cfg, "features")
+			} else {
+				cfg["features"] = features
+			}
+		}
+	}
+
+	// Restore OTel exporter entries independently. One managed sibling does not
+	// make the entire [otel] table ours: an operator may have replaced another
+	// exporter or added unrelated settings after Setup. Managed entries return to
+	// their saved value (or are deleted if Setup added them), while current
+	// operator-owned exporters/subtables survive verbatim. Ownership detection is
+	// structural and never loads or mints the scoped credential.
+	restoreCodexOtelEntries(cfg, backup, opts)
+
+	managedNotify := codexNotifyLooksManaged(cfg["notify"], opts)
+	if managedNotify && backup.HadNotify && len(backup.OriginalNotify) > 0 {
+		var orig interface{}
+		if err := json.Unmarshal(backup.OriginalNotify, &orig); err != nil {
+			return atomicTransformResult{}, fmt.Errorf("restore original Codex notify config: %w", err)
+		}
+		cfg["notify"] = orig
+	} else if managedNotify {
+		delete(cfg, "notify")
+	}
+
+	restoredShape, err := json.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("snapshot restored codex config shape: %w", err)
+	}
+	if bytes.Equal(originalShape, restoredShape) {
+		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+	}
+	if len(cfg) == 0 {
+		return atomicTransformResult{Remove: true}, nil
+	}
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("marshal restored codex config: %w", err)
+	}
+	return atomicTransformResult{Data: out}, nil
 }
 
 func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts) error {
