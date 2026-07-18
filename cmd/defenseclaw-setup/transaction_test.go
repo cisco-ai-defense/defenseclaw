@@ -1123,6 +1123,83 @@ func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *te
 	}
 }
 
+func TestLegacyConnectorHomesFollowValidatedOverridesWithoutManagedBinding(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex_config_backup.json", "claudecode_backup.json"} {
+		if err := os.WriteFile(filepath.Join(dataRoot, name), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clientRoot := filepath.Join(filepath.Dir(dataRoot), "client-homes")
+	codexHome := filepath.Join(clientRoot, "codex")
+	claudeHome := filepath.Join(clientRoot, "claude")
+	for _, path := range []string{codexHome, claudeHome} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	legacyState := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"0.8.0",
+	)
+	transaction, err := newSetupTransaction(
+		"uninstall",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		"0.8.0",
+		"0.8.6",
+		&legacyState,
+		options{Action: "uninstall", Connector: "none", Mode: "observe"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(transaction.PreviousCodexHome, codexHome) ||
+		!samePath(transaction.PreviousClaudeConfigDir, claudeHome) {
+		t.Fatalf(
+			"legacy transaction homes = (%q, %q), want validated overrides (%q, %q)",
+			transaction.PreviousCodexHome,
+			transaction.PreviousClaudeConfigDir,
+			codexHome,
+			claudeHome,
+		)
+	}
+
+	source := transaction
+	source.Action = "install"
+	source.ID = testCurrentTransactionID
+	source.CodexHome = codexHome
+	source.ClaudeConfigDir = claudeHome
+	handoff, err := newUninstallHandoffTransaction(
+		source,
+		&legacyState,
+		options{Action: "uninstall", Connector: "none", Mode: "observe"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(handoff.PreviousCodexHome, codexHome) ||
+		!samePath(handoff.PreviousClaudeConfigDir, claudeHome) {
+		t.Fatalf(
+			"legacy handoff homes = (%q, %q), want source overrides (%q, %q)",
+			handoff.PreviousCodexHome,
+			handoff.PreviousClaudeConfigDir,
+			codexHome,
+			claudeHome,
+		)
+	}
+}
+
 func envValue(env []string, name string) string {
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")

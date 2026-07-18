@@ -244,14 +244,18 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		previousCodexState = oldState.CodexHome
 		previousClaudeState = oldState.ClaudeConfigDir
 	}
+	// Pre-home-binding releases can advertise a connector only through their
+	// legacy backup. In that case the validated current override is the sole
+	// authority for the client home; falling back to the process profile would
+	// consume the shared backup while editing and verifying a different file.
 	previousCodexHome, err := resolvePreviousConnectorHome(
-		previousCodexState, previousConnectors, dataRoot, "codex", "config.toml", defaultCodexHome,
+		previousCodexState, previousConnectors, dataRoot, "codex", "config.toml", codexHome,
 	)
 	if err != nil {
 		return setupTransaction{}, err
 	}
 	previousClaudeConfigDir, err := resolvePreviousConnectorHome(
-		previousClaudeState, previousConnectors, dataRoot, "claudecode", "settings.json", defaultClaudeConfigDir,
+		previousClaudeState, previousConnectors, dataRoot, "claudecode", "settings.json", claudeConfigDir,
 	)
 	if err != nil {
 		return setupTransaction{}, err
@@ -354,13 +358,24 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		configuredCodexHome = oldState.CodexHome
 		configuredClaudeHome = oldState.ClaudeConfigDir
 	}
+	// The source install transaction already captured validated client homes.
+	// Preserve them across an install-to-uninstall handoff when predecessor
+	// state and managed backup bindings predate explicit home persistence.
+	legacyCodexFallback := source.CodexHome
+	if legacyCodexFallback == "" {
+		legacyCodexFallback = defaultCodexHome
+	}
+	legacyClaudeFallback := source.ClaudeConfigDir
+	if legacyClaudeFallback == "" {
+		legacyClaudeFallback = defaultClaudeConfigDir
+	}
 	previousCodexHome, err := resolvePreviousConnectorHome(
 		configuredCodexHome,
 		previousConnectors,
 		source.DataRoot,
 		"codex",
 		"config.toml",
-		defaultCodexHome,
+		legacyCodexFallback,
 	)
 	if err != nil {
 		return setupTransaction{}, err
@@ -371,7 +386,7 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		source.DataRoot,
 		"claudecode",
 		"settings.json",
-		defaultClaudeConfigDir,
+		legacyClaudeFallback,
 	)
 	if err != nil {
 		return setupTransaction{}, err
