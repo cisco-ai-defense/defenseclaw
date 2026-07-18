@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,11 +34,14 @@ from defenseclaw.observability.v8_config import load_validate_v8
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
+PROTOCOL_SCRIPT = ROOT / "scripts" / "test-upgrade-protocol-release.sh"
 DEVELOPER_ACTIVATION_SCRIPT = ROOT / "scripts" / "test-developer-target-activation.sh"
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
+PRE_RELEASE_CERTIFICATION = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
+RECEIPT_CHECK = ROOT / "scripts" / "check_upgrade_receipt.py"
 
 
 def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -249,6 +254,157 @@ def test_upgrade_failure_guidance_does_not_restore_gateway_jsonl_ownership() -> 
         normalized = line.lower()
         assert "optional" in normalized, line
         assert "destination" in normalized, line
+
+
+def _bridge_comment_restore_program() -> str:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start_marker = "# BEGIN BRIDGE_COMMENT_RESTORE_PY"
+    end_marker = "# END BRIDGE_COMMENT_RESTORE_PY"
+    start = source.index(start_marker)
+    end = source.index(end_marker, start) + len(end_marker)
+    return source[start:end] + "\n"
+
+
+def _run_bridge_comment_restore(
+    source_path: Path,
+    active_path: Path,
+    *,
+    program: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-",
+            str(source_path),
+            str(active_path),
+            "a" * 32,
+        ],
+        input=program or _bridge_comment_restore_program(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    migration = source.index("# ── Run migrations")
+    restore = source.index("    restore_bridge_config_comments\n", migration)
+    cleanup = source.index("    bridge_phase1_cleanup_owned_temporaries", restore)
+    seal = source.index("    bridge_phase1_state_transaction seal-active", cleanup)
+    start = source.index("# ── Start services", seal)
+    restore_function = source[
+        source.index("restore_bridge_config_comments()") : source.index("bridge_phase1_state_transaction()")
+    ]
+
+    assert migration < restore < cleanup < seal < start
+    assert "bridge_phase1_state_transaction config-comment-source" in restore_function
+    assert "${BACKUP_DIR}/config.yaml" not in restore_function
+    assert "pre-bridge-config.yaml" not in source
+    assert "DEFENSECLAW_OBSERVABILITY_V8_PRESERVED_COMMENTS_PATH" not in source
+
+
+def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source.yaml"
+    active = tmp_path / "active.yaml"
+    source.write_text(
+        """# operator guide
+config_version: 7
+guardrail:
+  enabled: true # keep this explanation
+notes:
+  quoted: "# scalar hash is not a comment"
+  block: |
+    # block hash is not a comment
+# already present
+otel:
+  endpoint: https://collector.example.test
+""",
+        encoding="utf-8",
+    )
+    active.write_text(
+        """# already present
+config_version: 7
+guardrail:
+  enabled: false
+otel:
+  enabled: false
+  destinations: []
+""",
+        encoding="utf-8",
+    )
+    source.chmod(0o600)
+    active.chmod(0o640)
+    before = yaml.safe_load(active.read_text(encoding="utf-8"))
+
+    completed = _run_bridge_comment_restore(source, active)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "2"
+    final = active.read_text(encoding="utf-8")
+    preamble = final[: final.index("config_version:")]
+    assert preamble == "# operator guide\n# keep this explanation\n# already present\n"
+    assert "# scalar hash is not a comment" not in final
+    assert "# block hash is not a comment" not in final
+    assert final.count("# already present") == 1
+    assert yaml.safe_load(final) == before
+    assert stat.S_IMODE(active.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("unsafe_kind", ["source-symlink", "source-hardlink", "source-oversize", "active-symlink"])
+def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kind: str) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source.yaml"
+    active = tmp_path / "active.yaml"
+    source.write_text("# guide\nconfig_version: 7\n", encoding="utf-8")
+    active.write_text("config_version: 7\n", encoding="utf-8")
+    source.chmod(0o600)
+    active.chmod(0o600)
+
+    if unsafe_kind == "source-symlink":
+        actual = tmp_path / "source-actual.yaml"
+        source.replace(actual)
+        source.symlink_to(actual)
+    elif unsafe_kind == "source-hardlink":
+        os.link(source, tmp_path / "source-alias.yaml")
+    elif unsafe_kind == "source-oversize":
+        with source.open("wb") as stream:
+            stream.truncate(4 * 1024 * 1024 + 1)
+    else:
+        actual = tmp_path / "active-actual.yaml"
+        active.replace(actual)
+        active.symlink_to(actual)
+
+    completed = _run_bridge_comment_restore(source, active)
+
+    assert completed.returncode != 0
+    assert "configuration source" in completed.stderr
+
+
+def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source.yaml"
+    active = tmp_path / "active.yaml"
+    source.write_text("# guide\nconfig_version: 7\n", encoding="utf-8")
+    active.write_text("config_version: 7\n", encoding="utf-8")
+    source.chmod(0o600)
+    active.chmod(0o600)
+    program = _bridge_comment_restore_program().replace(
+        "    atomic_exchange(active_path, temporary)",
+        '    with open(active_path, "ab") as concurrent:\n'
+        '        concurrent.write(b"# concurrent edit\\n")\n'
+        "    atomic_exchange(active_path, temporary)",
+        1,
+    )
+
+    completed = _run_bridge_comment_restore(source, active, program=program)
+
+    assert completed.returncode != 0
+    assert "changed before comment continuity activation" in completed.stderr
+    assert active.read_bytes().endswith(b"# concurrent edit\n")
 
 
 @pytest.mark.parametrize(
@@ -549,9 +705,10 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         "config.historical.source",
         "phase1-source-gateway",
         "phase two retained no distinct byte-exact config-v7 bridge backup",
-        'terminal_receipt.get("from_version") != bridge_version',
+        'receipt_from="${REQUIRED_BRIDGE_VERSION}"',
     ):
         assert contract in text
+    assert 'facts.get("from_version") != source' in RECEIPT_CHECK.read_text(encoding="utf-8")
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
@@ -608,9 +765,33 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
     assert 'WORKDIR="$(abs_path "$(mktemp -d ' in script
     function_start = script.index("run_v8_source_contract_tests()")
     gate = script.index("target_uses_observability_v8 || return 0", function_start)
+    resource_stage = script.index("scripts/telemetry_runtime_assets.py", function_start)
     pytest_call = script.index("uv run python -m pytest", function_start)
-    assert gate < pytest_call
+    failure_tail = script.index('tail_log "${result_log}"', pytest_call)
+    assert gate < resource_stage < pytest_call < failure_tail
     assert 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]' in script
+
+
+def test_historical_release_matrices_do_not_repeat_source_contract_suite() -> None:
+    workflow = PRE_RELEASE_CERTIFICATION.read_text(encoding="utf-8")
+    linux = workflow[workflow.index("  linux-upgrade:") : workflow.index("  macos-upgrade:")]
+    macos = workflow[workflow.index("  macos-upgrade:") : workflow.index("  windows-unpublished-refusal:")]
+    for job in (linux, macos):
+        assert job.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
+
+
+def test_success_receipt_verifier_uses_canonical_audit_and_queue_acknowledgement() -> None:
+    harness = SCRIPT.read_text(encoding="utf-8")
+    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    verifier = RECEIPT_CHECK.read_text(encoding="utf-8")
+
+    assert "scripts/check_upgrade_receipt.py" in harness
+    assert "expected exactly one terminal target receipt" not in harness
+    assert "expected one native-v8 target receipt" not in harness
+    assert "assert_staged_success_receipt" not in protocol
+    assert "FROM audit_events" in verifier
+    assert "canonical target receipt" in verifier
+    assert "if not queued_target:" in verifier
 
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
@@ -734,5 +915,8 @@ def test_v8_known_regression_marker_uses_redacted_tail() -> None:
     marker_start = function_body.index('if grep -E "Traceback|AttributeError|Required migration')
     marker_failure = function_body[marker_start:]
 
-    assert 'if target_uses_observability_v8; then\n            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"' in marker_failure
+    assert (
+        'if target_uses_observability_v8; then\n            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"'
+        in marker_failure
+    )
     assert 'else\n            tail_log "${SMOKE_HOME}/upgrade.log"' in marker_failure

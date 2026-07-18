@@ -171,6 +171,25 @@ func TestUpgradeReceiptRejectsUnknownOrUnboundedContent(t *testing.T) {
 	}
 }
 
+func TestUpgradeReceiptReadinessUsesMandatorySQLiteNotExternalExporters(t *testing.T) {
+	fixture := upgradeReceiptFixture(t)
+	fixture.sidecar.health.SetTelemetry(
+		StateError,
+		"external exporter unavailable",
+		map[string]interface{}{"local_sqlite": "healthy"},
+	)
+	if !fixture.sidecar.upgradeReceiptStartupReady() {
+		t.Fatal("external exporter failure blocked mandatory SQLite receipt readiness")
+	}
+
+	store := fixture.sidecar.store
+	fixture.sidecar.store = nil
+	if fixture.sidecar.upgradeReceiptStartupReady() {
+		t.Fatal("receipt readiness ignored unavailable mandatory SQLite")
+	}
+	fixture.sidecar.store = store
+}
+
 func upgradeReceiptFixture(t *testing.T) sidecarV8BootstrapFixture {
 	t.Helper()
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")

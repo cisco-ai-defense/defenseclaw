@@ -1585,12 +1585,18 @@ run_v8_source_contract_tests() {
     touch "${result_log}"
     chmod 600 "${result_log}"
     log "Proving v8 permission, retry, rollback, and bundle contracts"
-    if ! PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -q \
+    python3 "${ROOT}/scripts/telemetry_runtime_assets.py" \
+        --root "${ROOT}" \
+        --stage "${ROOT}/cli/defenseclaw/_data/telemetry/v8" \
+        >"${result_log}" 2>&1 \
+        || { tail_log "${result_log}"; die "could not stage checked telemetry resources for v8 source tests"; }
+    if ! PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -q --tb=short \
         cli/tests/test_observability_v8_activation.py \
         cli/tests/test_observability_v8_upgrade_migration.py \
         cli/tests/test_local_observability_bundle_upgrade.py \
         cli/tests/test_local_observability_upgrade_wiring.py \
-        >"${result_log}" 2>&1; then
+        >>"${result_log}" 2>&1; then
+        tail_log "${result_log}"
         die "v8 source contract tests failed (private log: ${result_log})"
     fi
     ok "v8 source contracts passed (permission, retry, rollback, bundle)"
@@ -1890,25 +1896,6 @@ if not any(
     for path in normal_backups
 ):
     raise SystemExit("native-v8 upgrade retained no byte-exact source backup")
-
-receipts = [
-    json.loads(path.read_text(encoding="utf-8"))
-    for path in sorted((data_dir / ".upgrade-receipts").glob("*.json"))
-    if path.is_file() and not path.is_symlink()
-]
-terminal = [item for item in receipts if item.get("target_version") == target_version]
-if len(terminal) != 1:
-    raise SystemExit(f"expected one native-v8 target receipt, got {len(terminal)}")
-receipt = terminal[0]
-if receipt.get("from_version") != source_version:
-    raise SystemExit("native-v8 target receipt has the wrong source version")
-if (
-    receipt.get("status") != "succeeded"
-    or receipt.get("migration_status") != "completed"
-    or receipt.get("artifacts_verified") is not True
-    or receipt.get("failure_code")
-):
-    raise SystemExit("native-v8 target receipt is not fully successful")
 
 for comment in (
     "# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐",
@@ -2273,25 +2260,6 @@ if source_is_older_than_bridge:
     if not phase_two_backups:
         raise SystemExit("phase two retained no distinct byte-exact config-v7 bridge backup")
 
-    receipt_root = data_dir / ".upgrade-receipts"
-    receipts = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(receipt_root.glob("*.json"))
-        if path.is_file() and not path.is_symlink()
-    ]
-    terminal_receipts = [item for item in receipts if item.get("target_version") == target_version]
-    if len(terminal_receipts) != 1:
-        raise SystemExit(f"expected exactly one terminal target receipt, got {len(terminal_receipts)}")
-    terminal_receipt = terminal_receipts[0]
-    if terminal_receipt.get("from_version") != bridge_version:
-        raise SystemExit(f"target activation did not originate from bridge {bridge_version}")
-    if (
-        terminal_receipt.get("status") != "succeeded"
-        or terminal_receipt.get("migration_status") != "completed"
-        or terminal_receipt.get("artifacts_verified") is not True
-        or terminal_receipt.get("failure_code")
-    ):
-        raise SystemExit("terminal bridge-to-target receipt is not fully successful")
 else:
     if not historical_backups:
         raise SystemExit("direct bridge upgrade retained no byte-exact historical config/.env backup")
@@ -2361,6 +2329,18 @@ print("v8_recovery_backups=historical_and_bridge_byte_exact")
 print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
+
+        local receipt_from="${FROM_VERSION}"
+        if [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
+            && ! version_lte "${REQUIRED_BRIDGE_VERSION}" "${FROM_VERSION}"; then
+            receipt_from="${REQUIRED_BRIDGE_VERSION}"
+        fi
+        "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
+            --data-dir "${SMOKE_HOME}/.defenseclaw" \
+            --from-version "${receipt_from}" \
+            --target-version "${TARGET_VERSION}" \
+            --timeout-seconds 10 \
+            || die "target gateway did not admit and acknowledge the successful upgrade receipt"
     else
         "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" <<'PY'
 from pathlib import Path

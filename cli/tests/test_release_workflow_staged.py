@@ -18,6 +18,7 @@ WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
+RECEIPT_CHECK = ROOT / "scripts/check_upgrade_receipt.py"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
@@ -481,7 +482,6 @@ def test_every_ci_remote_action_is_commit_pinned() -> None:
 
 def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
-    assert 'receipt.get("migration_status") != "completed"' in text
     for contract in (
         "CANDIDATE_MIN_PROTOCOL",
         "CANDIDATE_SCHEMA_VERSION",
@@ -502,7 +502,6 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "immutable-bridge-empty-windows",
         "prepare_required_bridge_assets",
         "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
-        "assert_staged_success_receipt",
         "UPGRADE_GATE_STOP_MARKER",
         "gateway sentinel PID changed",
         "assert_no_success_receipt",
@@ -536,6 +535,11 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
     assert "force_latest_version" in smoke
     assert 'target_version = "{force_latest_version}"' in smoke
+    assert "scripts/check_upgrade_receipt.py" in smoke
+    assert "assert_staged_success_receipt" not in text
+    verifier = RECEIPT_CHECK.read_text(encoding="utf-8")
+    assert 'facts.get("migration_status") != "completed"' in verifier
+    assert "FROM audit_events" in verifier
 
 
 def test_external_resolver_boundaries_disable_python_bytecode() -> None:

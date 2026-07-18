@@ -4719,6 +4719,339 @@ create_bridge_handoff_directory() {
     printf '%s\n' "${destination}"
 }
 
+restore_bridge_config_comments() {
+    local original_config
+    local result
+
+    [[ "${BRIDGE_PHASE1}" -eq 1 ]] || return 0
+    original_config="$(bridge_phase1_state_transaction config-comment-source)" \
+        || die "Could not authenticate the phase-one configuration snapshot for comment continuity"
+    [[ -n "${original_config}" ]] || return 0
+    [[ -e "${CONFIG_PATH}" || -L "${CONFIG_PATH}" ]] \
+        || die "The bridge configuration disappeared before comment continuity could be verified"
+
+    result="$("${VENV_PYTHON}" -I -B - \
+        "${original_config}" \
+        "${CONFIG_PATH}" \
+        "${BRIDGE_RECOVERY_PLAN_ID#phase-one-}" <<'PY'
+# BEGIN BRIDGE_COMMENT_RESTORE_PY
+from __future__ import annotations
+
+import collections
+import ctypes
+import hashlib
+import os
+import re
+import stat
+import sys
+import tempfile
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+
+MAX_CONFIG_BYTES = 4 * 1024 * 1024
+source_path, active_path = (os.path.abspath(path) for path in sys.argv[1:3])
+mutation_token = sys.argv[3]
+if re.fullmatch(r"[0-9a-f]{32}", mutation_token) is None:
+    raise RuntimeError("comment continuity mutation token is invalid")
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def require_private_parent(path: str) -> str:
+    parent = os.path.dirname(path)
+    info = os.lstat(parent)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        fail("configuration parent is not private current-user custody")
+    return parent
+
+
+def read_stable(path: str) -> tuple[bytes, os.stat_result]:
+    require_private_parent(path)
+    named_before = os.lstat(path)
+    if (
+        stat.S_ISLNK(named_before.st_mode)
+        or not stat.S_ISREG(named_before.st_mode)
+        or named_before.st_uid != os.geteuid()
+        or named_before.st_nlink != 1
+        or named_before.st_size <= 0
+        or named_before.st_size > MAX_CONFIG_BYTES
+    ):
+        fail("configuration source is not one bounded current-user-owned regular file")
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened_before = os.fstat(descriptor)
+        if identity(opened_before) != identity(named_before):
+            fail("configuration source changed while opening")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, MAX_CONFIG_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_CONFIG_BYTES:
+                fail("configuration source exceeds its size bound")
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named_after = os.lstat(path)
+    if identity(opened_after) != identity(opened_before) or identity(named_after) != identity(named_before):
+        fail("configuration source changed while reading")
+    payload = b"".join(chunks)
+    if len(payload) != named_before.st_size:
+        fail("configuration source length changed while reading")
+    return payload, named_before
+
+
+def scalar_ranges(node: Node) -> tuple[tuple[int, int], ...]:
+    if isinstance(node, ScalarNode):
+        return ((node.start_mark.index, node.end_mark.index),)
+    if isinstance(node, MappingNode):
+        children = [child for pair in node.value for child in pair]
+    elif isinstance(node, SequenceNode):
+        children = list(node.value)
+    else:
+        children = []
+    return tuple(item for child in children for item in scalar_ranges(child))
+
+
+def parsed_mapping(text: str, label: str) -> dict[object, object]:
+    try:
+        value = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError, UnicodeError) as exc:
+        fail(f"{label} is not safe YAML: {exc}")
+    if not isinstance(value, dict):
+        fail(f"{label} must contain one YAML mapping")
+    return value
+
+
+def comments(payload: bytes, label: str) -> tuple[str, ...]:
+    try:
+        text = payload.decode("utf-8")
+        root = yaml.compose(text, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError, UnicodeError) as exc:
+        fail(f"{label} comments could not be parsed safely: {exc}")
+    if not isinstance(root, MappingNode):
+        fail(f"{label} must contain one YAML mapping")
+
+    ranges = sorted(scalar_ranges(root))
+    range_index = 0
+    found: list[str] = []
+    cursor = 0
+    for raw_line in text.splitlines(keepends=True):
+        for index, character in enumerate(raw_line):
+            absolute = cursor + index
+            if character != "#" or (index > 0 and not raw_line[index - 1].isspace()):
+                continue
+            while range_index < len(ranges) and ranges[range_index][1] <= absolute:
+                range_index += 1
+            inside_scalar = (
+                range_index < len(ranges)
+                and ranges[range_index][0] <= absolute < ranges[range_index][1]
+            )
+            if not inside_scalar:
+                found.append(raw_line[index:].rstrip("\r\n"))
+                break
+        cursor += len(raw_line)
+    return tuple(found)
+
+
+def named_inode_matches(path: str, expected: os.stat_result) -> bool:
+    try:
+        observed = os.lstat(path)
+    except OSError:
+        return False
+    return os.path.samestat(observed, expected)
+
+
+def atomic_exchange(left: str, right: str) -> None:
+    parent = os.path.dirname(left)
+    if parent != os.path.dirname(right):
+        fail("comment continuity exchange crossed configuration directories")
+    descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            function = library.renameatx_np
+        elif sys.platform.startswith("linux"):
+            function = library.renameat2
+        else:
+            fail("atomic comment continuity exchange is unsupported")
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        result = function(
+            descriptor,
+            os.fsencode(os.path.basename(left)),
+            descriptor,
+            os.fsencode(os.path.basename(right)),
+            0x2,  # RENAME_EXCHANGE on Linux, RENAME_SWAP on macOS.
+        )
+        if result != 0:
+            fail(f"atomic comment continuity exchange failed with errno {ctypes.get_errno()}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def same_cas_source(
+    payload: bytes,
+    observed: os.stat_result,
+    expected_payload: bytes,
+    expected: os.stat_result,
+) -> bool:
+    return payload == expected_payload and (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_uid,
+        observed.st_gid,
+        observed.st_nlink,
+        observed.st_size,
+        observed.st_mtime_ns,
+    ) == (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode,
+        expected.st_uid,
+        expected.st_gid,
+        expected.st_nlink,
+        expected.st_size,
+        expected.st_mtime_ns,
+    )
+
+
+source, _ = read_stable(source_path)
+active, active_snapshot = read_stable(active_path)
+source_comments = comments(source, "pre-bridge configuration")
+active_comments = collections.Counter(comments(active, "bridge configuration"))
+missing: list[str] = []
+for comment in source_comments:
+    if active_comments[comment] > 0:
+        active_comments[comment] -= 1
+    else:
+        missing.append(comment)
+
+if not missing:
+    print(0)
+    raise SystemExit(0)
+
+active_text = active.decode("utf-8")
+newline = "\r\n" if "\r\n" in active_text else "\n"
+prefix = "".join(comment + newline for comment in missing).encode("utf-8")
+candidate = prefix + active
+if len(candidate) > MAX_CONFIG_BYTES:
+    fail("comment-preserving bridge configuration exceeds its size bound")
+try:
+    before = parsed_mapping(active_text, "bridge configuration")
+    after = parsed_mapping(candidate.decode("utf-8"), "comment-preserving bridge configuration")
+    semantically_equal = before == after
+except (RecursionError, TypeError, ValueError) as exc:
+    fail(f"comment continuity comparison failed safely: {exc}")
+if not semantically_equal:
+    fail("restoring comments changed bridge configuration semantics")
+
+parent = require_private_parent(active_path)
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(active_path)}.upgrade-{mutation_token}.",
+    suffix=".tmp",
+    dir=parent,
+)
+swapped = False
+try:
+    os.fchmod(descriptor, stat.S_IMODE(active_snapshot.st_mode))
+    os.fchown(descriptor, active_snapshot.st_uid, active_snapshot.st_gid)
+    view = memoryview(candidate)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            fail("comment-preserving bridge configuration write stalled")
+        view = view[written:]
+    os.fsync(descriptor)
+    candidate_snapshot = os.fstat(descriptor)
+    atomic_exchange(active_path, temporary)
+    swapped = True
+    try:
+        previous, previous_snapshot = read_stable(temporary)
+        if not same_cas_source(previous, previous_snapshot, active, active_snapshot):
+            fail("bridge configuration changed before comment continuity activation")
+        committed, committed_snapshot = read_stable(active_path)
+        if (
+            committed != candidate
+            or hashlib.sha256(committed).digest() != hashlib.sha256(candidate).digest()
+            or not os.path.samestat(committed_snapshot, candidate_snapshot)
+        ):
+            fail("comment-preserving bridge configuration was not committed exactly")
+        os.unlink(temporary)
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        if named_inode_matches(active_path, candidate_snapshot) and os.path.lexists(temporary):
+            atomic_exchange(active_path, temporary)
+            swapped = False
+        raise
+    temporary = ""
+finally:
+    os.close(descriptor)
+    if temporary and not swapped:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+committed, _ = read_stable(active_path)
+if committed != candidate or hashlib.sha256(committed).digest() != hashlib.sha256(candidate).digest():
+    fail("comment-preserving bridge configuration was not committed exactly")
+print(len(missing))
+# END BRIDGE_COMMENT_RESTORE_PY
+PY
+    )" || die "Could not preserve pre-bridge YAML comments without changing bridge semantics"
+
+    [[ "${result}" =~ ^[0-9]+$ ]] \
+        || die "Bridge comment continuity verifier returned an invalid result"
+    if [[ "${result}" -gt 0 ]]; then
+        ok "Preserved ${result} pre-bridge YAML comment(s) in the verified bridge state"
+    fi
+}
+
 bridge_phase1_state_transaction() {
     local operation="$1"
     local snapshot_root="${BACKUP_DIR}/phase1-state"
@@ -5210,6 +5543,17 @@ if operation == "snapshot":
     os.chmod(manifest_path, 0o600)
     fsync_path_tree(manifest_path)
     fsync_directory(snapshot_root)
+elif operation == "config-comment-source":
+    source_entries, _source_manifest = load_source_manifest()
+    config_entry = source_entries[0]
+    if config_entry.get("target") != config_path:
+        raise RuntimeError("phase-one configuration snapshot target changed")
+    if not config_entry["existed"]:
+        print("")
+    else:
+        if config_entry.get("kind") != "file" or config_entry.get("backup") != "item-0":
+            raise RuntimeError("phase-one configuration snapshot is not one regular file")
+        print(os.path.join(snapshot_root, "item-0"))
 elif operation == "seal-active":
     source_entries, source_manifest = load_source_manifest()
     if journal.get("state_snapshot_ready") is not True:
@@ -6810,6 +7154,7 @@ if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]; then
 fi
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
+    restore_bridge_config_comments
     bridge_phase1_cleanup_owned_temporaries \
         || die "Could not remove resolver-owned mutation temporaries before sealing bridge state"
     bridge_phase1_state_transaction seal-active \
