@@ -265,6 +265,35 @@ def _bridge_comment_restore_program() -> str:
     return source[start:end] + "\n"
 
 
+def _phase_one_recovery_cleanup_program() -> str:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    recovery_start = source.index("recover_interrupted_bridge_phase1()")
+    cleanup_start = source.index("def cleanup_owned_temporaries() -> None:", recovery_start)
+    cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
+    cleanup = source[cleanup_start:cleanup_end]
+    return (
+        "import os\n"
+        "import re\n"
+        "import stat\n"
+        "import sys\n\n"
+        "data_home, openclaw_home, config_path, plan_id, openclaw_existed = sys.argv[1:]\n"
+        "openclaw_home_existed = openclaw_existed == '1'\n"
+        "uid = os.geteuid()\n\n"
+        "def identity(path: str) -> dict[str, int]:\n"
+        "    info = os.lstat(path)\n"
+        "    return {'device': info.st_dev, 'inode': info.st_ino}\n\n"
+        "path_identities = {\n"
+        "    'data_dir': identity(data_home),\n"
+        "    'config_parent': identity(os.path.dirname(config_path) or '.'),\n"
+        "    'openclaw_home': identity(\n"
+        "        openclaw_home if openclaw_home_existed else (os.path.dirname(openclaw_home) or '.')\n"
+        "    ),\n"
+        "}\n\n"
+        f"{cleanup}\n\n"
+        "cleanup_owned_temporaries()\n"
+    )
+
+
 def _run_bridge_comment_restore(
     source_path: Path,
     active_path: Path,
@@ -285,6 +314,36 @@ def _run_bridge_comment_restore(
         text=True,
         capture_output=True,
         check=False,
+        timeout=15,
+    )
+
+
+def _run_phase_one_recovery_cleanup(
+    data_home: Path,
+    openclaw_home: Path,
+    config_path: Path,
+    plan_id: str,
+    *,
+    openclaw_home_existed: bool = True,
+    program: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-",
+            str(data_home),
+            str(openclaw_home),
+            str(config_path),
+            plan_id,
+            "1" if openclaw_home_existed else "0",
+        ],
+        input=program or _phase_one_recovery_cleanup_program(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
     )
 
 
@@ -304,6 +363,19 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     assert "${BACKUP_DIR}/config.yaml" not in restore_function
     assert "pre-bridge-config.yaml" not in source
     assert "DEFENSECLAW_OBSERVABILITY_V8_PRESERVED_COMMENTS_PATH" not in source
+    assert restore_function.count("same_cas_source(") == 4
+    assert "committed != candidate" not in restore_function
+    assert "os.path.samestat(committed_snapshot" not in restore_function
+
+    recovery_start = source.index("recover_interrupted_bridge_phase1()")
+    resume = source[
+        source.index("if resume_unsealed_bridge:", recovery_start) : source.index(
+            "removed_activation_temp = False", recovery_start
+        )
+    ]
+    assert resume.index("cleanup_owned_temporaries()") < resume.index(
+        'print(f"bridge\\t{bridge_version}\\t{plan_id}")'
+    )
 
 
 def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:
@@ -405,6 +477,126 @@ def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Pat
     assert completed.returncode != 0
     assert "changed before comment continuity activation" in completed.stderr
     assert active.read_bytes().endswith(b"# concurrent edit\n")
+
+
+@pytest.mark.parametrize("commit_check", ["pre-unlink", "final-readback"])
+def test_bridge_comment_restore_commit_checks_include_metadata(
+    tmp_path: Path,
+    commit_check: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source.yaml"
+    active = tmp_path / "active.yaml"
+    source.write_text("# guide\nconfig_version: 7\n", encoding="utf-8")
+    active.write_text("config_version: 7\n", encoding="utf-8")
+    source.chmod(0o600)
+    active.chmod(0o640)
+    program = _bridge_comment_restore_program()
+    if commit_check == "pre-unlink":
+        needle = "        committed, committed_snapshot = read_stable(active_path)"
+        replacement = f"        os.chmod(active_path, 0o600)\n{needle}"
+    else:
+        needle = "\ncommitted, committed_snapshot = read_stable(active_path)"
+        replacement = f"\nos.chmod(active_path, 0o600){needle}"
+    assert program.count(needle) == 1
+    program = program.replace(needle, replacement, 1)
+
+    completed = _run_bridge_comment_restore(source, active, program=program)
+
+    assert completed.returncode != 0
+    assert "was not committed exactly" in completed.stderr
+
+
+def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_closes(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    data_home = tmp_path / "data"
+    openclaw_home = tmp_path / "openclaw"
+    data_home.mkdir(mode=0o700)
+    openclaw_home.mkdir(mode=0o700)
+    source = tmp_path / "source.yaml"
+    active = tmp_path / "active.yaml"
+    source.write_text("# operator guide\nconfig_version: 7\n", encoding="utf-8")
+    original_active = b"config_version: 7\nsecret: old-value\n"
+    active.write_bytes(original_active)
+    source.chmod(0o600)
+    active.chmod(0o600)
+    token = "a" * 32
+    program = _bridge_comment_restore_program()
+    needle = "    atomic_exchange(active_path, temporary)\n    swapped = True"
+    assert program.count(needle) == 1
+    program = program.replace(
+        needle,
+        "    atomic_exchange(active_path, temporary)\n"
+        "    os.kill(os.getpid(), 9)\n"
+        "    swapped = True",
+        1,
+    )
+
+    crashed = _run_bridge_comment_restore(source, active, program=program)
+
+    assert crashed.returncode < 0
+    assert active.read_bytes() == b"# operator guide\n" + original_active
+    displaced = list(tmp_path.glob(f".active.yaml.upgrade-{token}.*.tmp"))
+    assert len(displaced) == 1
+    assert displaced[0].read_bytes() == original_active
+
+    cleaned = _run_phase_one_recovery_cleanup(
+        data_home,
+        openclaw_home,
+        active,
+        f"phase-one-{token}",
+        openclaw_home_existed=False,
+    )
+
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert not displaced[0].exists()
+    assert active.read_bytes() == b"# operator guide\n" + original_active
+
+
+def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    token = "a" * 32
+    data_home = tmp_path / "data"
+    openclaw_home = tmp_path / "openclaw"
+    config_parent = tmp_path / "config-root"
+    data_home.mkdir(mode=0o700)
+    openclaw_home.mkdir(mode=0o700)
+    config_parent.mkdir(mode=0o700)
+    config_path = config_parent / "active.yaml"
+    config_path.write_text("config_version: 7\n", encoding="utf-8")
+    temporary_name = f".active.yaml.upgrade-{token}.owned.tmp"
+    (config_parent / temporary_name).write_text("bound-sensitive-bytes\n", encoding="utf-8")
+    displaced_parent = Path(f"{config_parent}.bound")
+    program = _phase_one_recovery_cleanup_program()
+    needle = "            cleanup_descriptor(descriptor)\n            validate_bound_descriptor("
+    assert program.count(needle) == 1
+    program = program.replace(
+        needle,
+        "            if name == 'config_parent':\n"
+        "                os.rename(path, path + '.bound')\n"
+        "                os.mkdir(path, 0o700)\n"
+        f"                with open(os.path.join(path, {temporary_name!r}), 'w', encoding='utf-8') as stream:\n"
+        "                    stream.write('replacement-must-survive\\n')\n"
+        "            cleanup_descriptor(descriptor)\n"
+        "            validate_bound_descriptor(",
+        1,
+    )
+
+    completed = _run_phase_one_recovery_cleanup(
+        data_home,
+        openclaw_home,
+        config_path,
+        f"phase-one-{token}",
+        program=program,
+    )
+
+    assert completed.returncode != 0
+    assert "config_parent identity changed during temporary cleanup" in completed.stderr
+    assert not (displaced_parent / temporary_name).exists()
+    replacement = config_parent / temporary_name
+    assert replacement.read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
 @pytest.mark.parametrize(
@@ -786,12 +978,13 @@ def test_success_receipt_verifier_uses_canonical_audit_and_queue_acknowledgement
     verifier = RECEIPT_CHECK.read_text(encoding="utf-8")
 
     assert "scripts/check_upgrade_receipt.py" in harness
+    assert 'REQUIRED_BRIDGE_VERSION="${REQUIRED_BRIDGE_VERSION:-}"' in harness
     assert "expected exactly one terminal target receipt" not in harness
     assert "expected one native-v8 target receipt" not in harness
     assert "assert_staged_success_receipt" not in protocol
     assert "FROM audit_events" in verifier
     assert "canonical target receipt" in verifier
-    assert "if not queued_target:" in verifier
+    assert "if not queued_target and remaining > 0:" in verifier
 
 
 def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:

@@ -8002,7 +8002,7 @@ def _execute_hard_cut_rollback(
                         os_name=plan.os_name,
                     )
                     bridge_healthy = True
-                except SystemExit:
+                except (OSError, SystemExit):
                     bridge_healthy = False
             else:
                 bridge_healthy = False

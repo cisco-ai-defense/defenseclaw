@@ -1994,6 +1994,50 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             self.assertEqual(receipt.status, "failed")
             self.assertEqual(receipt.failure_code, "install_failed")
 
+    def test_rollback_retries_when_first_restored_health_probe_raises_oserror(self):
+        with TemporaryDirectory() as root:
+            app, plan, config_path, _cursor_path, _gateway_payload, home = self._prepare_plan(root)
+            receipt_path = begin_upgrade_receipt(
+                app.cfg.data_dir,
+                from_version="0.8.4",
+                target_version="0.8.5",
+                artifacts_verified=True,
+            )
+
+            with (
+                patch.dict(os.environ, {"HOME": home, "DEFENSECLAW_CONFIG": config_path}),
+                patch("defenseclaw.commands.cmd_upgrade._install_wheel"),
+                patch("defenseclaw.commands.cmd_upgrade._verify_restored_bridge_artifacts"),
+                patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._poll_installed_health",
+                    side_effect=[OSError("health probe could not start"), None],
+                ) as poll_health,
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_silent",
+                    return_value=True,
+                ) as run_silent,
+            ):
+                restored = _execute_hard_cut_rollback(
+                    plan,
+                    app,
+                    receipt_path,
+                    failure_code="health_check_failed",
+                    health_timeout=3,
+                )
+
+            self.assertTrue(restored)
+            self.assertEqual(poll_health.call_count, 2)
+            start_calls = [
+                call
+                for call in run_silent.call_args_list
+                if call.args[0] == [plan.active_gateway_path, "start"]
+            ]
+            self.assertEqual(len(start_calls), 2)
+            receipt = load_upgrade_receipt(receipt_path)
+            self.assertEqual(receipt.status, "rolled_back")
+            self.assertEqual(receipt.failure_code, "health_check_failed")
+
     def test_recovery_journal_round_trips_private_secret_free_custody(self):
         with TemporaryDirectory() as root:
             app, plan, config_path, _cursor_path, _gateway_payload, home = self._prepare_plan(

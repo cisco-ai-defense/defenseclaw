@@ -2587,6 +2587,150 @@ if active_snapshot_available:
         raise RuntimeError("phase-one active manifest custody digest changed")
 
 
+def cleanup_owned_temporaries() -> None:
+    token = plan_id.removeprefix("phase-one-")
+    generic_prefix = f".tmp.upgrade-{token}."
+    cursor_prefix = f".migration_state.upgrade-{token}."
+    tagged_writer = re.compile(
+        rf"^\..+\.upgrade-{re.escape(token)}\.[A-Za-z0-9_-]+\.tmp$"
+    )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+    def expected_identity(name: str) -> dict:
+        expected = path_identities.get(name)
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"device", "inode"}
+            or isinstance(expected.get("device"), bool)
+            or isinstance(expected.get("inode"), bool)
+            or not isinstance(expected.get("device"), int)
+            or not isinstance(expected.get("inode"), int)
+        ):
+            raise RuntimeError("phase-one cleanup root identity changed")
+        return expected
+
+    def validate_bound_descriptor(
+        name: str,
+        path: str,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> None:
+        expected = expected_identity(name)
+        try:
+            named = os.lstat(path)
+        except OSError as exc:
+            raise RuntimeError(f"phase-one {name} disappeared during temporary cleanup") from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(opened.st_mode)
+            or opened.st_dev != expected["device"]
+            or opened.st_ino != expected["inode"]
+            or not os.path.samestat(named, opened)
+            or not os.path.samestat(os.fstat(descriptor), opened)
+        ):
+            raise RuntimeError(f"phase-one {name} identity changed during temporary cleanup")
+
+    def cleanup_descriptor(descriptor: int) -> None:
+        with os.scandir(descriptor) as entries:
+            members = list(entries)
+        if len(members) > 100000:
+            raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
+        for entry in members:
+            owned = (
+                entry.name.startswith(generic_prefix)
+                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
+                or tagged_writer.fullmatch(entry.name) is not None
+            )
+            if not owned:
+                continue
+            info = entry.stat(follow_symlinks=False)
+            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+                raise RuntimeError("phase-one owned temporary has an unsafe identity")
+            os.unlink(entry.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+
+    def cleanup_bound_root(name: str, path: str) -> None:
+        descriptor = os.open(path, directory_flags)
+        try:
+            opened = os.fstat(descriptor)
+            validate_bound_descriptor(name, path, descriptor, opened)
+            cleanup_descriptor(descriptor)
+            validate_bound_descriptor(name, path, descriptor, opened)
+        finally:
+            os.close(descriptor)
+
+    cleanup_bound_root("data_dir", data_home)
+    cleanup_bound_root("config_parent", os.path.dirname(config_path) or ".")
+    if openclaw_home_existed:
+        cleanup_bound_root("openclaw_home", openclaw_home)
+        return
+
+    # When OpenClaw did not exist at snapshot time, its recorded identity is
+    # the parent. Open the target-created child through that bound parent so a
+    # concurrent name replacement cannot redirect cleanup outside custody.
+    parent = os.path.dirname(openclaw_home) or "."
+    child_name = os.path.basename(openclaw_home)
+    if not child_name:
+        raise RuntimeError("phase-one absent OpenClaw path has no child name")
+    parent_descriptor = os.open(parent, directory_flags)
+    try:
+        parent_opened = os.fstat(parent_descriptor)
+        validate_bound_descriptor(
+            "openclaw_home", parent, parent_descriptor, parent_opened
+        )
+        try:
+            child_descriptor = os.open(
+                child_name,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            child_descriptor = -1
+        if child_descriptor >= 0:
+            try:
+                child_opened = os.fstat(child_descriptor)
+                child_named = os.stat(
+                    child_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(child_opened.st_mode)
+                    or stat.S_ISLNK(child_opened.st_mode)
+                    or child_opened.st_uid != uid
+                    or stat.S_IMODE(child_opened.st_mode) & 0o022
+                    or not os.path.samestat(child_named, child_opened)
+                ):
+                    raise RuntimeError(
+                        "target-created OpenClaw home is unsafe during temporary cleanup"
+                    )
+                cleanup_descriptor(child_descriptor)
+                child_named = os.stat(
+                    child_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not os.path.samestat(child_named, child_opened)
+                    or not os.path.samestat(os.fstat(child_descriptor), child_opened)
+                ):
+                    raise RuntimeError(
+                        "target-created OpenClaw home changed during temporary cleanup"
+                    )
+            finally:
+                os.close(child_descriptor)
+        validate_bound_descriptor(
+            "openclaw_home", parent, parent_descriptor, parent_opened
+        )
+    finally:
+        os.close(parent_descriptor)
+
+
 def restore_state_before_artifacts() -> None:
     global resume_unsealed_bridge
 
@@ -3038,6 +3182,11 @@ if resume_unsealed_bridge:
     if os.path.isdir(openclaw_home) and not os.path.islink(openclaw_home):
         fsync_directory(openclaw_home)
     fsync_directory(data_home)
+    # A crash after a plan-owned atomic writer published its canonical file
+    # can leave the displaced pre-write bytes in the authenticated temporary.
+    # Remove those owner-checked, token-bound files before the caller closes
+    # recovery custody around the resumed bridge.
+    cleanup_owned_temporaries()
     with open(journal, "rb") as stream:
         if json.load(stream).get("plan_id") != plan_id:
             raise RuntimeError("phase-one recovery journal changed before bridge resumption")
@@ -3161,35 +3310,6 @@ else:
         os.unlink(gateway_displaced)
         fsync_directory(install_dir)
 
-
-def cleanup_owned_temporaries() -> None:
-    token = plan_id.removeprefix("phase-one-")
-    generic_prefix = f".tmp.upgrade-{token}."
-    cursor_prefix = f".migration_state.upgrade-{token}."
-    tagged_writer = re.compile(
-        rf"^\..+\.upgrade-{re.escape(token)}\.[A-Za-z0-9_-]+\.tmp$"
-    )
-    roots = {data_home, os.path.dirname(config_path) or "."}
-    if os.path.isdir(openclaw_home) and not os.path.islink(openclaw_home):
-        roots.add(openclaw_home)
-    for root in roots:
-        with os.scandir(root) as entries:
-            members = list(entries)
-        if len(members) > 100000:
-            raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
-        for entry in members:
-            owned = (
-                entry.name.startswith(generic_prefix)
-                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
-                or tagged_writer.fullmatch(entry.name) is not None
-            )
-            if not owned:
-                continue
-            info = entry.stat(follow_symlinks=False)
-            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
-                raise RuntimeError("phase-one owned temporary has an unsafe identity")
-            os.unlink(entry.path)
-        fsync_directory(root)
 
 cleanup_owned_temporaries()
 
@@ -4739,7 +4859,6 @@ from __future__ import annotations
 
 import collections
 import ctypes
-import hashlib
 import os
 import re
 import stat
@@ -5011,10 +5130,11 @@ try:
         if not same_cas_source(previous, previous_snapshot, active, active_snapshot):
             fail("bridge configuration changed before comment continuity activation")
         committed, committed_snapshot = read_stable(active_path)
-        if (
-            committed != candidate
-            or hashlib.sha256(committed).digest() != hashlib.sha256(candidate).digest()
-            or not os.path.samestat(committed_snapshot, candidate_snapshot)
+        if not same_cas_source(
+            committed,
+            committed_snapshot,
+            candidate,
+            candidate_snapshot,
         ):
             fail("comment-preserving bridge configuration was not committed exactly")
         os.unlink(temporary)
@@ -5037,8 +5157,13 @@ finally:
         except FileNotFoundError:
             pass
 
-committed, _ = read_stable(active_path)
-if committed != candidate or hashlib.sha256(committed).digest() != hashlib.sha256(candidate).digest():
+committed, committed_snapshot = read_stable(active_path)
+if not same_cas_source(
+    committed,
+    committed_snapshot,
+    candidate,
+    candidate_snapshot,
+):
     fail("comment-preserving bridge configuration was not committed exactly")
 print(len(missing))
 # END BRIDGE_COMMENT_RESTORE_PY

@@ -76,10 +76,20 @@ def _queued_receipts(data_dir: Path) -> list[dict[str, Any]]:
     return receipts
 
 
-def _canonical_receipts(database: Path, source: str, target: str) -> list[tuple[Any, ...]]:
+def _canonical_receipts(
+    database: Path,
+    source: str,
+    target: str,
+    *,
+    busy_timeout_seconds: float,
+) -> list[tuple[Any, ...]]:
     if not database.is_file():
         return []
-    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    connection = sqlite3.connect(
+        database.resolve().as_uri() + "?mode=ro",
+        uri=True,
+        timeout=max(0.0, min(1.0, busy_timeout_seconds)),
+    )
     try:
         rows = connection.execute(
             """SELECT id, bucket, signal, event_name, source, mandatory,
@@ -186,7 +196,12 @@ def check_upgrade_receipt(
                 raise ReceiptCheckError("prior queued target attempt is invalid")
 
         try:
-            canonical = _canonical_receipts(database, source, target)
+            canonical = _canonical_receipts(
+                database,
+                source,
+                target,
+                busy_timeout_seconds=max(0.0, deadline - time.monotonic()),
+            )
         except sqlite3.Error:
             canonical = []
         last_canonical_count = len(canonical)
@@ -194,19 +209,20 @@ def check_upgrade_receipt(
         canonical_success = [row for row in canonical if _validate_attempt(row, source, target) == "succeeded"]
         if len(canonical_success) > 1:
             raise ReceiptCheckError("canonical audit contains duplicate successful target receipts")
+        remaining = max(0.0, deadline - time.monotonic())
         if canonical_success:
             receipt_id = canonical_success[0][0]
             if queued_success and queued_success[0].get("receipt_id") != receipt_id:
                 raise ReceiptCheckError("queued and canonical successful target receipts disagree")
-            if not queued_target:
+            if not queued_target and remaining > 0:
                 return
 
-        if time.monotonic() >= deadline:
+        if remaining == 0:
             raise ReceiptCheckError(
                 "expected one admitted and acknowledged target receipt; "
                 f"canonical={last_canonical_count} queued={last_queued_count}"
             )
-        time.sleep(POLL_SECONDS)
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
 def main() -> int:

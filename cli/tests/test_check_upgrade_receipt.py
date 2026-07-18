@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from pathlib import Path
 
 import pytest
 import yaml
 
+import scripts.check_upgrade_receipt as receipt_check
 from scripts.check_upgrade_receipt import ReceiptCheckError, _queued_receipts, check_upgrade_receipt
 
 
@@ -187,6 +189,43 @@ def test_queue_scan_tolerates_gateway_acknowledgement_unlink(
     monkeypatch.setattr(Path, "lstat", unlink_during_lstat)
 
     assert _queued_receipts(data_dir) == []
+
+
+def test_locked_database_respects_short_caller_deadline(tmp_path: Path) -> None:
+    data_dir, database = _fixture(tmp_path)
+    lock = sqlite3.connect(database, timeout=0)
+    lock.execute("BEGIN EXCLUSIVE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(ReceiptCheckError, match="canonical=0 queued=0"):
+            _check(data_dir, timeout=0.05)
+    finally:
+        elapsed = time.monotonic() - started
+        lock.rollback()
+        lock.close()
+
+    assert elapsed < 0.2
+
+
+def test_slow_canonical_read_cannot_succeed_after_caller_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir, database = _fixture(tmp_path)
+    _insert(database, _facts(str(uuid.uuid4())))
+    now = [100.0]
+    real_canonical_receipts = receipt_check._canonical_receipts
+
+    def slow_canonical_receipts(*args: object, **kwargs: object):
+        rows = real_canonical_receipts(*args, **kwargs)
+        now[0] = 100.1
+        return rows
+
+    monkeypatch.setattr(receipt_check.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(receipt_check, "_canonical_receipts", slow_canonical_receipts)
+
+    with pytest.raises(ReceiptCheckError, match="canonical=1 queued=0"):
+        _check(data_dir, timeout=0.05)
 
 
 def test_rejects_duplicate_canonical_target_receipts(tmp_path: Path) -> None:
