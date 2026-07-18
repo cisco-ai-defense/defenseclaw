@@ -21,6 +21,7 @@ from unittest.mock import ANY, Mock, patch
 import click
 import defenseclaw.commands.cmd_upgrade as cmd_upgrade_module
 import pytest
+import yaml
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_upgrade import (
     _INSTALLED_HEALTH_SCRIPT,
@@ -109,7 +110,7 @@ from defenseclaw.commands.cmd_upgrade import (
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
 from defenseclaw.context import AppContext
-from defenseclaw.migrations import ObservabilityV8PreflightBinding
+from defenseclaw.migrations import ObservabilityV8PreflightBinding, run_migrations
 from defenseclaw.upgrade_receipt import (
     UPGRADE_RECEIPT_DIRECTORY,
     begin_upgrade_receipt,
@@ -684,6 +685,8 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
         self,
         root: str,
         *,
+        config_payload: bytes | None = None,
+        cursor_payload: bytes | None = None,
         active_gateway_payload: bytes | None = None,
         environment_payload: bytes | None = None,
         environment_lock_payload: bytes | None = None,
@@ -718,14 +721,16 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
         cursor_path = os.path.join(data_dir, ".migration_state.json")
         with open(config_path, "wb") as stream:
             stream.write(
-                (
+                config_payload
+                if config_payload is not None
+                else (
                     f"config_version: 7\ndata_dir: {data_dir}\ngateway:\n  api_port: 18970\n"
                     if default_controller_config
                     else "config_version: 7\ngateway:\n  api_port: 18970\n"
                 ).encode()
             )
         with open(cursor_path, "wb") as stream:
-            stream.write(b'{"schema":1,"applied":["0.8.4"]}\n')
+            stream.write(cursor_payload if cursor_payload is not None else b'{"schema":1,"applied":["0.8.4"]}\n')
         if environment_payload is not None:
             with open(os.path.join(data_dir, ".env"), "wb") as stream:
                 stream.write(environment_payload)
@@ -1542,8 +1547,15 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
 
     def test_post_migration_health_failure_restores_exact_bridge_state_and_records_outcome(self):
         with TemporaryDirectory() as root:
+            root = os.path.realpath(root)
+            bridge_config = (
+                b"# operator upgrade note\nconfig_version: 7\ngateway:\n  api_port: 18970 # keep this port\n"
+            )
+            bridge_cursor = b'{"schema":1,"applied":["0.3.0","0.4.0","0.5.0","0.7.0","0.8.0"]}\n'
             app, plan, config_path, cursor_path, gateway_payload, home = self._prepare_plan(
                 root,
+                config_payload=bridge_config,
+                cursor_payload=bridge_cursor,
                 environment_lock_payload=b"bridge lock sentinel\n",
             )
             with open(config_path, "wb") as stream:
@@ -1589,7 +1601,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                 patch("defenseclaw.commands.cmd_upgrade._verify_restored_bridge_artifacts"),
                 patch(
                     "defenseclaw.commands.cmd_upgrade._run_silent",
-                    return_value=True,
+                    side_effect=[True, False, True],
                 ) as run_silent,
                 patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"),
                 patch("defenseclaw.commands.cmd_upgrade._poll_installed_health") as poll_health,
@@ -1604,9 +1616,9 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
 
             self.assertTrue(restored)
             with open(config_path, "rb") as stream:
-                self.assertEqual(stream.read(), b"config_version: 7\ngateway:\n  api_port: 18970\n")
+                self.assertEqual(stream.read(), bridge_config)
             with open(cursor_path, "rb") as stream:
-                self.assertEqual(stream.read(), b'{"schema":1,"applied":["0.8.4"]}\n')
+                self.assertEqual(stream.read(), bridge_cursor)
             self.assertFalse(os.path.exists(environment_path))
             self.assertEqual(Path(environment_lock_path).read_bytes(), b"bridge lock sentinel\n")
             self.assertEqual(stat.S_IMODE(os.stat(environment_lock_path).st_mode), 0o644)
@@ -1627,7 +1639,61 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             )
             gateway_commands = [call.args[0] for call in run_silent.call_args_list]
             self.assertIn([plan.active_gateway_path, "stop"], gateway_commands)
-            self.assertIn([plan.active_gateway_path, "start"], gateway_commands)
+            self.assertEqual(gateway_commands.count([plan.active_gateway_path, "start"]), 2)
+            start_calls = [call for call in run_silent.call_args_list if call.args[0][-1] == "start"]
+            self.assertTrue(all(call.kwargs["timeout_seconds"] == 90 for call in start_calls))
+
+            # A later direct bridge-to-target retry must snapshot the restored,
+            # comment-bearing bridge bytes, not a lossy phase-two derivative.
+            retry_backup_dir = os.path.join(os.path.dirname(plan.backup_dir), "upgrade-retry")
+            os.mkdir(retry_backup_dir, 0o700)
+            with (
+                patch.dict(os.environ, {"HOME": home, "DEFENSECLAW_CONFIG": config_path}),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.shutil.which",
+                    return_value="/usr/bin/cosign",
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                    return_value=Mock(returncode=0),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._capture_source_gateway_running_state",
+                    return_value=True,
+                ),
+            ):
+                retry_plan = _prepare_hard_cut_rollback_plan(
+                    app.cfg,
+                    retry_backup_dir,
+                    source_version="0.8.4",
+                    os_name="linux",
+                    arch="amd64",
+                    staged_artifact_dir=os.path.join(root, "staged-handoff"),
+                    release_provenance=plan.release_provenance,
+                )
+            self.assertEqual(Path(retry_plan.state_files[0].backup_path).read_bytes(), bridge_config)
+
+            with (
+                patch("defenseclaw.__version__", "0.8.5"),
+                patch(
+                    "defenseclaw.migrations.inspect_v8_config",
+                    return_value=types.SimpleNamespace(valid=True, config_version=8),
+                ),
+            ):
+                applied = run_migrations(
+                    "0.8.4",
+                    "0.8.5",
+                    app.cfg.claw.home_dir,
+                    app.cfg.data_dir,
+                    upgrade_handles_local_bundle=True,
+                )
+
+            self.assertEqual(applied, 1)
+            migrated = Path(config_path).read_text(encoding="utf-8")
+            self.assertEqual(yaml.safe_load(migrated)["config_version"], 8)
+            self.assertIn("# operator upgrade note", migrated)
+            self.assertIn("# keep this port", migrated)
+            self.assertIn("0.8.5", Path(cursor_path).read_text(encoding="utf-8"))
             self.assertNotIn(["defenseclaw-gateway", "stop"], gateway_commands)
             self.assertNotIn(["defenseclaw-gateway", "start"], gateway_commands)
             receipt = load_upgrade_receipt(receipt_path)
@@ -1927,6 +1993,50 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             receipt = load_upgrade_receipt(receipt_path)
             self.assertEqual(receipt.status, "failed")
             self.assertEqual(receipt.failure_code, "install_failed")
+
+    def test_rollback_retries_when_first_restored_health_probe_raises_oserror(self):
+        with TemporaryDirectory() as root:
+            app, plan, config_path, _cursor_path, _gateway_payload, home = self._prepare_plan(root)
+            receipt_path = begin_upgrade_receipt(
+                app.cfg.data_dir,
+                from_version="0.8.4",
+                target_version="0.8.5",
+                artifacts_verified=True,
+            )
+
+            with (
+                patch.dict(os.environ, {"HOME": home, "DEFENSECLAW_CONFIG": config_path}),
+                patch("defenseclaw.commands.cmd_upgrade._install_wheel"),
+                patch("defenseclaw.commands.cmd_upgrade._verify_restored_bridge_artifacts"),
+                patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._poll_installed_health",
+                    side_effect=[OSError("health probe could not start"), None],
+                ) as poll_health,
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_silent",
+                    return_value=True,
+                ) as run_silent,
+            ):
+                restored = _execute_hard_cut_rollback(
+                    plan,
+                    app,
+                    receipt_path,
+                    failure_code="health_check_failed",
+                    health_timeout=3,
+                )
+
+            self.assertTrue(restored)
+            self.assertEqual(poll_health.call_count, 2)
+            start_calls = [
+                call
+                for call in run_silent.call_args_list
+                if call.args[0] == [plan.active_gateway_path, "start"]
+            ]
+            self.assertEqual(len(start_calls), 2)
+            receipt = load_upgrade_receipt(receipt_path)
+            self.assertEqual(receipt.status, "rolled_back")
+            self.assertEqual(receipt.failure_code, "health_check_failed")
 
     def test_recovery_journal_round_trips_private_secret_free_custody(self):
         with TemporaryDirectory() as root:
@@ -3289,11 +3399,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             "a" * 32,
         )
         self.assertEqual(
-            json.loads(
-                child_environment[
-                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
-                ]
-            ),
+            json.loads(child_environment["DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"]),
             binding.to_payload(),
         )
 
@@ -3979,9 +4085,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 )
             )
             self.require_stable_preflight_source = stack.enter_context(
-                patch(
-                    "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
-                )
+                patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged")
             )
             self.write_recovery_journal = stack.enter_context(
                 patch(

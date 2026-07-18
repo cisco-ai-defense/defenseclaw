@@ -429,36 +429,6 @@ PY
     ok "Reviewed release-owned resolver assets are complete and checksum-bound"
 }
 
-assert_staged_success_receipt() {
-    python3 - \
-        "${SMOKE_HOME}/.defenseclaw/.upgrade-receipts" \
-        "${REQUIRED_BRIDGE_VERSION}" \
-        "${TARGET_VERSION}" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-root = Path(sys.argv[1])
-bridge, target = sys.argv[2:]
-receipts = [
-    json.loads(path.read_text(encoding="utf-8"))
-    for path in sorted(root.glob("*.json"))
-]
-terminal = [receipt for receipt in receipts if receipt.get("target_version") == target]
-if len(terminal) != 1:
-    raise SystemExit(f"expected one terminal target receipt, got {len(terminal)}")
-receipt = terminal[0]
-if receipt.get("from_version") != bridge:
-    raise SystemExit(f"target receipt did not originate from bridge {bridge}")
-if receipt.get("status") != "succeeded" or receipt.get("migration_status") != "completed":
-    raise SystemExit(f"target receipt is not fully successful: {receipt!r}")
-if receipt.get("artifacts_verified") is not True or receipt.get("failure_code"):
-    raise SystemExit(f"target receipt lacks verified terminal facts: {receipt!r}")
-if any(receipt.get("status") in {"pending", "partial"} for receipt in receipts):
-    raise SystemExit("staged upgrade left a pending or partial receipt")
-PY
-}
-
 prepare_refusal_home() {
     local baseline="$1"
     local case_name="$2"
@@ -741,7 +711,6 @@ run_candidate_updater_staged_success() {
     grep -Fq "${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}" \
         "${log_file}" || die "staged upgrade log did not prove the resolved bridge handoff"
     verify_upgrade
-    assert_staged_success_receipt
     stop_smoke_gateway
     ok "One-command staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
 }

@@ -78,8 +78,13 @@ func (s *Sidecar) upgradeReceiptStartupReady() bool {
 		return false
 	}
 	snapshot := s.health.Snapshot()
-	return snapshot.API.State == StateRunning && snapshot.Config.State == StateRunning &&
-		snapshot.Telemetry.State == StateRunning
+	// Upgrade receipts have one mandatory destination: canonical local SQLite.
+	// External exporters may be failing while that compliance store is fully
+	// ready, and must not prevent the receipt from being admitted and
+	// acknowledged. The logger/emitter checks above prove the v8 pipeline is
+	// bound; Store.Ready proves its migrations, pragmas, durable-write canary,
+	// and post-migration path checks completed.
+	return snapshot.API.State == StateRunning && snapshot.Config.State == StateRunning && s.store.Ready()
 }
 
 // consumeUpgradeReceipts processes every bounded terminal receipt. afterPersist

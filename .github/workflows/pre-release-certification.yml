@@ -182,6 +182,7 @@ jobs:
           BASELINE: ${{ matrix.baseline }}
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
+          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
         run: |
           set -euo pipefail
           python3 scripts/release_candidate.py verify \

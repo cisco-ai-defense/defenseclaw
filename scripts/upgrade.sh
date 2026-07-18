@@ -2587,6 +2587,230 @@ if active_snapshot_available:
         raise RuntimeError("phase-one active manifest custody digest changed")
 
 
+def cleanup_owned_temporaries() -> None:
+    token = plan_id.removeprefix("phase-one-")
+    generic_prefix = f".tmp.upgrade-{token}."
+    cursor_prefix = f".migration_state.upgrade-{token}."
+    tagged_writer = re.compile(
+        rf"^\..+\.upgrade-{re.escape(token)}\.[A-Za-z0-9_-]+\.tmp$"
+    )
+    cleanup_quarantine = re.compile(
+        rf"^\.defenseclaw-cleanup-{re.escape(token)}-"
+        r"([0-9a-f]+)-([0-9a-f]+)-[0-9a-f]{32}\.quarantine$"
+    )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+    def expected_identity(name: str) -> dict:
+        expected = path_identities.get(name)
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"device", "inode"}
+            or isinstance(expected.get("device"), bool)
+            or isinstance(expected.get("inode"), bool)
+            or not isinstance(expected.get("device"), int)
+            or not isinstance(expected.get("inode"), int)
+        ):
+            raise RuntimeError("phase-one cleanup root identity changed")
+        return expected
+
+    def validate_bound_descriptor(
+        name: str,
+        path: str,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> None:
+        expected = expected_identity(name)
+        try:
+            named = os.lstat(path)
+        except OSError as exc:
+            raise RuntimeError(f"phase-one {name} disappeared during temporary cleanup") from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(opened.st_mode)
+            or opened.st_dev != expected["device"]
+            or opened.st_ino != expected["inode"]
+            or not os.path.samestat(named, opened)
+            or not os.path.samestat(os.fstat(descriptor), opened)
+        ):
+            raise RuntimeError(f"phase-one {name} identity changed during temporary cleanup")
+
+    def quarantine_no_replace(
+        descriptor: int,
+        source_name: str,
+        inspected: os.stat_result,
+    ) -> str:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            function = library.renameatx_np
+            flag = 0x4  # RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            function = library.renameat2
+            flag = 0x1  # RENAME_NOREPLACE
+        else:
+            raise RuntimeError("phase-one temporary quarantine is unsupported")
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        for _attempt in range(16):
+            quarantine_name = (
+                f".defenseclaw-cleanup-{token}-"
+                f"{inspected.st_dev:x}-{inspected.st_ino:x}-"
+                f"{secrets.token_hex(16)}.quarantine"
+            )
+            result = function(
+                descriptor,
+                os.fsencode(source_name),
+                descriptor,
+                os.fsencode(quarantine_name),
+                flag,
+            )
+            if result == 0:
+                os.fsync(descriptor)
+                return quarantine_name
+            code = ctypes.get_errno()
+            if code in {errno.EEXIST, errno.ENOTEMPTY}:
+                continue
+            raise RuntimeError(
+                f"phase-one temporary quarantine failed with errno {code}"
+            )
+        raise RuntimeError("phase-one temporary quarantine name allocation was exhausted")
+
+    def cleanup_descriptor(descriptor: int) -> None:
+        with os.scandir(descriptor) as entries:
+            members = []
+            for entry in entries:
+                if len(members) == 100000:
+                    raise RuntimeError(
+                        "phase-one temporary cleanup exceeded its scan bound"
+                    )
+                members.append(entry)
+        for entry in members:
+            quarantine_match = cleanup_quarantine.fullmatch(entry.name)
+            owned = (
+                entry.name.startswith(generic_prefix)
+                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
+                or tagged_writer.fullmatch(entry.name) is not None
+                or quarantine_match is not None
+            )
+            if not owned:
+                continue
+            info = entry.stat(follow_symlinks=False)
+            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+                raise RuntimeError("phase-one owned temporary has an unsafe identity")
+            if quarantine_match is not None and (
+                info.st_dev != int(quarantine_match.group(1), 16)
+                or info.st_ino != int(quarantine_match.group(2), 16)
+            ):
+                os.fsync(descriptor)
+                raise RuntimeError(
+                    "phase-one cleanup quarantine identity changed before replay"
+                )
+            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)
+            quarantined = os.stat(
+                quarantine_name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(quarantined.st_mode)
+                or stat.S_ISLNK(quarantined.st_mode)
+                or quarantined.st_uid != uid
+                or not os.path.samestat(quarantined, info)
+            ):
+                os.fsync(descriptor)
+                raise RuntimeError(
+                    "phase-one owned temporary identity changed during quarantine"
+                )
+            os.unlink(quarantine_name, dir_fd=descriptor)
+        os.fsync(descriptor)
+
+    def cleanup_bound_root(name: str, path: str) -> None:
+        descriptor = os.open(path, directory_flags)
+        try:
+            opened = os.fstat(descriptor)
+            validate_bound_descriptor(name, path, descriptor, opened)
+            cleanup_descriptor(descriptor)
+            validate_bound_descriptor(name, path, descriptor, opened)
+        finally:
+            os.close(descriptor)
+
+    cleanup_bound_root("data_dir", data_home)
+    cleanup_bound_root("config_parent", os.path.dirname(config_path) or ".")
+    if openclaw_home_existed:
+        cleanup_bound_root("openclaw_home", openclaw_home)
+        return
+
+    # When OpenClaw did not exist at snapshot time, its recorded identity is
+    # the parent. Open the target-created child through that bound parent so a
+    # concurrent name replacement cannot redirect cleanup outside custody.
+    parent = os.path.dirname(openclaw_home) or "."
+    child_name = os.path.basename(openclaw_home)
+    if not child_name:
+        raise RuntimeError("phase-one absent OpenClaw path has no child name")
+    parent_descriptor = os.open(parent, directory_flags)
+    try:
+        parent_opened = os.fstat(parent_descriptor)
+        validate_bound_descriptor(
+            "openclaw_home", parent, parent_descriptor, parent_opened
+        )
+        try:
+            child_descriptor = os.open(
+                child_name,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            child_descriptor = -1
+        if child_descriptor >= 0:
+            try:
+                child_opened = os.fstat(child_descriptor)
+                child_named = os.stat(
+                    child_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(child_opened.st_mode)
+                    or stat.S_ISLNK(child_opened.st_mode)
+                    or child_opened.st_uid != uid
+                    or stat.S_IMODE(child_opened.st_mode) & 0o022
+                    or not os.path.samestat(child_named, child_opened)
+                ):
+                    raise RuntimeError(
+                        "target-created OpenClaw home is unsafe during temporary cleanup"
+                    )
+                cleanup_descriptor(child_descriptor)
+                child_named = os.stat(
+                    child_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not os.path.samestat(child_named, child_opened)
+                    or not os.path.samestat(os.fstat(child_descriptor), child_opened)
+                ):
+                    raise RuntimeError(
+                        "target-created OpenClaw home changed during temporary cleanup"
+                    )
+            finally:
+                os.close(child_descriptor)
+        validate_bound_descriptor(
+            "openclaw_home", parent, parent_descriptor, parent_opened
+        )
+    finally:
+        os.close(parent_descriptor)
+
+
 def restore_state_before_artifacts() -> None:
     global resume_unsealed_bridge
 
@@ -3038,6 +3262,11 @@ if resume_unsealed_bridge:
     if os.path.isdir(openclaw_home) and not os.path.islink(openclaw_home):
         fsync_directory(openclaw_home)
     fsync_directory(data_home)
+    # A crash after a plan-owned atomic writer published its canonical file
+    # can leave the displaced pre-write bytes in the authenticated temporary.
+    # Remove those owner-checked, token-bound files before the caller closes
+    # recovery custody around the resumed bridge.
+    cleanup_owned_temporaries()
     with open(journal, "rb") as stream:
         if json.load(stream).get("plan_id") != plan_id:
             raise RuntimeError("phase-one recovery journal changed before bridge resumption")
@@ -3161,35 +3390,6 @@ else:
         os.unlink(gateway_displaced)
         fsync_directory(install_dir)
 
-
-def cleanup_owned_temporaries() -> None:
-    token = plan_id.removeprefix("phase-one-")
-    generic_prefix = f".tmp.upgrade-{token}."
-    cursor_prefix = f".migration_state.upgrade-{token}."
-    tagged_writer = re.compile(
-        rf"^\..+\.upgrade-{re.escape(token)}\.[A-Za-z0-9_-]+\.tmp$"
-    )
-    roots = {data_home, os.path.dirname(config_path) or "."}
-    if os.path.isdir(openclaw_home) and not os.path.islink(openclaw_home):
-        roots.add(openclaw_home)
-    for root in roots:
-        with os.scandir(root) as entries:
-            members = list(entries)
-        if len(members) > 100000:
-            raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
-        for entry in members:
-            owned = (
-                entry.name.startswith(generic_prefix)
-                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
-                or tagged_writer.fullmatch(entry.name) is not None
-            )
-            if not owned:
-                continue
-            info = entry.stat(follow_symlinks=False)
-            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
-                raise RuntimeError("phase-one owned temporary has an unsafe identity")
-            os.unlink(entry.path)
-        fsync_directory(root)
 
 cleanup_owned_temporaries()
 
@@ -4719,6 +4919,344 @@ create_bridge_handoff_directory() {
     printf '%s\n' "${destination}"
 }
 
+restore_bridge_config_comments() {
+    local original_config
+    local result
+
+    [[ "${BRIDGE_PHASE1}" -eq 1 ]] || return 0
+    original_config="$(bridge_phase1_state_transaction config-comment-source)" \
+        || die "Could not authenticate the phase-one configuration snapshot for comment continuity"
+    [[ -n "${original_config}" ]] || return 0
+    [[ -e "${CONFIG_PATH}" || -L "${CONFIG_PATH}" ]] \
+        || die "The bridge configuration disappeared before comment continuity could be verified"
+
+    result="$("${VENV_PYTHON}" -I -B - \
+        "${original_config}" \
+        "${CONFIG_PATH}" \
+        "${BRIDGE_RECOVERY_PLAN_ID#phase-one-}" <<'PY'
+# BEGIN BRIDGE_COMMENT_RESTORE_PY
+from __future__ import annotations
+
+import collections
+import ctypes
+import os
+import re
+import stat
+import sys
+import tempfile
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+
+MAX_CONFIG_BYTES = 4 * 1024 * 1024
+source_path, active_path = (os.path.abspath(path) for path in sys.argv[1:3])
+mutation_token = sys.argv[3]
+if re.fullmatch(r"[0-9a-f]{32}", mutation_token) is None:
+    raise RuntimeError("comment continuity mutation token is invalid")
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def require_private_parent(path: str) -> str:
+    parent = os.path.dirname(path)
+    info = os.lstat(parent)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        fail("configuration parent is not private current-user custody")
+    return parent
+
+
+def read_stable(path: str) -> tuple[bytes, os.stat_result]:
+    require_private_parent(path)
+    named_before = os.lstat(path)
+    if (
+        stat.S_ISLNK(named_before.st_mode)
+        or not stat.S_ISREG(named_before.st_mode)
+        or named_before.st_uid != os.geteuid()
+        or named_before.st_nlink != 1
+        or named_before.st_size <= 0
+        or named_before.st_size > MAX_CONFIG_BYTES
+    ):
+        fail("configuration source is not one bounded current-user-owned regular file")
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened_before = os.fstat(descriptor)
+        if identity(opened_before) != identity(named_before):
+            fail("configuration source changed while opening")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, MAX_CONFIG_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_CONFIG_BYTES:
+                fail("configuration source exceeds its size bound")
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named_after = os.lstat(path)
+    if identity(opened_after) != identity(opened_before) or identity(named_after) != identity(named_before):
+        fail("configuration source changed while reading")
+    payload = b"".join(chunks)
+    if len(payload) != named_before.st_size:
+        fail("configuration source length changed while reading")
+    return payload, named_before
+
+
+def scalar_ranges(node: Node) -> tuple[tuple[int, int], ...]:
+    if isinstance(node, ScalarNode):
+        return ((node.start_mark.index, node.end_mark.index),)
+    if isinstance(node, MappingNode):
+        children = [child for pair in node.value for child in pair]
+    elif isinstance(node, SequenceNode):
+        children = list(node.value)
+    else:
+        children = []
+    return tuple(item for child in children for item in scalar_ranges(child))
+
+
+def parsed_mapping(text: str, label: str) -> dict[object, object]:
+    try:
+        value = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError, UnicodeError) as exc:
+        fail(f"{label} is not safe YAML: {exc}")
+    if not isinstance(value, dict):
+        fail(f"{label} must contain one YAML mapping")
+    return value
+
+
+def comments(payload: bytes, label: str) -> tuple[str, ...]:
+    try:
+        text = payload.decode("utf-8")
+        root = yaml.compose(text, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError, UnicodeError) as exc:
+        fail(f"{label} comments could not be parsed safely: {exc}")
+    if not isinstance(root, MappingNode):
+        fail(f"{label} must contain one YAML mapping")
+
+    ranges = sorted(scalar_ranges(root))
+    range_index = 0
+    found: list[str] = []
+    cursor = 0
+    for raw_line in text.splitlines(keepends=True):
+        for index, character in enumerate(raw_line):
+            absolute = cursor + index
+            if character != "#" or (index > 0 and not raw_line[index - 1].isspace()):
+                continue
+            while range_index < len(ranges) and ranges[range_index][1] <= absolute:
+                range_index += 1
+            inside_scalar = (
+                range_index < len(ranges)
+                and ranges[range_index][0] <= absolute < ranges[range_index][1]
+            )
+            if not inside_scalar:
+                found.append(raw_line[index:].rstrip("\r\n"))
+                break
+        cursor += len(raw_line)
+    return tuple(found)
+
+
+def named_inode_matches(path: str, expected: os.stat_result) -> bool:
+    try:
+        observed = os.lstat(path)
+    except OSError:
+        return False
+    return os.path.samestat(observed, expected)
+
+
+def atomic_exchange(left: str, right: str) -> None:
+    parent = os.path.dirname(left)
+    if parent != os.path.dirname(right):
+        fail("comment continuity exchange crossed configuration directories")
+    descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            function = library.renameatx_np
+        elif sys.platform.startswith("linux"):
+            function = library.renameat2
+        else:
+            fail("atomic comment continuity exchange is unsupported")
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        result = function(
+            descriptor,
+            os.fsencode(os.path.basename(left)),
+            descriptor,
+            os.fsencode(os.path.basename(right)),
+            0x2,  # RENAME_EXCHANGE on Linux, RENAME_SWAP on macOS.
+        )
+        if result != 0:
+            fail(f"atomic comment continuity exchange failed with errno {ctypes.get_errno()}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def same_cas_source(
+    payload: bytes,
+    observed: os.stat_result,
+    expected_payload: bytes,
+    expected: os.stat_result,
+) -> bool:
+    return payload == expected_payload and (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_uid,
+        observed.st_gid,
+        observed.st_nlink,
+        observed.st_size,
+        observed.st_mtime_ns,
+    ) == (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode,
+        expected.st_uid,
+        expected.st_gid,
+        expected.st_nlink,
+        expected.st_size,
+        expected.st_mtime_ns,
+    )
+
+
+source, _ = read_stable(source_path)
+active, active_snapshot = read_stable(active_path)
+source_comments = comments(source, "pre-bridge configuration")
+active_comments = collections.Counter(comments(active, "bridge configuration"))
+missing: list[str] = []
+for comment in source_comments:
+    if active_comments[comment] > 0:
+        active_comments[comment] -= 1
+    else:
+        missing.append(comment)
+
+if not missing:
+    print(0)
+    raise SystemExit(0)
+
+active_text = active.decode("utf-8")
+newline = "\r\n" if "\r\n" in active_text else "\n"
+prefix = "".join(comment + newline for comment in missing).encode("utf-8")
+candidate = prefix + active
+if len(candidate) > MAX_CONFIG_BYTES:
+    fail("comment-preserving bridge configuration exceeds its size bound")
+try:
+    before = parsed_mapping(active_text, "bridge configuration")
+    after = parsed_mapping(candidate.decode("utf-8"), "comment-preserving bridge configuration")
+    semantically_equal = before == after
+except (RecursionError, TypeError, ValueError) as exc:
+    fail(f"comment continuity comparison failed safely: {exc}")
+if not semantically_equal:
+    fail("restoring comments changed bridge configuration semantics")
+
+parent = require_private_parent(active_path)
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(active_path)}.upgrade-{mutation_token}.",
+    suffix=".tmp",
+    dir=parent,
+)
+swapped = False
+try:
+    os.fchmod(descriptor, stat.S_IMODE(active_snapshot.st_mode))
+    os.fchown(descriptor, active_snapshot.st_uid, active_snapshot.st_gid)
+    view = memoryview(candidate)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            fail("comment-preserving bridge configuration write stalled")
+        view = view[written:]
+    os.fsync(descriptor)
+    candidate_snapshot = os.fstat(descriptor)
+    atomic_exchange(active_path, temporary)
+    swapped = True
+    try:
+        previous, previous_snapshot = read_stable(temporary)
+        if not same_cas_source(previous, previous_snapshot, active, active_snapshot):
+            fail("bridge configuration changed before comment continuity activation")
+        committed, committed_snapshot = read_stable(active_path)
+        if not same_cas_source(
+            committed,
+            committed_snapshot,
+            candidate,
+            candidate_snapshot,
+        ):
+            fail("comment-preserving bridge configuration was not committed exactly")
+        os.unlink(temporary)
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        if named_inode_matches(active_path, candidate_snapshot) and os.path.lexists(temporary):
+            atomic_exchange(active_path, temporary)
+            swapped = False
+        raise
+    temporary = ""
+finally:
+    os.close(descriptor)
+    if temporary and not swapped:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+committed, committed_snapshot = read_stable(active_path)
+if not same_cas_source(
+    committed,
+    committed_snapshot,
+    candidate,
+    candidate_snapshot,
+):
+    fail("comment-preserving bridge configuration was not committed exactly")
+print(len(missing))
+# END BRIDGE_COMMENT_RESTORE_PY
+PY
+    )" || die "Could not preserve pre-bridge YAML comments without changing bridge semantics"
+
+    [[ "${result}" =~ ^[0-9]+$ ]] \
+        || die "Bridge comment continuity verifier returned an invalid result"
+    if [[ "${result}" -gt 0 ]]; then
+        ok "Preserved ${result} pre-bridge YAML comment(s) in the verified bridge state"
+    fi
+}
+
 bridge_phase1_state_transaction() {
     local operation="$1"
     local snapshot_root="${BACKUP_DIR}/phase1-state"
@@ -5210,6 +5748,17 @@ if operation == "snapshot":
     os.chmod(manifest_path, 0o600)
     fsync_path_tree(manifest_path)
     fsync_directory(snapshot_root)
+elif operation == "config-comment-source":
+    source_entries, _source_manifest = load_source_manifest()
+    config_entry = source_entries[0]
+    if config_entry.get("target") != config_path:
+        raise RuntimeError("phase-one configuration snapshot target changed")
+    if not config_entry["existed"]:
+        print("")
+    else:
+        if config_entry.get("kind") != "file" or config_entry.get("backup") != "item-0":
+            raise RuntimeError("phase-one configuration snapshot is not one regular file")
+        print(os.path.join(snapshot_root, "item-0"))
 elif operation == "seal-active":
     source_entries, source_manifest = load_source_manifest()
     if journal.get("state_snapshot_ready") is not True:
@@ -6810,6 +7359,7 @@ if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]; then
 fi
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
+    restore_bridge_config_comments
     bridge_phase1_cleanup_owned_temporaries \
         || die "Could not remove resolver-owned mutation temporaries before sealing bridge state"
     bridge_phase1_state_transaction seal-active \

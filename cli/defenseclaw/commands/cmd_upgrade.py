@@ -7980,7 +7980,8 @@ def _execute_hard_cut_rollback(
         _restore_hard_cut_backup_root_contract(plan)
 
         if plan.source_gateway_was_running:
-            if not _run_silent(
+            rollback_start_timeout = max(health_timeout + 30, 90)
+            start_reported_success = _run_silent(
                 [plan.active_gateway_path, "start"],
                 "Restored bridge gateway started",
                 "Could not start restored bridge gateway",
@@ -7988,14 +7989,46 @@ def _execute_hard_cut_rollback(
                     plan.data_dir,
                     config_path=plan_config_path,
                 ),
-            ):
-                raise OSError("restored bridge gateway failed to start")
-            _poll_installed_health(
-                plan.data_dir,
-                health_timeout,
-                plan.source_version,
-                os_name=plan.os_name,
+                timeout_seconds=rollback_start_timeout,
             )
+            if not start_reported_success and _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT:
+                raise OSError("restored bridge gateway failed to start")
+            if start_reported_success:
+                try:
+                    _poll_installed_health(
+                        plan.data_dir,
+                        health_timeout,
+                        plan.source_version,
+                        os_name=plan.os_name,
+                    )
+                    bridge_healthy = True
+                except (OSError, SystemExit):
+                    bridge_healthy = False
+            else:
+                bridge_healthy = False
+
+            if not bridge_healthy:
+                ux.warn(
+                    "Restored bridge gateway was not healthy after its first start; retrying once.",
+                    indent="  ",
+                )
+                if not _run_silent(
+                    [plan.active_gateway_path, "start"],
+                    "Restored bridge gateway started on retry",
+                    "Could not start restored bridge gateway on retry",
+                    env=_gateway_process_environment(
+                        plan.data_dir,
+                        config_path=plan_config_path,
+                    ),
+                    timeout_seconds=rollback_start_timeout,
+                ):
+                    raise OSError("restored bridge gateway failed to start")
+                _poll_installed_health(
+                    plan.data_dir,
+                    health_timeout,
+                    plan.source_version,
+                    os_name=plan.os_name,
+                )
 
         else:
             _assert_gateway_quiesced(
@@ -8620,6 +8653,7 @@ def _run_silent(
     *,
     env: dict[str, str] | None = None,
     failure_output_markers: tuple[str, ...] = (),
+    timeout_seconds: float = 30,
 ) -> bool:
     """Run a command, printing ok_msg on success and fail_msg on failure.
 
@@ -8634,7 +8668,7 @@ def _run_silent(
         kwargs: dict[str, object] = {
             "capture_output": True,
             "text": True,
-            "timeout": 30,
+            "timeout": timeout_seconds,
             "check": False,
         }
         if env is not None:
