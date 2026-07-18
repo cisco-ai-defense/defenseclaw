@@ -5452,7 +5452,6 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 				"headers": map[string]interface{}{
 					"authorization":        "Bearer synthetic-stale-backup-token",
 					"x-defenseclaw-client": "codex-otel/legacy",
-					"x-defenseclaw-source": "codex-legacy",
 				},
 			},
 		},
@@ -5706,6 +5705,100 @@ func TestRestoreOwnedCodexConfigFromTOMLRejectsContaminatedLegacyOriginals(t *te
 	operatorRestoredOtel, ok := operatorConfig["otel"].(map[string]interface{})
 	if !ok || !codexValueMatches(operatorRestoredOtel["exporter"], operatorExporter) {
 		t.Fatalf("restore discarded operator exporter: %#v", operatorConfig)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("c", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	raw, err := toml.Marshal(map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           managedOtel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := map[string]interface{}{"environment": "staging"}
+	for index, key := range codexOtelExporterKeys {
+		contaminatedOtel[key] = map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": fmt.Sprintf("https://otel.example.test/v1/signal-%d", index),
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"authorization":        "redacted-test-credential",
+					"x-defenseclaw-source": "obsolete-marker-value",
+					"x-defenseclaw-client": "obsolete-client-value",
+				},
+			},
+		}
+	}
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{HadOtelBlock: true, OriginalOtel: originalOtel},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	restoredOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || restoredOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := restoredOtel[key]; exists {
+			t.Fatalf("restore resurrected drifted marker residue at otel.%s", key)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") ||
+		strings.Contains(string(restored.Data), "redacted-test-credential") {
+		t.Fatalf("restore retained contaminated telemetry metadata: %s", restored.Data)
+	}
+}
+
+func TestCodexNotifyLooksManagedAcceptsSameBoundLegacyBridgePath(t *testing.T) {
+	dataDir := t.TempDir()
+	nested := filepath.Join(dataDir, "legacy-path-segment")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(dataDir, "notify-bridge.sh")
+	if err := os.WriteFile(bridge, []byte("synthetic bridge\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := filepath.Join(nested, "..", "notify-bridge.sh")
+	if !codexNotifyLooksManaged([]interface{}{"bash", equivalent}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("same bound legacy bridge path was not recognized: %q", equivalent)
+	}
+	foreign := filepath.Join(filepath.Dir(dataDir), "other", "notify-bridge.sh")
+	if codexNotifyLooksManaged([]interface{}{"bash", foreign}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("foreign legacy bridge path was accepted: %q", foreign)
 	}
 }
 

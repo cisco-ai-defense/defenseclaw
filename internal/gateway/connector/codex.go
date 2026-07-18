@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -1538,6 +1539,13 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	default:
 		return false
 	}
+	if len(argv) == 2 && argv[0] == "bash" &&
+		pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+		// Older Windows releases serialized this path with either slash style.
+		// Treat lexical spellings of the same bound data-root bridge alike, but
+		// never claim another absolute script merely because its basename matches.
+		return true
+	}
 	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
 }
 
@@ -2495,10 +2503,12 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		if original != nil {
 			if hadSaved {
 				// Field-level backups from older releases may themselves be
-				// contaminated by a prior managed setup. Only restore a saved
-				// exporter after applying the same strict ownership test used
-				// for the current config.
-				if !codexExporterLooksManaged(saved, opts) {
+				// contaminated by a prior managed setup. Product-namespaced header
+				// keys remain residue even when a predecessor wrote an obsolete
+				// endpoint or marker value that no longer satisfies the full
+				// current ownership predicate.
+				if !codexExporterLooksManaged(saved, opts) &&
+					!codexExporterHasManagedHeaderResidue(saved) {
 					current[key] = saved
 					continue
 				}
@@ -2657,7 +2667,7 @@ func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool)
 	// survive cleanup. Authorization is generic, so restore it only from a
 	// saved exporter that was not itself a stale managed snapshot.
 	savedHeaders := map[string]interface{}(nil)
-	if hadSaved && !codexExporterHasManagedHeaderPair(saved) {
+	if hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
 		savedHeaders = codexExporterHeaders(saved)
 	}
 	if value, exists := savedHeaders["authorization"]; exists {
