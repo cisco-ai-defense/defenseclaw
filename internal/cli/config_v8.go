@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -303,6 +304,7 @@ func compileConfigV8File(path, defaultDataDir string) (*config.ObservabilityV8Co
 type loadedConfigV8File struct {
 	compiled       *config.ObservabilityV8CompiledConfig
 	document       *config.V8YAMLDocument
+	runtime        *config.Config
 	source         string
 	raw            []byte
 	gatewayAPIPort int
@@ -355,6 +357,13 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	if err != nil {
 		return nil, err
 	}
+	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRuntimeV8ConnectorRoster(document, runtimeCandidate); err != nil {
+		return nil, err
+	}
 	gatewayAPIPort := config.DefaultGatewayAPIPort
 	if gateway, ok := document.Plain["gateway"].(map[string]any); ok {
 		if rawPort, exists := gateway["api_port"]; exists {
@@ -368,10 +377,57 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	return &loadedConfigV8File{
 		compiled:       compiled,
 		document:       document,
+		runtime:        runtimeCandidate,
 		source:         absPath,
 		raw:            append([]byte(nil), raw...),
 		gatewayAPIPort: gatewayAPIPort,
 	}, nil
+}
+
+func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate *config.Config) error {
+	if document == nil || candidate == nil {
+		return &config.V8SemanticError{
+			Path:     "$.guardrail.connectors",
+			Summary:  "target runtime returned no connector candidate",
+			Expected: "the configured connector roster to survive target-runtime decoding",
+			Action:   "use the packaged target runtime to validate the complete candidate",
+		}
+	}
+	guardrail, ok := document.Plain["guardrail"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	configured, ok := guardrail["connectors"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, retained := candidate.Guardrail.Connectors[name]; retained {
+			continue
+		}
+		return &config.V8SemanticError{
+			Source:   document.Source,
+			Path:     "$.guardrail.connectors." + name,
+			Summary:  "target runtime did not retain the configured connector",
+			Expected: "the staged runtime connector roster to match the candidate source",
+			Action:   "refuse activation and keep the live configuration unchanged",
+		}
+	}
+	if len(candidate.Guardrail.Connectors) != len(configured) {
+		return &config.V8SemanticError{
+			Source:   document.Source,
+			Path:     "$.guardrail.connectors",
+			Summary:  "target runtime changed the configured connector roster",
+			Expected: "the staged runtime connector roster to match the candidate source",
+			Action:   "refuse activation and keep the live configuration unchanged",
+		}
+	}
+	return nil
 }
 
 func readConfigV8Source(path string) ([]byte, error) {

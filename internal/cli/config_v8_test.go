@@ -19,8 +19,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -28,6 +30,59 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	raw := []byte(`config_version: 8
+data_dir: ` + directory + `
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+observability: {}
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfigV8File(path, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if got := loaded.runtime.ActiveConnectors(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged target runtime connectors = %v, want %v", got, want)
+	}
+}
+
+func TestValidateRuntimeV8ConnectorRosterReportsExactSafePath(t *testing.T) {
+	document, err := config.ParseV8YAML("candidate.yaml", []byte(`config_version: 8
+guardrail:
+  connectors:
+    codex: {}
+observability: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateRuntimeV8ConnectorRoster(document, &config.Config{})
+	var semanticError *config.V8SemanticError
+	if !errors.As(err, &semanticError) {
+		t.Fatalf("connector roster error = %T, want *config.V8SemanticError: %v", err, err)
+	}
+	if semanticError.Path != "$.guardrail.connectors.codex" ||
+		semanticError.Summary != "target runtime did not retain the configured connector" {
+		t.Fatalf("connector roster diagnostic = %+v", semanticError)
+	}
+	failure := configV8ValidationFailure(err)
+	if failure.Path != "$.guardrail.connectors.codex" ||
+		!strings.Contains(failure.Reason, "target runtime did not retain the configured connector") ||
+		!strings.Contains(failure.Reason, "refuse activation and keep the live configuration unchanged") {
+		t.Fatalf("connector roster wire diagnostic = %+v", failure)
+	}
+}
 
 func TestCompileConfigV8FileUsesCanonicalMaskedPlan(t *testing.T) {
 	directory := t.TempDir()
