@@ -1773,7 +1773,14 @@ func restoreOwnedCodexConfigFromTOML(
 		if err := json.Unmarshal(backup.OriginalNotify, &orig); err != nil {
 			return atomicTransformResult{}, fmt.Errorf("restore original Codex notify config: %w", err)
 		}
-		cfg["notify"] = orig
+		// A predecessor may have captured an already-managed command as the
+		// operator's original value during an upgrade. Reapplying that stale
+		// registration would defeat the current snapshot filter above.
+		if codexNotifyLooksManaged(orig, opts) {
+			delete(cfg, "notify")
+		} else {
+			cfg["notify"] = orig
+		}
 	} else if managedNotify {
 		delete(cfg, "notify")
 	}
@@ -2472,8 +2479,14 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		}
 		if original != nil {
 			if saved, hadSaved := original[key]; hadSaved {
-				current[key] = saved
-				continue
+				// Field-level backups from older releases may themselves be
+				// contaminated by a prior managed setup. Only restore a saved
+				// exporter after applying the same strict ownership test used
+				// for the current config.
+				if !codexExporterLooksManaged(saved, opts) {
+					current[key] = saved
+					continue
+				}
 			}
 		}
 		delete(current, key)

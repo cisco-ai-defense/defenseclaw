@@ -5460,6 +5460,125 @@ func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T)
 	}
 }
 
+func TestRestoreOwnedCodexConfigFromTOMLRejectsContaminatedLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("b", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	managedNotify := []string{managedHook, "notify"}
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         managedNotify,
+		"otel":           managedOtel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := make(map[string]interface{}, len(managedOtel)+1)
+	for key, value := range managedOtel {
+		contaminatedOtel[key] = value
+	}
+	contaminatedOtel["environment"] = "staging"
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalNotify, err := json.Marshal(managedNotify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   originalOtel,
+			HadNotify:      true,
+			OriginalNotify: originalNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	if _, exists := restoredConfig["notify"]; exists {
+		t.Fatalf("restore resurrected contaminated managed notify: %#v", restoredConfig)
+	}
+	gotOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || gotOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := gotOtel[key]; exists {
+			t.Fatalf("restore resurrected contaminated managed OTel field %s: %#v", key, gotOtel)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") {
+		t.Fatalf("restore retained a managed registration: %s", restored.Data)
+	}
+
+	operatorExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://otel.example.test/v1/logs",
+			"protocol": "json",
+		},
+	}
+	operatorOtel, err := json.Marshal(map[string]interface{}{"exporter": operatorExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorNotify, err := json.Marshal([]string{"operator-notify", "notify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorRestored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   operatorOtel,
+			HadNotify:      true,
+			OriginalNotify: operatorNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operatorRestored.Data, &operatorConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !codexValueMatches(operatorConfig["notify"], []interface{}{"operator-notify", "notify"}) {
+		t.Fatalf("restore discarded operator notify: %#v", operatorConfig)
+	}
+	operatorRestoredOtel, ok := operatorConfig["otel"].(map[string]interface{})
+	if !ok || !codexValueMatches(operatorRestoredOtel["exporter"], operatorExporter) {
+		t.Fatalf("restore discarded operator exporter: %#v", operatorConfig)
+	}
+}
+
 func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
