@@ -39,7 +39,14 @@ var statusCmd = &cobra.Command{
 gateway connection, skill watcher, and API server.
 
 The sidecar must be running for this command to work.`,
-	RunE: runSidecarStatus,
+	// Status only needs the strict runtime config to locate the health API.
+	// Do not inherit root's audit-store lifecycle: a second short-lived Store
+	// can unlink the running daemon's WAL/SHM and strand later audit writes.
+	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+		return loadGatewayCommandConfigOnly()
+	},
+	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
+	RunE:              runSidecarStatus,
 }
 
 func init() {

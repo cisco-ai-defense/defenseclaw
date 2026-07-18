@@ -1722,12 +1722,14 @@ class DefenseClawTUI(App[None]):
             text = f"{key} {label}"
             if unread:
                 text = f"{text} ({unread})"
-            # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` replaces
-            # the older ``query_one("#tab-id", Tab)`` + NoMatches dance.
-            # It returns the tab widget directly (or None for unknown
-            # ids), so we skip exception-as-control-flow.
-            tab = tabs.get_tab(f"tab-{name}")
-            if tab is None:
+            # ``query_one`` is public in both Textual 7.x (installed by the
+            # published scanner dependency) and 8.x (used by the source
+            # development lock). Do not use the 8.x-only ``Tabs.get_tab``
+            # convenience method here: release wheels must run with their
+            # declared transitive dependency set, not only the dev override.
+            try:
+                tab = tabs.query_one(f"#tab-{name}", Tab)
+            except NoMatches:
                 continue
             if self._tab_label_cache.get(name) == text:
                 continue

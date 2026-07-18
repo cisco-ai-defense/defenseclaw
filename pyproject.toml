@@ -16,6 +16,10 @@ dependencies = [
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
+    # Bare `defenseclaw` and `defenseclaw tui` launch the Python Textual UI.
+    # The scanner currently resolves 7.x while source development exercises
+    # 8.x; the runtime and installed-wheel gates cover both supported majors.
+    "textual>=7.5,<9",
     # Runtime validation of config_version: 8 uses the schema bundled in the
     # wheel. The 0.8.4 bridge already carries this transitively; the hard-cut
     # controller verifies that exact pre-existing runtime before mutation.
@@ -46,11 +50,6 @@ dependencies = [
     # so it must be installed there to parse TOML.
     "tomli>=2.0.1; python_version < '3.11'",
 ]
-
-# P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was
-# retired in favour of the Go-based TUI launched via `defenseclaw tui`.
-# No Python-side TUI extra is shipped anymore; the alerts command now
-# renders a plain Rich table.
 
 [project.optional-dependencies]
 # Vertex AI auth (service-account JSON, ADC, workload identity).
@@ -208,7 +207,7 @@ override-dependencies = [
     # auto-scroll on select, weak-ref DOM GC). No ``Select.BLANK``
     # usage in our TUI (the only documented 8.0 breaking rename),
     # verified via grep.
-    "textual>=8.2.7",
+    "textual>=8.2.7,<9",
     # ``pytest-textual-snapshot==1.1.0`` transitively pins
     # ``syrupy==4.8.0``, which in turn pins ``pytest>=7,<9``. We are on
     # pytest 9.x project-wide, so override to a syrupy version that

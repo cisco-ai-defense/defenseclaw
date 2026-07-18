@@ -373,25 +373,24 @@ def _rewrite_manifest(env: dict[str, str], version: str, payload: dict[str, obje
     )
 
 
-def test_explicit_hard_cut_from_0_8_3_refuses_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.8.0"))
+def test_explicit_final_target_still_resolves_verified_two_hop_plan(
+    resolver_env,
+    current_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
 
     result = _run(env, "--version", "0.8.5", "--plan")
 
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "0.8.5 requires the 0.8.4 upgrade bridge" in output
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5" in output
     assert "No changes were made" in output
-    assert "there is intentionally no --version argument" in output
-    assert "defenseclaw-upgrade.XXXXXX" in output
-    assert "releases/download/0.8.5/" in output
-    assert "defenseclaw-upgrade.sh" in output
-    assert "cosign verify-blob" in output
-    assert "DefenseClaw upgrade resolver complete v1" in output
-    assert 'bash "$d/defenseclaw-upgrade.sh" --yes' in output
-    assert "upgrade.sh | bash" not in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
 def test_bridge_manifest_runtime_config_boundary_is_fail_closed(resolver_env) -> None:

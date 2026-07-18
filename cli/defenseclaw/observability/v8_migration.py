@@ -162,6 +162,95 @@ _V7_OTEL_BATCH_DEFAULTS: Final = {
     "max_export_batch_size": 512,
     "scheduled_delay_ms": 5000,
 }
+_V7_FRESH_080_FLAT_OTEL_PLACEHOLDER: Final = {
+    "enabled": False,
+    "endpoint": "",
+    "protocol": "grpc",
+    "headers": {},
+    "tls": {"ca_cert": "", "insecure": False},
+    "batch": _V7_OTEL_BATCH_DEFAULTS,
+    "traces": {
+        "enabled": True,
+        "sampler": "always_on",
+        "sampler_arg": "1.0",
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+    },
+    "logs": {
+        "enabled": True,
+        "emit_individual_findings": False,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+    },
+    "metrics": {
+        "enabled": True,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+        "export_interval_s": 60,
+    },
+    "resource": {"attributes": {}},
+}
+_V7_FRESH_080_NAMED_OTEL_PLACEHOLDER: Final = {
+    "name": "generic-otlp",
+    "preset": "generic-otlp",
+    "enabled": False,
+    "endpoint": "",
+    "protocol": "grpc",
+    "tls": {"ca_cert": "", "insecure": False},
+    "batch": _V7_OTEL_BATCH_DEFAULTS,
+    "traces": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "logs": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "metrics": {
+        "enabled": True,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+        "export_interval_s": 60,
+    },
+}
+
+
+def _type_sensitive_equal(actual: Any, expected: Any) -> bool:
+    """Compare frozen source shapes without Python's scalar coercions.
+
+    Historical placeholder recognition is a fail-closed release boundary.
+    Ordinary equality is unsafe here because ``False == 0`` and
+    ``60 == 60.0``; an operator-edited value must never be mistaken for an
+    immutable installer default and silently omitted.
+    """
+
+    if isinstance(actual, Mapping) or isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping) or not isinstance(expected, Mapping):
+            return False
+        if len(actual) != len(expected):
+            return False
+        for expected_key, expected_value in expected.items():
+            matching_keys = [
+                actual_key
+                for actual_key in actual
+                if type(actual_key) is type(expected_key) and actual_key == expected_key
+            ]
+            if len(matching_keys) != 1:
+                return False
+            if not _type_sensitive_equal(actual[matching_keys[0]], expected_value):
+                return False
+        return True
+
+    sequence_types = (list, tuple)
+    if isinstance(actual, sequence_types) or isinstance(expected, sequence_types):
+        if not isinstance(actual, sequence_types) or not isinstance(expected, sequence_types):
+            return False
+        return len(actual) == len(expected) and all(
+            _type_sensitive_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+
+    return type(actual) is type(expected) and actual == expected
+
+
 # Exact historical Galileo v7 preset filter accepted by the upgrade boundary.
 # Keep this source-shape constant local: an upgrade runs inside the already
 # imported baseline CLI after replacing its wheel, so importing the target
@@ -1134,6 +1223,13 @@ def _build_observability(
     result["trace_policy"] = _trace_policy(otel, ctx)
     master_enabled = _effective_otel_enabled(otel, ctx)
     flat_otel_destination = _flat_otel_destination(otel, ctx)
+    if _is_fresh_080_unconfigured_flat_otel(otel, flat_otel_destination):
+        # Fresh 0.8.0 init wrote this exact disabled, endpointless flat block
+        # even when the operator never configured OTLP. The effective shape is
+        # checked too, so an environment-supplied endpoint or other override
+        # remains on the normal migration path instead of being discarded.
+        ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
+        flat_otel_destination = None
     metric_policy = _metric_policy(otel, master_enabled, flat_otel_destination, ctx)
     if metric_policy:
         result["metric_policy"] = metric_policy
@@ -1449,6 +1545,12 @@ def _convert_otel(
     effective_global_batch = _effective_otel_batch(global_batch, {}, "$.otel.batch", ctx)
     for raw, source_path in raw_destinations:
         source = dict(_mapping(raw, source_path, ctx))
+        if _type_sensitive_equal(source, _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER):
+            # The immutable 0.8.0 release installer wrote this second exact
+            # endpointless default shape. As with the flat quickstart shape,
+            # any additional or changed field stays fail closed.
+            ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
+            continue
         destination_batch = (
             _mapping(source.get("batch"), f"{source_path}.batch", ctx) if "batch" in source else {}
         )
@@ -1469,6 +1571,13 @@ def _convert_otel(
         active_signals.update(active)
         if local_full is not None:
             local_coverage.append(local_full)
+    if master_enabled and not result:
+        raise _error(
+            ctx,
+            "invalid_v7_otel",
+            "$.otel.destinations",
+            "configure at least one destination with a real endpoint before upgrading",
+        )
     local_state = "not-configured"
     if local_coverage:
         local_state = "full" if all(local_coverage) else "partial"
@@ -1627,6 +1736,41 @@ def _flat_otel_destination(otel: Mapping[str, Any], ctx: _Context) -> dict[str, 
         for signal in _SIGNALS:
             source[signal]["enabled"] = True
     return source
+
+
+def _is_fresh_080_unconfigured_flat_otel(
+    otel: Mapping[str, Any],
+    effective: Mapping[str, Any] | None,
+) -> bool:
+    if not _type_sensitive_equal(otel, _V7_FRESH_080_FLAT_OTEL_PLACEHOLDER):
+        return False
+    return _type_sensitive_equal(effective, {
+        "__flat_otel_destination": True,
+        "name": "generic-otlp",
+        "preset": "generic-otlp",
+        "enabled": False,
+        "endpoint": "",
+        "protocol": "grpc",
+        "headers": {},
+        "tls": {"ca_cert": "", "insecure": False},
+        "batch": _V7_OTEL_BATCH_DEFAULTS,
+        "traces": {
+            "enabled": True,
+            "sampler": "always_on",
+            "sampler_arg": "1.0",
+            "url_path": "",
+        },
+        "logs": {
+            "enabled": True,
+            "emit_individual_findings": False,
+            "url_path": "",
+        },
+        "metrics": {
+            "enabled": True,
+            "export_interval_s": 60,
+            "url_path": "",
+        },
+    })
 
 
 def _convert_otel_destination(

@@ -1792,6 +1792,91 @@ print("cursor_applied=" + ",".join(cursor.get("applied", [])))
 PY
 
     if target_uses_observability_v8; then
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+from pathlib import Path
+import sys
+
+from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8
+
+data_dir = Path(sys.argv[1])
+source = b"""config_version: 7
+otel:
+  enabled: false
+  endpoint: ''
+  protocol: grpc
+  headers: {}
+  tls: {ca_cert: '', insecure: false}
+  batch:
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    scheduled_delay_ms: 5000
+  traces:
+    enabled: true
+    sampler: always_on
+    sampler_arg: '1.0'
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  logs:
+    enabled: true
+    emit_individual_findings: false
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  resource:
+    attributes: {}
+"""
+named_source = b"""config_version: 7
+otel:
+  enabled: false
+  traces:
+    sampler: always_on
+    sampler_arg: '1.0'
+  logs:
+    emit_individual_findings: false
+  destinations:
+    - name: generic-otlp
+      preset: generic-otlp
+      enabled: false
+      endpoint: ''
+      protocol: grpc
+      tls: {ca_cert: '', insecure: false}
+      batch:
+        max_queue_size: 2048
+        max_export_batch_size: 512
+        scheduled_delay_ms: 5000
+      traces: {enabled: true, endpoint: '', protocol: '', url_path: ''}
+      logs: {enabled: true, endpoint: '', protocol: '', url_path: ''}
+      metrics: {enabled: true, endpoint: '', protocol: '', url_path: '', export_interval_s: 60}
+  resource:
+    attributes: {}
+"""
+for label, historical_source in (("flat", source), ("named", named_source)):
+    result = convert_v7_observability_to_v8(
+        historical_source,
+        {},
+        effective_data_dir=str(data_dir),
+    )
+    candidate = load_validate_v8(result.candidate).source
+    destinations = {
+        item.get("name")
+        for item in (candidate.get("observability") or {}).get("destinations", [])
+        if isinstance(item, dict)
+    }
+    if "generic-otlp" in destinations:
+        raise SystemExit(f"fresh 0.8.0 {label} endpointless OTLP placeholder survived artifact migration")
+    if "legacy_unconfigured_generic_otlp_placeholder_omitted" not in result.warnings:
+        raise SystemExit(f"fresh 0.8.0 {label} artifact migration omitted no explicit diagnostic")
+print("fresh_080_default_migration=ok")
+PY
+
         if (( FROM_CONFIG_VERSION == 8 )); then
             "${venv_python}" - \
                 "${SMOKE_HOME}/.defenseclaw" \
@@ -2385,24 +2470,132 @@ PY
     fi
     ok "Fresh target gateway is running and healthy"
 
-    "${venv_python}" - <<'PY'
-import textual
-from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile
+    HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PYTHONNOUSERSITE=1 PYTHONPATH='' "${venv_python}" - <<'PY'
+import asyncio
+import sys
+from pathlib import Path
 
-metric = MetricDatum(
-    key="hook_calls",
-    label="Hook Calls",
-    value=0,
-    progress=0.0,
-    detail="gateway offline",
-    state="error",
-    target_panel="logs",
-)
-tile = MetricTile(metric)
-tile.refresh_metric(metric)
+import textual
+import defenseclaw.tui.app as tui_app
+
+module_path = Path(tui_app.__file__).resolve()
+if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+    raise SystemExit(f"TUI imported outside wheel environment: {module_path}")
+DefenseClawTUI = tui_app.DefenseClawTUI
+
+async def main() -> None:
+    app = DefenseClawTUI()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+asyncio.run(main())
 print("textual_version=" + getattr(textual, "__version__", "unknown"))
-print("metric_tile_refresh=ok")
+print("installed_target_tui_origin=venv")
+print("installed_target_tui_mount=ok")
 PY
+
+    local policy_rows_before=""
+    if target_uses_observability_v8; then
+        policy_rows_before="$("${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+
+import yaml
+
+data_dir = Path(sys.argv[1])
+config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
+configured = (((config.get("observability") or {}).get("local") or {}).get("path"))
+if configured is None:
+    database = data_dir / "audit.db"
+elif not isinstance(configured, str) or not configured.strip():
+    raise SystemExit("configured audit database path is invalid")
+else:
+    database = Path(configured).expanduser()
+    if not database.is_absolute():
+        database = data_dir / database
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+try:
+    count = connection.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
+    ).fetchone()[0]
+finally:
+    connection.close()
+print(count)
+PY
+)" || die "could not snapshot mandatory policy rows immediately before reload"
+        [[ "${policy_rows_before}" =~ ^[0-9]+$ ]] \
+            || die "invalid mandatory policy row count immediately before reload"
+
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" "${policy_rows_before}" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+import time
+from urllib.request import Request, urlopen
+
+import yaml
+
+data_dir = Path(sys.argv[1])
+before = int(sys.argv[2])
+config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
+port = int((config.get("gateway") or {}).get("api_port") or 18970)
+token = ""
+for line in (data_dir / ".env").read_text(encoding="utf-8").splitlines():
+    name, separator, value = line.partition("=")
+    if separator and name.strip() == "DEFENSECLAW_GATEWAY_TOKEN":
+        token = value.strip()
+        break
+if not token:
+    raise SystemExit("target gateway token is unavailable for the post-status write probe")
+
+request = Request(
+    f"http://127.0.0.1:{port}/policy/reload",
+    data=b"",
+    method="POST",
+    headers={
+        "Authorization": "Bearer " + token,
+        "X-DefenseClaw-Token": token,
+    },
+)
+with urlopen(request, timeout=10) as response:
+    if response.status != 200:
+        raise SystemExit(f"post-status policy reload returned HTTP {response.status}")
+
+local = (config.get("observability") or {}).get("local") or {}
+configured = local.get("path")
+if configured is None:
+    database = data_dir / "audit.db"
+elif not isinstance(configured, str) or not configured.strip():
+    raise SystemExit("configured audit database path is invalid")
+else:
+    database = Path(configured).expanduser()
+    if not database.is_absolute():
+        database = data_dir / database
+deadline = time.monotonic() + 10
+while True:
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        after = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    if after > before:
+        break
+    if time.monotonic() >= deadline:
+        raise SystemExit("fresh SQLite readers cannot see the mandatory write made after status")
+    time.sleep(0.1)
+print("post_status_mandatory_sqlite_write=ok")
+PY
+        "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
+            --data-dir "${SMOKE_HOME}/.defenseclaw" \
+            --from-version "${receipt_from}" \
+            --target-version "${TARGET_VERSION}" \
+            --timeout-seconds 10 \
+            || die "read-only status/TUI commands detached the target gateway audit WAL"
+    fi
 }
 
 run_one_upgrade_smoke() {

@@ -767,7 +767,7 @@ async def test_tool_policy_tab_is_removed() -> None:
         await pilot.pause()
 
         tabs = app.query_one("#tabs", Tabs)
-        assert tabs.get_tab("tab-tools") is None
+        assert not list(tabs.query("#tab-tools"))
         assert all("Tool Policy" not in str(tab.label) for tab in tabs.query(Tab))
 
         await pilot.press("T")
@@ -797,8 +797,7 @@ async def test_unchanged_status_and_tab_labels_skip_widget_updates(monkeypatch) 
         assert len(status_updates) == 1
 
         tabs = app.query_one("#tabs", Tabs)
-        audit_tab = tabs.get_tab("tab-audit")
-        assert audit_tab is not None
+        audit_tab = tabs.query_one("#tab-audit", Tab)
         app._update_tab_labels()  # noqa: SLF001
         first_label = audit_tab.label
         app._update_tab_labels()  # noqa: SLF001

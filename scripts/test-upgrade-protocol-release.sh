@@ -625,58 +625,16 @@ run_candidate_updater_refusal() {
     ok "Candidate-owned updater refused source ${baseline} pre-mutation"
 }
 
-run_candidate_explicit_bridge_refusal() {
-    local baseline="$1"
-    log "Proving the release-owned resolver repairs the immutable explicit-target hint"
-    prepare_refusal_home "${baseline}" "candidate-explicit-bridge"
-
-    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
-    local real_curl
-    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
-    local before="${WORKDIR}/${baseline}-candidate-explicit.before.json"
-    local after="${WORKDIR}/${baseline}-candidate-explicit.after.json"
-    local log_file="${WORKDIR}/${baseline}-candidate-explicit-refusal.log"
-    snapshot_state "${before}"
-
-    set +e
-    HOME="${SMOKE_HOME}" \
-    DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-    OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
-    PYTHONDONTWRITEBYTECODE=1 \
-    UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
-    UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
-    UPGRADE_GATE_REAL_CURL="${real_curl}" \
-    UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
-    PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
-        bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
-        --yes --version "${TARGET_VERSION}" \
-        >"${log_file}" 2>&1
-    local status=$?
-    set -e
-
-    verify_refusal_invariants "${before}" "${after}" "${baseline}" "${log_file}" "${status}"
-    grep -Fq "defenseclaw-upgrade.XXXXXX" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted unique temporary custody"
-    grep -Fq "releases/download/${TARGET_VERSION}/" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the target release asset URL"
-    grep -Fq "cosign verify-blob" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted resolver provenance verification"
-    grep -Fq "DefenseClaw upgrade resolver complete v1" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the completeness check"
-    grep -Fq 'bash "$d/defenseclaw-upgrade.sh" --yes' "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the exact no-version invocation"
-    if grep -Fq "upgrade.sh | bash" "${log_file}"; then
-        die "release-owned explicit-target refusal still streams a network response into bash"
-    fi
-    grep -Fq "there is intentionally no --version argument" "${log_file}" \
-        || die "release-owned explicit-target refusal did not disambiguate the immutable hint"
-    restore_stop_probe
-    ok "Release-owned resolver converted the immutable explicit hint into the exact staged command"
-}
-
 run_candidate_updater_staged_success() {
     local baseline="$1"
-    log "Proving one-command staged upgrade ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
+    local invocation="${2:-latest}"
+    local -a resolver_args=(--yes)
+    case "${invocation}" in
+        latest) ;;
+        explicit) resolver_args+=(--version "${TARGET_VERSION}") ;;
+        *) die "unknown staged resolver invocation: ${invocation}" ;;
+    esac
+    log "Proving ${invocation} resolver staging ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
     FROM_VERSION="${baseline}"
     SMOKE_HOME="${WORKDIR}/staged-${baseline}"
     rm -rf "${SMOKE_HOME}"
@@ -703,7 +661,7 @@ run_candidate_updater_staged_success() {
         UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
         PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
             bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
-            --yes >"${log_file}" 2>&1; then
+            "${resolver_args[@]}" >"${log_file}" 2>&1; then
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "one-command staged upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
@@ -712,7 +670,7 @@ run_candidate_updater_staged_success() {
         "${log_file}" || die "staged upgrade log did not prove the resolved bridge handoff"
     verify_upgrade
     stop_smoke_gateway
-    ok "One-command staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
+    ok "${invocation} resolver staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
 }
 
 run_candidate_updater_direct_success() {
@@ -861,8 +819,11 @@ run_protocol_case() {
                 || die "tested source ${baseline} requires a bridge, but the signed bridge contract is absent"
             manifest_array_contains auto_bridge_from "${baseline}" \
                 || die "tested pre-bridge source ${baseline} is absent from auto_bridge_from"
-            run_candidate_explicit_bridge_refusal "${baseline}"
-            run_candidate_updater_staged_success "${baseline}"
+            # Frozen schema-1 controllers hand their selected target to the
+            # current release-owned resolver with --version.  Prove that exact
+            # immutable handoff now stages the bridge instead of producing a
+            # second refusal and another command for the operator.
+            run_candidate_updater_staged_success "${baseline}" explicit
         else
             run_candidate_updater_direct_success "${baseline}"
         fi

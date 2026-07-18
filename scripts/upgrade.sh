@@ -32,7 +32,7 @@
 #
 # Options:
 #   --yes, -y             Skip confirmation prompts
-#   --version VERSION     Upgrade to a specific release (default: latest)
+#   --version VERSION     Select a specific final release (required bridges are still staged)
 #   --plan                Verify contracts and print the resolved path only
 #   --help, -h            Show this help
 #
@@ -3542,8 +3542,6 @@ ensure_upgrade_lock_before_mutation() {
 YES=0
 PLAN_ONLY=0
 RELEASE_VERSION="${VERSION:-}"
-TARGET_VERSION_EXPLICIT=0
-[[ -n "${RELEASE_VERSION}" ]] && TARGET_VERSION_EXPLICIT=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3551,7 +3549,7 @@ while [[ $# -gt 0 ]]; do
         --plan)     PLAN_ONLY=1; shift ;;
         --version)
             [[ $# -lt 2 ]] && die "--version requires a value"
-            RELEASE_VERSION="$2"; TARGET_VERSION_EXPLICIT=1; shift 2 ;;
+            RELEASE_VERSION="$2"; shift 2 ;;
         --help|-h)
             cat <<EOF
 
@@ -3561,7 +3559,7 @@ while [[ $# -gt 0 ]]; do
 
   Options:
     --yes, -y             Skip confirmation prompts
-    --version VERSION     Upgrade to a specific release (e.g. 0.2.0)
+    --version VERSION     Select a specific final release; required bridges are still staged
     --plan                Verify release contracts and print the path; make no changes
     --help, -h            Show this help
 
@@ -4297,6 +4295,7 @@ print_new_upgrade_script_hint() {
     cat >&2 <<EOF
     (
       set -eu
+      unset VERSION
       umask 077
       d="\$(mktemp -d "\${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
       trap 'rm -rf "\$d"' EXIT
@@ -4816,12 +4815,11 @@ resolve_staged_upgrade() {
         return 0
     fi
 
-    if [[ "${TARGET_VERSION_EXPLICIT}" -eq 1 ]]; then
-        err "${RELEASE_VERSION} requires the ${MANIFEST_REQUIRED_BRIDGE} upgrade bridge. No changes were made."
-        info "  Run the release-owned resolver in latest mode; there is intentionally no --version argument."
-        print_new_upgrade_script_hint latest
-        exit 1
-    fi
+    # A version override selects the final release; it never authorizes a
+    # direct hard-cut install.  Legacy controllers that cannot parse schema 2
+    # hand off to the target resolver with exactly this override, so the
+    # release-owned resolver must preserve that target intent while still
+    # inserting every manifest-required bridge.
     if ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
         supported="$(manifest_array_values "auto_bridge_from" "${UPGRADE_MANIFEST_FILE}" | paste -sd ',' - | sed 's/,/, /g')"
         die "Installed version ${CURRENT_VERSION} is outside the tested automatic bridge matrix. No changes were made.

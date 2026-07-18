@@ -60,6 +60,25 @@ def test_sensitive_plan_installs_cosign_before_historical_authentication() -> No
     assert "nightly/manual certification" in workflow_text
 
 
+def test_installed_release_artifacts_mount_the_full_tui() -> None:
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
+
+    for source, marker in (
+        (ci, "installed_wheel_tui_mount=ok"),
+        (ci, "installed_wheel_tui_origin=venv"),
+        (smoke, "installed_target_tui_mount=ok"),
+        (smoke, "installed_target_tui_origin=venv"),
+    ):
+        assert "import defenseclaw.tui.app as tui_app" in source
+        assert "TUI imported outside wheel environment" in source
+        assert "app.run_test(size=(120, 40))" in source
+        assert marker in source
+    assert "fresh_080_default_migration=ok" in smoke
+    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" in smoke
+    assert "post_status_mandatory_sqlite_write=ok" in smoke
+
+
 def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     workflow = _workflow()
     triggers = workflow["on"]
@@ -513,7 +532,6 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         'patch_installed_upgrade_endpoint "${TARGET_VERSION}"',
         'defenseclaw "${command_args[@]}"',
         "run_candidate_updater_refusal",
-        "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
         "run_candidate_updater_direct_success",
         "manifest_windows_sources_are_empty",
@@ -529,7 +547,8 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "manifest_array_contains tested_source_versions",
         "canonical gateway refusal envelope",
         "artifact-envelope",
-        "there is intentionally no --version argument",
+        'resolver_args+=(--version "${TARGET_VERSION}")',
+        'run_candidate_updater_staged_success "${baseline}" explicit',
         "stage_authenticated_baseline",
         "SUCCESS_PATH_ONLY",
         "REFUSAL_CONTRACT_ONLY",
@@ -547,7 +566,7 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     ):
         assert contract in text
     sealed_resolver = 'bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"'
-    assert text.count(sealed_resolver) >= 4
+    assert text.count(sealed_resolver) >= 3
     assert 'scripts/upgrade.sh" --yes' not in text
     assert not re.search(r"TARGET_VERSION[^\n]*0\.8\.", text)
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
@@ -564,7 +583,6 @@ def test_external_resolver_boundaries_disable_python_bytecode() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
     for function_name in (
         "run_candidate_updater_refusal",
-        "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
         "run_candidate_updater_direct_success",
     ):

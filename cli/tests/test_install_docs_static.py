@@ -1847,6 +1847,7 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
 
     assert "defenseclaw-upgrade.sh" in cli
     assert "verify-blob" in cli
+    assert "unset VERSION" in cli
     latest_assets = "releases/latest/download/"
     assert cli.count(latest_assets) == 1
     assert re.search(r"releases/download/\d+\.\d+\.\d+/", cli) is None
@@ -1854,6 +1855,7 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
     assert "That URL is only a locator" in " ".join(cli.split())
     generated = authenticated_resolver_instructions(CURRENT_RELEASE)
     assert "Preflight refusal only" in generated
+    assert "unset VERSION" in generated
     assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
     expected_reference = "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade"

@@ -67,23 +67,11 @@ and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		// Cobra normally executes this process once, but tests and embedders can
-		// execute the command tree repeatedly. Never retain a previous source.
-		activeObservabilityV8Startup = nil
-
-		// Load the default installation .env before strict v8 compilation so
-		// destination token_env/bearer_env references work for a daemon without
-		// an interactive shell. loadConfigV8File repeats this for the source's
-		// resolved data_dir before validating destination secrets.
-		loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+		if err := loadGatewayCommandConfigOnly(); err != nil {
+			return err
+		}
 
 		var err error
-		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
-		if err != nil {
-			return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
-		}
-		version.SetBinaryVersion(appVersion)
-
 		auditStore, err = audit.NewStore(cfg.AuditDB)
 		if err != nil {
 			return fmt.Errorf("failed to open audit store: %w", err)
@@ -101,11 +89,6 @@ Run without arguments to start the sidecar daemon.`,
 		// stack is unaffected.
 		installCorrelator(auditStore, os.Stderr)
 
-		// Re-run with the resolved data dir in case DEFENSECLAW_HOME
-		// redirected it; second call is a no-op when paths match.
-		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
-			loadDotEnvIntoOS(resolved)
-		}
 		return nil
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
@@ -118,6 +101,37 @@ Run without arguments to start the sidecar daemon.`,
 	},
 	RunE:         runSidecar,
 	SilenceUsage: true,
+}
+
+// loadGatewayCommandConfigOnly performs the strict v8 configuration phase
+// shared by the daemon and read-only control commands. It deliberately does
+// not open audit.db: a short-lived `status` process must never become a second
+// SQLite owner beside the running daemon, because closing that connection can
+// unlink the daemon's live WAL/SHM files on supported SQLite implementations.
+func loadGatewayCommandConfigOnly() error {
+	// Cobra normally executes this process once, but tests and embedders can
+	// execute the command tree repeatedly. Never retain a previous source.
+	activeObservabilityV8Startup = nil
+
+	// Load the default installation .env before strict v8 compilation so
+	// destination token_env/bearer_env references work for a daemon without
+	// an interactive shell. loadConfigV8File repeats this for the source's
+	// resolved data_dir before validating destination secrets.
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+
+	var err error
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	if err != nil {
+		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+	}
+	version.SetBinaryVersion(appVersion)
+
+	// Re-run with the resolved data dir in case DEFENSECLAW_HOME redirected
+	// it; the second call is a no-op when paths match.
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	return nil
 }
 
 // loadGatewayConfigV8 strict-parses and compiles the exact source snapshot

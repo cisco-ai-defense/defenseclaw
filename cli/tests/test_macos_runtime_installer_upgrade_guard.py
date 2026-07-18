@@ -106,6 +106,7 @@ def test_bundled_runtime_refusal_names_exact_supported_upgrade_path() -> None:
         "sha256sum",
         "shasum -a 256",
         "DefenseClaw upgrade resolver complete v1",
+        "unset VERSION",
         "bash <(printf '%s\\\\n' \"$resolver\") --yes",
     ):
         assert required in refusal
@@ -411,6 +412,9 @@ def test_mac_app_resolver_command_is_raw_canonical_semver_gated_and_bash_syntax_
     assert "printf '%s\\n' \"$resolver\" | sha" in command
     assert "bash -n <(printf '%s\\n' \"$resolver\")" in command
     assert "bash <(printf '%s\\n' \"$resolver\") --yes" in command
+    assert command.index("unset VERSION") < command.index(
+        "bash <(printf '%s\\n' \"$resolver\") --yes"
+    )
     result = subprocess.run(
         ["/bin/bash", "-n"],
         input=command,

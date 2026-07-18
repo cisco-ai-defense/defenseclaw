@@ -38,6 +38,64 @@ _GENERATED_COMPATIBILITY = json.loads(v7_exporter_selection_bytes())
 _TYPED_COMPATIBILITY = V7CompatibilitySelection.from_mapping(_GENERATED_COMPATIBILITY)
 _ALL_BUCKETS = list(BUCKETS)
 _TEST_DATA_DIR = str(Path(Path.cwd().anchor) / "var" / "lib" / "defenseclaw")
+_FRESH_080_DEFAULT_OTEL_CONFIG = """config_version: 7
+otel:
+  enabled: false
+  endpoint: ""
+  protocol: grpc
+  headers: {}
+  tls: {ca_cert: "", insecure: false}
+  batch:
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    scheduled_delay_ms: 5000
+  traces:
+    enabled: true
+    sampler: always_on
+    sampler_arg: "1.0"
+    endpoint: ""
+    protocol: ""
+    url_path: ""
+  logs:
+    enabled: true
+    emit_individual_findings: false
+    endpoint: ""
+    protocol: ""
+    url_path: ""
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    endpoint: ""
+    protocol: ""
+    url_path: ""
+  resource:
+    attributes: {}
+"""
+_FRESH_080_NAMED_OTEL_CONFIG = """config_version: 7
+otel:
+  enabled: false
+  traces:
+    sampler: always_on
+    sampler_arg: "1.0"
+  logs:
+    emit_individual_findings: false
+  destinations:
+    - name: generic-otlp
+      preset: generic-otlp
+      enabled: false
+      endpoint: ""
+      protocol: grpc
+      tls: {ca_cert: "", insecure: false}
+      batch:
+        max_queue_size: 2048
+        max_export_batch_size: 512
+        scheduled_delay_ms: 5000
+      traces: {enabled: true, endpoint: "", protocol: "", url_path: ""}
+      logs: {enabled: true, endpoint: "", protocol: "", url_path: ""}
+      metrics: {enabled: true, endpoint: "", protocol: "", url_path: "", export_interval_s: 60}
+  resource:
+    attributes: {}
+"""
 _ALL_SPAN_EVENT_NAMES = [
     "span.admin.operation",
     "span.agent.invoke",
@@ -2181,6 +2239,129 @@ otel:
             "action": "drop",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    (_FRESH_080_DEFAULT_OTEL_CONFIG, _FRESH_080_NAMED_OTEL_CONFIG),
+    ids=("flat-quickstart", "named-release-installer"),
+)
+def test_fresh_080_disabled_otel_placeholder_migrates_without_inventing_endpoint(source: str) -> None:
+    result = _convert(source)
+    assert all(
+        destination.get("name") != "generic-otlp"
+        for destination in _document(result)["observability"].get("destinations", [])
+    )
+    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" in result.warnings
+    load_validate_v8(result.candidate)
+
+
+def test_custom_disabled_endpointless_otel_destination_still_fails_closed() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            """config_version: 7
+otel:
+  enabled: false
+  destinations:
+    - name: operator-destination
+      preset: generic-otlp
+      enabled: false
+      protocol: grpc
+      traces: {enabled: true}
+      logs: {enabled: true}
+      metrics: {enabled: true}
+"""
+        )
+
+    assert captured.value.code == "candidate_validation_failed"
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("  headers: {}", "  headers: {X-Operator: custom}"),
+        ("    sampler: always_on", "    sampler: parentbased_traceidratio"),
+        ("    export_interval_s: 60", "    export_interval_s: 30"),
+    ),
+)
+def test_fresh_placeholder_with_operator_changes_is_not_silently_omitted(
+    original: str,
+    replacement: str,
+) -> None:
+    source = _FRESH_080_DEFAULT_OTEL_CONFIG.replace(original, replacement)
+    with pytest.raises(V8MigrationError):
+        _convert(source)
+
+
+def test_fresh_placeholder_with_environment_endpoint_preserves_effective_transport() -> None:
+    result = _convert(
+        _FRESH_080_DEFAULT_OTEL_CONFIG,
+        {"OTEL_EXPORTER_OTLP_ENDPOINT": "collector.example.test:4317"},
+    )
+    destination = _destination(_document(result), "generic-otlp")
+
+    assert destination["endpoint"] == "collector.example.test:4317"
+    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" not in result.warnings
+    load_validate_v8(result.candidate)
+
+
+def test_named_release_placeholder_with_operator_field_is_not_silently_omitted() -> None:
+    source = _FRESH_080_NAMED_OTEL_CONFIG.replace(
+        "      tls: {ca_cert: \"\", insecure: false}",
+        "      headers: {}\n      tls: {ca_cert: \"\", insecure: false}",
+    )
+    with pytest.raises(V8MigrationError):
+        _convert(source)
+
+
+@pytest.mark.parametrize(
+    ("source", "original", "replacement"),
+    (
+        (_FRESH_080_DEFAULT_OTEL_CONFIG, "  enabled: false", "  enabled: 0"),
+        (
+            _FRESH_080_DEFAULT_OTEL_CONFIG,
+            '    sampler_arg: "1.0"',
+            "    sampler_arg: 1.0",
+        ),
+        (
+            _FRESH_080_DEFAULT_OTEL_CONFIG,
+            "    export_interval_s: 60",
+            "    export_interval_s: 60.0",
+        ),
+        (_FRESH_080_NAMED_OTEL_CONFIG, "      enabled: false", "      enabled: 0"),
+        (
+            _FRESH_080_NAMED_OTEL_CONFIG,
+            "export_interval_s: 60}",
+            "export_interval_s: 60.0}",
+        ),
+    ),
+    ids=(
+        "flat-bool-to-int",
+        "flat-string-to-float",
+        "flat-int-to-float",
+        "named-bool-to-int",
+        "named-int-to-float",
+    ),
+)
+def test_historical_placeholder_scalar_types_must_match_exactly(
+    source: str,
+    original: str,
+    replacement: str,
+) -> None:
+    altered = source.replace(original, replacement, 1)
+    assert altered != source
+    with pytest.raises(V8MigrationError):
+        _convert(altered)
+
+
+def test_named_release_placeholder_with_master_enabled_still_fails_closed() -> None:
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            _FRESH_080_NAMED_OTEL_CONFIG,
+            {"DEFENSECLAW_OTEL_ENABLED": "true"},
+        )
+
+    assert captured.value.code == "invalid_v7_otel"
 
 
 def test_disabled_destination_without_any_transport_fails_instead_of_disappearing() -> None:

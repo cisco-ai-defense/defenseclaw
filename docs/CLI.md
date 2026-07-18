@@ -499,8 +499,7 @@ is required.
 6. Report success only after version-bound health checks pass; otherwise restore and verify the exact source state.
 
 Crossing the observability-v8 hard cut requires the `0.8.4` bridge. The
-release-owned POSIX shell resolver performs the supported one-command path when
-invoked without an explicit target:
+release-owned POSIX shell resolver performs the supported one-command path:
 
 ```text
 reviewed 0.8.3-or-older source
@@ -513,9 +512,11 @@ An already-published `0.8.3`-or-older built-in CLI cannot be taught this
 two-process orchestration retroactively. Its protocol check therefore refuses
 a hard-cut latest release before stopping services. Some frozen releases print
 an obsolete raw-network shell hint after that safe refusal; it must not be
-executed. Use the authenticated resolver-asset bootstrap below instead.
-Likewise, an explicit request for `0.8.5` from a pre-bridge source
-refuses before mutation; explicit targets never hide an intermediate release.
+executed. Use the authenticated resolver-asset bootstrap below instead. A
+current resolver treats `--version` as the selected final release and still
+inserts every manifest-required bridge; the option never authorizes a direct
+hard-cut install. The immutable `0.8.5` resolver predates that repair and must
+be invoked without `--version` and with no exported `VERSION` value.
 
 POSIX rollback retains any plan-owned inode that might still receive a late
 open-descriptor write. The payload is placed in a plan-scoped, mode-0700
@@ -552,7 +553,8 @@ the v7 file.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
-- `--version VERSION` — upgrade to a specific release (default: latest)
+- `--version VERSION` — select a specific final release; required bridges are
+  still staged (default: latest)
 - `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
   signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
@@ -576,7 +578,7 @@ matrix is empty. Use the current target-release POSIX resolver on every
 | `0.8.0` or `0.8.1` | Use the current release-owned POSIX resolver without `--version`; no system-wide Cosign installation is required. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
 | Any Windows source | The `0.8.4` release contains no Windows gateway/rollback binary, so no Windows hard-cut path is published. The PowerShell resolver fails closed before stopping services. Keep the current installation unchanged. |
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
-| Direct `0.8.3 → 0.8.5` request | Refused before service stop or installed mutation. Remove the explicit target and use the release-owned resolver. |
+| Direct installer from `0.8.3 → 0.8.5` | Refused before service stop or installed mutation. Manual artifact copying is unsupported because it bypasses bridge selection and rollback. Use the release-owned resolver; selecting a final version there does not bypass the bridge. |
 
 **Examples:**
 
@@ -589,6 +591,7 @@ completeness marker, and syntax check authenticate the bytes before execution.
 # POSIX: one-command staged resolver (do not add --version)
 (
   set -eu
+  unset VERSION
   umask 077
   d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
   trap 'rm -rf "$d"' EXIT
