@@ -1542,6 +1542,27 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
 }
 
+func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
+	if !codexNotifyLooksManaged(cfg["notify"], opts) {
+		return nil
+	}
+	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
+		var original interface{}
+		if err := json.Unmarshal(backup.OriginalNotify, &original); err != nil {
+			return fmt.Errorf("restore original Codex notify config: %w", err)
+		}
+		if !codexNotifyLooksManaged(original, opts) {
+			cfg["notify"] = original
+			return nil
+		}
+	}
+	// A stale predecessor backup may describe DefenseClaw's own notifier as the
+	// operator preimage. Strong argv ownership makes deletion safe; unrelated
+	// notifiers never reach this branch.
+	delete(cfg, "notify")
+	return nil
+}
+
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
 // shell shim codex invokes on agent-turn-complete. The script POSTs
 // codex's JSON arg to /api/v1/codex/notify with the gateway token
@@ -1639,13 +1660,13 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	render := func(raw []byte, exists bool) error {
 		if exact, ok := managedFileBackupTransform(managedBackup, raw, exists); ok {
 			if !exact.Remove {
-				cleaned, changed, err := removeOwnedCodexHooksFromTOML(
+				cleaned, changed, err := removeOwnedCodexStateFromExactRestore(
 					exact.Data,
 					configPath,
-					filepath.Join(opts.DataDir, "hooks"),
+					opts,
 				)
 				if err != nil {
-					return fmt.Errorf("clean exact-restored Codex hooks: %w", err)
+					return fmt.Errorf("clean exact-restored Codex config: %w", err)
 				}
 				if changed {
 					exact.Data = cleaned
@@ -1727,15 +1748,8 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 		// structural and never loads or mints the scoped credential.
 		restoreCodexOtelEntries(cfg, backup, opts)
 
-		managedNotify := codexNotifyLooksManaged(cfg["notify"], opts)
-		if managedNotify && backup.HadNotify && len(backup.OriginalNotify) > 0 {
-			var orig interface{}
-			if err := json.Unmarshal(backup.OriginalNotify, &orig); err != nil {
-				return fmt.Errorf("restore original Codex notify config: %w", err)
-			}
-			cfg["notify"] = orig
-		} else if managedNotify {
-			delete(cfg, "notify")
+		if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+			return err
 		}
 
 		out, err := toml.Marshal(cfg)
@@ -1949,6 +1963,59 @@ func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]b
 		delete(cfg, "hooks")
 	} else {
 		cfg["hooks"] = hooks
+	}
+	if len(cfg) == 0 {
+		return nil, true, nil
+	}
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal restored Codex config: %w", err)
+	}
+	return out, true, nil
+}
+
+// removeOwnedCodexStateFromExactRestore sanitizes a byte-exact pristine
+// snapshot before teardown publishes it. Upgrade predecessors could capture a
+// config.toml that already contained DefenseClaw hooks, OTel exporters, or the
+// notify bridge. Exact restoration must not resurrect those owned entries.
+// Strong structural ownership checks preserve unrelated operator settings, and
+// operator-only snapshots remain byte-for-byte exact.
+func removeOwnedCodexStateFromExactRestore(raw []byte, configPath string, opts SetupOpts) ([]byte, bool, error) {
+	cleaned, hooksChanged, err := removeOwnedCodexHooksFromTOML(
+		raw,
+		configPath,
+		filepath.Join(opts.DataDir, "hooks"),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	cfg := map[string]interface{}{}
+	if len(cleaned) > 0 {
+		if err := toml.Unmarshal(cleaned, &cfg); err != nil {
+			return nil, false, fmt.Errorf("parse Codex config: %w", err)
+		}
+	}
+	before, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("canonicalize Codex config before cleanup: %w", err)
+	}
+
+	// A contaminated pristine snapshot is not evidence that owned telemetry was
+	// operator configuration. Use neutral restoration metadata so only strict
+	// DefenseClaw markers are removed and unrelated OTel siblings survive.
+	if codexOtelBlockLooksManaged(cfg["otel"], opts) {
+		restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts)
+	}
+	if err := restoreCodexNotify(cfg, codexConfigBackup{}, opts); err != nil {
+		return nil, false, err
+	}
+	after, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("canonicalize Codex config after cleanup: %w", err)
+	}
+	if bytes.Equal(before, after) {
+		return cleaned, hooksChanged, nil
 	}
 	if len(cfg) == 0 {
 		return nil, true, nil
@@ -2415,10 +2482,12 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	var originalValue interface{}
 	originalDecoded := false
 	original := map[string]interface{}(nil)
+	originalLooksManaged := false
 	if backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
 		if err := json.Unmarshal(backup.OriginalOtel, &originalValue); err == nil {
 			originalDecoded = true
 			original, _ = originalValue.(map[string]interface{})
+			originalLooksManaged = codexOtelBlockLooksManaged(original, opts)
 		}
 	}
 
@@ -2437,8 +2506,10 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		}
 		if original != nil {
 			if saved, hadSaved := original[key]; hadSaved {
-				current[key] = saved
-				continue
+				if !codexExporterLooksManaged(saved, opts) {
+					current[key] = saved
+					continue
+				}
 			}
 		}
 		delete(current, key)
@@ -2449,7 +2520,13 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	if value, exists := current["log_user_prompt"]; exists && value == true {
 		if original != nil {
 			if saved, hadSaved := original["log_user_prompt"]; hadSaved {
-				current["log_user_prompt"] = saved
+				// A stale managed snapshot cannot prove that Setup's true value
+				// belonged to the operator; a distinct saved value still can.
+				if originalLooksManaged && saved == true {
+					delete(current, "log_user_prompt")
+				} else {
+					current["log_user_prompt"] = saved
+				}
 			} else {
 				delete(current, "log_user_prompt")
 			}
