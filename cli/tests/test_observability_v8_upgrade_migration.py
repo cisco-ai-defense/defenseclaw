@@ -75,7 +75,10 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def test_target_bundle_subprocess_uses_isolated_python(self) -> None:
         observed: list[str] = []
 
-        def complete(command, **_kwargs):
+        def complete(
+            command: list[str],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
             observed.extend(command)
             with open(command[-1], "w", encoding="utf-8") as result_file:
                 json.dump({"ok": True, "installed": False}, result_file)
