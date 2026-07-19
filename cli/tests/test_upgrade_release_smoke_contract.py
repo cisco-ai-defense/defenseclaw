@@ -383,6 +383,11 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
     cleanup = source[cleanup_start:cleanup_end]
     assert "members = list(entries)" not in cleanup
+    assert "members.append(entry.name)" in cleanup
+    assert "members.append(entry)" not in cleanup
+    assert "os.lstat(name, dir_fd=descriptor)" in cleanup
+    assert "entry.stat(" not in cleanup
+    assert "entry.is_symlink()" not in cleanup
     assert "if len(members) == 100000:" in cleanup
 
 
@@ -624,20 +629,20 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     program = _phase_one_recovery_cleanup_program()
     needle = (
         "            quarantine_name = quarantine_no_replace("
-        "descriptor, entry.name, info)"
+        "descriptor, name, info)"
     )
     assert program.count(needle) == 1
     program = program.replace(
         needle,
-        f"            if entry.name == {temporary_name!r}:\n"
+        f"            if name == {temporary_name!r}:\n"
         "                os.rename(\n"
-        "                    entry.name,\n"
-        "                    entry.name + '.inspected',\n"
+        "                    name,\n"
+        "                    name + '.inspected',\n"
         "                    src_dir_fd=descriptor,\n"
         "                    dst_dir_fd=descriptor,\n"
         "                )\n"
         "                replacement = os.open(\n"
-        "                    entry.name,\n"
+        "                    name,\n"
         "                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
         "                    0o600,\n"
         "                    dir_fd=descriptor,\n"
@@ -699,7 +704,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     program = _phase_one_recovery_cleanup_program()
     needle = (
         "            quarantine_name = quarantine_no_replace("
-        "descriptor, entry.name, info)"
+        "descriptor, name, info)"
     )
     assert program.count(needle) == 1
     program = program.replace(
