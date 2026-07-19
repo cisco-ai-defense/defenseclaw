@@ -1399,6 +1399,19 @@ DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
 
+    # A working native-v8 host has already completed gateway first boot. Keep
+    # that invariant in the fixture so starting the target runtime does not
+    # manufacture an unrelated dotenv mutation after the continuity snapshot.
+    python3 -I - "${data_dir}/.env" <<'PY'
+import secrets
+from pathlib import Path
+import sys
+
+environment_path = Path(sys.argv[1])
+with environment_path.open("a", encoding="utf-8", newline="\n") as stream:
+    stream.write(f"DEFENSECLAW_GATEWAY_TOKEN={secrets.token_urlsafe(32)}\n")
+PY
+
     # A real config-v8 host already has the v8 activation recorded. Seed the
     # cursor through the authenticated published baseline's own state API so a
     # later candidate must preserve, rather than invent, that history.
@@ -1839,6 +1852,10 @@ config_bytes = config_path.read_bytes()
 environment_bytes = environment_path.read_bytes()
 historical_config = (evidence_dir / "config.historical.source").read_bytes()
 historical_environment = (evidence_dir / "environment.historical.source").read_bytes()
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if not isinstance(historical_gateway_token, str) or not historical_gateway_token.strip():
+    raise SystemExit("native-v8 source fixture has no established gateway token")
 
 if config_bytes != historical_config:
     raise SystemExit("native-v8 config bytes changed without a target config migration")
@@ -1869,6 +1886,7 @@ expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
+    "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
 }
 actual_environment = dotenv_values(environment_path)
 if any(actual_environment.get(name) != value for name, value in expected_environment.items()):
