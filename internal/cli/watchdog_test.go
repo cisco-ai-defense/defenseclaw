@@ -487,6 +487,8 @@ func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
 		CooldownSeconds: intPtr(0),
 	}})
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var probes atomic.Int32
 	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := probes.Add(1)
@@ -496,15 +498,23 @@ func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"gateway":{"state":"running"}}`))
+		if n == 5 {
+			// End the loop only after serving the first healthy probe following
+			// the debounced outage. The selected probe is processed before the
+			// loop observes cancellation on its next iteration.
+			cancel()
+		}
 	}))
 	defer healthSrv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Millisecond)
-	defer cancel()
 	runWatchdogLoop(ctx, healthSrv.URL, 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, webhooks, nil)
+	timedOut := ctx.Err() == context.DeadlineExceeded
 	// Dispatch is asynchronous. Close deterministically drains every accepted
-	// delivery, avoiding a scheduler-dependent sleep before the assertion.
+	// delivery after the fifth probe synchronizes the loop's completion.
 	webhooks.Close()
+	if timedOut {
+		t.Fatal("timed out waiting for gateway recovery webhook")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
