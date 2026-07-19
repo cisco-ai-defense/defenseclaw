@@ -174,6 +174,19 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert "did not reach version-bound health" in canary
 
 
+def test_post_status_write_probe_satisfies_gateway_csrf_contract() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index('request = Request(\n    f"http://127.0.0.1:{port}/policy/reload"')
+    end = source.index("\n)\nwith urlopen(request, timeout=10)", start)
+    request = source[start:end]
+
+    assert 'data=b"{}"' in request
+    assert '"Authorization": "Bearer " + token' in request
+    assert '"Content-Type": "application/json"' in request
+    assert '"X-DefenseClaw-Client": "release-upgrade-smoke"' in request
+    assert '"X-DefenseClaw-Token": token' in request
+
+
 @pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])
 def test_historical_canary_fixture_is_hermetic_before_gateway_start(
     tmp_path: Path,
