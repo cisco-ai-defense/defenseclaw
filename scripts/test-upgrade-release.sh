@@ -1395,6 +1395,8 @@ YAML
     cat >"${data_dir}/.env" <<'ENV'
 # exact native-v8 environment bytes must survive later upgrades
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
+# an initialized source profile completed gateway first boot before upgrading
+DEFENSECLAW_GATEWAY_TOKEN=upgrade-smoke-v8-gateway-fixture
 DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
@@ -1867,6 +1869,7 @@ if destinations["v8-http-protected"].get("bearer_env") != "DEFENSECLAW_V8_FIXTUR
 
 expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+    "DEFENSECLAW_GATEWAY_TOKEN": "upgrade-smoke-v8-gateway-fixture",
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
 }
