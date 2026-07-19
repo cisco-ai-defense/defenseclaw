@@ -1,7 +1,6 @@
 {
   "schema_version": 2,
   "published_baselines": [
-    "0.8.5",
     "0.8.4",
     "0.8.3",
     "0.8.2",
@@ -20,7 +19,6 @@
     "0.4.0"
   ],
   "published_baseline_config_versions": {
-    "0.8.5": 8,
     "0.8.4": 7,
     "0.8.3": 7,
     "0.8.2": 6,

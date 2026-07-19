@@ -591,7 +591,13 @@ type daemonReadinessRequirements struct {
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
-	cfg, err := config.LoadRuntimeV8File(config.ConfigPath())
+	// Resolve the daemon management view through the same strict source and
+	// dotenv path as the child. A migrated config can keep destination secrets
+	// only in <data_dir>/.env; compiling it without those values fails and used
+	// to make readiness silently probe the default endpoint instead of the
+	// dynamically configured one.
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+	cfg, _, err := loadGatewayConfigV8(config.ConfigPath())
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}

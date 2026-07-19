@@ -1854,12 +1854,27 @@ class DefenseClawTUI(App[None]):
         scroller: VerticalScroll | None,
         scroll_y: float | None,
     ) -> float | None:
-        """Keep Overview scroll stable across body relayouts."""
+        """Keep Overview scroll stable across body relayouts.
+
+        A reader at an interior offset keeps that absolute offset.  A reader
+        already pinned to the bottom stays pinned when live rows make the body
+        taller; Textual must resolve that target after its next layout because
+        ``max_scroll_y`` still describes the old body in this call frame.
+        """
 
         if scroller is None or scroll_y is None:
             return scroll_y
-        target = max(0.0, min(float(scroll_y), float(scroller.max_scroll_y)))
+        previous_max = float(scroller.max_scroll_y)
+        pinned_to_end = previous_max > 0.0 and float(scroll_y) >= previous_max
         try:
+            if pinned_to_end:
+                scroller.scroll_end(
+                    animate=False,
+                    immediate=False,
+                    x_axis=False,
+                )
+                return float(scroll_y)
+            target = max(0.0, min(float(scroll_y), previous_max))
             scroller.scroll_to(y=target, animate=False, immediate=True)
         except Exception:  # noqa: BLE001 - scroll restoration is best-effort.
             return scroll_y

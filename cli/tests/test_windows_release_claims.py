@@ -116,3 +116,16 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     assert "$profile =" not in workflow + native_workflow
     assert "windows-native-required:" in native_workflow
     assert "name: windows native required" in native_workflow
+
+
+def test_disposable_connector_workspace_includes_the_v8_jsonl_validator() -> None:
+    launcher = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(
+        encoding="utf-8"
+    )
+    contract_files = launcher[
+        launcher.index("if ($Mode -eq 'contract')") : launcher.index(
+            "foreach ($file in $harnessFiles)"
+        )
+    ]
+
+    assert "'assert-observability-v8-jsonl.py'" in contract_files

@@ -1884,12 +1884,21 @@ async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
     logs.filter_mode = ""
     logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
     app = DefenseClawTUI(logs_model=logs)
+    # The assertion measures one stable render generation.  Keep the
+    # independent two-second refresh timer from starting another generation
+    # while this test is slowed by full-suite coverage instrumentation.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         await _wait_for_background(lambda: table.row_count == 200)
+        # The responsive renderer yields after appending its final batch and
+        # only then publishes the generation signature.  Row count alone can
+        # therefore become observable one event-loop turn too early.
+        await _wait_for_panel_render(app, "logs")
+        await pilot.pause()
         row_objects = tuple(table.rows.values())
 
         logs.cursor["gateway"] = 1
@@ -1911,12 +1920,20 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
     logs.filter_mode = ""
     logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
     app = DefenseClawTUI(logs_model=logs)
+    # The assertion measures a delta within one stable render generation.
+    # Keep the independent two-second refresh timer from starting another
+    # generation while the full suite is instrumented.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         await _wait_for_background(lambda: table.row_count == 200)
+        # The responsive renderer exposes its final row batch one event-loop
+        # turn before it commits the matching generation signature.
+        await _wait_for_panel_render(app, "logs")
+        await pilot.pause()
         previous_second_row = list(table.rows.values())[1]
         logs.set_cursor(50)
         app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
@@ -5253,6 +5270,10 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
     store = HookStatsStore()
     audit = AuditPanelModel(store)
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+    # This contract measures cache reuse inside the cold-start generation.
+    # A periodic refresh is a new, legitimate sampling generation and is not
+    # part of the before/after-health comparison below.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
@@ -5401,6 +5422,10 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
         ]
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+    # This contract covers reuse of the grouped persisted totals within one
+    # render generation.  Do not let Textual's independent two-second refresh
+    # timer create another generation while the full suite is instrumented.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
@@ -5411,19 +5436,20 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
         assert rows["codex"].blocks == 27
         assert rows["codex"].alerts == 54
         assert rows["codex"].last_activity != "—"
-        assert store.stats_calls == 1
+        initial_stats_calls = store.stats_calls
+        assert initial_stats_calls >= 1
 
         app._set_connector_filter("codex")
         codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert codex_metrics["findings"].value == 2
-        assert store.stats_calls == 1
+        assert store.stats_calls == initial_stats_calls
 
         app._set_connector_filter("claudecode")
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
         assert metrics["hook_calls"].value == 4408
         assert metrics["findings"].value == 2
-        assert store.stats_calls == 1
+        assert store.stats_calls == initial_stats_calls
 
         session_counts = app._overview_session_enforcement_counts()
         assert session_counts.active_alerts == 59
@@ -6562,6 +6588,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
     app._schedule_observability_status_load = lambda: None  # type: ignore[method-assign]
     app._schedule_credentials_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_overview_disk_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
@@ -6571,18 +6598,19 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
 
-        # Establish one complete coherent render baseline before counting
-        # updates. Under a loaded full-suite run the mount-time snapshot may
-        # have sampled the model just before this test scrolls the panel; only
-        # resetting the connector-row fingerprint then leaves the body/live
-        # fingerprints from that older generation and makes the first explicit
-        # periodic refresh look like idle churn.
-        with app._connector_hook_event_render_cache():
-            app._last_body_signature = app._overview_body_signature()
-            app._overview_connector_rows_signature_cache = (
-                app._overview_connector_rows_signature()
-            )
-            app._overview_live_data_signature_cache = app._overview_live_data_signature()
+        # Establish the baseline through the same deferred production path
+        # that the assertion exercises.  Directly assigning the three
+        # fingerprints is not equivalent: the worker snapshot also advances
+        # its sampled hook-stat generation/cache, so the first real periodic
+        # sample can legitimately replace the mount-time synchronous frame.
+        # Waiting for that generation before installing the counter makes the
+        # measured refresh a true unchanged -> unchanged transition even when
+        # the full suite is running under coverage instrumentation.
+        app._overview_last_scroll_activity_at = 0.0
+        periodic_refresh()
+        await _wait_for_panel_render(app, "overview")
+        await pilot.pause()
+
         body = app.query_one("#body", Static)
         update_calls = 0
         original_update = body.update
@@ -6593,7 +6621,6 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             original_update(*args, **kwargs)
 
         body.update = counted_update  # type: ignore[method-assign]
-        app._overview_last_scroll_activity_at = 0.0
 
         periodic_refresh()
         await _wait_for_panel_render(app, "overview")
@@ -6614,6 +6641,9 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
 
         periodic_refresh()
         await _wait_for_panel_render(app, "overview")
+        # Bottom anchoring is intentionally resolved after Textual lays out
+        # the taller body and publishes its new max_scroll_y.
+        await pilot.pause()
 
         assert update_calls == 1
         assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()

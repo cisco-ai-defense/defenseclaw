@@ -1,0 +1,369 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Pre-release certification gates
+
+# Candidate construction and signing deliberately stay in release.yaml so the
+# immutable release.yaml@refs/heads/main Fulcio identity remains compatible
+# with every published installer. This reusable workflow only tests those
+# already-signed, sealed bytes.
+on:
+  workflow_call:
+    inputs:
+      candidate_artifact:
+        description: Immutable Actions artifact containing release-candidate/.
+        required: true
+        type: string
+      version:
+        description: Canonical candidate version.
+        required: true
+        type: string
+      commit:
+        description: Exact reviewed source commit bound into the candidate.
+        required: true
+        type: string
+      baselines:
+        description: JSON versions selected by release behavior class.
+        required: true
+        type: string
+      historical_matrix:
+        description: JSON include matrix for authentic historical dependency canaries.
+        required: true
+        type: string
+      min_upgrade_protocol:
+        description: Candidate minimum upgrade protocol.
+        required: true
+        type: string
+      required_bridge_version:
+        description: Published bridge required by the candidate, if any.
+        required: false
+        default: ""
+        type: string
+      windows_prebridge_baselines:
+        description: JSON Windows baseline list; empty while Windows release bytes are disabled.
+        required: true
+        type: string
+    outputs:
+      passed:
+        description: True only after every required certification gate passes.
+        value: ${{ jobs.certification-complete.outputs.passed }}
+
+permissions:
+  contents: read
+
+env:
+  # Every certification consumer reads the snapshot sealed into the candidate;
+  # no job independently re-resolves the historical source set.
+  UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/release-candidate/effective-upgrade-baselines.json
+
+jobs:
+  posix-fresh-install:
+    name: Fresh install signed candidate (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-amd64
+            runner_arch: X64
+          - runner: macos-15
+            platform: darwin-arm64
+            runner_arch: ARM64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Verify and install exact signed bytes
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ARCH" = "${{ matrix.runner_arch }}"
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          scripts/test-fresh-install-release.sh \
+            "$GITHUB_WORKSPACE/release-candidate/dist" "$RELEASE_TAG"
+
+  linux-upgrade:
+    name: Linux signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        baseline: ${{ fromJSON(inputs.baselines) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Exercise staged handoff, rollback, and recovery
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          scripts/test-upgrade-protocol-release.sh \
+            --from-version "$BASELINE" \
+            --target-version "$RELEASE_TAG" \
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+            --baseline-mode seed \
+            --health-timeout 60
+
+  macos-upgrade:
+    name: macOS signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        baseline: ${{ fromJSON(inputs.baselines) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Exercise staged handoff, rollback, and recovery
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          scripts/test-upgrade-protocol-release.sh \
+            --from-version "$BASELINE" \
+            --target-version "$RELEASE_TAG" \
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+            --baseline-mode seed \
+            --health-timeout 60
+
+  historical-dependency-canary:
+    name: Published dependency canary ${{ matrix.baseline }} → ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.historical_matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Exercise authentic historical dependencies
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          BASELINE: ${{ matrix.baseline }}
+          CANARY_START_SOURCE: ${{ matrix.start_source_gateway }}
+          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          source_gateway_args=()
+          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
+            source_gateway_args+=(--start-source-gateway)
+          fi
+          scripts/test-upgrade-protocol-release.sh \
+            --from-version "$BASELINE" \
+            --target-version "$RELEASE_TAG" \
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+            --baseline-mode seed \
+            --baseline-dependencies published \
+            --success-path-only \
+            --health-timeout 60 \
+            "${source_gateway_args[@]}"
+
+  windows-unpublished-refusal:
+    name: Windows unpublished-runtime refusal
+    if: ${{ inputs.windows_prebridge_baselines == '[]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Prove native resolver refuses before mutation
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          python scripts/release_candidate.py verify `
+            --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/verify-sigstore-blob.py `
+            --certificate release-candidate/dist/checksums.txt.pem `
+            --signature release-candidate/dist/checksums.txt.sig `
+            --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
+            release-candidate/dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/test-upgrade-release-windows.ps1 `
+            -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
+            -TargetVersion "$env:RELEASE_TAG" `
+            -UnpublishedWindowsRefusalOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  live-continuity:
+    name: Live Docker/local observability continuity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-candidate
+      - name: Exercise bridge-to-target history and dashboard continuity
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          MIN_PROTOCOL: ${{ inputs.min_upgrade_protocol }}
+          BRIDGE_BASELINE: ${{ inputs.required_bridge_version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          if [[ ! "$MIN_PROTOCOL" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error title=Invalid upgrade protocol::min_upgrade_protocol=$MIN_PROTOCOL"
+            exit 1
+          fi
+          if (( MIN_PROTOCOL > 1 )); then
+            test -n "$BRIDGE_BASELINE"
+            scripts/test-observability-v8-upgrade-continuity.sh \
+              --from-version "$BRIDGE_BASELINE" \
+              --target-version "$RELEASE_TAG" \
+              --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+              --health-timeout 60
+          else
+            echo "Candidate protocol $MIN_PROTOCOL does not require hard-cut continuity."
+          fi
+
+  certification-complete:
+    name: Full certification complete
+    needs:
+      - posix-fresh-install
+      - linux-upgrade
+      - macos-upgrade
+      - historical-dependency-canary
+      - windows-unpublished-refusal
+      - live-continuity
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.result.outputs.passed }}
+    steps:
+      - id: result
+        env:
+          POSIX: ${{ needs.posix-fresh-install.result }}
+          LINUX: ${{ needs.linux-upgrade.result }}
+          MACOS: ${{ needs.macos-upgrade.result }}
+          HISTORICAL: ${{ needs.historical-dependency-canary.result }}
+          WINDOWS_REFUSAL: ${{ needs.windows-unpublished-refusal.result }}
+          CONTINUITY: ${{ needs.live-continuity.result }}
+        run: |
+          set -euo pipefail
+          for result in "$POSIX" "$LINUX" "$MACOS" "$HISTORICAL" "$WINDOWS_REFUSAL" "$CONTINUITY"; do
+            test "$result" = success
+          done
+          echo "passed=true" >> "$GITHUB_OUTPUT"
