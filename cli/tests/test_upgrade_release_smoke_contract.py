@@ -552,6 +552,12 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     environment_path = data_dir / ".env"
     config_before = config_path.read_bytes()
     environment_before = environment_path.read_bytes()
+    gateway_token_match = re.search(
+        rb"^DEFENSECLAW_GATEWAY_TOKEN=([0-9a-f]{64})$",
+        environment_before,
+        re.MULTILINE,
+    )
+    assert gateway_token_match is not None
     source = load_validate_v8(config_before, source_name=str(config_path)).source
     assert source["config_version"] == 8
     assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
