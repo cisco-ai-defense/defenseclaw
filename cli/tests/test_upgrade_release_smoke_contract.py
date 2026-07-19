@@ -174,17 +174,125 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert "did not reach version-bound health" in canary
 
 
-def test_post_status_write_probe_satisfies_gateway_csrf_contract() -> None:
+def test_audit_event_probe_is_policy_independent_and_satisfies_gateway_contract() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    start = source.index('request = Request(\n    f"http://127.0.0.1:{port}/policy/reload"')
-    end = source.index("\n)\nwith urlopen(request, timeout=10)", start)
+    start = source.index("probe_id = str(uuid.uuid4())")
+    end = source.index("\nlocal = (config.get(\"observability\")", start)
     request = source[start:end]
 
-    assert 'data=b"{}"' in request
+    assert '"action": "policy-reload"' in request
+    assert '"id": probe_id' in request
+    assert '"target": "release-upgrade-smoke:" + probe_id' in request
+    assert '"actor": "release-upgrade-smoke"' in request
+    assert '"details": "synthetic post-status SQLite continuity probe; no policy state changed"' in request
+    assert '"severity": "INFO"' in request
+    assert 'f"http://127.0.0.1:{port}/audit/event"' in request
+    assert "data=body" in request
     assert '"Authorization": "Bearer " + token' in request
     assert '"Content-Type": "application/json"' in request
     assert '"X-DefenseClaw-Client": "release-upgrade-smoke"' in request
     assert '"X-DefenseClaw-Token": token' in request
+    assert "/policy/reload" not in request
+    assert "response.status != 200" in request
+    assert 'result != {"status": "ok"}' in request
+
+    persistence = source[end : source.index('print("post_status_mandatory_sqlite_write=ok")', end)]
+    assert "WHERE id = ? AND action = 'policy-reload'" in persistence
+    assert "AND event_name = 'policy.updated' AND mandatory = 1" in persistence
+    assert "(probe_id,)" in persistence
+    assert 'getattr(sqlite3, "SQLITE_BUSY", 5)' in persistence
+    assert 'getattr(sqlite3, "SQLITE_LOCKED", 6)' in persistence
+    assert 'message == "database is busy"' in persistence
+    assert '"database table is locked"' in persistence
+    assert "timeout=0.2" in persistence
+    assert "if after == 1:" in persistence
+
+
+def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+
+    receipt_function = source[
+        source.index("begin_release_upgrade_receipt() {") : source.index(
+            "\n}\n\nfinish_release_upgrade_receipt()", source.index("begin_release_upgrade_receipt() {")
+        )
+    ]
+    backup = source.index('ok "Backup saved to: ${BACKUP_DIR}"')
+    receipt = source.index("begin_release_upgrade_receipt\n", backup)
+    stop = source.index('# ── Stop services', receipt)
+    gateway_activation = source.index('mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"', stop)
+    target_activation = source.index(
+        'UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation
+    )
+    launcher = source.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', target_activation)
+    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', stop)
+    required = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
+    start = source.index('# ── Start services', required)
+    health = source.index('if [[ "${HEALTH_OK}" -eq 0 ]]', start)
+    suppress_failed_trap = source.index("UPGRADE_RECEIPT_TERMINAL=1", health)
+    complete = source.index("finish_release_upgrade_receipt succeeded", suppress_failed_trap)
+
+    assert (
+        backup
+        < receipt
+        < stop
+        < gateway_activation
+        < target_activation
+        < launcher
+        < migration
+        < required
+        < start
+        < health
+        < suppress_failed_trap
+        < complete
+    )
+    assert receipt_function.index('local receipt_path receipt_name') < receipt_function.index(
+        'UPGRADE_RECEIPT_PATH="${receipt_path}"'
+    )
+    assert "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}" in receipt_function
+    migration_phase = source[stop:required]
+    assert "TARGET_PYTHON_STDIN_ARGS=(-)" in migration_phase
+    assert "TARGET_PYTHON_STDIN_ARGS=(-I -B -)" in migration_phase
+    assert (
+        '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}"'
+        in migration_phase
+    )
+    assert "delegate_prior_upgrade_receipts(Path(receipt_path))" in migration_phase
+    assert 'os.environ["MIGRATION_TO_VERSION"]' in migration_phase
+    assert "record_upgrade_migrations(" in migration_phase
+    assert (
+        '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}"'
+        in source[migration:required]
+    )
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<\'PY\'' in source[start:health]
+
+    same_version = source.index('same_version_recovery="clean"')
+    recovery = source.index('section "Recovering Incomplete Upgrade"', same_version)
+    clean_noop = source.index('section "Version Already Verified"', recovery)
+    assert same_version < recovery < clean_noop < backup
+    same_version_phase = source[same_version:clean_noop]
+    assert "find_resumable_upgrade_receipt" in same_version_phase
+    assert "find_verified_installed_upgrade_receipt" in same_version_phase
+    assert "installed_local_observability_bundle_version" in same_version_phase
+    assert 'print("untrusted-bundle-drift")' in same_version_phase
+    assert '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes' in same_version_phase
+
+    split = source.index('if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]')
+    hard_cut_state = source.index('hard_cut_state="$(', split)
+    split_phase = source[split:hard_cut_state]
+    assert "find_resumable_upgrade_receipt" not in split_phase
+    assert "MAX_UPGRADE_RECEIPTS" in split_phase
+    assert "UPGRADE_RECEIPT_DIRECTORY" in split_phase
+    assert "load_upgrade_receipt" in split_phase
+    assert 'receipt.from_version == source_version' in split_phase
+    assert 'receipt.target_version == target_version' in split_phase
+    assert 'receipt.artifacts_verified' in split_phase
+    assert 'receipt.migration_status == "pending"' in split_phase
+    assert "receipt.migration_count is None" in split_phase
+    assert 'receipt.status == "pending" and receipt.failure_code == ""' in split_phase
+    assert 'receipt.status == "failed" and receipt.failure_code == "interrupted"' in split_phase
+    assert "latest_created_at = max(" in split_phase
+    assert "if created_at == latest_created_at" in split_phase
+    assert 'print("recover" if len(latest) == 1 else "invalid")' in split_phase
 
 
 @pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])

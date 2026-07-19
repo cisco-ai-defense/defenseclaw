@@ -810,6 +810,8 @@ sys.exit(0 if payload["ok"] else 1)
         completed = subprocess.run(
             [
                 sys.executable,
+                "-I",
+                "-B",
                 "-c",
                 script,
                 data_dir,

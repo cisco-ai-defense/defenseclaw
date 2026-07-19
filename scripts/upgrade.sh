@@ -393,6 +393,77 @@ preflight_python_wheel() {
     ok "Python CLI dependency preflight passed"
 }
 
+begin_release_upgrade_receipt() {
+    [[ "${BRIDGE_PHASE1}" -ne 1 && "${CURRENT_VERSION}" != "unknown" \
+        && -n "${RELEASE_PROVENANCE_FILE}" ]] || return 0
+
+    local source_python="${DEFENSECLAW_VENV}/bin/python"
+    [[ -x "${source_python}" ]] \
+        || die "The provenance-authenticated source controller cannot create a durable upgrade receipt. No services changed."
+    [[ "${CHECKSUMS_SIGNATURE_VERIFIED}" -eq 1 ]] \
+        || die "The modern release artifacts were not authenticated; no upgrade receipt or service mutation was attempted."
+
+    local receipt_path receipt_name
+    receipt_path="$(
+        DEFENSECLAW_HOME="${DATA_DIR}" "${source_python}" -I -B - \
+            "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
+import os
+import sys
+
+from defenseclaw.upgrade_receipt import (
+    begin_upgrade_receipt,
+    finalize_interrupted_upgrade_receipts,
+)
+
+data_dir, source_version, target_version = sys.argv[1:]
+finalize_interrupted_upgrade_receipts(data_dir, current_version=source_version)
+receipt = begin_upgrade_receipt(
+    data_dir,
+    from_version=source_version,
+    target_version=target_version,
+    artifacts_verified=True,
+)
+print(os.fspath(receipt))
+PY
+    )" || die "Could not create the durable upgrade compliance receipt; no services changed."
+    receipt_name="${receipt_path#"${DATA_DIR}/.upgrade-receipts/"}"
+    [[ -n "${receipt_path}" \
+        && "${receipt_path}" == "${DATA_DIR}/.upgrade-receipts/"* \
+        && "${receipt_name}" != */* \
+        && "${receipt_name}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}[.]json$ ]] \
+        || die "The durable upgrade receipt escaped the managed controller directory; no services changed."
+    UPGRADE_RECEIPT_PATH="${receipt_path}"
+    UPGRADE_RECEIPT_FAILURE_CODE="install_failed"
+    ok "Durable upgrade receipt committed before mutation"
+}
+
+finish_release_upgrade_receipt() {
+    local status="$1" failure_code="${2:-}"
+    [[ -n "${UPGRADE_RECEIPT_PATH}" ]] || return 0
+    DEFENSECLAW_HOME="${DATA_DIR}" "${VENV_PYTHON}" -I -B - \
+        "${UPGRADE_RECEIPT_PATH}" "${status}" "${failure_code}" <<'PY'
+from pathlib import Path
+import sys
+
+from defenseclaw import upgrade_receipt
+
+path = Path(sys.argv[1])
+status, failure_code = sys.argv[2:]
+if status == "succeeded":
+    supersede = getattr(upgrade_receipt, "supersede_prior_upgrade_receipts", None)
+    if supersede is not None:
+        supersede(path)
+upgrade_receipt.complete_upgrade_receipt(
+    path,
+    status=status,
+    failure_code=failure_code,
+)
+PY
+    local transition_status=$?
+    [[ "${transition_status}" -eq 0 ]] || return "${transition_status}"
+    UPGRADE_RECEIPT_TERMINAL=1
+}
+
 recover_interrupted_phase_two() {
     local journal_root="${DEFENSECLAW_HOME}/.upgrade-recovery"
     local journal="${journal_root}/phase-two-active.json"
@@ -3696,11 +3767,10 @@ if [[ "${CURRENT_VERSION}" != "unknown" && "${CURRENT_GATEWAY_VERSION}" == "unkn
     die "Could not determine the installed gateway version while CLI ${CURRENT_VERSION} is present. No changes were made.
   Recovery path: restore the gateway artifact from the same signed ${CURRENT_VERSION} release, verify both --version outputs match, then run this release-owned resolver without --version."
 fi
+COMPONENT_VERSION_SPLIT=0
 if [[ "${CURRENT_VERSION}" != "unknown" && "${CURRENT_GATEWAY_VERSION}" != "unknown" \
       && "${CURRENT_VERSION}" != "${CURRENT_GATEWAY_VERSION}" ]]; then
-    die "Installed component versions are inconsistent: CLI ${CURRENT_VERSION}, gateway ${CURRENT_GATEWAY_VERSION}. No changes were made.
-  This commonly means a package manager or manual artifact copy bypassed the staged upgrade.
-  Recovery path: restore the CLI from the same signed ${CURRENT_GATEWAY_VERSION} release as the gateway, verify both --version outputs match, then run this release-owned resolver without --version."
+    COMPONENT_VERSION_SPLIT=1
 fi
 
 # The managed Python environment belongs to CONTROLLER_HOME, while an
@@ -3813,6 +3883,99 @@ fi
    && -n "${CONFIG_PATH}" && "${CONFIG_PATH}" == /* \
    && -n "${OPENCLAW_HOME}" && "${OPENCLAW_HOME}" == /* ]] \
     || die "Resolved runtime paths are invalid; no changes were made."
+
+if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]; then
+    split_recovery="invalid"
+    if [[ "${CURRENT_GATEWAY_VERSION}" == "${RELEASE_VERSION}" \
+          && -x "${DEFENSECLAW_VENV}/bin/python" ]] \
+        && version_lt "${CURRENT_VERSION}" "${CURRENT_GATEWAY_VERSION}"; then
+        split_recovery="$(
+            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+                "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
+from datetime import datetime
+import os
+from pathlib import Path
+import stat
+import sys
+import uuid
+
+from defenseclaw.upgrade_receipt import (
+    MAX_UPGRADE_RECEIPTS,
+    UPGRADE_RECEIPT_DIRECTORY,
+    load_upgrade_receipt,
+)
+
+data_dir, source_version, target_version = sys.argv[1:]
+root = Path(os.path.abspath(os.path.expanduser(data_dir)))
+receipt_dir = root / UPGRADE_RECEIPT_DIRECTORY
+try:
+    root_info = root.lstat()
+    receipt_info = receipt_dir.lstat()
+except FileNotFoundError:
+    print("invalid")
+    raise SystemExit(0)
+if (
+    stat.S_ISLNK(root_info.st_mode)
+    or not stat.S_ISDIR(root_info.st_mode)
+    or stat.S_ISLNK(receipt_info.st_mode)
+    or not stat.S_ISDIR(receipt_info.st_mode)
+):
+    raise SystemExit("unsafe upgrade receipt directory")
+if os.name == "posix":
+    geteuid = getattr(os, "geteuid", None)
+    if (
+        (geteuid is not None and (root_info.st_uid != geteuid() or receipt_info.st_uid != geteuid()))
+        or stat.S_IMODE(receipt_info.st_mode) & 0o077
+    ):
+        raise SystemExit("upgrade receipt directory is not private")
+
+entries = sorted(receipt_dir.glob("*.json"))
+if len(entries) > MAX_UPGRADE_RECEIPTS:
+    raise SystemExit("upgrade receipt queue exceeds its bound")
+authorities = []
+for path in entries:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SystemExit("upgrade receipt queue contains an unsafe entry")
+    if os.name == "posix" and (
+        (geteuid is not None and info.st_uid != geteuid())
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise SystemExit("upgrade receipt record is not private")
+    receipt = load_upgrade_receipt(path)
+    phase_matches = (
+        receipt.migration_status == "pending"
+        and receipt.migration_count is None
+        and (
+            (receipt.status == "pending" and receipt.failure_code == "")
+            or (receipt.status == "failed" and receipt.failure_code == "interrupted")
+        )
+    )
+    if (
+        receipt.from_version == source_version
+        and receipt.target_version == target_version
+        and receipt.artifacts_verified
+        and uuid.UUID(receipt.receipt_id).version == 4
+        and phase_matches
+    ):
+        created_at = datetime.fromisoformat(receipt.created_at.replace("Z", "+00:00"))
+        authorities.append((created_at, path))
+if not authorities:
+    print("invalid")
+else:
+    latest_created_at = max(created_at for created_at, _path in authorities)
+    latest = [path for created_at, path in authorities if created_at == latest_created_at]
+    print("recover" if len(latest) == 1 else "invalid")
+PY
+        )" || split_recovery="invalid"
+    fi
+    if [[ "${split_recovery}" != "recover" ]]; then
+        die "Installed component versions are inconsistent: CLI ${CURRENT_VERSION}, gateway ${CURRENT_GATEWAY_VERSION}. No changes were made.
+  This commonly means a package manager or manual artifact copy bypassed the staged upgrade.
+  Recovery path: restore the CLI from the same signed ${CURRENT_GATEWAY_VERSION} release as the gateway, verify both --version outputs match, then run this release-owned resolver without --version."
+    fi
+    warn "Found an authenticated interrupted ${CURRENT_VERSION} → ${RELEASE_VERSION} artifact activation; the resolver will re-verify the release and resume it."
+fi
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
     hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
@@ -4052,6 +4215,9 @@ BRIDGE_EXPECTED_GATEWAY_SHA256=""
 BRIDGE_EXPECTED_WHEEL_SHA256=""
 BRIDGE_WHEEL_CUSTODY_PATH=""
 BRIDGE_SOURCE_VENV_IDENTITY_SHA256=""
+UPGRADE_RECEIPT_PATH=""
+UPGRADE_RECEIPT_FAILURE_CODE="install_failed"
+UPGRADE_RECEIPT_TERMINAL=0
 
 upgrade_exit_trap() {
     local status=$?
@@ -4060,6 +4226,13 @@ upgrade_exit_trap() {
     set +e
     if [[ "${BRIDGE_ROLLBACK_ARMED:-0}" -eq 1 ]]; then
         rollback_bridge_phase1 || rollback_status=$?
+    fi
+    if [[ "${status}" -ne 0 && -n "${UPGRADE_RECEIPT_PATH:-}" \
+        && "${UPGRADE_RECEIPT_TERMINAL:-0}" -eq 0 \
+        && -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
+        VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
+        finish_release_upgrade_receipt failed "${UPGRADE_RECEIPT_FAILURE_CODE:-install_failed}" \
+            || true
     fi
     [[ -z "${BRIDGE_GATEWAY_INSTALL_TEMP:-}" ]] || rm -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"
     [[ -z "${BRIDGE_CANDIDATE_VENV:-}" ]] || rm -rf "${BRIDGE_CANDIDATE_VENV}"
@@ -6928,6 +7101,64 @@ resolve_staged_upgrade
 if [[ "${CURRENT_VERSION}" != "unknown" \
       && "${CURRENT_VERSION}" == "${RELEASE_VERSION}" \
       && -z "${STAGED_FINAL_VERSION}" ]]; then
+    same_version_recovery="clean"
+    if [[ -n "${RELEASE_PROVENANCE_FILE}" ]]; then
+        [[ -x "${DEFENSECLAW_VENV}/bin/python" \
+            && -x "${DEFENSECLAW_VENV}/bin/defenseclaw" ]] \
+            || die "The installed target controller is incomplete; authenticated recovery cannot continue."
+        same_version_recovery="$(
+            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+                "${DATA_DIR}" "${RELEASE_VERSION}" <<'PY'
+import sys
+
+from defenseclaw.bundle_refresh import installed_local_observability_bundle_version
+from defenseclaw.upgrade_receipt import (
+    find_resumable_upgrade_receipt,
+    find_verified_installed_upgrade_receipt,
+)
+
+data_dir, target_version = sys.argv[1:]
+receipt = find_resumable_upgrade_receipt(data_dir, target_version=target_version)
+bundle_version = installed_local_observability_bundle_version(data_dir)
+needs_bundle_repair = bundle_version is not None and bundle_version != target_version
+installed_receipt = None
+if receipt is None and needs_bundle_repair:
+    installed_receipt = find_verified_installed_upgrade_receipt(
+        data_dir,
+        target_version=target_version,
+    )
+if receipt is not None or installed_receipt is not None:
+    print("recover")
+elif needs_bundle_repair:
+    print("untrusted-bundle-drift")
+else:
+    print("clean")
+PY
+        )" || die "Could not inspect authenticated same-version recovery state; no mutation was attempted."
+        [[ "${same_version_recovery}" == "clean" \
+            || "${same_version_recovery}" == "recover" \
+            || "${same_version_recovery}" == "untrusted-bundle-drift" ]] \
+            || die "The installed target controller returned invalid recovery state; no mutation was attempted."
+    fi
+    if [[ "${same_version_recovery}" == "untrusted-bundle-drift" ]]; then
+        die "The installed local-observability bundle differs from ${RELEASE_VERSION}, but no verified target-install receipt remains. No changes were made.
+  The resolver will not trust a version string alone. Use an isolated fresh install or contact DefenseClaw support for state-aware recovery."
+    fi
+    if [[ "${same_version_recovery}" == "recover" ]]; then
+        section "Recovering Incomplete Upgrade"
+        if [[ "${PLAN_ONLY}" -eq 1 ]]; then
+            ok "Authenticated recovery authority exists for ${RELEASE_VERSION}"
+            info "Re-run without --plan to reconcile the receipt, bundle, and target health."
+            exit 0
+        fi
+        recovery_status=0
+        DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+            OPENCLAW_HOME="${OPENCLAW_HOME}" \
+            "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes \
+                --version "${RELEASE_VERSION}" --health-timeout 60 \
+            || recovery_status=$?
+        exit "${recovery_status}"
+    fi
     section "Version Already Verified"
     if [[ "${CHECKSUMS_SIGNATURE_VERIFIED}" -eq 1 ]]; then
         ok "Authenticated the ${RELEASE_VERSION} release contract; installed version ${CURRENT_VERSION} is already current"
@@ -7081,6 +7312,11 @@ fi
 
 ok "Backup saved to: ${BACKUP_DIR}"
 
+# Provenance-authenticated direct upgrades commit their receipt before the
+# first service or installed-file mutation. Staged hard cuts keep receipt and
+# rollback custody in the fresh target controller instead.
+begin_release_upgrade_receipt
+
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     prepare_bridge_phase1_custody
 fi
@@ -7202,6 +7438,10 @@ finally:
 PY
 else
     mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-gateway"
+    # A graceful failure from this point until target CLI activation must
+    # remain eligible for exact receipt-bound component-split recovery. A
+    # process crash in the same window leaves the pending receipt authoritative.
+    UPGRADE_RECEIPT_FAILURE_CODE="interrupted"
 fi
 BRIDGE_GATEWAY_INSTALL_TEMP=""
 ok "Gateway binary installed"
@@ -7247,7 +7487,12 @@ section "Running Migrations"
 # Run migrations with the freshly-installed CLI environment. The Python
 # helper is intentionally verbose (click.echo); redirect that progress to
 # stderr so command substitution captures only the numeric count.
+TARGET_PYTHON_STDIN_ARGS=(-)
+if [[ "${BRIDGE_PHASE1}" -ne 1 ]]; then
+    TARGET_PYTHON_STDIN_ARGS=(-I -B -)
+fi
 MIGRATION_FAILED=0
+UPGRADE_RECEIPT_FAILURE_CODE="migration_failed"
 if ! MIGRATION_COUNT=$(MIGRATION_FROM_VERSION="${CURRENT_VERSION}" \
     MIGRATION_TO_VERSION="${RELEASE_VERSION}" \
     MIGRATION_OPENCLAW_HOME="${OPENCLAW_HOME}" \
@@ -7256,19 +7501,35 @@ if ! MIGRATION_COUNT=$(MIGRATION_FROM_VERSION="${CURRENT_VERSION}" \
     DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
     OPENCLAW_HOME="${OPENCLAW_HOME}" \
     DEFENSECLAW_UPGRADE_MUTATION_TOKEN="${BRIDGE_RECOVERY_PLAN_ID#phase-one-}" \
-    "${VENV_PYTHON}" - <<'PY'
+    "${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}" <<'PY'
 import contextlib
 import os
+from pathlib import Path
 import sys
 
 from defenseclaw.migrations import run_migrations
 
+receipt_path = sys.argv[1]
+kwargs = {"upgrade_handles_local_bundle": True} if receipt_path else {}
+if receipt_path:
+    from defenseclaw.upgrade_receipt import delegate_prior_upgrade_receipts
+
+    delegate_prior_upgrade_receipts(Path(receipt_path))
 with contextlib.redirect_stdout(sys.stderr):
     count = run_migrations(
         os.environ["MIGRATION_FROM_VERSION"],
         os.environ["MIGRATION_TO_VERSION"],
         os.environ["MIGRATION_OPENCLAW_HOME"],
         os.environ["MIGRATION_DEFENSECLAW_HOME"],
+        **kwargs,
+    )
+if receipt_path:
+    from defenseclaw.upgrade_receipt import record_upgrade_migrations
+
+    record_upgrade_migrations(
+        Path(receipt_path),
+        migration_count=count,
+        degraded=False,
     )
 print(count)
 PY
@@ -7297,7 +7558,7 @@ if [[ -n "${UPGRADE_MANIFEST_FILE}" ]]; then
         DEFENSECLAW_HOME="${DATA_DIR}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
         DEFENSECLAW_UPGRADE_MUTATION_TOKEN="${BRIDGE_RECOVERY_PLAN_ID#phase-one-}" \
-        "${VENV_PYTHON}" - "${UPGRADE_MANIFEST_FILE}" <<'PY'
+        "${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}" <<'PY'
 import json
 import os
 import sys
@@ -7332,6 +7593,8 @@ if [[ -n "${REQUIRED_MIGRATIONS_MISSING}" ]]; then
     warn "${migration_label} migration(s) were not recorded: $(printf '%s' "${REQUIRED_MIGRATIONS_MISSING}" | tr '\n' ' ')"
     MIGRATION_FAILED=1
 fi
+
+UPGRADE_RECEIPT_FAILURE_CODE="required_migration_failed"
 
 if [[ "${MIGRATION_FAILURE_POLICY}" == "fail" && "${MIGRATION_FAILED}" -eq 1 ]]; then
     UPGRADE_INCOMPLETE=1
@@ -7368,6 +7631,7 @@ fi
 
 section "Starting Services"
 
+UPGRADE_RECEIPT_FAILURE_CODE="startup_failed"
 step "Starting defenseclaw-gateway ..."
 DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
     OPENCLAW_HOME="${OPENCLAW_HOME}" \
@@ -7382,6 +7646,7 @@ OPENCLAW_HOME="${OPENCLAW_HOME}" openclaw gateway restart 9>&- 2>/dev/null \
 
 # ── Health verification ───────────────────────────────────────────────────────
 
+UPGRADE_RECEIPT_FAILURE_CODE="health_check_failed"
 section "Verifying Gateway Health"
 
 HEALTH_TIMEOUT=60
@@ -7390,7 +7655,7 @@ ELAPSED=0
 HEALTH_OK=0
 HEALTH_URL="$(DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
     OPENCLAW_HOME="${OPENCLAW_HOME}" \
-    "${VENV_PYTHON}" - <<'PY' 2>/dev/null || true
+    "${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 
 cfg = load()
@@ -7476,6 +7741,16 @@ if [[ "${HEALTH_OK}" -eq 0 ]]; then
     info "Check ${DATA_DIR}/gateway.log (process log); gateway.jsonl exists only when an optional JSONL destination is configured"
     info "Run:  defenseclaw-gateway status"
     exit 1
+fi
+
+if [[ -n "${UPGRADE_RECEIPT_PATH}" ]]; then
+    # Target health is already proven. If the final receipt write itself
+    # fails, preserve the pending recovery authority instead of letting the
+    # exit trap rewrite this healthy attempt as a failed upgrade.
+    UPGRADE_RECEIPT_TERMINAL=1
+    finish_release_upgrade_receipt succeeded \
+        || die "Could not commit the successful upgrade receipt after target health verification."
+    ok "Successful upgrade receipt committed"
 fi
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 \

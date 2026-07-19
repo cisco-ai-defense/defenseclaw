@@ -24,6 +24,7 @@ from defenseclaw.migrations import (
     _allocate_observability_v8_bundle_backup,
     _migrate_observability_v8,
     _observability_v8_upgrade_environment,
+    _run_observability_v8_bundle_upgrade_in_target,
     _valid_upgrade_mutation_token,
     _validate_observability_v8_candidate,
     preflight_observability_v8_upgrade,
@@ -70,6 +71,25 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
                 artifacts_verified=True,
             )
         )
+
+    def test_target_bundle_subprocess_uses_isolated_python(self) -> None:
+        observed: list[str] = []
+
+        def complete(command, **_kwargs):
+            observed.extend(command)
+            with open(command[-1], "w", encoding="utf-8") as result_file:
+                json.dump({"ok": True, "installed": False}, result_file)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("defenseclaw.migrations.subprocess.run", side_effect=complete):
+            result = _run_observability_v8_bundle_upgrade_in_target(
+                self.data_dir,
+                os.path.join(self.data_dir, "backups", "bundle"),
+                "9.9.9",
+            )
+
+        self.assertEqual(result, {"ok": True, "installed": False})
+        self.assertEqual(observed[:4], [sys.executable, "-I", "-B", "-c"])
 
     def test_registry_runs_migration_only_at_forward_release_key(self) -> None:
         rows = [(version, fn) for version, _description, fn in MIGRATIONS if fn is _migrate_observability_v8]

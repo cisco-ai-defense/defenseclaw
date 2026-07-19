@@ -2498,50 +2498,20 @@ print("installed_target_tui_origin=venv")
 print("installed_target_tui_mount=ok")
 PY
 
-    local policy_rows_before=""
     if target_uses_observability_v8; then
-        policy_rows_before="$("${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
-from pathlib import Path
-import sqlite3
-import sys
-
-import yaml
-
-data_dir = Path(sys.argv[1])
-config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
-configured = (((config.get("observability") or {}).get("local") or {}).get("path"))
-if configured is None:
-    database = data_dir / "audit.db"
-elif not isinstance(configured, str) or not configured.strip():
-    raise SystemExit("configured audit database path is invalid")
-else:
-    database = Path(configured).expanduser()
-    if not database.is_absolute():
-        database = data_dir / database
-connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-try:
-    count = connection.execute(
-        "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
-    ).fetchone()[0]
-finally:
-    connection.close()
-print(count)
-PY
-)" || die "could not snapshot mandatory policy rows immediately before reload"
-        [[ "${policy_rows_before}" =~ ^[0-9]+$ ]] \
-            || die "invalid mandatory policy row count immediately before reload"
-
-        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" "${policy_rows_before}" <<'PY'
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+import json
 from pathlib import Path
 import sqlite3
 import sys
 import time
+import uuid
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import yaml
 
 data_dir = Path(sys.argv[1])
-before = int(sys.argv[2])
 config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
 port = int((config.get("gateway") or {}).get("api_port") or 18970)
 token = ""
@@ -2553,9 +2523,20 @@ for line in (data_dir / ".env").read_text(encoding="utf-8").splitlines():
 if not token:
     raise SystemExit("target gateway token is unavailable for the post-status write probe")
 
+probe_id = str(uuid.uuid4())
+body = json.dumps(
+    {
+        "id": probe_id,
+        "action": "policy-reload",
+        "target": "release-upgrade-smoke:" + probe_id,
+        "actor": "release-upgrade-smoke",
+        "details": "synthetic post-status SQLite continuity probe; no policy state changed",
+        "severity": "INFO",
+    }
+).encode("utf-8")
 request = Request(
-    f"http://127.0.0.1:{port}/policy/reload",
-    data=b"{}",
+    f"http://127.0.0.1:{port}/audit/event",
+    data=body,
     method="POST",
     headers={
         "Authorization": "Bearer " + token,
@@ -2564,9 +2545,27 @@ request = Request(
         "X-DefenseClaw-Token": token,
     },
 )
-with urlopen(request, timeout=10) as response:
-    if response.status != 200:
-        raise SystemExit(f"post-status policy reload returned HTTP {response.status}")
+try:
+    with urlopen(request, timeout=10) as response:
+        response_body = response.read(4097)
+        if len(response_body) > 4096:
+            raise SystemExit("post-status audit write returned an oversized response")
+        result = json.loads(response_body)
+        if response.status != 200 or result != {"status": "ok"}:
+            raise SystemExit("post-status audit write was not acknowledged")
+except HTTPError as exc:
+    try:
+        response_body = exc.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        response_body = "<response body unavailable after read timeout>"
+    raise SystemExit(
+        f"post-status audit write returned HTTP {exc.code}: {response_body}"
+    ) from exc
+except (URLError, OSError) as exc:
+    reason = getattr(exc, "reason", type(exc).__name__)
+    raise SystemExit(f"post-status audit write request/read failed: {reason}") from exc
+except (json.JSONDecodeError, UnicodeError) as exc:
+    raise SystemExit("post-status audit write returned invalid JSON") from exc
 
 local = (config.get("observability") or {}).get("local") or {}
 configured = local.get("path")
@@ -2580,14 +2579,35 @@ else:
         database = data_dir / database
 deadline = time.monotonic() + 10
 while True:
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection = None
     try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=0.2)
         after = connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE id = ? AND action = 'policy-reload' "
+            "AND event_name = 'policy.updated' AND mandatory = 1",
+            (probe_id,),
         ).fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", None)
+        busy_code = getattr(sqlite3, "SQLITE_BUSY", 5)
+        locked_code = getattr(sqlite3, "SQLITE_LOCKED", 6)
+        retryable = code is not None and (code & 0xFF) in {
+            busy_code,
+            locked_code,
+        }
+        if code is None:
+            message = str(exc).lower()
+            retryable = message == "database is busy" or message.startswith(
+                ("database is locked", "database table is locked", "database schema is locked")
+            )
+        if not retryable:
+            raise
+        after = 0
     finally:
-        connection.close()
-    if after > before:
+        if connection is not None:
+            connection.close()
+    if after == 1:
         break
     if time.monotonic() >= deadline:
         raise SystemExit("fresh SQLite readers cannot see the mandatory write made after status")
