@@ -2555,10 +2555,12 @@ if not token:
 
 request = Request(
     f"http://127.0.0.1:{port}/policy/reload",
-    data=b"",
+    data=b"{}",
     method="POST",
     headers={
         "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "X-DefenseClaw-Client": "release-upgrade-smoke",
         "X-DefenseClaw-Token": token,
     },
 )
