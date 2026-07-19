@@ -3458,6 +3458,7 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
 
 	body := []byte(`{
+		"id":"5e897a6d-428a-4438-a014-33b6116ccbf2",
 		"action":"gateway-tool-call",
 		"target":"/tmp/bad-plugin",
 		"actor":"plugin-test",
@@ -3491,8 +3492,9 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != string(audit.ActionGatewayToolCall) {
-		t.Fatalf("canonical event history = %#v, want one %q row", events, audit.ActionGatewayToolCall)
+	if len(events) != 1 || events[0].ID != "5e897a6d-428a-4438-a014-33b6116ccbf2" ||
+		events[0].Action != string(audit.ActionGatewayToolCall) {
+		t.Fatalf("canonical event history = %#v, want one caller-identified %q row", events, audit.ActionGatewayToolCall)
 	}
 }
 

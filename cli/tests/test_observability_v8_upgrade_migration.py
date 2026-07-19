@@ -24,6 +24,7 @@ from defenseclaw.migrations import (
     _allocate_observability_v8_bundle_backup,
     _migrate_observability_v8,
     _observability_v8_upgrade_environment,
+    _run_observability_v8_bundle_upgrade_in_target,
     _valid_upgrade_mutation_token,
     _validate_observability_v8_candidate,
     preflight_observability_v8_upgrade,
@@ -70,6 +71,28 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
                 artifacts_verified=True,
             )
         )
+
+    def test_target_bundle_subprocess_uses_isolated_python(self) -> None:
+        observed: list[str] = []
+
+        def complete(
+            command: list[str],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            observed.extend(command)
+            with open(command[-1], "w", encoding="utf-8") as result_file:
+                json.dump({"ok": True, "installed": False}, result_file)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("defenseclaw.migrations.subprocess.run", side_effect=complete):
+            result = _run_observability_v8_bundle_upgrade_in_target(
+                self.data_dir,
+                os.path.join(self.data_dir, "backups", "bundle"),
+                "9.9.9",
+            )
+
+        self.assertEqual(result, {"ok": True, "installed": False})
+        self.assertEqual(observed[:4], [sys.executable, "-I", "-B", "-c"])
 
     def test_registry_runs_migration_only_at_forward_release_key(self) -> None:
         rows = [(version, fn) for version, _description, fn in MIGRATIONS if fn is _migrate_observability_v8]
@@ -638,6 +661,7 @@ audit_sinks:
             self.assertEqual(environment["DOTENV_ONLY"], "dotenv-value")
             self.assertEqual(environment["SHARED"], "ambient-wins")
             self.assertEqual(environment["AMBIENT_ONLY"], "ambient-value")
+            self.assertNotIn("BASH_FUNC_which%%", environment)
             self.assertEqual(kwargs["source_name"], os.path.abspath(self.config_path))
             self.assertEqual(kwargs["effective_data_dir"], os.path.abspath(self.data_dir))
             return migration
@@ -671,7 +695,11 @@ audit_sinks:
         with (
             patch.dict(
                 os.environ,
-                {"SHARED": "ambient-wins", "AMBIENT_ONLY": "ambient-value"},
+                {
+                    "SHARED": "ambient-wins",
+                    "AMBIENT_ONLY": "ambient-value",
+                    "BASH_FUNC_which%%": "() { :; }",
+                },
                 clear=True,
             ),
             patch("defenseclaw.migrations.convert_v7_observability_to_v8", side_effect=convert),
@@ -1157,6 +1185,19 @@ audit_sinks:
     def test_missing_environment_uses_ambient_snapshot(self) -> None:
         os.remove(self.environment_path)
         with patch.dict(os.environ, {"AMBIENT_ONLY": "present"}, clear=True):
+            snapshot = _observability_v8_upgrade_environment(self.environment_path)
+        self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
+
+    def test_ambient_snapshot_ignores_unreferenceable_shell_function_names(self) -> None:
+        os.remove(self.environment_path)
+        with patch.dict(
+            os.environ,
+            {
+                "AMBIENT_ONLY": "present",
+                "BASH_FUNC_which%%": "() { :; }",
+            },
+            clear=True,
+        ):
             snapshot = _observability_v8_upgrade_environment(self.environment_path)
         self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
 
