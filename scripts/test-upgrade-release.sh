@@ -80,7 +80,7 @@ Options:
 
 Examples:
   make upgrade-legacy-smoke
-  make upgrade-legacy-smoke-matrix
+  make upgrade-legacy-smoke-matrix ARGS="--target-version X.Y.Z"
   scripts/test-upgrade-release.sh --from-version 0.7.2
   scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed

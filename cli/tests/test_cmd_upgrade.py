@@ -36,6 +36,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _capture_source_gateway_running_state,
     _check_post_upgrade_drift,
     _cleanup_hard_cut_mutation_temporaries,
+    _copy_distribution_metadata,
     _crash_bundle_rollback_result,
     _create_backup,
     _detect_platform,
@@ -79,9 +80,8 @@ from defenseclaw.commands.cmd_upgrade import (
     _refresh_target_dotenv_environment,
     _release_download_base,
     _require_bridge_checksums_provenance,
-    _require_hard_cut_dependency_contract,
+    _require_bridge_environment_accepts_target_wheel,
     _require_hard_cut_manifest_contract,
-    _require_hard_cut_preexisting_promoted_runtime,
     _require_release_owned_hard_cut_handoff,
     _require_target_phase_two_mutator_wrapper,
     _resolve_upgrade_source_version,
@@ -96,7 +96,6 @@ from defenseclaw.commands.cmd_upgrade import (
     _start_and_verify_services,
     _target_migration_capabilities,
     _TargetMigrationCapabilities,
-    _validate_hard_cut_promoted_runtime_probe,
     _validate_staged_bridge_artifact_set,
     _validate_target_migration_capabilities,
     _validate_upgrade_manifest,
@@ -114,7 +113,11 @@ from defenseclaw.migrations import ObservabilityV8PreflightBinding, run_migratio
 from defenseclaw.upgrade_receipt import (
     UPGRADE_RECEIPT_DIRECTORY,
     begin_upgrade_receipt,
+    clear_local_bundle_restart_intent,
+    load_local_bundle_restart_intent,
     load_upgrade_receipt,
+    load_upgrade_receipt_supersession,
+    record_local_bundle_restart_intent,
 )
 
 
@@ -1686,6 +1689,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                     app.cfg.claw.home_dir,
                     app.cfg.data_dir,
                     upgrade_handles_local_bundle=True,
+                    controller_owns_local_bundle_transaction=True,
                 )
 
             self.assertEqual(applied, 1)
@@ -2029,9 +2033,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             self.assertTrue(restored)
             self.assertEqual(poll_health.call_count, 2)
             start_calls = [
-                call
-                for call in run_silent.call_args_list
-                if call.args[0] == [plan.active_gateway_path, "start"]
+                call for call in run_silent.call_args_list if call.args[0] == [plan.active_gateway_path, "start"]
             ]
             self.assertEqual(len(start_calls), 2)
             receipt = load_upgrade_receipt(receipt_path)
@@ -2828,6 +2830,22 @@ class TestTargetWheelMigrationCapabilities(unittest.TestCase):
             calls.append((args, {"upgrade_handles_local_bundle": upgrade_handles_local_bundle}))
             return 1
 
+        def capable(
+            *args,
+            upgrade_handles_local_bundle=False,
+            controller_owns_local_bundle_transaction=False,
+        ):
+            calls.append(
+                (
+                    args,
+                    {
+                        "upgrade_handles_local_bundle": upgrade_handles_local_bundle,
+                        "controller_owns_local_bundle_transaction": controller_owns_local_bundle_transaction,
+                    },
+                )
+            )
+            return 1
+
         def positional_only(
             from_version,
             to_version,
@@ -2846,10 +2864,18 @@ class TestTargetWheelMigrationCapabilities(unittest.TestCase):
 
         execute(legacy)
         execute(current)
+        execute(capable)
         execute(positional_only)
         self.assertEqual(calls[0][1], {})
         self.assertEqual(calls[1][1], {"upgrade_handles_local_bundle": True})
-        self.assertEqual(calls[2][1], {"upgrade_handles_local_bundle": False})
+        self.assertEqual(
+            calls[2][1],
+            {
+                "upgrade_handles_local_bundle": True,
+                "controller_owns_local_bundle_transaction": True,
+            },
+        )
+        self.assertEqual(calls[3][1], {"upgrade_handles_local_bundle": False})
 
     def test_upgrade_rejects_hard_cut_wheel_without_v8_capability_before_mutation(self):
         runner = CliRunner()
@@ -3026,156 +3052,145 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertIn("--reinstall", args)
         self.assertEqual(args[-1], "/tmp/defenseclaw-0.8.5.whl")
 
-    def test_hard_cut_requires_exact_authenticated_dependency_contract(self):
-        def write_wheel(path: Path, version: str, requirements: list[str]) -> None:
-            metadata = f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n"
-            metadata += "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements)
-            with zipfile.ZipFile(path, "w") as archive:
-                archive.writestr(
-                    f"defenseclaw-{version}.dist-info/METADATA",
-                    metadata,
-                )
-
-        with TemporaryDirectory() as root:
-            source = Path(root, "source.whl")
-            target = Path(root, "target.whl")
-            write_wheel(source, "0.8.4", ["requests>=2.32"])
-            write_wheel(
-                target,
-                "0.8.5",
-                [
-                    "requests>=2.32",
-                    "jsonschema<5,>=4.23.0",
-                    'mcp<2,>=1.28.1; python_version >= "3.11"',
-                ],
-            )
-            _require_hard_cut_dependency_contract(
-                str(source),
-                str(target),
-                source_version="0.8.4",
-                target_version="0.8.5",
-            )
-
-            write_wheel(
-                target,
-                "0.8.5",
-                ["requests>=2.32", "jsonschema<5,>=4.23.0"],
-            )
-            with self.assertRaisesRegex(ValueError, "Requires-Dist differs"):
-                _require_hard_cut_dependency_contract(
-                    str(source),
-                    str(target),
-                    source_version="0.8.4",
-                    target_version="0.8.5",
-                )
-
-            write_wheel(
-                target,
-                "0.8.5",
-                [
-                    "requests>=2.32",
-                    "jsonschema<5,>=4.23.0",
-                    'mcp<2,>=1.28.0; python_version >= "3.11"',
-                ],
-            )
-            with self.assertRaisesRegex(ValueError, "Requires-Dist differs"):
-                _require_hard_cut_dependency_contract(
-                    str(source),
-                    str(target),
-                    source_version="0.8.4",
-                    target_version="0.8.5",
-                )
-
     @staticmethod
-    def _valid_hard_cut_promoted_runtime_probe() -> dict[str, object]:
-        return {
-            "python_version": "3.11.0",
-            "jsonschema_version": "4.23.0",
-            "jsonschema_draft": "https://json-schema.org/draft/2020-12/schema",
-            "mcp_version": "1.28.1",
-            "mcp_import": True,
+    def _write_dependency_contract_wheel(
+        path: Path,
+        version: str,
+        requirements: list[str],
+    ) -> None:
+        metadata = f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n"
+        metadata += "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements)
+        dist_info = f"defenseclaw-{version}.dist-info"
+        members = {
+            "defenseclaw/__init__.py": f'__version__ = "{version}"\n',
+            f"{dist_info}/METADATA": metadata,
+            f"{dist_info}/WHEEL": (
+                "Wheel-Version: 1.0\nGenerator: defenseclaw-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+            ),
         }
+        record = "".join(f"{name},,\n" for name in members)
+        record += f"{dist_info}/RECORD,,\n"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, payload in members.items():
+                archive.writestr(name, payload)
+            archive.writestr(f"{dist_info}/RECORD", record)
 
-    def test_hard_cut_requires_preexisting_promoted_runtime_in_bridge_venv(self):
-        probe = self._valid_hard_cut_promoted_runtime_probe()
-        with patch(
-            "subprocess.run",
-            return_value=Mock(returncode=0, stdout=json.dumps(probe)),
-        ) as run_mock:
-            _require_hard_cut_preexisting_promoted_runtime("/managed/bridge/bin/python")
-
-        args = run_mock.call_args.args[0]
-        self.assertEqual(args[:4], ["/managed/bridge/bin/python", "-I", "-B", "-c"])
-        self.assertIn("Draft202012Validator", args[4])
-        self.assertIn("import mcp", args[4])
-        self.assertIn('version("mcp")', args[4])
-        self.assertIn("sys.version_info >= (3, 11)", args[4])
-        self.assertTrue(run_mock.call_args.kwargs["check"])
-        self.assertEqual(run_mock.call_args.kwargs["timeout"], 10)
-
-    def test_hard_cut_promoted_runtime_accepts_exact_floors(self):
-        _validate_hard_cut_promoted_runtime_probe(self._valid_hard_cut_promoted_runtime_probe())
-
-    def test_hard_cut_promoted_runtime_accepts_pep440_post_and_local_builds(self):
-        for jsonschema_version, mcp_version in (
-            ("4.23.0.post1", "1.28.1.post1"),
-            ("4.23.0+vendor.1", "1.28.1+vendor.1"),
-            ("4.23", "1.28.1.0"),
-        ):
-            probe = self._valid_hard_cut_promoted_runtime_probe()
-            probe.update(
-                {
-                    "jsonschema_version": jsonschema_version,
-                    "mcp_version": mcp_version,
-                }
+    @unittest.skipUnless(cmd_upgrade_module.shutil.which("uv"), "uv required")
+    def test_dynamic_hard_cut_contract_accepts_arbitrary_future_versions(self):
+        uv = cmd_upgrade_module.shutil.which("uv") or ""
+        os_name, _arch = _detect_platform()
+        with TemporaryDirectory() as root:
+            bridge_venv = Path(root, "bridge")
+            subprocess.run(
+                [uv, "--no-config", "venv", str(bridge_venv), "--python", sys.executable, "--offline", "--quiet"],
+                check=True,
             )
-            with self.subTest(jsonschema=jsonschema_version, mcp=mcp_version):
-                _validate_hard_cut_promoted_runtime_probe(probe)
+            bridge_python = cmd_upgrade_module._venv_python_path(str(bridge_venv), os_name)
+            site_packages = Path(cmd_upgrade_module._venv_site_package_directories(bridge_python)[0])
+            runtime_info = site_packages / "runtime_support-3.7.0.dist-info"
+            runtime_info.mkdir()
+            (runtime_info / "METADATA").write_text(
+                "Metadata-Version: 2.4\nName: runtime-support\nVersion: 3.7.0\n",
+                encoding="utf-8",
+            )
+            (runtime_info / "WHEEL").write_text(
+                "Wheel-Version: 1.0\nGenerator: defenseclaw-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+                encoding="utf-8",
+            )
+            source = Path(root, "defenseclaw-0.8.4-py3-none-any.whl")
+            self._write_dependency_contract_wheel(source, "0.8.4", ["runtime-support>=3"])
+            for version in ("0.8.5", "0.8.6", "0.9.0", "1.0.0"):
+                target = Path(root, f"defenseclaw-{version}-py3-none-any.whl")
+                self._write_dependency_contract_wheel(target, version, ["runtime-support>=3.5"])
+                with self.subTest(version=version):
+                    _require_bridge_environment_accepts_target_wheel(
+                        uv,
+                        bridge_python,
+                        str(source),
+                        str(target),
+                        os_name=os_name,
+                    )
 
-    def test_hard_cut_promoted_runtime_allows_python_310_without_marker_gated_mcp(self):
-        probe = self._valid_hard_cut_promoted_runtime_probe()
-        probe.update(
-            {
-                "python_version": "3.10.14",
-                "mcp_version": None,
-                "mcp_import": None,
+    @unittest.skipUnless(cmd_upgrade_module.shutil.which("uv"), "uv required")
+    def test_dynamic_hard_cut_contract_rejects_missing_or_incompatible_requirements(self):
+        uv = cmd_upgrade_module.shutil.which("uv") or ""
+        os_name, _arch = _detect_platform()
+        with TemporaryDirectory() as root:
+            bridge_venv = Path(root, "bridge")
+            subprocess.run(
+                [uv, "--no-config", "venv", str(bridge_venv), "--python", sys.executable, "--offline", "--quiet"],
+                check=True,
+            )
+            bridge_python = cmd_upgrade_module._venv_python_path(str(bridge_venv), os_name)
+            site_packages = Path(cmd_upgrade_module._venv_site_package_directories(bridge_python)[0])
+            runtime_info = site_packages / "runtime_support-3.7.0.dist-info"
+            runtime_info.mkdir()
+            (runtime_info / "METADATA").write_text(
+                "Metadata-Version: 2.4\nName: runtime-support\nVersion: 3.7.0\n",
+                encoding="utf-8",
+            )
+            (runtime_info / "WHEEL").write_text(
+                "Wheel-Version: 1.0\nGenerator: defenseclaw-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+                encoding="utf-8",
+            )
+            source = Path(root, "defenseclaw-0.8.4-py3-none-any.whl")
+            self._write_dependency_contract_wheel(source, "0.8.4", ["runtime-support>=3"])
+            cases = {
+                "missing": ["runtime-support>=3", "future-runtime>=1"],
+                "incompatible": ["runtime-support>=4"],
             }
-        )
+            for name, requirements in cases.items():
+                target = Path(root, f"defenseclaw-9.9.{len(requirements)}-py3-none-any.whl")
+                self._write_dependency_contract_wheel(target, f"9.9.{len(requirements)}", requirements)
+                with self.subTest(name=name), self.assertRaises(subprocess.CalledProcessError):
+                    _require_bridge_environment_accepts_target_wheel(
+                        uv,
+                        bridge_python,
+                        str(source),
+                        str(target),
+                        os_name=os_name,
+                    )
 
-        _validate_hard_cut_promoted_runtime_probe(probe)
+    def test_distribution_metadata_copy_excludes_defenseclaw_and_rejects_duplicates(self):
+        with TemporaryDirectory() as root:
+            source = Path(root, "source")
+            destination = Path(root, "destination")
+            source.mkdir()
+            destination.mkdir()
 
-    def test_hard_cut_promoted_runtime_rejects_version_and_import_boundaries(self):
-        cases = {
-            "python_below_floor": ({"python_version": "3.9.20"}, "Python runtime"),
-            "jsonschema_below_floor": ({"jsonschema_version": "4.22.9"}, "jsonschema runtime"),
-            "jsonschema_upper_bound": ({"jsonschema_version": "5.0.0"}, "jsonschema runtime"),
-            "jsonschema_prerelease": ({"jsonschema_version": "4.23.0rc1"}, "not a supported PEP 440"),
-            "jsonschema_malformed": ({"jsonschema_version": "release-4.23.0"}, "not a supported PEP 440"),
-            "jsonschema_wrong_draft": ({"jsonschema_draft": "draft-07"}, "Draft 2020-12"),
-            "mcp_below_floor": ({"mcp_version": "1.28.0"}, "mcp runtime"),
-            "mcp_upper_bound": ({"mcp_version": "2.0.0"}, "mcp runtime"),
-            "mcp_prerelease": ({"mcp_version": "1.28.1rc1"}, "not a supported PEP 440"),
-            "mcp_import_failed": ({"mcp_import": False}, "cannot be imported"),
-        }
-        for name, (override, message) in cases.items():
-            probe = self._valid_hard_cut_promoted_runtime_probe()
-            probe.update(override)
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
-                _validate_hard_cut_promoted_runtime_probe(probe)
+            def write_metadata(directory: str, name: str, version: str) -> None:
+                info = source / directory
+                info.mkdir()
+                (info / "METADATA").write_text(
+                    f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n",
+                    encoding="utf-8",
+                )
+                (info / "WHEEL").write_text("Wheel-Version: 1.0\n", encoding="utf-8")
 
-    def test_hard_cut_preflight_rejects_missing_promoted_runtime_before_uv(self):
+            write_metadata("defenseclaw-0.8.4.dist-info", "DefenseClaw", "0.8.4")
+            write_metadata("runtime_support-3.7.dist-info", "runtime-support", "3.7")
+            _copy_distribution_metadata((str(source),), str(destination))
+            self.assertFalse((destination / "defenseclaw-0.8.4.dist-info").exists())
+            self.assertTrue((destination / "runtime_support-3.7.dist-info/METADATA").is_file())
+
+            write_metadata("runtime.support-3.7.dist-info", "runtime.support", "3.7")
+            duplicate = Path(root, "duplicate")
+            duplicate.mkdir()
+            with self.assertRaisesRegex(ValueError, "duplicate packages"):
+                _copy_distribution_metadata((str(source),), str(duplicate))
+
+    def test_hard_cut_preflight_rejects_dynamic_contract_failure_before_mutation(self):
         with (
             TemporaryDirectory() as home,
             patch.dict(os.environ, {"DEFENSECLAW_HOME": home}),
             patch("shutil.which", return_value="/usr/bin/uv"),
             patch("os.path.isfile", return_value=True),
             patch("defenseclaw.commands.cmd_upgrade._preflight_target_wheel_migrations"),
-            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_dependency_contract"),
             patch(
-                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preexisting_promoted_runtime",
-                side_effect=ValueError("installed mcp runtime is outside 1.28.1 <= version < 2"),
+                "defenseclaw.commands.cmd_upgrade._require_bridge_environment_accepts_target_wheel",
+                side_effect=ValueError("target dependency is absent"),
             ),
-            patch("subprocess.run") as run_mock,
+            patch("subprocess.run", return_value=Mock(returncode=0)) as run_mock,
         ):
             with self.assertRaises(SystemExit):
                 _preflight_wheel_install(
@@ -3186,25 +3201,29 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                     source_version="0.8.4",
                 )
 
-        run_mock.assert_not_called()
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(run_mock.call_args.args[0][2:4], ["pip", "check"])
+        self.assertEqual(
+            run_mock.call_args.kwargs["timeout"],
+            cmd_upgrade_module._DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+        )
 
-    def test_hard_cut_preflight_reports_promoted_runtime_timeout_before_uv(self):
+    def test_hard_cut_preflight_reports_dynamic_contract_timeout(self):
         with (
             TemporaryDirectory() as home,
             patch.dict(os.environ, {"DEFENSECLAW_HOME": home}),
             patch("shutil.which", return_value="/usr/bin/uv"),
             patch("os.path.isfile", return_value=True),
             patch("defenseclaw.commands.cmd_upgrade._preflight_target_wheel_migrations"),
-            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_dependency_contract"),
             patch(
-                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preexisting_promoted_runtime",
+                "defenseclaw.commands.cmd_upgrade._require_bridge_environment_accepts_target_wheel",
                 side_effect=subprocess.TimeoutExpired(["bridge-python", "-I", "-B"], 10),
             ),
             patch(
                 "defenseclaw.commands.cmd_upgrade._fail_wheel_preflight",
                 side_effect=SystemExit(1),
             ) as fail_mock,
-            patch("subprocess.run") as run_mock,
+            patch("subprocess.run", return_value=Mock(returncode=0)) as run_mock,
         ):
             with self.assertRaises(SystemExit):
                 _preflight_wheel_install(
@@ -3219,7 +3238,11 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             "Hard-cut target cannot preserve the authenticated bridge dependency environment.",
             None,
         )
-        run_mock.assert_not_called()
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(
+            run_mock.call_args.kwargs["timeout"],
+            cmd_upgrade_module._DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+        )
 
     def test_restored_bridge_verifies_exact_package_metadata(self):
         with TemporaryDirectory() as root:
@@ -3289,6 +3312,58 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(calls[1][:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertIn("--dry-run", calls[1])
         self.assertEqual(calls[1][-1], "/tmp/defenseclaw.whl")
+        for call in run_mock.call_args_list:
+            self.assertEqual(
+                call.kwargs["timeout"],
+                cmd_upgrade_module._DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+            )
+
+    def test_preflight_wheel_install_fails_closed_on_resolver_timeout(self):
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": home}),
+            patch("shutil.which", return_value="/usr/bin/uv"),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._fail_wheel_preflight",
+                side_effect=SystemExit(1),
+            ) as fail_mock,
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["uv", "pip", "install"], 120),
+            ),
+        ):
+            venv_python = os.path.join(home, ".venv", "bin", "python")
+            os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+            Path(venv_python).write_text("# python", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                _preflight_wheel_install("/tmp/defenseclaw.whl", "linux")
+
+        fail_mock.assert_called_once_with(
+            "Python CLI wheel dependencies are unsatisfiable.",
+            None,
+        )
+
+    def test_preflight_wheel_install_fails_closed_on_venv_timeout(self):
+        with (
+            TemporaryDirectory() as home,
+            patch.dict(os.environ, {"HOME": home}),
+            patch("shutil.which", return_value="/usr/bin/uv"),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._fail_wheel_preflight",
+                side_effect=SystemExit(1),
+            ) as fail_mock,
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["uv", "venv"], 120),
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                _preflight_wheel_install("/tmp/defenseclaw.whl", "linux")
+
+        fail_mock.assert_called_once_with(
+            "Could not create Python CLI preflight environment.",
+            None,
+        )
 
     def test_run_installed_migrations_uses_managed_venv_python(self):
         with (
@@ -3334,6 +3409,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(call[1:4], ["-I", "-B", "-c"])
         self.assertIn("inspect.signature(run_migrations).parameters", call[4])
         self.assertIn('kwargs["upgrade_handles_local_bundle"] = True', call[4])
+        self.assertIn('kwargs["controller_owns_local_bundle_transaction"] = True', call[4])
         self.assertNotIn("upgrade_handles_local_bundle=True", call[4])
         self.assertEqual(call[5:9], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
         child_environment = run_mock.call_args.kwargs["env"]
@@ -3464,6 +3540,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                     custom_home,
                     os.path.join(home, "backup"),
                     "0.8.5",
+                    receipt_path=os.path.join(home, "receipt.json"),
                     os_name="linux",
                 )
 
@@ -3667,6 +3744,36 @@ class TestUpgradeFreshProcessHandoff(unittest.TestCase):
 
 
 class TestUpgradeSameVersionRepair(unittest.TestCase):
+    def test_same_version_bundle_mismatch_requires_reconciliation(self):
+        with patch(
+            "defenseclaw.bundle_refresh.installed_local_observability_bundle_version",
+            side_effect=[None, "9.9.9", "9.9.8", ""],
+        ):
+            self.assertFalse(
+                cmd_upgrade_module._installed_local_observability_bundle_needs_reconciliation(
+                    "/tmp/data",
+                    "9.9.9",
+                )
+            )
+            self.assertFalse(
+                cmd_upgrade_module._installed_local_observability_bundle_needs_reconciliation(
+                    "/tmp/data",
+                    "9.9.9",
+                )
+            )
+            self.assertTrue(
+                cmd_upgrade_module._installed_local_observability_bundle_needs_reconciliation(
+                    "/tmp/data",
+                    "9.9.9",
+                )
+            )
+            self.assertTrue(
+                cmd_upgrade_module._installed_local_observability_bundle_needs_reconciliation(
+                    "/tmp/data",
+                    "9.9.9",
+                )
+            )
+
     def test_same_version_is_authenticated_noop(self):
         runner = CliRunner()
         app = AppContext()
@@ -3736,10 +3843,98 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
             run_migrations = stack.enter_context(
                 patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=1)
             )
+            recover_interrupted = stack.enter_context(
+                patch("defenseclaw.commands.cmd_upgrade._recover_interrupted_same_version_upgrade")
+            )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
             receipts = list((Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).glob("*.json"))
             self.assertEqual(receipts, [])
+            self.assertFalse((Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).exists())
+            recover_interrupted.assert_not_called()
+
+            installed = begin_upgrade_receipt(
+                data_dir,
+                from_version="0.8.4",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            cmd_upgrade_module.complete_upgrade_receipt(installed, status="succeeded")
+            with patch(
+                "defenseclaw.commands.cmd_upgrade._installed_local_observability_bundle_needs_reconciliation",
+                return_value=True,
+            ):
+                installed_reconciliation_result = runner.invoke(
+                    upgrade,
+                    ["--yes", "--version", "9.9.9"],
+                    obj=app,
+                )
+            recover_interrupted.assert_called_once()
+            installed_recovery_receipt = recover_interrupted.call_args.kwargs["receipt_path"]
+            installed_recovery = load_upgrade_receipt(installed_recovery_receipt)
+            self.assertEqual(installed_recovery.from_version, "9.9.9")
+            self.assertEqual(installed_recovery.target_version, "9.9.9")
+            installed_recovery_receipt.unlink()
+            recover_interrupted.reset_mock()
+
+            pending = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            recovery_result = runner.invoke(
+                upgrade,
+                ["--yes", "--version", "9.9.9"],
+                obj=app,
+            )
+            recover_interrupted.assert_called_once()
+            self.assertEqual(
+                recover_interrupted.call_args.kwargs["receipt_path"],
+                pending,
+            )
+
+            record_local_bundle_restart_intent(pending, restart_required=True)
+            cmd_upgrade_module.complete_upgrade_receipt(
+                pending,
+                status="failed",
+                failure_code="local_observability_failed",
+            )
+            recover_interrupted.reset_mock()
+            terminal_recovery_result = runner.invoke(
+                upgrade,
+                ["--yes", "--version", "9.9.9"],
+                obj=app,
+            )
+            recover_interrupted.assert_called_once()
+            terminal_recovery_receipt = recover_interrupted.call_args.kwargs["receipt_path"]
+            self.assertNotEqual(terminal_recovery_receipt, pending)
+            replacement = load_upgrade_receipt(terminal_recovery_receipt)
+            self.assertEqual(replacement.status, "pending")
+            self.assertEqual(replacement.from_version, "9.9.8")
+            self.assertIs(load_local_bundle_restart_intent(terminal_recovery_receipt), True)
+
+            recover_interrupted.reset_mock()
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.find_resumable_upgrade_receipt",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.find_verified_installed_upgrade_receipt",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._installed_local_observability_bundle_needs_reconciliation",
+                    return_value=True,
+                ),
+            ):
+                unproven_bundle_result = runner.invoke(
+                    upgrade,
+                    ["--yes", "--version", "9.9.9"],
+                    obj=app,
+                )
+            recover_interrupted.assert_not_called()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Version Already Verified", result.output)
@@ -3748,6 +3943,335 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
         install_gateway.assert_not_called()
         install_wheel.assert_not_called()
         run_migrations.assert_not_called()
+        self.assertEqual(
+            installed_reconciliation_result.exit_code,
+            0,
+            msg=installed_reconciliation_result.output,
+        )
+        self.assertEqual(recovery_result.exit_code, 0, msg=recovery_result.output)
+        self.assertIn("Found an incomplete target transaction", recovery_result.output)
+        self.assertEqual(
+            terminal_recovery_result.exit_code,
+            0,
+            msg=terminal_recovery_result.output,
+        )
+        self.assertEqual(unproven_bundle_result.exit_code, 1)
+        self.assertIn("no verified target-install receipt exists", unproven_bundle_result.output)
+
+    def test_interrupted_same_version_bundle_recovery_is_retryable(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            Path(data_dir, "observability-stack").mkdir()
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            cmd_upgrade_module.record_upgrade_migrations(
+                receipt_path,
+                migration_count=1,
+                degraded=False,
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    return_value=os.path.join(data_dir, "backup"),
+                )
+            )
+            refresh = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_installed_local_observability_bundle_upgrade",
+                    side_effect=[
+                        _LocalBundleUpgradeInvocationError("child_failed", "refresh"),
+                        {"installed": True, "restart_required": False},
+                    ],
+                )
+            )
+            start = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._start_and_verify_services"))
+            required = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations"))
+            run_migrations = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations"))
+
+            with self.assertRaises(SystemExit):
+                cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=receipt_path,
+                    data_dir=data_dir,
+                    target_version="9.9.9",
+                    os_name="darwin",
+                    health_timeout=60,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                    recovery_home=data_dir,
+                    upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+                )
+            self.assertEqual(load_upgrade_receipt(receipt_path).status, "pending")
+
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=receipt_path,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="darwin",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+            )
+
+            self.assertEqual(load_upgrade_receipt(receipt_path).status, "succeeded")
+            self.assertEqual(
+                list((Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).glob("*.json")),
+                [receipt_path],
+            )
+            self.assertEqual(refresh.call_count, 2)
+            run_migrations.assert_not_called()
+            required.assert_called()
+            start.assert_called_once()
+            self.assertTrue(start.call_args.kwargs["strict_local_observability"])
+            self.assertEqual(start.call_args.kwargs["expected_version"], "9.9.9")
+
+    def test_terminal_restart_custody_is_superseded_before_replacement_success(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            Path(data_dir, "observability-stack").mkdir()
+            superseded = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            record_local_bundle_restart_intent(superseded, restart_required=True)
+            cmd_upgrade_module.complete_upgrade_receipt(
+                superseded,
+                status="failed",
+                failure_code="local_observability_failed",
+            )
+            replacement = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            cmd_upgrade_module.record_upgrade_migrations(
+                replacement,
+                migration_count=0,
+                degraded=False,
+            )
+            record_local_bundle_restart_intent(replacement, restart_required=True)
+
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    return_value=os.path.join(data_dir, "backup"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations"))
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_installed_local_observability_bundle_upgrade",
+                    return_value={
+                        "installed": True,
+                        "restart_required": True,
+                        "_restart_intent_receipt": str(replacement),
+                    },
+                )
+            )
+            start_attempts = 0
+
+            def start_then_recover(*_args, **_kwargs):
+                nonlocal start_attempts
+                start_attempts += 1
+                if start_attempts == 1:
+                    raise SystemExit(1)
+                clear_local_bundle_restart_intent(replacement)
+
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._start_and_verify_services",
+                    side_effect=start_then_recover,
+                )
+            )
+            original_complete = cmd_upgrade_module.complete_upgrade_receipt
+
+            def complete_after_old_custody_is_superseded(path, **kwargs):
+                marker = load_upgrade_receipt_supersession(superseded)
+                self.assertIsNotNone(marker)
+                self.assertTrue(marker.health_proven)
+                self.assertEqual(
+                    marker.superseded_by_receipt_id,
+                    load_upgrade_receipt(replacement).receipt_id,
+                )
+                self.assertIs(load_local_bundle_restart_intent(superseded), True)
+                return original_complete(path, **kwargs)
+
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.complete_upgrade_receipt",
+                    side_effect=complete_after_old_custody_is_superseded,
+                )
+            )
+
+            with self.assertRaises(SystemExit):
+                cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=replacement,
+                    data_dir=data_dir,
+                    target_version="9.9.9",
+                    os_name="darwin",
+                    health_timeout=60,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                    recovery_home=data_dir,
+                    upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+                )
+            self.assertEqual(load_upgrade_receipt(replacement).status, "pending")
+            self.assertIs(load_local_bundle_restart_intent(superseded), True)
+
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=replacement,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="darwin",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+            )
+
+            self.assertEqual(load_upgrade_receipt(replacement).status, "succeeded")
+            self.assertIsNone(load_local_bundle_restart_intent(replacement))
+            replacement.unlink()
+            self.assertIsNone(
+                cmd_upgrade_module.find_resumable_upgrade_receipt(
+                    data_dir,
+                    target_version="9.9.9",
+                )
+            )
+
+    def test_same_version_recovery_rejects_pre_v8_bridge_receipt(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="0.8.4",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            with (
+                patch("defenseclaw.commands.cmd_upgrade._create_backup") as backup,
+                self.assertRaises(SystemExit),
+            ):
+                cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=receipt_path,
+                    data_dir=data_dir,
+                    target_version="9.9.9",
+                    os_name="linux",
+                    health_timeout=60,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                    recovery_home=data_dir,
+                    upgrade_manifest={"required_cli_migrations": ["0.8.5"]},
+                )
+
+            backup.assert_not_called()
+            self.assertEqual(load_upgrade_receipt(receipt_path).status, "pending")
+
+    def test_interrupted_same_version_replays_pending_migrations_before_health(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    return_value=os.path.join(data_dir, "backup"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True))
+            quiesced = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
+            run_migrations = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_installed_migrations",
+                    return_value=2,
+                )
+            )
+            required = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations"))
+            start = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._start_and_verify_services"))
+
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=receipt_path,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="linux",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+            )
+
+            receipt = load_upgrade_receipt(receipt_path)
+            self.assertEqual(receipt.status, "succeeded")
+            self.assertEqual(receipt.migration_status, "completed")
+            self.assertEqual(receipt.migration_count, 2)
+            run_migrations.assert_called_once()
+            self.assertEqual(run_migrations.call_args.args[:2], ("9.9.8", "9.9.9"))
+            quiesced.assert_called_once()
+            required.assert_called_once()
+            start.assert_called_once()
+            self.assertIsNone(start.call_args.kwargs["local_bundle_upgrade"])
+
+            degraded_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            cmd_upgrade_module.record_upgrade_migrations(
+                degraded_path,
+                migration_count=0,
+                degraded=True,
+            )
+            run_migrations.reset_mock()
+            required.reset_mock()
+            start.reset_mock()
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=degraded_path,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="linux",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+            )
+            degraded = load_upgrade_receipt(degraded_path)
+            self.assertEqual(degraded.status, "succeeded")
+            self.assertEqual(degraded.migration_status, "completed")
+            run_migrations.assert_called_once()
+            required.assert_called_once()
+            start.assert_called_once()
 
     def test_required_migration_failure_leaves_target_services_stopped(self):
         runner = CliRunner()
@@ -3944,6 +4468,8 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         recovery_journal_removal_side_effect=None,
         unset_config_data_dir: bool = False,
         controller_home_override: bool = False,
+        installed_local_bundle: bool = False,
+        bundle_refresh_side_effect=None,
     ):
         runner = CliRunner()
         app = AppContext()
@@ -3970,6 +4496,11 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": "/tmp/staged-bridge-artifacts",
             }
             selected_data_dir = data_dir if not unset_config_data_dir else recovery_home
+            if installed_local_bundle:
+                os.makedirs(
+                    os.path.join(selected_data_dir, "observability-stack"),
+                    exist_ok=True,
+                )
             self.invocation_data_dir = selected_data_dir
             self.invocation_recovery_home = recovery_home
             stack.enter_context(patch.dict(os.environ, environment))
@@ -4077,6 +4608,18 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             self.assert_required_migrations = stack.enter_context(
                 patch("defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations")
             )
+            self.local_bundle_refresh = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_installed_local_observability_bundle_upgrade",
+                    return_value={
+                        "installed": True,
+                        "refreshed": True,
+                        "restart_required": False,
+                        "changed_paths": ["docker-compose.yml"],
+                    },
+                    side_effect=bundle_refresh_side_effect,
+                )
+            )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._check_post_upgrade_drift"))
             self.prepare_rollback = stack.enter_context(
                 patch(
@@ -4173,6 +4716,67 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(receipt.failure_code, "")
         self.assertIn("Upgrade Complete", result.output)
         poll_health.assert_called_once()
+
+    def test_verified_receipt_precedes_target_migrations_and_bundle_refresh(self):
+        observed_receipts: list[Path] = []
+
+        def assert_receipt_before_migration(*args, **_kwargs):
+            data_dir = args[3]
+            receipt_paths = list(
+                (Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).glob("*.json")
+            )
+            self.assertEqual(len(receipt_paths), 1)
+            receipt = load_upgrade_receipt(receipt_paths[0])
+            self.assertEqual(receipt.status, "pending")
+            self.assertTrue(receipt.artifacts_verified)
+            self.assertEqual(receipt.from_version, "9.9.8")
+            self.assertEqual(receipt.target_version, "9.9.9")
+            observed_receipts.append(receipt_paths[0])
+            return 0
+
+        result, receipt, _poll_health = self._invoke_upgrade(
+            installed_local_bundle=True,
+            migration_side_effect=assert_receipt_before_migration,
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(receipt.status, "succeeded")
+        self.assertEqual(len(observed_receipts), 1)
+        self.assertEqual(
+            self.local_bundle_refresh.call_args.kwargs["receipt_path"],
+            observed_receipts[0],
+        )
+
+    def test_normal_future_upgrade_refreshes_installed_bundle_without_rollback_plan(self):
+        result, receipt, poll_health = self._invoke_upgrade(
+            installed_local_bundle=True,
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(receipt.status, "succeeded")
+        self.local_bundle_refresh.assert_called_once()
+        call = self.local_bundle_refresh.call_args
+        self.assertEqual(call.args[0], self.invocation_data_dir)
+        self.assertEqual(call.args[2], "9.9.9")
+        poll_health.assert_called_once()
+
+    def test_normal_future_bundle_refresh_failure_prevents_target_restart(self):
+        result, receipt, poll_health = self._invoke_upgrade(
+            installed_local_bundle=True,
+            bundle_refresh_side_effect=_LocalBundleUpgradeInvocationError(
+                "activation_failed",
+                "activate",
+            ),
+        )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertEqual(receipt.status, "failed")
+        self.assertIn("Local observability bundle refresh failed", result.output)
+        poll_health.assert_not_called()
+        gateway_starts = [
+            call for call in self.run_silent.call_args_list if len(call.args[0]) == 2 and call.args[0][1] == "start"
+        ]
+        self.assertEqual(gateway_starts, [])
 
     def test_unset_config_data_dir_reuses_controller_override_for_all_phases(self):
         result, receipt, _poll_health = self._invoke_upgrade(

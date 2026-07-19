@@ -95,8 +95,9 @@ def source_config_version(*, path: str | None = None) -> int | None:
     """Read only ``config_version`` without loading either runtime schema.
 
     The 0.8.4 bridge remains a config-v7 runtime.  It uses this bounded YAML
-    node inspection solely to prove that the separately verified 0.8.5 wheel
-    can migrate the source before any installed artifact is changed.
+    node inspection solely to prove that the separately verified first-v8-or-
+    later target wheel can migrate the source before any installed artifact is
+    changed.
 
     This preflight deliberately does not source ``.env``, construct legacy
     compatibility dataclasses, resolve secrets, or apply runtime defaults.

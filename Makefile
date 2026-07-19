@@ -16,7 +16,7 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
-UPGRADE_SMOKE_FROM ?= 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
+UPGRADE_SMOKE_FROM ?=
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -40,6 +40,39 @@ endif
 # and otherwise use the host Python available on every supported installer/CI
 # platform. Dependency-bearing scripts continue to use $(VENV_BIN)/python.
 BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%s' "$(VENV_BIN)/python$(EXE)"; elif command -v python3 >/dev/null 2>&1; then command -v python3; elif command -v python >/dev/null 2>&1; then command -v python; else printf '%s' python; fi)
+
+# Resolve newly published stable baselines at execution time. Explicit
+# UPGRADE_SMOKE_FROM values still provide a deterministic developer override.
+# Dynamic resolution requires the exact candidate in ARGS so only older
+# releases can become upgrade baselines; the checked-in development VERSION is
+# intentionally not a release-selection fallback.
+define run_upgrade_matrix
+	@set -eu; \
+	from_versions='$(strip $(UPGRADE_SMOKE_FROM))'; \
+	target_version=''; \
+	set -- $(ARGS); \
+	while [ "$$#" -gt 0 ]; do \
+		case "$$1" in \
+			--target-version) shift; [ "$$#" -gt 0 ] || { echo 'missing value for --target-version' >&2; exit 2; }; target_version="$$1" ;; \
+			--target-version=*) target_version="$${1#--target-version=}" ;; \
+		esac; \
+		shift; \
+	done; \
+	resolution_dir=''; \
+	cleanup() { if [ -n "$$resolution_dir" ]; then rm -rf "$$resolution_dir"; fi; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	if [ -z "$$from_versions" ]; then \
+		[ -n "$$target_version" ] || { echo 'dynamic upgrade matrix requires ARGS="--target-version X.Y.Z ..." (or explicit UPGRADE_SMOKE_FROM)' >&2; exit 2; }; \
+		resolution_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/defenseclaw-baselines.XXXXXX")"; \
+		$(BOOTSTRAP_PYTHON) scripts/resolve_upgrade_baselines.py \
+			--target-version "$$target_version" \
+			--output "$$resolution_dir/effective.json"; \
+		from_versions="$$( $(BOOTSTRAP_PYTHON) -c \
+			'import json, sys; print(" ".join(json.load(open(sys.argv[1], encoding="utf-8"))["published_baselines"]))' \
+			"$$resolution_dir/effective.json" )"; \
+	fi; \
+	$(1) --from-versions "$$from_versions" $(2) $(ARGS)
+endef
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
@@ -869,7 +902,7 @@ upgrade-smoke:
 	@scripts/test-upgrade-protocol-release.sh --refusal-contract-only $(ARGS)
 
 upgrade-smoke-matrix:
-	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" --refusal-contract-only $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,--refusal-contract-only)
 
 upgrade-refusal-contract-matrix: upgrade-smoke-matrix
 
@@ -880,13 +913,13 @@ upgrade-legacy-smoke:
 	@scripts/test-upgrade-release.sh $(ARGS)
 
 upgrade-legacy-smoke-matrix:
-	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-release.sh,)
 
 upgrade-signed-protocol:
 	@scripts/test-upgrade-protocol-release.sh $(ARGS)
 
 upgrade-signed-protocol-matrix:
-	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,)
 
 # ---------------------------------------------------------------------------
 # Lint targets

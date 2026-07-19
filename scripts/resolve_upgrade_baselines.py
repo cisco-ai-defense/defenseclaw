@@ -56,7 +56,7 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _checked_policy(path: Path, candidate_runtime_config_version: int) -> dict[str, Any]:
+def _checked_policy(path: Path) -> dict[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -78,22 +78,15 @@ def _checked_policy(path: Path, candidate_runtime_config_version: int) -> dict[s
         raise BaselineResolutionError("checked baseline floor is empty")
     if any(not isinstance(item, str) or SEMVER.fullmatch(item) is None for item in versions):
         raise BaselineResolutionError("checked baseline floor contains a non-canonical version")
-    if len(versions) != len(set(versions)) or versions != sorted(
-        versions, key=_version_key, reverse=True
-    ):
+    if len(versions) != len(set(versions)) or versions != sorted(versions, key=_version_key, reverse=True):
         raise BaselineResolutionError("checked baseline floor must be unique descending semver")
     if not isinstance(configs, dict) or set(configs) != set(versions):
         raise BaselineResolutionError("checked baseline config map does not match its versions")
     if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value < 1
-        or value > candidate_runtime_config_version
+        not isinstance(value, int) or isinstance(value, bool) or value < 1
         for value in configs.values()
     ):
-        raise BaselineResolutionError(
-            "checked baseline config versions must be positive and no newer than the candidate runtime"
-        )
+        raise BaselineResolutionError("checked baseline config versions must be positive")
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise BaselineResolutionError("checked baseline platforms must contain exactly windows")
     windows = platforms["windows"]
@@ -270,9 +263,7 @@ def _authenticate_release(
     }
     missing = sorted(set(required_metadata) - set(assets))
     if missing:
-        raise BaselineResolutionError(
-            f"immutable release {version} lacks authentication assets: {missing}"
-        )
+        raise BaselineResolutionError(f"immutable release {version} lacks authentication assets: {missing}")
     fetched: dict[str, bytes] = {}
     for name, maximum in required_metadata.items():
         item = assets[name]
@@ -295,9 +286,7 @@ def _authenticate_release(
     checksums = _parse_checksums(fetched["checksums.txt"])
     manifest_digest = checksums.get("upgrade-manifest.json")
     if manifest_digest is None or manifest_digest != _sha256(fetched["upgrade-manifest.json"]):
-        raise BaselineResolutionError(
-            f"upgrade manifest for {version} is not covered by authenticated checksums"
-        )
+        raise BaselineResolutionError(f"upgrade manifest for {version} is not covered by authenticated checksums")
     # Every actually published payload must be covered by the signed checksum
     # manifest and GitHub's immutable digest. The sealed candidate may contain
     # platform payloads intentionally omitted at publication (0.8.4's Windows
@@ -309,9 +298,7 @@ def _authenticate_release(
             continue
         digest = checksums.get(name)
         if digest is None or item["digest"].removeprefix("sha256:") != digest:
-            raise BaselineResolutionError(
-                f"signed checksum and immutable GitHub asset disagree for {version}/{name}"
-            )
+            raise BaselineResolutionError(f"signed checksum and immutable GitHub asset disagree for {version}/{name}")
     try:
         manifest = json.loads(fetched["upgrade-manifest.json"].decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -326,18 +313,14 @@ def _authenticate_release(
         or runtime_config < 1
         or runtime_config > candidate_runtime_config_version
     ):
-        raise BaselineResolutionError(
-            f"published upgrade manifest for {version} has invalid release/config identity"
-        )
+        raise BaselineResolutionError(f"published upgrade manifest for {version} has invalid release/config identity")
     posix = _required_posix_assets(version)
     if not posix.issubset(checksums) or not posix.issubset(assets):
         raise BaselineResolutionError(f"published release {version} lacks its complete POSIX runtime")
     windows = _required_windows_assets(version)
     published_windows = windows & set(assets)
     if published_windows and published_windows != windows:
-        raise BaselineResolutionError(
-            f"published release {version} has a partial Windows runtime capability"
-        )
+        raise BaselineResolutionError(f"published release {version} has a partial Windows runtime capability")
     return runtime_config, published_windows == windows
 
 
@@ -357,9 +340,22 @@ def resolve_effective_policy(
         or candidate_runtime_config_version < 1
     ):
         raise BaselineResolutionError("candidate runtime config version must be positive")
-    checked = _checked_policy(checked_policy_path, candidate_runtime_config_version)
+    checked = _checked_policy(checked_policy_path)
     checked_versions = list(checked["published_baselines"])
-    floor_key = _version_key(checked_versions[0])
+    eligible_checked_versions = [
+        version for version in checked_versions if _version_key(version) < target_key
+    ]
+    dynamic_floor_key = max(
+        (_version_key(version) for version in eligible_checked_versions),
+        default=None,
+    )
+    if any(
+        checked["published_baseline_config_versions"][version] > candidate_runtime_config_version
+        for version in eligible_checked_versions
+    ):
+        raise BaselineResolutionError(
+            "eligible checked baseline config version is newer than the candidate runtime"
+        )
     candidates: dict[str, dict[str, Any]] = {}
     for release in releases:
         if not isinstance(release, dict):
@@ -368,7 +364,7 @@ def resolve_effective_policy(
         if not isinstance(tag, str) or SEMVER.fullmatch(tag) is None:
             continue
         key = _version_key(tag)
-        if not floor_key < key < target_key:
+        if dynamic_floor_key is None or not dynamic_floor_key < key < target_key:
             continue
         if release.get("draft") is not False or release.get("prerelease") is not False:
             continue
@@ -379,8 +375,15 @@ def resolve_effective_policy(
         candidates[tag] = release
 
     dynamic_versions = sorted(candidates, key=_version_key, reverse=True)
-    configs = dict(checked["published_baseline_config_versions"])
-    windows = list(checked["platform_published_baselines"]["windows"])
+    configs = {
+        version: checked["published_baseline_config_versions"][version]
+        for version in eligible_checked_versions
+    }
+    windows = [
+        version
+        for version in checked["platform_published_baselines"]["windows"]
+        if version in eligible_checked_versions
+    ]
     dynamic_windows: list[str] = []
     for version in dynamic_versions:
         runtime_config, has_windows = _authenticate_release(
@@ -394,7 +397,11 @@ def resolve_effective_policy(
         if has_windows:
             dynamic_windows.append(version)
 
-    versions = [*dynamic_versions, *checked_versions]
+    versions = [*dynamic_versions, *eligible_checked_versions]
+    if not versions:
+        raise BaselineResolutionError(
+            f"no supported published baseline predates candidate {target_version}"
+        )
     ordered_configs = {version: configs[version] for version in versions}
     return {
         "schema_version": 2,

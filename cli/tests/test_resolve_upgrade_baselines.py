@@ -61,9 +61,7 @@ def _release(
     windows_assets = RESOLVER._required_windows_assets(version)
     for name in windows_assets:
         payload_digests[name] = _digest(f"payload:{name}".encode())
-    checksums = "".join(
-        f"{digest}  {name}\n" for name, digest in sorted(payload_digests.items())
-    ).encode()
+    checksums = "".join(f"{digest}  {name}\n" for name, digest in sorted(payload_digests.items())).encode()
     downloaded = {
         f"https://downloads.example/{version}/checksums.txt": checksums,
         f"https://downloads.example/{version}/checksums.txt.pem": b"certificate\n",
@@ -106,13 +104,13 @@ def _resolve(
     target: str,
     releases_and_downloads: list[tuple[dict[str, object], dict[str, bytes]]],
     *,
+    candidate_runtime_config_version: int = 8,
+    checked_policy_path: Path | None = None,
     verify=None,
 ) -> dict[str, object]:
     releases = [item[0] for item in releases_and_downloads]
     downloads = {
-        url: payload
-        for _, release_downloads in releases_and_downloads
-        for url, payload in release_downloads.items()
+        url: payload for _, release_downloads in releases_and_downloads for url, payload in release_downloads.items()
     }
 
     def download(url: str, maximum: int) -> bytes:
@@ -122,9 +120,9 @@ def _resolve(
 
     return RESOLVER.resolve_effective_policy(
         target_version=target,
-        candidate_runtime_config_version=8,
+        candidate_runtime_config_version=candidate_runtime_config_version,
         releases=releases,
-        checked_policy_path=ROOT / "release" / "upgrade-baselines.json",
+        checked_policy_path=checked_policy_path or ROOT / "release" / "upgrade-baselines.json",
         download=download,
         verify=verify or (lambda *_: None),
     )
@@ -165,6 +163,74 @@ def test_087_discovers_all_newer_immutable_stables_without_a_policy_edit() -> No
         "0.8.3",
     ]
     assert policy["published_baseline_config_versions"]["0.8.6"] == 8
+
+
+def test_candidate_below_checked_head_discovers_release_above_eligible_floor(
+    tmp_path: Path,
+) -> None:
+    checked_policy = tmp_path / "upgrade-baselines.json"
+    checked_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": ["0.8.4", "0.8.1", "0.8.0"],
+                "published_baseline_config_versions": {
+                    "0.8.4": 7,
+                    "0.8.1": 6,
+                    "0.8.0": 6,
+                },
+                "platform_published_baselines": {"windows": ["0.8.0"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    policy = _resolve(
+        "0.8.3",
+        [_release("0.8.2")],
+        checked_policy_path=checked_policy,
+    )
+
+    assert policy["published_baselines"] == ["0.8.2", "0.8.1", "0.8.0"]
+
+
+def test_legacy_candidate_filters_checked_baselines_that_are_not_older() -> None:
+    policy = _resolve("0.8.3", [])
+
+    assert policy["published_baselines"][:3] == ["0.8.2", "0.8.1", "0.8.0"]
+    assert "0.8.4" not in policy["published_baselines"]
+    assert "0.8.3" not in policy["published_baselines"]
+    assert "0.8.4" not in policy["published_baseline_config_versions"]
+
+
+def test_ineligible_newer_config_does_not_reject_legacy_candidate() -> None:
+    policy = _resolve("0.8.3", [], candidate_runtime_config_version=6)
+
+    assert policy["published_baselines"][0] == "0.8.2"
+    assert set(policy["published_baseline_config_versions"].values()) <= {5, 6}
+
+
+def test_eligible_newer_config_still_rejects_candidate() -> None:
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match="eligible checked baseline config version is newer",
+    ):
+        _resolve("0.8.5", [], candidate_runtime_config_version=6)
+
+
+def test_candidate_at_or_below_support_floor_requires_explicit_fixture() -> None:
+    checked_policy = json.loads(
+        (ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
+    )
+    support_floor = checked_policy["published_baselines"][-1]
+    assert tuple(map(int, support_floor.split("."))) > (0, 0, 0)
+
+    for candidate in ("0.0.0", support_floor):
+        with pytest.raises(
+            RESOLVER.BaselineResolutionError,
+            match="no supported published baseline",
+        ):
+            _resolve(candidate, [])
 
 
 def test_actual_complete_windows_assets_control_platform_availability(
@@ -214,7 +280,7 @@ def test_manifest_must_be_covered_by_authenticated_checksums() -> None:
     release, downloads = _release("0.8.5")
     downloads = dict(downloads)
     manifest_url = "https://downloads.example/0.8.5/upgrade-manifest.json"
-    downloads[manifest_url] = b'{}'
+    downloads[manifest_url] = b"{}"
     for asset in release["assets"]:
         if asset["name"] == "upgrade-manifest.json":
             asset["digest"] = f"sha256:{_digest(downloads[manifest_url])}"
@@ -291,9 +357,6 @@ def test_sigstore_verification_uses_bounded_wrapper_and_exact_release_identity(
     assert str(ROOT / "scripts/verify-sigstore-blob.py") in observed
     identity = observed[observed.index("--certificate-identity") + 1]
     assert identity == (
-        "https://github.com/cisco-ai-defense/defenseclaw/"
-        ".github/workflows/release.yaml@refs/heads/main"
+        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main"
     )
-    assert observed[observed.index("--certificate-oidc-issuer") + 1] == (
-        "https://token.actions.githubusercontent.com"
-    )
+    assert observed[observed.index("--certificate-oidc-issuer") + 1] == ("https://token.actions.githubusercontent.com")

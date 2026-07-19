@@ -24,6 +24,7 @@ from defenseclaw.migrations import (
     _allocate_observability_v8_bundle_backup,
     _migrate_observability_v8,
     _observability_v8_upgrade_environment,
+    _valid_upgrade_mutation_token,
     _validate_observability_v8_candidate,
     preflight_observability_v8_upgrade,
     run_migrations,
@@ -31,6 +32,7 @@ from defenseclaw.migrations import (
 from defenseclaw.observability.v8_activation import V8ActivationError
 from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES
 from defenseclaw.observability.v8_migration import V8MigrationError
+from defenseclaw.upgrade_receipt import begin_upgrade_receipt
 
 
 class TestObservabilityV8UpgradeMigration(unittest.TestCase):
@@ -59,6 +61,16 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def tearDown(self) -> None:
         self.root.cleanup()
 
+    def _begin_verified_upgrade_receipt(self, target_version: str = "9.9.9") -> str:
+        return os.fspath(
+            begin_upgrade_receipt(
+                self.data_dir,
+                from_version="0.8.5",
+                target_version=target_version,
+                artifacts_verified=True,
+            )
+        )
+
     def test_registry_runs_migration_only_at_forward_release_key(self) -> None:
         rows = [(version, fn) for version, _description, fn in MIGRATIONS if fn is _migrate_observability_v8]
         self.assertEqual(rows, [("0.8.5", _migrate_observability_v8)])
@@ -83,9 +95,7 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
             candidate=b"config_version: 8\n",
             source_sha256="1" * 64,
             candidate_sha256="2" * 64,
-            environment_dependencies=(
-                SimpleNamespace(name="DOTENV_ONLY", present=True, value_sha256="3" * 64),
-            ),
+            environment_dependencies=(SimpleNamespace(name="DOTENV_ONLY", present=True, value_sha256="3" * 64),),
             environment_edits=(
                 SimpleNamespace(
                     name="MOVED_SECRET",
@@ -114,9 +124,7 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             patch("defenseclaw.migrations.convert_v7_observability_to_v8", return_value=migration) as convert,
             patch("defenseclaw.migrations.inspect_v8_config", side_effect=inspect),
-            patch(
-                "defenseclaw.migrations.preflight_v8_migration_activation"
-            ) as activation_preflight,
+            patch("defenseclaw.migrations.preflight_v8_migration_activation") as activation_preflight,
             patch("defenseclaw.migrations.activate_v8_migration") as activate,
         ):
             binding = preflight_observability_v8_upgrade(
@@ -210,9 +218,7 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
 
     def _real_preflight_binding(self) -> ObservabilityV8PreflightBinding:
         with open(self.config_path, "wb") as config_file:
-            config_file.write(
-                f"config_version: 7\ndata_dir: {self.data_dir}\n".encode()
-            )
+            config_file.write(f"config_version: 7\ndata_dir: {self.data_dir}\n".encode())
         with (
             patch.dict(os.environ, {}, clear=True),
             patch(
@@ -380,6 +386,18 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
         self.assertEqual(raised.exception.code, "preflight_binding_missing")
         activate.assert_not_called()
 
+    def test_malformed_target_mutation_token_is_not_a_hard_cut_capability(self) -> None:
+        for token in ("a" * 31, "A" * 32, "g" * 32):
+            with (
+                self.subTest(token=token),
+                patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+                    clear=True,
+                ),
+            ):
+                self.assertFalse(_valid_upgrade_mutation_token())
+
     @unittest.skipIf(os.name == "nt", "POSIX backup-root mode assertion")
     def test_target_rejects_config_changed_after_real_locks_before_any_activation_mutation(
         self,
@@ -407,11 +425,7 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
         os.chmod(backup_root, 0o755)
         binding = self._real_preflight_binding()
         config_before = open(self.config_path, "rb").read()
-        environment_before = (
-            open(self.environment_path, "rb").read()
-            if os.path.exists(self.environment_path)
-            else None
-        )
+        environment_before = open(self.environment_path, "rb").read() if os.path.exists(self.environment_path) else None
         config_mutation = b"# post-lock uncooperative config edit\n"
         environment_mutation = b"# post-lock comment-only dotenv edit\n"
         created_environment = b"POST_LOCK_CREATED=1\n"
@@ -767,7 +781,12 @@ audit_sinks:
         ):
             _migrate_observability_v8(self.ctx)
 
-        refresh.assert_called_once_with(self.data_dir, backup, "0.8.5")
+        refresh.assert_called_once_with(
+            self.data_dir,
+            backup,
+            "0.8.5",
+            restart_intent_receipt=None,
+        )
         self.assertEqual(
             self.ctx.changes,
             [
@@ -792,6 +811,235 @@ audit_sinks:
             _migrate_observability_v8(self.ctx)
 
         refresh.assert_not_called()
+
+    def test_immutable_v8_controller_repairs_bundle_after_noop_future_upgrade(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        receipt_path = self._begin_verified_upgrade_receipt()
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
+                return_value={"installed": True, "degraded_errors": []},
+            ) as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[0], self.data_dir)
+        self.assertEqual(refresh.call_args.args[2], "9.9.9")
+        self.assertEqual(refresh.call_args.kwargs["restart_intent_receipt"], receipt_path)
+
+    def test_immutable_v8_controller_requires_durable_bundle_recovery_authority(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
+                clear=True,
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+            self.assertRaisesRegex(
+                ObservabilityV8UpgradeMigrationError,
+                "local_bundle_receipt_missing",
+            ),
+        ):
+            run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        refresh.assert_not_called()
+
+    def test_immutable_v8_controller_skips_receipt_when_no_bundle_is_installed(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
+                clear=True,
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_not_called()
+
+    def test_immutable_controller_defers_bundle_refresh_after_future_migration_failure(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+
+        def fail_future_migration(_ctx: MigrationContext) -> None:
+            raise RuntimeError("future migration failed")
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations.MIGRATIONS",
+                [("9.9.9", "future migration", fail_future_migration)],
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_not_called()
+
+    def test_capable_controller_suppresses_target_bundle_fallback(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
+                clear=True,
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+                controller_owns_local_bundle_transaction=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_not_called()
+
+    def test_controller_bundle_ownership_is_effective_migration_context_capability(self) -> None:
+        observed: list[bool] = []
+
+        def capture_context(ctx: MigrationContext) -> None:
+            observed.append(ctx.upgrade_handles_local_bundle)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "defenseclaw.migrations.MIGRATIONS",
+                [("9.9.9", "future migration", capture_context)],
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=False,
+                controller_owns_local_bundle_transaction=True,
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(observed, [True])
+        refresh.assert_not_called()
+
+    def test_hard_cut_mutation_token_suppresses_target_bundle_fallback(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "a" * 32,
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "null",
+                },
+                clear=True,
+            ),
+            patch("defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target") as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_not_called()
+
+    def test_unpaired_ambient_mutation_token_does_not_suppress_bundle_repair(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        receipt_path = self._begin_verified_upgrade_receipt()
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "a" * 32},
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
+                return_value={"installed": True, "degraded_errors": []},
+            ) as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.kwargs["restart_intent_receipt"], receipt_path)
+
+    def test_malformed_hard_cut_binding_does_not_grant_bundle_custody(self) -> None:
+        os.makedirs(os.path.join(self.data_dir, "observability-stack"))
+        receipt_path = self._begin_verified_upgrade_receipt()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_UPGRADE_MUTATION_TOKEN": "a" * 32,
+                    "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "{}",
+                },
+                clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
+                return_value={"installed": True, "degraded_errors": []},
+            ) as refresh,
+        ):
+            count = run_migrations(
+                "0.8.5",
+                "9.9.9",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                upgrade_handles_local_bundle=True,
+            )
+
+        self.assertEqual(count, 0)
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.kwargs["restart_intent_receipt"], receipt_path)
 
     @unittest.skipIf(os.name != "posix", "descriptor-relative backup creation is POSIX-only")
     def test_retry_allocates_private_bundle_backup_directory(self) -> None:

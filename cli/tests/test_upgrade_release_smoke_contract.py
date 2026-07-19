@@ -31,6 +31,7 @@ import pytest
 import yaml
 from defenseclaw.migrations import run_migrations
 from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.upgrade_receipt import begin_upgrade_receipt
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
@@ -66,6 +67,7 @@ def test_developer_activation_is_isolated_from_every_production_upgrade_surface(
     assert 'source "${ROOT}/scripts/test-upgrade-release.sh"' in source
     assert "run_migrations(" in source
     assert "upgrade_handles_local_bundle=True" in source
+    assert "controller_owns_local_bundle_transaction=True" in source
     assert "_poll_health(configuration" in source
     assert '[[ -n "${RELEASE_ROOT}" ]]' in source
     assert '[[ "${BASELINE_MODE}" == "seed" ]]' in source
@@ -376,9 +378,7 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
             "removed_activation_temp = False", recovery_start
         )
     ]
-    assert resume.index("cleanup_owned_temporaries()") < resume.index(
-        'print(f"bridge\\t{bridge_version}\\t{plan_id}")'
-    )
+    assert resume.index("cleanup_owned_temporaries()") < resume.index('print(f"bridge\\t{bridge_version}\\t{plan_id}")')
     cleanup_start = source.index("def cleanup_owned_temporaries() -> None:")
     cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
     cleanup = source[cleanup_start:cleanup_end]
@@ -536,9 +536,7 @@ def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_clo
     assert program.count(needle) == 1
     program = program.replace(
         needle,
-        "    atomic_exchange(active_path, temporary)\n"
-        "    os.kill(os.getpid(), 9)\n"
-        "    swapped = True",
+        "    atomic_exchange(active_path, temporary)\n    os.kill(os.getpid(), 9)\n    swapped = True",
         1,
     )
 
@@ -622,10 +620,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     temporary = config_parent / temporary_name
     temporary.write_text("inspected-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = (
-        "            quarantine_name = quarantine_no_replace("
-        "descriptor, entry.name, info)"
-    )
+    needle = "            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)"
     assert program.count(needle) == 1
     program = program.replace(
         needle,
@@ -664,9 +659,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     inspected = config_parent / f"{temporary_name}.inspected"
     assert inspected.read_text(encoding="utf-8") == "inspected-sensitive-bytes\n"
     assert not temporary.exists()
-    quarantines = list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    quarantines = list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
     assert len(quarantines) == 1
     assert quarantines[0].read_text(encoding="utf-8") == "replacement-must-survive\n"
 
@@ -697,10 +690,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     temporary = config_parent / temporary_name
     temporary.write_text("crash-left-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = (
-        "            quarantine_name = quarantine_no_replace("
-        "descriptor, entry.name, info)"
-    )
+    needle = "            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)"
     assert program.count(needle) == 1
     program = program.replace(
         needle,
@@ -718,9 +708,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
 
     assert crashed.returncode < 0
     assert not temporary.exists()
-    quarantines = list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    quarantines = list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
     assert len(quarantines) == 1
     assert quarantines[0].read_text(encoding="utf-8") == "crash-left-sensitive-bytes\n"
 
@@ -732,9 +720,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     )
 
     assert replay.returncode == 0, replay.stderr
-    assert not list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    assert not list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
 
 
 @pytest.mark.parametrize(
@@ -1004,6 +990,12 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert baseline_bundle_manifest["bundle_version"] == "0.8.5"
 
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    begin_upgrade_receipt(
+        str(data_dir),
+        from_version="0.8.5",
+        target_version="0.8.6",
+        artifacts_verified=True,
+    )
     count = run_migrations(
         "0.8.5",
         "0.8.6",
@@ -1014,7 +1006,10 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert count == 0
     assert config_path.read_bytes() == config_before
     assert environment_path.read_bytes() == environment_before
-    assert not list((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+    refreshed_bundle_manifest = json.loads(
+        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(encoding="utf-8")
+    )
+    assert refreshed_bundle_manifest["bundle_version"] == "0.8.6"
     cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
     assert "0.8.5" in cursor["applied"]
 
@@ -1061,6 +1056,12 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
     baselines = policy["published_baselines"]
 
     assert policy["schema_version"] == 2
+    assert line.strip() == "UPGRADE_SMOKE_FROM ?="
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    assert "target_version=''" in makefile
+    assert "dynamic upgrade matrix requires" in makefile
+    assert '--target-version "$$target_version"' in makefile
+    assert '--target-version=*) target_version="$${1#--target-version=}"' in makefile
     assert baselines[0] == "0.8.4"
     assert policy["published_baseline_config_versions"] == {
         "0.8.4": 7,
@@ -1086,7 +1087,6 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
         "0.8.1",
         "0.8.0",
     ]
-    assert line.split("?=", 1)[1].split() == baselines
 
 
 def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> None:

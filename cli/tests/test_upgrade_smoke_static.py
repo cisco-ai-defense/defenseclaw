@@ -46,28 +46,133 @@ UPGRADE_SMOKE_BASELINES = (
 
 def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
     text = (ROOT / "Makefile").read_text()
-    match = re.search(r"^UPGRADE_SMOKE_FROM \?= (.+)$", text, re.MULTILINE)
+    match = re.search(r"^UPGRADE_SMOKE_FROM \?=\s*$", text, re.MULTILINE)
     assert match is not None
-    assert tuple(match.group(1).split()) == UPGRADE_SMOKE_BASELINES
 
     policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text())
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
+    assert "scripts/resolve_upgrade_baselines.py" in text
+    assert "from_versions='$(strip $(UPGRADE_SMOKE_FROM))'" in text
+    assert "target_version=''" in text
+    assert "dynamic upgrade matrix requires" in text
+    assert '--target-version "$$target_version"' in text
+    assert '--target-version=*) target_version="$${1#--target-version=}"' in text
 
     assert "upgrade-refusal-contract-matrix: upgrade-smoke-matrix" in text
     assert "upgrade-developer-activation:" in text
     assert "scripts/test-developer-target-activation.sh $(ARGS)" in text
-    assert (
-        'scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" '
-        "--refusal-contract-only $(ARGS)"
-    ) in text
+    assert "$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,--refusal-contract-only)" in text
     assert "upgrade-legacy-smoke-matrix:" in text
-    assert 'scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)' in text
+    assert "$(call run_upgrade_matrix,scripts/test-upgrade-release.sh,)" in text
     assert "upgrade-signed-protocol-matrix:" in text
+
+
+def test_makefile_upgrade_matrix_executes_dynamic_and_explicit_baselines(tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    resolver = scripts / "resolve_upgrade_baselines.py"
+    resolver.write_text(
+        """import json, pathlib, sys
+args = sys.argv[1:]
+target = args[args.index('--target-version') + 1]
+output = pathlib.Path(args[args.index('--output') + 1])
+pathlib.Path('resolver-observed.json').write_text(json.dumps({'target': target, 'output': str(output)}))
+output.write_text(json.dumps({'published_baselines': ['0.8.5', '0.8.4']}))
+""",
+        encoding="utf-8",
+    )
+    runner = scripts / "test-upgrade-protocol-release.sh"
+    runner.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > runner-args.txt\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    environment = os.environ.copy()
+    environment.pop("UPGRADE_SMOKE_FROM", None)
+
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "ARGS=--target-version 0.8.6 --health-timeout 3",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    observed = json.loads((tmp_path / "resolver-observed.json").read_text(encoding="utf-8"))
+    assert observed["target"] == "0.8.6"
+    assert not Path(observed["output"]).parent.exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.5 0.8.4",
+        "--refusal-contract-only",
+        "--target-version",
+        "0.8.6",
+        "--health-timeout",
+        "3",
+    ]
+
+    (tmp_path / "resolver-observed.json").unlink()
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "ARGS=--target-version=0.8.6 --health-timeout 4",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    observed = json.loads((tmp_path / "resolver-observed.json").read_text(encoding="utf-8"))
+    assert observed["target"] == "0.8.6"
+    assert not Path(observed["output"]).parent.exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.5 0.8.4",
+        "--refusal-contract-only",
+        "--target-version=0.8.6",
+        "--health-timeout",
+        "4",
+    ]
+
+    (tmp_path / "resolver-observed.json").unlink()
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "UPGRADE_SMOKE_FROM=0.8.3 0.8.2",
+            "ARGS=--target-version=0.8.6",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    assert not (tmp_path / "resolver-observed.json").exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.3 0.8.2",
+        "--refusal-contract-only",
+        "--target-version=0.8.6",
+    ]
 
 
 def test_upgrade_smoke_docs_cover_default_matrix() -> None:
     text = (ROOT / "docs" / "TESTING.md").read_text()
-    default_line = next(line for line in text.splitlines() if line.startswith("The default matrix covers"))
+    default_line = next(line for line in text.splitlines() if "default matrix covers" in line)
     for version in UPGRADE_SMOKE_BASELINES:
         assert f"`{version}`" in default_line
 
@@ -385,7 +490,7 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     assert '"SELECT COUNT(*) FROM audit_events WHERE target = ?"' in compatibility
     assert 'event.get("target") == probe_target' in compatibility
     assert 'event.get("details") == marker' not in compatibility
-    api_read_start = compatibility.index('read = urllib.request.Request(')
+    api_read_start = compatibility.index("read = urllib.request.Request(")
     api_read_end = compatibility.index("\nPY\n", api_read_start)
     assert 'event.get("binary_version")' not in compatibility[api_read_start:api_read_end]
     assert "SELECT COUNT(*), COALESCE(MAX(binary_version), '')" in compatibility
@@ -413,7 +518,7 @@ def test_live_continuity_fixture_has_no_implicit_openclaw_fleet_dependency() -> 
     verification = continuity[verify_start:verify_end]
 
     assert '"claw:\\n"' in fixture
-    assert '"  mode: \'\'\\n"' in fixture
+    assert "\"  mode: ''\\n\"" in fixture
     assert '"  connector:' not in fixture
     assert '"gateway:\\n"' in fixture
     assert '"  fleet_mode: disabled\\n"' in fixture
@@ -712,12 +817,10 @@ def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
     assert '"${DEFENSECLAW_VENV}/bin/python" - <<' not in posix
 
     installed_version = windows[
-        windows.index("function Get-InstalledVersion") : windows.index(
-            "function Get-CanonicalVersionOutput"
-        )
+        windows.index("function Get-InstalledVersion") : windows.index("function Get-CanonicalVersionOutput")
     ]
     assert "[void](Get-Cli)" in installed_version
-    assert "-Arguments @(\"-I\", \"-B\", \"-c\"" in installed_version
+    assert '-Arguments @("-I", "-B", "-c"' in installed_version
     assert "Get-CanonicalVersionOutput -Command $cli" not in installed_version
     assert 'Assert-VersionOutput (Get-Cli) $SourceVersion "source CLI"' not in windows
 
@@ -792,8 +895,7 @@ def test_release_owned_embedded_python_remains_apple_python39_compatible() -> No
         f"with Apple Python 3.9: {incompatible_annotations}"
     )
     assert not incompatible_calls, (
-        "release-owned embedded Python cannot use zip(strict=...) before Python 3.10: "
-        f"{incompatible_calls}"
+        f"release-owned embedded Python cannot use zip(strict=...) before Python 3.10: {incompatible_calls}"
     )
 
 
@@ -812,7 +914,7 @@ def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() 
     )
     assert "python3 -I -B -c 'import secrets" in native_fixture
     assert native_fixture.index("DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}") < native_fixture.index(
-        'environment.historical.source'
+        "environment.historical.source"
     )
     invariant_start = smoke.index("assert_source_gateway_canary_preserved_fixture() {")
     invariant_end = smoke.index("\n}\n", invariant_start)
@@ -820,9 +922,11 @@ def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() 
     assert 'cmp -s "${evidence_dir}/config.historical.source" "${data_dir}/config.yaml"' in invariant
     assert 'cmp -s "${evidence_dir}/environment.historical.source" "${data_dir}/.env"' in invariant
     run_one = smoke[smoke.index("run_one_upgrade_smoke() {") : smoke.index("\n}\n\nmain()")]
-    assert run_one.index("start_source_gateway_canary") < run_one.index(
-        "assert_source_gateway_canary_preserved_fixture"
-    ) < run_one.index("patch_installed_upgrade_endpoint")
+    assert (
+        run_one.index("start_source_gateway_canary")
+        < run_one.index("assert_source_gateway_canary_preserved_fixture")
+        < run_one.index("patch_installed_upgrade_endpoint")
+    )
     assert 'actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token' in smoke
     assert 'raise SystemExit("gateway token changed across the staged upgrade")' in smoke
     assert "historical_gateway_token," in smoke
@@ -954,13 +1058,16 @@ def test_posix_resolver_releases_only_the_lock_custody_it_created(
         advisory_lock.write_bytes(b"")
         advisory_lock.chmod(0o600)
 
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 acquire_upgrade_lock
 test -f "${UPGRADE_LOCK_FILE}"
 test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
 release_upgrade_lock
 test ! -e "${UPGRADE_LOCK_FILE}"
 """
+    )
     if preexisting_recovery_root:
         script += """
 test -d "${UPGRADE_RECOVERY_ROOT}"
@@ -988,13 +1095,16 @@ test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
 def test_posix_resolver_parent_wait_refusal_runs_exit_cleanup(tmp_path: Path) -> None:
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 trap release_upgrade_lock EXIT
 acquire_upgrade_lock
 target_status=0
 bash -c 'exit 42' || target_status=$?
 exit "${target_status}"
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
@@ -1015,7 +1125,9 @@ exit "${target_status}"
 def test_posix_resolver_never_deletes_replacement_advisory_inode(tmp_path: Path) -> None:
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 acquire_upgrade_lock
 mv "${UPGRADE_ADVISORY_LOCK_FILE}" "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
 printf 'replacement\n' >"${UPGRADE_ADVISORY_LOCK_FILE}"
@@ -1025,6 +1137,7 @@ test ! -e "${UPGRADE_LOCK_FILE}"
 test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
 test -f "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
@@ -1051,7 +1164,9 @@ def test_posix_resolver_keeps_kernel_lease_until_created_path_is_removed(
     data_home.mkdir(mode=0o700)
     ready = tmp_path / "observer-ready"
     result = tmp_path / "observer-result"
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 acquire_upgrade_lock
 (
     exec 9>&-
@@ -1101,6 +1216,7 @@ wait "${observer_pid}"
     esac
     test ! -e "${UPGRADE_RECOVERY_ROOT}"
 """
+    )
     environment = os.environ.copy()
     environment.update(
         {
@@ -1128,7 +1244,9 @@ def test_posix_resolver_retry_waits_for_surviving_mutation_child(tmp_path: Path)
     data_home.mkdir(mode=0o700)
     ready = tmp_path / "parent-ready"
     child_pid_path = tmp_path / "child-pid"
-    parent_script = _posix_resolver_lock_harness() + """
+    parent_script = (
+        _posix_resolver_lock_harness()
+        + """
 acquire_upgrade_lock
 bash -c 'sleep 4' &
 child_pid=$!
@@ -1136,6 +1254,7 @@ printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
 printf 'ready\n' >"$TEST_READY"
 wait "${child_pid}"
 """
+    )
     environment = os.environ.copy()
     environment.update(
         {
@@ -1161,10 +1280,13 @@ wait "${child_pid}"
     assert parent.wait(timeout=5) != 0
     os.kill(child_pid, 0)
 
-    retry_script = _posix_resolver_lock_harness() + """
+    retry_script = (
+        _posix_resolver_lock_harness()
+        + """
 trap release_upgrade_lock EXIT
 acquire_upgrade_lock
 """
+    )
     refused = subprocess.run(
         ["bash", "-c", retry_script],
         cwd=ROOT,
@@ -1206,7 +1328,9 @@ def test_posix_resolver_exit_cleanup_keeps_surviving_child_advisory_lease(tmp_pa
     data_home.mkdir(mode=0o700)
     ready = tmp_path / "parent-ready"
     child_pid_path = tmp_path / "child-pid"
-    parent_script = _posix_resolver_lock_harness() + """
+    parent_script = (
+        _posix_resolver_lock_harness()
+        + """
 trap release_upgrade_lock EXIT
 acquire_upgrade_lock
 bash -c 'sleep 4' &
@@ -1215,6 +1339,7 @@ printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
 printf 'ready\n' >"$TEST_READY"
 exit 0
 """
+    )
     environment = os.environ.copy()
     environment.update(
         {
@@ -1240,10 +1365,13 @@ exit 0
 
     advisory_lock = data_home / ".upgrade-recovery" / "upgrade.advisory.lock"
     assert advisory_lock.is_file()
-    retry_script = _posix_resolver_lock_harness() + """
+    retry_script = (
+        _posix_resolver_lock_harness()
+        + """
 trap release_upgrade_lock EXIT
 acquire_upgrade_lock
 """
+    )
     refused = subprocess.run(
         ["bash", "-c", retry_script],
         cwd=ROOT,
@@ -1284,7 +1412,9 @@ def test_posix_resolver_reclaims_reused_pid_schema_v2_claim(tmp_path: Path) -> N
     """A reused PID must not permanently block a stale diagnostic claim."""
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 mkdir -p "${UPGRADE_RECOVERY_ROOT}"
 chmod 700 "${UPGRADE_RECOVERY_ROOT}"
 python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
@@ -1318,6 +1448,7 @@ assert claim["process_start"] != "linux:0"
 PY
 release_upgrade_lock
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
@@ -1339,7 +1470,9 @@ def test_posix_resolver_schema1_live_pid_claim_fails_closed(tmp_path: Path) -> N
 
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 mkdir -p "${UPGRADE_RECOVERY_ROOT}"
 chmod 700 "${UPGRADE_RECOVERY_ROOT}"
 python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
@@ -1359,6 +1492,7 @@ PY
 chmod 600 "${UPGRADE_LOCK_FILE}"
 acquire_upgrade_lock
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
@@ -1381,7 +1515,9 @@ def test_posix_resolver_legacy_schema2_live_pid_claim_fails_closed(tmp_path: Pat
 
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 mkdir -p "${UPGRADE_RECOVERY_ROOT}"
 chmod 700 "${UPGRADE_RECOVERY_ROOT}"
 python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
@@ -1406,6 +1542,7 @@ PY
 chmod 600 "${UPGRADE_LOCK_FILE}"
 acquire_upgrade_lock
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
@@ -1428,7 +1565,9 @@ def test_posix_resolver_preserves_nonempty_created_recovery_root_in_place(
 ) -> None:
     data_home = tmp_path / "data"
     data_home.mkdir(mode=0o700)
-    script = _posix_resolver_lock_harness() + """
+    script = (
+        _posix_resolver_lock_harness()
+        + """
 acquire_upgrade_lock
 printf '{"schema_version":4}\n' >"${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
 chmod 600 "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
@@ -1438,6 +1577,7 @@ test -f "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
 test ! -e "${UPGRADE_LOCK_FILE}"
 test ! -e "${UPGRADE_ADVISORY_LOCK_FILE}"
 """
+    )
     environment = os.environ.copy()
     environment["TEST_DATA_HOME"] = str(data_home)
     completed = subprocess.run(
