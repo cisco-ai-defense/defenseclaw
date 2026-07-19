@@ -658,6 +658,7 @@ audit_sinks:
             self.assertEqual(environment["DOTENV_ONLY"], "dotenv-value")
             self.assertEqual(environment["SHARED"], "ambient-wins")
             self.assertEqual(environment["AMBIENT_ONLY"], "ambient-value")
+            self.assertNotIn("BASH_FUNC_which%%", environment)
             self.assertEqual(kwargs["source_name"], os.path.abspath(self.config_path))
             self.assertEqual(kwargs["effective_data_dir"], os.path.abspath(self.data_dir))
             return migration
@@ -691,7 +692,11 @@ audit_sinks:
         with (
             patch.dict(
                 os.environ,
-                {"SHARED": "ambient-wins", "AMBIENT_ONLY": "ambient-value"},
+                {
+                    "SHARED": "ambient-wins",
+                    "AMBIENT_ONLY": "ambient-value",
+                    "BASH_FUNC_which%%": "() { :; }",
+                },
                 clear=True,
             ),
             patch("defenseclaw.migrations.convert_v7_observability_to_v8", side_effect=convert),
@@ -1177,6 +1182,19 @@ audit_sinks:
     def test_missing_environment_uses_ambient_snapshot(self) -> None:
         os.remove(self.environment_path)
         with patch.dict(os.environ, {"AMBIENT_ONLY": "present"}, clear=True):
+            snapshot = _observability_v8_upgrade_environment(self.environment_path)
+        self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
+
+    def test_ambient_snapshot_ignores_unreferenceable_shell_function_names(self) -> None:
+        os.remove(self.environment_path)
+        with patch.dict(
+            os.environ,
+            {
+                "AMBIENT_ONLY": "present",
+                "BASH_FUNC_which%%": "() { :; }",
+            },
+            clear=True,
+        ):
             snapshot = _observability_v8_upgrade_environment(self.environment_path)
         self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
 

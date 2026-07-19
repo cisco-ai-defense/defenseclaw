@@ -65,6 +65,7 @@ _OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGH
 _UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
 _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES = 4 * 1024 * 1024
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x00000400
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # These target-wheel dependencies are resolved lazily. Older upgrade clients
@@ -889,7 +890,16 @@ def _observability_v8_upgrade_environment_snapshot(
     """Return parsed values and a value-free identity of the exact dotenv bytes."""
 
     snapshot, present, digest = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
-    snapshot.update(os.environ)
+    # POSIX permits exported shell functions and other ambient entries whose
+    # names cannot be referenced by the v8 ``$NAME`` grammar (for example,
+    # ``BASH_FUNC_which%%``). They are unrelated to config conversion and must
+    # not make an otherwise valid upgrade fail. The managed dotenv remains
+    # strict: its parser rejects every malformed assignment before this merge.
+    snapshot.update(
+        (name, value)
+        for name, value in os.environ.items()
+        if _ENVIRONMENT_NAME.fullmatch(name) is not None
+    )
     return snapshot, present, digest
 
 
