@@ -510,7 +510,15 @@ def find_resumable_upgrade_receipt(data_dir: str, *, target_version: str) -> Pat
         elif replacement is not None:
             if not replacement.artifacts_verified or replacement.target_version != target_version:
                 raise ValueError("upgrade receipt delegation points to an invalid target retry")
-            superseded.add(path)
+            replacement_restart_intent = None
+            if replacement.status in {"succeeded", "partial"}:
+                replacement_path = path.with_name(f"{replacement.receipt_id}.json")
+                replacement_restart_intent = load_local_bundle_restart_intent(replacement_path)
+            if replacement.status == "pending" or _is_recoverable_target(
+                replacement,
+                replacement_restart_intent,
+            ):
+                superseded.add(path)
     if pending:
         return pending[0][0]
     authorities: list[Path] = []
@@ -556,7 +564,7 @@ def find_verified_installed_upgrade_receipt(
         return None
     return max(
         matches,
-        key=lambda item: (item[1].created_at, item[1].status == "succeeded"),
+        key=lambda item: (_parse_time(item[1].created_at), item[1].status == "succeeded"),
     )[0]
 
 

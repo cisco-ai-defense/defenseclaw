@@ -4273,6 +4273,84 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
             required.assert_called_once()
             start.assert_called_once()
 
+    def test_required_migration_assertion_failure_keeps_recovery_retryable(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    return_value=os.path.join(data_dir, "backup"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
+            run_migrations = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_installed_migrations",
+                    return_value=1,
+                )
+            )
+            required = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations",
+                    side_effect=[SystemExit(1), None],
+                )
+            )
+            start = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._start_and_verify_services"))
+
+            with self.assertRaises(SystemExit):
+                cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=receipt_path,
+                    data_dir=data_dir,
+                    target_version="9.9.9",
+                    os_name="linux",
+                    health_timeout=60,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                    recovery_home=data_dir,
+                    upgrade_manifest={
+                        "migration_failure_policy": "fail",
+                        "required_cli_migrations": ["9.9.9"],
+                    },
+                )
+
+            failed_attempt = load_upgrade_receipt(receipt_path)
+            self.assertEqual(failed_attempt.status, "pending")
+            self.assertEqual(failed_attempt.migration_status, "degraded")
+            start.assert_not_called()
+
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=receipt_path,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="linux",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={
+                    "migration_failure_policy": "fail",
+                    "required_cli_migrations": ["9.9.9"],
+                },
+            )
+
+            recovered = load_upgrade_receipt(receipt_path)
+            self.assertEqual(recovered.status, "succeeded")
+            self.assertEqual(recovered.migration_status, "completed")
+            self.assertEqual(run_migrations.call_count, 2)
+            self.assertEqual(required.call_count, 2)
+            start.assert_called_once()
+
     def test_required_migration_failure_leaves_target_services_stopped(self):
         runner = CliRunner()
         app = AppContext()
@@ -4722,9 +4800,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
 
         def assert_receipt_before_migration(*args, **_kwargs):
             data_dir = args[3]
-            receipt_paths = list(
-                (Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).glob("*.json")
-            )
+            receipt_paths = list((Path(data_dir) / UPGRADE_RECEIPT_DIRECTORY).glob("*.json"))
             self.assertEqual(len(receipt_paths), 1)
             receipt = load_upgrade_receipt(receipt_paths[0])
             self.assertEqual(receipt.status, "pending")

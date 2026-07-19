@@ -1355,7 +1355,20 @@ def _recover_interrupted_same_version_upgrade(
                 migration_count=count,
                 degraded=migration_failed,
             )
-        _assert_required_cli_migrations(upgrade_manifest, data_dir)
+        try:
+            _assert_required_cli_migrations(upgrade_manifest, data_dir)
+        except BaseException:
+            # A migration child can exit successfully without recording every
+            # release-required cursor. Keep the pending receipt retryable so a
+            # later authenticated recovery reruns the target migrations.
+            latest_receipt = load_upgrade_receipt(receipt_path)
+            if latest_receipt.status == "pending" and latest_receipt.migration_status == "completed":
+                record_upgrade_migrations(
+                    receipt_path,
+                    migration_count=latest_receipt.migration_count or 0,
+                    degraded=True,
+                )
+            raise
 
         bundle_destination = os.path.join(data_dir, "observability-stack")
         if os.path.lexists(bundle_destination):

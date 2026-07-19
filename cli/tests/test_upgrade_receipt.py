@@ -67,9 +67,7 @@ def test_python_and_go_recoverable_failure_codes_match() -> None:
         switch_body.group("body"),
     )
     assert case_labels, "Go recoverable failure-code case labels are missing"
-    go_failure_codes = frozenset(
-        code for labels in case_labels for code in re.findall(r'"([a-z_]+)"', labels)
-    )
+    go_failure_codes = frozenset(code for labels in case_labels for code in re.findall(r'"([a-z_]+)"', labels))
     assert go_failure_codes == upgrade_receipt_module._RECOVERABLE_TARGET_FAILURE_CODES
 
 
@@ -248,6 +246,31 @@ def test_installed_authority_requires_verified_terminal_success(tmp_path: Path) 
     record_upgrade_migrations(verified, migration_count=1, degraded=True)
     complete_upgrade_receipt(verified, status="partial")
     assert find_verified_installed_upgrade_receipt(str(tmp_path), target_version="8.0.0") == verified
+
+
+def test_installed_authority_orders_mixed_iso_timestamps_chronologically(tmp_path: Path) -> None:
+    receipts: list[tuple[Path, str]] = []
+    for created_at in (
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00.500000Z",
+    ):
+        path = begin_upgrade_receipt(
+            str(tmp_path),
+            from_version="7.9.0",
+            target_version="8.0.0",
+            artifacts_verified=True,
+        )
+        record_upgrade_migrations(path, migration_count=1, degraded=False)
+        complete_upgrade_receipt(path, status="succeeded")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["created_at"] = created_at
+        payload["completed_at"] = created_at
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+        receipts.append((path, created_at))
+
+    assert find_verified_installed_upgrade_receipt(str(tmp_path), target_version="8.0.0") == receipts[1][0]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode contract")
@@ -561,6 +584,26 @@ def test_retry_delegation_keeps_one_authority_across_repeated_failures(tmp_path:
     third.unlink()
 
     assert find_resumable_upgrade_receipt(str(tmp_path), target_version="8.0.0") is None
+
+
+def test_nonrecoverable_replacement_restores_delegated_authority(tmp_path: Path) -> None:
+    prior = begin_upgrade_receipt(
+        str(tmp_path),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
+    complete_upgrade_receipt(prior, status="failed", failure_code="interrupted")
+    replacement = begin_upgrade_receipt(
+        str(tmp_path),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
+    assert delegate_prior_upgrade_receipts(replacement) == 1
+    complete_upgrade_receipt(replacement, status="failed", failure_code="install_failed")
+
+    assert find_resumable_upgrade_receipt(str(tmp_path), target_version="8.0.0") == prior
 
 
 def test_supersession_metadata_fails_closed_when_identity_is_changed(tmp_path: Path) -> None:
