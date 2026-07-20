@@ -266,6 +266,22 @@ func TestMaintenanceTeardownRecognizesCanonicalHookWithoutInstalledLayout(t *tes
 	}
 }
 
+func TestMaintenanceTeardownRecognizesLegacyInstalledGatewayNotifierWithoutLayout(t *testing.T) {
+	legacyGateway := canonicalNativeWindowsInstalledGatewayBinary()
+	if strings.TrimSpace(legacyGateway) == "" {
+		t.Fatal("canonical native installed gateway path is empty")
+	}
+	defenseclawHookBinaryOverride = `C:\maintenance-temp\defenseclaw-hook.exe`
+	t.Cleanup(func() { defenseclawHookBinaryOverride = "" })
+
+	if !codexNotifyLooksManaged([]interface{}{legacyGateway, "notify"}, SetupOpts{}) {
+		t.Fatalf("maintenance teardown did not recognize legacy installed gateway notifier %q", legacyGateway)
+	}
+	if codexNotifyLooksManaged([]interface{}{`C:\foreign\defenseclaw-gateway.exe`, "notify"}, SetupOpts{}) {
+		t.Fatal("maintenance teardown accepted a foreign same-basename gateway notifier")
+	}
+}
+
 func TestManagedHookExecutableRejectsRelativeOwnedBasename(t *testing.T) {
 	dir := t.TempDir()
 	owned := filepath.Join(dir, windowsHookBinaryName)

@@ -2199,11 +2199,32 @@ func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
 // LoadRuntimeV8FromBytes. It keeps process-wide provenance unchanged until the
 // source-aware reload transaction has committed.
 func LoadRuntimeV8CandidateFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadRuntimeV8CandidateFromBytes(configFile, raw, true)
+}
+
+// LoadRuntimeV8InspectionCandidateFromBytes decodes the same immutable target
+// candidate without publishing provenance or requiring the staged copy to have
+// the live managed-enterprise path identity. The caller must independently
+// bind and validate its isolated source and data roots before invoking this
+// read-only helper. Live activation and reload must use the strict loaders.
+func LoadRuntimeV8InspectionCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadRuntimeV8CandidateFromBytes(configFile, raw, false)
+}
+
+func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManagedTrust bool) (*Config, error) {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSource(configFile, false, append([]byte(nil), raw...), true, false, true, true)
+	candidate, err := loadConfigSource(
+		configFile,
+		false,
+		append([]byte(nil), raw...),
+		true,
+		false,
+		true,
+		enforceManagedTrust,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -2427,6 +2448,11 @@ func loadConfigSource(
 		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	if runtimeV8 {
+		if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
+			return nil, err
+		}
+	}
 	cfg.ConfigFilePath = configFile
 
 	// Reinstate the dot-preserving OTel resource attributes that we
@@ -2638,6 +2664,24 @@ func loadConfigSource(
 	}
 
 	return &cfg, nil
+}
+
+// restoreRuntimeV8GuardrailConnectors closes a Viper decode gap for connector
+// entries whose policy value is an empty mapping (for example, codex: {}).
+// Those entries are semantically meaningful roster members, but Viper omits
+// them while unmarshalling. Decode this one dynamic map from the same immutable
+// target-runtime bytes before migration/defaulting and validation continue.
+func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
+	var source struct {
+		Guardrail struct {
+			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(raw, &source); err != nil {
+		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	}
+	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	return nil
 }
 
 // clearLegacyObservabilityRuntimeConfig makes the general application Config

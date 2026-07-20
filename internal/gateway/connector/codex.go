@@ -28,9 +28,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -260,9 +262,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 			} else if _, exists := cfg["hooks"]; exists {
 				return fmt.Errorf("verify Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
 			}
-			if codexOtelBlockLooksManaged(cfg["otel"], opts) {
-				residual = append(residual, "config.toml [otel] still points at defenseclaw")
-			}
+			residual = append(residual, codexOtelResidueFields(cfg["otel"], opts)...)
 			if codexNotifyLooksManaged(cfg["notify"], opts) {
 				residual = append(residual, "config.toml notify still points at defenseclaw bridge")
 			}
@@ -1539,6 +1539,13 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	default:
 		return false
 	}
+	if len(argv) == 2 && argv[0] == "bash" &&
+		pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+		// Older Windows releases serialized this path with either slash style.
+		// Treat lexical spellings of the same bound data-root bridge alike, but
+		// never claim another absolute script merely because its basename matches.
+		return true
+	}
 	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
 }
 
@@ -1660,103 +1667,27 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	render := func(raw []byte, exists bool) error {
 		if exact, ok := managedFileBackupTransform(managedBackup, raw, exists); ok {
 			if !exact.Remove {
-				cleaned, changed, err := removeOwnedCodexStateFromExactRestore(
+				cleaned, err := restoreOwnedCodexConfigFromTOML(
 					exact.Data,
-					configPath,
+					true,
+					backup,
 					opts,
+					configPath,
 				)
 				if err != nil {
 					return fmt.Errorf("clean exact-restored Codex config: %w", err)
 				}
-				if changed {
-					exact.Data = cleaned
-					exact.Remove = len(cleaned) == 0
-				}
+				exact.Data = cleaned.Data
+				exact.Remove = cleaned.Remove
 			}
 			transformed = exact
 			return nil
 		}
-		if !exists {
-			transformed = atomicTransformResult{Remove: true}
-			return nil
-		}
-		cfg := map[string]interface{}{}
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
-			return fmt.Errorf("parse codex config: %w", err)
-		}
-
-		removedOwnedHooks := false
-		hookEventsRemain := false
-		if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
-			hooksDir := filepath.Join(opts.DataDir, "hooks")
-			// Trust keys are position-aware, so inspect and remove exactly owned
-			// records before filtering their corresponding handlers out of the table.
-			stateRemoved, err := removeOwnedCodexHookState(hooks, configPath, hooksDir)
-			if err != nil {
-				return fmt.Errorf("restore Codex hook trust: %w", err)
-			}
-			if stateRemoved {
-				removedOwnedHooks = true
-			}
-			for eventType, val := range hooks {
-				if eventType == "state" {
-					continue
-				}
-				if _, ok := val.([]interface{}); !ok {
-					return fmt.Errorf("restore Codex hooks.%s: unsupported type %T", eventType, val)
-				}
-				before := codexHookEntryCount(val)
-				remaining := removeOwnedHooks(val, hooksDir)
-				if before != len(remaining) || !codexValueMatches(val, remaining) {
-					removedOwnedHooks = true
-				}
-				if len(remaining) == 0 {
-					delete(hooks, eventType)
-				} else {
-					hooks[eventType] = remaining
-					hookEventsRemain = true
-				}
-			}
-			if len(hooks) == 0 {
-				delete(cfg, "hooks")
-			} else {
-				cfg["hooks"] = hooks
-			}
-		} else if _, exists := cfg["hooks"]; exists {
-			return fmt.Errorf("restore Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
-		} else if !backup.HadHooksKey {
-			delete(cfg, "hooks")
-		}
-
-		if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
-			if features, ok := cfg["features"].(map[string]interface{}); ok {
-				delete(features, "hooks")
-				delete(features, "codex_hooks")
-				if len(features) == 0 {
-					delete(cfg, "features")
-				} else {
-					cfg["features"] = features
-				}
-			}
-		}
-
-		// Restore OTel exporter entries independently. One managed sibling does not
-		// make the entire [otel] table ours: an operator may have replaced another
-		// exporter or added unrelated settings after Setup. Managed entries return to
-		// their saved value (or are deleted if Setup added them), while current
-		// operator-owned exporters/subtables survive verbatim. Ownership detection is
-		// structural and never loads or mints the scoped credential.
-		restoreCodexOtelEntries(cfg, backup, opts)
-
-		if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		cleaned, err := restoreOwnedCodexConfigFromTOML(raw, exists, backup, opts, configPath)
+		if err != nil {
 			return err
 		}
-
-		out, err := toml.Marshal(cfg)
-		if err != nil {
-			return fmt.Errorf("marshal restored codex config: %w", err)
-		}
-		transformed = atomicTransformResult{Data: out}
+		transformed = cleaned
 		return nil
 	}
 	if err := withFileLock(configPath, func() error {
@@ -1772,6 +1703,116 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 
 	discardManagedFileBackup(opts.DataDir, c.Name(), "config.toml")
 	return c.cleanupCodexRestoreArtifacts(opts)
+}
+
+// restoreOwnedCodexConfigFromTOML removes or restores every config.toml field
+// DefenseClaw can own. Exact managed-file backups also pass through this filter:
+// an older release may have captured an already-managed file as its pristine
+// snapshot during upgrade. Returning raw unchanged when no owned field changes
+// preserves byte-exact restoration for operator-only configurations.
+func restoreOwnedCodexConfigFromTOML(
+	raw []byte,
+	exists bool,
+	backup codexConfigBackup,
+	opts SetupOpts,
+	configPath string,
+) (atomicTransformResult, error) {
+	if !exists {
+		return atomicTransformResult{Remove: true}, nil
+	}
+	cfg := map[string]interface{}{}
+	if len(raw) > 0 {
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			return atomicTransformResult{}, fmt.Errorf("parse codex config: %w", err)
+		}
+	}
+	originalShape, err := json.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("snapshot codex config shape: %w", err)
+	}
+
+	removedOwnedHooks := false
+	hookEventsRemain := false
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		// Trust keys are position-aware, so inspect and remove exactly owned
+		// records before filtering their corresponding handlers out of the table.
+		stateRemoved, err := removeOwnedCodexHookState(hooks, configPath, hooksDir)
+		if err != nil {
+			return atomicTransformResult{}, fmt.Errorf("restore Codex hook trust: %w", err)
+		}
+		if stateRemoved {
+			removedOwnedHooks = true
+		}
+		for eventType, val := range hooks {
+			if eventType == "state" {
+				continue
+			}
+			if _, ok := val.([]interface{}); !ok {
+				return atomicTransformResult{}, fmt.Errorf("restore Codex hooks.%s: unsupported type %T", eventType, val)
+			}
+			before := codexHookEntryCount(val)
+			remaining := removeOwnedHooks(val, hooksDir)
+			if before != len(remaining) || !codexValueMatches(val, remaining) {
+				removedOwnedHooks = true
+			}
+			if len(remaining) == 0 {
+				delete(hooks, eventType)
+			} else {
+				hooks[eventType] = remaining
+				hookEventsRemain = true
+			}
+		}
+		if len(hooks) == 0 {
+			delete(cfg, "hooks")
+		} else {
+			cfg["hooks"] = hooks
+		}
+	} else if _, present := cfg["hooks"]; present {
+		return atomicTransformResult{}, fmt.Errorf("restore Codex hooks: unsupported config.toml hooks type %T", cfg["hooks"])
+	} else if !backup.HadHooksKey {
+		delete(cfg, "hooks")
+	}
+
+	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
+		if features, ok := cfg["features"].(map[string]interface{}); ok {
+			delete(features, "hooks")
+			delete(features, "codex_hooks")
+			if len(features) == 0 {
+				delete(cfg, "features")
+			} else {
+				cfg["features"] = features
+			}
+		}
+	}
+
+	// Restore OTel exporter entries independently. One managed sibling does not
+	// make the entire [otel] table ours: an operator may have replaced another
+	// exporter or added unrelated settings after Setup. Managed entries return to
+	// their saved value (or are deleted if Setup added them), while current
+	// operator-owned exporters/subtables survive verbatim. Ownership detection is
+	// structural and never loads or mints the scoped credential.
+	restoreCodexOtelEntries(cfg, backup, opts)
+
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		return atomicTransformResult{}, err
+	}
+
+	restoredShape, err := json.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("snapshot restored codex config shape: %w", err)
+	}
+	if bytes.Equal(originalShape, restoredShape) {
+		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+	}
+	if len(cfg) == 0 {
+		return atomicTransformResult{Remove: true}, nil
+	}
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		return atomicTransformResult{}, fmt.Errorf("marshal restored codex config: %w", err)
+	}
+	return atomicTransformResult{Data: out}, nil
 }
 
 func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts) error {
@@ -1963,59 +2004,6 @@ func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]b
 		delete(cfg, "hooks")
 	} else {
 		cfg["hooks"] = hooks
-	}
-	if len(cfg) == 0 {
-		return nil, true, nil
-	}
-	out, err := toml.Marshal(cfg)
-	if err != nil {
-		return nil, false, fmt.Errorf("marshal restored Codex config: %w", err)
-	}
-	return out, true, nil
-}
-
-// removeOwnedCodexStateFromExactRestore sanitizes a byte-exact pristine
-// snapshot before teardown publishes it. Upgrade predecessors could capture a
-// config.toml that already contained DefenseClaw hooks, OTel exporters, or the
-// notify bridge. Exact restoration must not resurrect those owned entries.
-// Strong structural ownership checks preserve unrelated operator settings, and
-// operator-only snapshots remain byte-for-byte exact.
-func removeOwnedCodexStateFromExactRestore(raw []byte, configPath string, opts SetupOpts) ([]byte, bool, error) {
-	cleaned, hooksChanged, err := removeOwnedCodexHooksFromTOML(
-		raw,
-		configPath,
-		filepath.Join(opts.DataDir, "hooks"),
-	)
-	if err != nil {
-		return nil, false, err
-	}
-
-	cfg := map[string]interface{}{}
-	if len(cleaned) > 0 {
-		if err := toml.Unmarshal(cleaned, &cfg); err != nil {
-			return nil, false, fmt.Errorf("parse Codex config: %w", err)
-		}
-	}
-	before, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, false, fmt.Errorf("canonicalize Codex config before cleanup: %w", err)
-	}
-
-	// A contaminated pristine snapshot is not evidence that owned telemetry was
-	// operator configuration. Use neutral restoration metadata so only strict
-	// DefenseClaw markers are removed and unrelated OTel siblings survive.
-	if codexOtelBlockLooksManaged(cfg["otel"], opts) {
-		restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts)
-	}
-	if err := restoreCodexNotify(cfg, codexConfigBackup{}, opts); err != nil {
-		return nil, false, err
-	}
-	after, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, false, fmt.Errorf("canonicalize Codex config after cleanup: %w", err)
-	}
-	if bytes.Equal(before, after) {
-		return cleaned, hooksChanged, nil
 	}
 	if len(cfg) == 0 {
 		return nil, true, nil
@@ -2501,12 +2489,35 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 
 	for _, key := range codexOtelExporterKeys {
 		value, exists := current[key]
-		if !exists || !codexExporterLooksManaged(value, opts) {
+		if !exists {
+			continue
+		}
+		var saved interface{}
+		hadSaved := false
+		if original != nil {
+			saved, hadSaved = original[key]
+		}
+		if !codexExporterLooksManaged(value, opts) {
+			// Endpoint drift can make an exporter operator-owned while leaving the
+			// exact pair of DefenseClaw header markers Setup wrote. In that case,
+			// preserve the endpoint, protocol, and unrelated headers, and restore or
+			// remove only the three header entries proven by the paired markers.
+			// A single marker is deliberately not mutation authority; VerifyClean
+			// reports it as residue so uninstall remains fail-closed.
+			if codexExporterHasManagedHeaderPair(value) {
+				restoreCodexOwnedExporterHeaders(value, saved, hadSaved)
+			}
 			continue
 		}
 		if original != nil {
-			if saved, hadSaved := original[key]; hadSaved {
-				if !codexExporterLooksManaged(saved, opts) {
+			if hadSaved {
+				// Field-level backups from older releases may themselves be
+				// contaminated by a prior managed setup. Product-namespaced header
+				// keys remain residue even when a predecessor wrote an obsolete
+				// endpoint or marker value that no longer satisfies the full
+				// current ownership predicate.
+				if !codexExporterLooksManaged(saved, opts) &&
+					!codexExporterHasManagedHeaderResidue(saved) {
 					current[key] = saved
 					continue
 				}
@@ -2598,6 +2609,96 @@ func codexOtelBlockLooksManaged(v interface{}, opts SetupOpts) bool {
 	return false
 }
 
+func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
+	otel, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	var residual []string
+	for _, key := range codexOtelExporterKeys {
+		exporter := otel[key]
+		if codexExporterLooksManaged(exporter, opts) {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
+		}
+		if !codexExporterHasManagedHeaderResidue(exporter) {
+			continue
+		}
+		headers := codexExporterHeaders(exporter)
+		if _, exists := headers["x-defenseclaw-source"]; exists {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-source retains DefenseClaw marker", key))
+		}
+		if _, exists := headers["x-defenseclaw-client"]; exists {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-client retains DefenseClaw marker", key))
+		}
+	}
+	if len(residual) > 0 {
+		residual = append([]string{"config.toml [otel] still contains DefenseClaw-owned fields"}, residual...)
+	}
+	return residual
+}
+
+func codexExporterHeaders(v interface{}) map[string]interface{} {
+	exporter, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	headers, _ := otlpHTTP["headers"].(map[string]interface{})
+	return headers
+}
+
+func codexExporterHasManagedHeaderResidue(v interface{}) bool {
+	headers := codexExporterHeaders(v)
+	if headers == nil {
+		return false
+	}
+	_, hasSource := headers["x-defenseclaw-source"]
+	_, hasClient := headers["x-defenseclaw-client"]
+	return hasSource || hasClient
+}
+
+func codexExporterHasManagedHeaderPair(v interface{}) bool {
+	headers := codexExporterHeaders(v)
+	if headers == nil {
+		return false
+	}
+	_, hasSource := headers["x-defenseclaw-source"]
+	_, hasClient := headers["x-defenseclaw-client"]
+	return hasSource && hasClient
+}
+
+func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool) {
+	headers := codexExporterHeaders(current)
+	if headers == nil || !codexExporterHasManagedHeaderPair(current) {
+		return
+	}
+	delete(headers, "x-defenseclaw-source")
+	delete(headers, "x-defenseclaw-client")
+
+	// The product-namespaced pair above is ownership authority and must never
+	// survive cleanup. Authorization is generic, so restore it only from a
+	// saved exporter that was not itself a stale managed snapshot.
+	savedHeaders := map[string]interface{}(nil)
+	if hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
+		savedHeaders = codexExporterHeaders(saved)
+	}
+	if value, exists := savedHeaders["authorization"]; exists {
+		headers["authorization"] = value
+	} else {
+		delete(headers, "authorization")
+	}
+	exporter := current.(map[string]interface{})
+	otlpHTTP := exporter["otlp-http"].(map[string]interface{})
+	if len(headers) == 0 {
+		delete(otlpHTTP, "headers")
+	} else {
+		otlpHTTP["headers"] = headers
+	}
+}
+
 func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 	exporter, ok := v.(map[string]interface{})
 	if !ok {
@@ -2608,32 +2709,36 @@ func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 		return false
 	}
 	endpoint, _ := otlpHTTP["endpoint"].(string)
-	if codexScopedOTLPEndpointLooksManaged(endpoint, opts) {
+	if codexScopedOTLPEndpointLooksManaged(endpoint) {
 		return true
-	}
-	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
-	if endpoint != directBase+"logs" && endpoint != directBase+"traces" && endpoint != directBase+"metrics" {
-		return false
 	}
 	headers, _ := otlpHTTP["headers"].(map[string]interface{})
 	if headers == nil {
 		return false
 	}
-	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	sourceMarker := headers["x-defenseclaw-source"] == "codex"
+	clientMarker := headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
+	if endpoint == directBase+"logs" || endpoint == directBase+"traces" || endpoint == directBase+"metrics" {
+		return sourceMarker || clientMarker
+	}
+	// Older releases used the unscoped /v1/<signal> receiver. A later
+	// operator change to gateway.api_port must not strand that registration,
+	// but port-independent ownership is deliberately stronger: require the
+	// exact pair of product markers and a strict loopback OTLP URL.
+	return sourceMarker && clientMarker && codexLegacyDirectOTLPEndpointLooksManaged(endpoint)
 }
 
-func codexScopedOTLPEndpointLooksManaged(endpoint string, opts SetupOpts) bool {
+func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
 		return false
 	}
-	base, err := url.Parse("http://" + strings.TrimSpace(opts.APIAddr))
-	if err != nil || base.Host == "" {
-		return false
-	}
-	sameConfiguredAuthority := parsed.Host == base.Host
-	equivalentLoopbackAuthority := parsed.Port() != "" && parsed.Port() == base.Port() && codexLoopbackHost(parsed.Hostname())
-	if !sameConfiguredAuthority && !equivalentLoopbackAuthority {
+	// The random connector-scoped path and the loopback-only authority are the
+	// durable ownership boundary. The API port is mutable configuration, so it
+	// cannot be part of teardown identity. Requiring an explicit port avoids
+	// claiming a generic local HTTP path that the product never emits.
+	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
@@ -2646,6 +2751,30 @@ func codexScopedOTLPEndpointLooksManaged(endpoint string, opts SetupOpts) bool {
 	default:
 		return false
 	}
+}
+
+func codexLegacyDirectOTLPEndpointLooksManaged(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
+		return false
+	}
+	switch parsed.Path {
+	case "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexLoopbackOTLPAuthorityLooksManaged(parsed *url.URL) bool {
+	if parsed == nil || !codexLoopbackHost(parsed.Hostname()) {
+		return false
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	return err == nil && port > 0 && port <= 65535
 }
 
 func codexLoopbackHost(host string) bool {

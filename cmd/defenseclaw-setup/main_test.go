@@ -5,11 +5,15 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -269,10 +273,239 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataRoot, "claudecode_backup.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := connectorsForNativeUninstall(&installState{Connector: "codex"}, dataRoot)
+	got, err := connectorsForNativeUninstall(&installState{Connector: "codex"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"codex", "claudecode"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
+	dataRoot := t.TempDir()
+	markers := []string{
+		filepath.Join("connector_backups", "codex", "config.toml.json"),
+		filepath.Join("connector_backups", "claudecode", "settings.json.json"),
+	}
+	for _, marker := range markers {
+		path := filepath.Join(dataRoot, marker)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"codex", "claudecode"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	state := []byte(`{"version":3,"names":["claudecode","codex"],"name":"claudecode"}`)
+	if err := os.WriteFile(filepath.Join(dataRoot, "active_connector.json"), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesConfiguredConnectorRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte(`config_version: 8
+data_dir: D:\synthetic-defenseclaw
+guardrail:
+  enabled: false
+  connector: openclaw
+  connectors:
+    claudecode:
+      mode: action
+    codex:
+      mode: observe
+gateway:
+  token: private-synthetic-value-must-not-appear
+observability:
+  enabled: true
+`)
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesLegacyConfiguredConnector(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("guardrail:\n  connector: claude-code\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"claudecode"}) {
+		t.Fatalf("connectors = %v, want [claudecode]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesConfiguredClawMode(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("config_version: 8\nclaw:\n  mode: codex\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"codex"}) {
+		t.Fatalf("connectors = %v, want [codex]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallMatchesRuntimeRosterPrecedence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "multi connector roster overrides singular fields",
+			config: "guardrail:\n  connector: codex\n  connectors:\n    openclaw: {}\n" +
+				"claw:\n  mode: claudecode\n",
+		},
+		{
+			name:   "guardrail connector overrides claw mode",
+			config: "guardrail:\n  connector: openclaw\nclaw:\n  mode: codex\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("connectors = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsInvalidConfigRosterWithoutValueLeak(t *testing.T) {
+	dataRoot := t.TempDir()
+	privateValue := "private-synthetic-config-value"
+	config := []byte("gateway:\n  token: " + privateValue + "\nguardrail:\n  connectors: [codex\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
+	if err == nil || !strings.Contains(err.Error(), "invalid YAML") {
+		t.Fatalf("invalid config roster error = %v", err)
+	}
+	if strings.Contains(err.Error(), privateValue) {
+		t.Fatal("invalid config roster error leaked a configuration value")
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsMultipleConfigDocuments(t *testing.T) {
+	dataRoot := t.TempDir()
+	config := []byte("guardrail:\n  connectors:\n    codex: {}\n---\nguardrail:\n  connectors: {}\n")
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "document count") {
+		t.Fatalf("multiple config document error = %v", err)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsOversizedConfigRoster(t *testing.T) {
+	dataRoot := t.TempDir()
+	configPath := filepath.Join(dataRoot, "config.yaml")
+	if err := os.WriteFile(configPath, bytes.Repeat([]byte{'x'}, int(nativeConfigRosterLimit)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized config roster error = %v", err)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesLegacyActiveConnector(t *testing.T) {
+	dataRoot := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dataRoot, "active_connector.json"),
+		[]byte(`{"name":"codex"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := connectorsForNativeUninstall(nil, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "codex" {
+		t.Fatalf("connectors = %v, want [codex]", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsInvalidActiveConnectorState(t *testing.T) {
+	dataRoot := t.TempDir()
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	if err := os.WriteFile(statePath, []byte(`{"names":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "parse active connector state") {
+		t.Fatalf("invalid active connector state error = %v", err)
+	}
+}
+
+func TestConnectorsForNativeUninstallRejectsOversizedActiveConnectorState(t *testing.T) {
+	dataRoot := t.TempDir()
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	if err := os.WriteFile(statePath, bytes.Repeat([]byte{'x'}, int(nativeConnectorStateLimit)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := connectorsForNativeUninstall(nil, dataRoot); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized active connector state error = %v", err)
 	}
 }
 
@@ -426,9 +659,12 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	}
 
 	wantEnv := map[string]bool{
-		"DEFENSECLAW_HOME=" + dataRoot: false,
-		"PYTHONUTF8=1":                 false,
-		"PYTHONIOENCODING=utf-8":       false,
+		"DEFENSECLAW_HOME=" + dataRoot:                                                     false,
+		"DEFENSECLAW_CONFIG=" + filepath.Join(dataRoot, "config.yaml"):                     false,
+		"DEFENSECLAW_INSTALL_ROOT=" + root:                                                 false,
+		"DEFENSECLAW_GATEWAY_BIN=" + filepath.Join(root, "bin", "defenseclaw-gateway.exe"): false,
+		"PYTHONUTF8=1":           false,
+		"PYTHONIOENCODING=utf-8": false,
 	}
 	for _, entry := range cmd.Env {
 		if _, ok := wantEnv[entry]; ok {
@@ -438,6 +674,191 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	for entry, found := range wantEnv {
 		if !found {
 			t.Fatalf("packaged migration environment is missing %q", entry)
+		}
+	}
+}
+
+func TestCommittedRecoveryPackagedMigrationScriptSupportsInstalledRuntimeWithoutStrictRequired(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
+    if not upgrade_handles_local_bundle:
+        raise RuntimeError("local bundle authority was not passed")
+    return 1
+`,
+		`class State:
+    applied = ("0.8.5",)
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err != nil {
+		t.Fatalf("legacy installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if got := strings.TrimSpace(string(output)); got != "1" {
+		t.Fatalf("legacy installed migration output = %q, want 1", got)
+	}
+}
+
+func TestPackagedMigrationScriptPassesStrictRequiredWhenSupported(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False, strict_required=()):
+    if not upgrade_handles_local_bundle:
+        raise RuntimeError("local bundle authority was not passed")
+    if tuple(strict_required) != ("0.8.5",):
+        raise RuntimeError("strict required migrations were not passed")
+    return 1
+`,
+		`class State:
+    applied = ("0.8.5",)
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err != nil {
+		t.Fatalf("strict installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if got := strings.TrimSpace(string(output)); got != "1" {
+		t.Fatalf("strict installed migration output = %q, want 1", got)
+	}
+}
+
+func TestPackagedMigrationScriptLegacyAPIMissingRequiredMigrationFailsClosed(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
+    return 0
+`,
+		`class State:
+    applied = ()
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err == nil {
+		t.Fatalf("legacy installed runtime accepted a missing required migration: %s", strings.TrimSpace(string(output)))
+	}
+	if !strings.Contains(string(output), "required migrations are missing: 0.8.5") {
+		t.Fatalf("missing required migration diagnostic = %q", strings.TrimSpace(string(output)))
+	}
+}
+
+func runPackagedMigrationScriptFixture(
+	t *testing.T,
+	migrationsSource, migrationStateSource string,
+	required []string,
+) ([]byte, error) {
+	t.Helper()
+	python, err := exec.LookPath("python")
+	if err != nil {
+		t.Skipf("python is unavailable: %v", err)
+	}
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "defenseclaw")
+	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"__init__.py":        "",
+		"migrations.py":      migrationsSource,
+		"migration_state.py": migrationStateSource,
+	} {
+		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := json.Marshal(map[string]interface{}{
+		"release_version":         "0.8.6",
+		"required_cli_migrations": required,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, "upgrade-manifest.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(root, "data")
+	if err := os.Mkdir(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		python,
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationScript,
+		"0.8.0",
+		"0.8.6",
+		filepath.Join(root, "openclaw"),
+		dataRoot,
+		manifestPath,
+	)
+	cmd.Dir = root
+	cmd.Env = sanitizePythonEnv(os.Environ())
+	return cmd.CombinedOutput()
+}
+
+func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "DefenseClaw.staging.fixture")
+	dataRoot := filepath.Join(t.TempDir(), "profile", ".defenseclaw")
+	openClawRoot := filepath.Join(t.TempDir(), "profile", ".openclaw")
+	scratch := filepath.Join(root, "installer", ".migration-preflight")
+	cmd := newPackagedMigrationPreflightCommand(
+		context.Background(),
+		root,
+		dataRoot,
+		openClawRoot,
+		"0.8.0",
+		"0.8.6",
+		scratch,
+	)
+	if got, want := cmd.Path, filepath.Join(root, "runtime", "python", "python.exe"); got != want {
+		t.Fatalf("preflight interpreter = %q, want staged target %q", got, want)
+	}
+	if !slices.Contains(cmd.Args, packagedMigrationPreflightScript) || !slices.Contains(cmd.Args, scratch) {
+		t.Fatalf("preflight arguments do not bind the staged script and scratch root: %v", cmd.Args)
+	}
+	for name, want := range map[string]string{
+		"DEFENSECLAW_HOME":         dataRoot,
+		"DEFENSECLAW_CONFIG":       filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT": root,
+		"DEFENSECLAW_GATEWAY_BIN":  filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	} {
+		if got := envValue(cmd.Env, name); got != want {
+			t.Fatalf("preflight %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestPackagedTargetRuntimeEnvRejectsAmbientRuntimeAndConfigAuthority(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "staged-target")
+	dataRoot := filepath.Join(t.TempDir(), "live-data")
+	env := packagedTargetRuntimeEnv([]string{
+		"DEFENSECLAW_HOME=D:\\untrusted-data",
+		"DEFENSECLAW_CONFIG=D:\\outside\\config.yaml",
+		"DEFENSECLAW_INSTALL_ROOT=D:\\old-runtime",
+		"DEFENSECLAW_GATEWAY_BIN=D:\\old-runtime\\gateway.exe",
+		"SAFE_SETTING=kept",
+	}, root, dataRoot)
+	if got := envValue(env, "SAFE_SETTING"); got != "kept" {
+		t.Fatalf("unrelated environment was not preserved: %q", got)
+	}
+	for name, want := range map[string]string{
+		"DEFENSECLAW_HOME":         dataRoot,
+		"DEFENSECLAW_CONFIG":       filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT": root,
+		"DEFENSECLAW_GATEWAY_BIN":  filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	} {
+		if got := envValue(env, name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
 		}
 	}
 }

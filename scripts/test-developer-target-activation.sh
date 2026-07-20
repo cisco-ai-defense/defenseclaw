@@ -466,6 +466,12 @@ expected_environment = (
         "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
     }
 )
+if not legacy_source:
+    historical_environment = dotenv_values(evidence_dir / "environment.historical.source")
+    historical_gateway_token = historical_environment.get("DEFENSECLAW_GATEWAY_TOKEN")
+    if not isinstance(historical_gateway_token, str) or not historical_gateway_token.strip():
+        raise SystemExit("native-v8 source fixture has no established gateway token")
+    expected_environment["DEFENSECLAW_GATEWAY_TOKEN"] = historical_gateway_token
 actual_environment = dotenv_values(data_dir / ".env")
 for name, value in expected_environment.items():
     if actual_environment.get(name) != value:

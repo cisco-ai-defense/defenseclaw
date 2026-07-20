@@ -2425,6 +2425,48 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup gateway and watchdog stop-command helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Native Windows service-control test fixture; never read by production runtime paths"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Enables the delayed owned-process exit regression fixture"}
+      ],
+      "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TEST_GATEWAY_STOP",
+      "category": "test_fixture",
+      "purpose": "Carries the absolute stop-marker path for the delayed native Setup gateway-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Writes the gateway stop marker from the isolated control subprocess"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Supplies the private gateway stop-marker path"}
+      ],
+      "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TEST_WATCHDOG_STOP",
+      "category": "test_fixture",
+      "purpose": "Carries the absolute stop-marker path for the delayed native Setup watchdog-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Writes the watchdog stop marker from the isolated control subprocess"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Supplies the private watchdog stop-marker path"}
+      ],
+      "since": "0.8.6"
+    },
+    {
       "name": "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD",
       "category": "test_fixture",
       "purpose": "Selects the detached managed-breakaway child subprocess fixture.",

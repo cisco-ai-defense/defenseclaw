@@ -347,6 +347,7 @@ func TestInstalledAppFreshPublicationRejectsPartialSameTransactionDestination(t 
 		false,
 		nil,
 		nil,
+		nil,
 		func() {
 			key := createInstalledAppTestKeyNamed(t, registryPath, testInstalledAppKey)
 			defer key.Close()
@@ -373,6 +374,98 @@ func TestInstalledAppFreshPublicationRejectsPartialSameTransactionDestination(t 
 		t.Fatalf("transaction-owned staging evidence was not retained: %v", openErr)
 	} else if closeErr := key.Close(); closeErr != nil {
 		t.Fatal(closeErr)
+	}
+}
+
+func TestInstalledAppCommittedUpdateUsesOneRegistrationSnapshot(t *testing.T) {
+	registryPath := newInstalledAppTestRegistry(t)
+	installRoot := filepath.Join(t.TempDir(), "Programs", "DefenseClaw")
+	maintenancePath := filepath.Join(t.TempDir(), "InstallerCache", setupArtifactName)
+	previousTransaction := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	currentTransaction := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	previous := &installState{TransactionID: previousTransaction}
+	if err := os.MkdirAll(filepath.Join(installRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installRoot, "bin", "defenseclaw.exe"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeInstalledAppTestValues(
+		t,
+		registryPath,
+		testInstalledAppKey,
+		maintenancePath,
+		installRoot,
+		"0.8.0",
+		previousTransaction,
+		false,
+	)
+
+	writtenEstimatedSize := estimateInstallKB(installRoot)
+	phase := setupPhaseCommitted
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseCommitted,
+		Transaction:   setupTransaction{Action: "install"},
+	}, setupRecoveryOps{
+		Converge: func(setupTransaction) error {
+			return registerInstalledAppAtWithHooks(
+				registryPath,
+				testInstalledAppKey,
+				maintenancePath,
+				installRoot,
+				"0.8.6",
+				currentTransaction,
+				false,
+				previous,
+				nil,
+				func() {
+					if writeErr := os.WriteFile(
+						filepath.Join(installRoot, "bin", "setup-owned-cache.bin"),
+						make([]byte, 4096),
+						0o600,
+					); writeErr != nil {
+						t.Fatal(writeErr)
+					}
+				},
+				nil,
+			)
+		},
+		Cleanup: func(setupTransaction) error { return nil },
+		Transition: func(_ setupTransaction, from, to string) error {
+			if phase != from {
+				return fmt.Errorf("journal transition from %s while phase is %s", from, phase)
+			}
+			phase = to
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("committed registration convergence: %v", err)
+	}
+	if phase != setupPhaseComplete {
+		t.Fatalf("journal phase = %q, want %q", phase, setupPhaseComplete)
+	}
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+testInstalledAppKey,
+		registry.QUERY_VALUE,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Close()
+	owner, _, err := key.GetStringValue(installedAppOwnerValue)
+	if err != nil || owner != currentTransaction {
+		t.Fatalf("registration owner = %q, %v", owner, err)
+	}
+	displayVersion, _, err := key.GetStringValue("DisplayVersion")
+	if err != nil || displayVersion != "0.8.6" {
+		t.Fatalf("registration version = %q, %v", displayVersion, err)
+	}
+	estimatedSize, _, err := key.GetIntegerValue("EstimatedSize")
+	if err != nil || estimatedSize != uint64(writtenEstimatedSize) {
+		t.Fatalf("registration size = %d, %v; want snapshot %d", estimatedSize, err, writtenEstimatedSize)
 	}
 }
 

@@ -5096,14 +5096,23 @@ func TestCodexExactRestoreSanitizesStaleManagedTelemetry(t *testing.T) {
 	if !ok || exact.Remove {
 		t.Fatalf("contaminated managed backup did not select exact restore: ok=%t remove=%t", ok, exact.Remove)
 	}
-	cleaned, changed, err := removeOwnedCodexStateFromExactRestore(exact.Data, configPath, opts)
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		exact.Data,
+		true,
+		codexConfigBackup{},
+		opts,
+		configPath,
+	)
 	if err != nil {
 		t.Fatalf("sanitize contaminated pristine snapshot: %v", err)
 	}
-	if !changed {
+	if cleaned.Remove {
+		t.Fatal("contaminated pristine snapshot removed unrelated operator config")
+	}
+	if bytes.Equal(cleaned.Data, exact.Data) {
 		t.Fatal("contaminated pristine snapshot was reported unchanged")
 	}
-	if err := os.WriteFile(configPath, cleaned, 0o600); err != nil {
+	if err := os.WriteFile(configPath, cleaned.Data, 0o600); err != nil {
 		t.Fatalf("publish sanitized exact restore: %v", err)
 	}
 	restored := map[string]interface{}{}
@@ -5144,16 +5153,40 @@ operator_note = "preserve"
 endpoint = "https://otel.example.com/v1/logs"
 protocol = "json"
 `)
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operator, &operatorConfig); err != nil {
+		t.Fatalf("parse operator-only pristine snapshot: %v", err)
+	}
+	originalOtel, err := json.Marshal(operatorConfig["otel"])
+	if err != nil {
+		t.Fatalf("capture operator OTel preimage: %v", err)
+	}
+	originalNotify, err := json.Marshal(operatorConfig["notify"])
+	if err != nil {
+		t.Fatalf("capture operator notify preimage: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
 
-	cleaned, changed, err := removeOwnedCodexStateFromExactRestore(operator, configPath, opts)
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		operator,
+		true,
+		backup,
+		opts,
+		configPath,
+	)
 	if err != nil {
 		t.Fatalf("inspect operator-only pristine snapshot: %v", err)
 	}
-	if changed {
-		t.Fatal("operator-only pristine snapshot was reported changed")
+	if cleaned.Remove {
+		t.Fatal("operator-only pristine snapshot was reported removed")
 	}
-	if !bytes.Equal(cleaned, operator) {
-		t.Fatalf("operator-only pristine snapshot changed byte-for-byte:\n%s", cleaned)
+	if !bytes.Equal(cleaned.Data, operator) {
+		t.Fatalf("operator-only pristine snapshot changed byte-for-byte:\n%s", cleaned.Data)
 	}
 }
 
@@ -5484,6 +5517,46 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
 		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
 	}
+	portDrift := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(portDrift, opts) {
+		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
+	}
+	legacyPortDrift := map[string]interface{}{
+		"metrics_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:43189/v1/metrics",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
+		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
+	}
+	for marker, headers := range map[string]map[string]interface{}{
+		"source only": {"x-defenseclaw-source": "codex"},
+		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
+	} {
+		ambiguousLegacyDrift := map[string]interface{}{
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:43189/v1/logs",
+					"headers":  headers,
+				},
+			},
+		}
+		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
+			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
+		}
+	}
 
 	user := map[string]interface{}{
 		"exporter": map[string]interface{}{
@@ -5503,12 +5576,524 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
 		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
 		"other scope":       "http://127.0.0.1:18970/otlp/geminicli/" + strings.Repeat("a", 64) + "/v1/logs",
+		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
 		"shared no headers": "http://127.0.0.1:18970/v1/logs",
 	} {
 		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
 		if codexOtelBlockLooksManaged(candidate, opts) {
 			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
 		}
+	}
+}
+
+func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *testing.T) {
+	cfg := map[string]interface{}{
+		"otel": map[string]interface{}{
+			"log_user_prompt":  true,
+			"operator_setting": "preserve",
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("d", 64) + "/v1/logs",
+					"protocol": "json",
+					"headers": map[string]interface{}{
+						"authorization":        "Bearer redacted-test-token",
+						"x-defenseclaw-client": "codex-otel/1.0",
+						"x-defenseclaw-source": "codex",
+					},
+				},
+			},
+		},
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: json.RawMessage(`{"environment":"staging"}`),
+	}
+
+	// Native acceptance changes gateway.api_port before uninstall. Exercise
+	// the surgical restore directly: the old scoped exporter is still owned,
+	// while current operator fields and displaced original fields survive.
+	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	restored, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(restored)), "defenseclaw") {
+		t.Fatalf("surgical restore left a product registration after API port drift: %s", restored)
+	}
+	otel, ok := cfg["otel"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("surgical restore removed the operator OTel table: %#v", cfg)
+	}
+	if otel["operator_setting"] != "preserve" || otel["environment"] != "staging" {
+		t.Fatalf("surgical restore discarded operator/original fields: %#v", otel)
+	}
+	if _, exists := otel["exporter"]; exists {
+		t.Fatalf("surgical restore retained the old managed exporter: %#v", otel)
+	}
+}
+
+func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testing.T) {
+	currentExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://operator.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer synthetic-product-token",
+				"x-defenseclaw-client": "codex-otel/1.0",
+				"x-defenseclaw-source": "codex",
+				"x-operator-header":    "preserve-current",
+			},
+		},
+	}
+	savedExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://original.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization": "Bearer synthetic-operator-token",
+			},
+		},
+	}
+	original, err := json.Marshal(map[string]interface{}{"exporter": savedExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{})
+
+	otel := cfg["otel"].(map[string]interface{})
+	exporter := otel["exporter"].(map[string]interface{})
+	http := exporter["otlp-http"].(map[string]interface{})
+	if http["endpoint"] != "https://operator.example.test/v1/logs" {
+		t.Fatalf("surgical cleanup replaced drifted operator endpoint: %#v", http)
+	}
+	headers := http["headers"].(map[string]interface{})
+	for key, want := range map[string]interface{}{
+		"authorization":     "Bearer synthetic-operator-token",
+		"x-operator-header": "preserve-current",
+	} {
+		if headers[key] != want {
+			t.Fatalf("restored header %s = %#v, want %#v: %#v", key, headers[key], want, headers)
+		}
+	}
+	for _, key := range []string{"x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := headers[key]; exists {
+			t.Fatalf("surgical cleanup restored product-owned header %s: %#v", key, headers)
+		}
+	}
+
+	contaminatedOriginal, err := json.Marshal(map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/v1/logs",
+				"headers": map[string]interface{}{
+					"authorization":        "Bearer synthetic-stale-backup-token",
+					"x-defenseclaw-client": "codex-otel/legacy",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withContaminatedOriginal := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	currentHeaders := codexExporterHeaders(currentExporter)
+	currentHeaders["authorization"] = "Bearer synthetic-product-token"
+	currentHeaders["x-defenseclaw-client"] = "codex-otel/legacy"
+	currentHeaders["x-defenseclaw-source"] = "codex-legacy"
+	restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: contaminatedOriginal,
+	}, SetupOpts{})
+	cleaned := codexExporterHeaders(withContaminatedOriginal["otel"].(map[string]interface{})["exporter"])
+	for _, key := range []string{"authorization", "x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := cleaned[key]; exists {
+			t.Fatalf("surgical cleanup retained product header %s: %#v", key, cleaned)
+		}
+	}
+	if cleaned["x-operator-header"] != "preserve-current" {
+		t.Fatalf("surgical cleanup discarded unrelated header: %#v", cleaned)
+	}
+}
+
+func TestCodexVerifyCleanReportsExactDriftedHeaderResidueWithoutValues(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	config := `notify = ["operator-notify", "notify"]
+
+[otel.exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/logs"
+
+[otel.exporter.otlp-http.headers]
+authorization = "Bearer synthetic-secret-value"
+x-defenseclaw-client = "codex-otel/1.0"
+x-defenseclaw-source = "codex"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/metrics"
+
+[otel.metrics_exporter.otlp-http.headers]
+x-defenseclaw-client = "codex-otel/1.0"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil {
+		t.Fatal("VerifyClean accepted exact DefenseClaw header residue")
+	}
+	message := err.Error()
+	for _, path := range []string{
+		"otel.exporter.otlp-http.headers.x-defenseclaw-client",
+		"otel.exporter.otlp-http.headers.x-defenseclaw-source",
+		"otel.metrics_exporter.otlp-http.headers.x-defenseclaw-client",
+	} {
+		if !strings.Contains(message, path) {
+			t.Fatalf("VerifyClean diagnostic missing safe path %q: %s", path, message)
+		}
+	}
+	if strings.Contains(message, "synthetic-secret-value") || strings.Contains(message, "operator.example.test") {
+		t.Fatalf("VerifyClean diagnostic leaked configuration values: %s", message)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	otel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           otel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", cfg)
+	}
+	if _, exists := cfg["notify"]; exists {
+		t.Fatalf("restore retained managed notify registration: %#v", cfg)
+	}
+	if _, exists := cfg["otel"]; exists {
+		t.Fatalf("restore retained managed OTel registration: %#v", cfg)
+	}
+
+	operatorOnly := []byte("model_provider = \"openai\"  # preserve spacing\nnotify = [\"operator-tool\", \"notify\"]\n")
+	unchanged, err := restoreOwnedCodexConfigFromTOML(
+		operatorOnly,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Remove || !bytes.Equal(unchanged.Data, operatorOnly) {
+		t.Fatalf("operator-only config was not byte-identical after restore:\n%s", unchanged.Data)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLRejectsContaminatedLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("b", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	managedNotify := []string{managedHook, "notify"}
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         managedNotify,
+		"otel":           managedOtel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := make(map[string]interface{}, len(managedOtel)+1)
+	for key, value := range managedOtel {
+		contaminatedOtel[key] = value
+	}
+	contaminatedOtel["environment"] = "staging"
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalNotify, err := json.Marshal(managedNotify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   originalOtel,
+			HadNotify:      true,
+			OriginalNotify: originalNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	if _, exists := restoredConfig["notify"]; exists {
+		t.Fatalf("restore resurrected contaminated managed notify: %#v", restoredConfig)
+	}
+	gotOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || gotOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := gotOtel[key]; exists {
+			t.Fatalf("restore resurrected contaminated managed OTel field %s: %#v", key, gotOtel)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") {
+		t.Fatalf("restore retained a managed registration: %s", restored.Data)
+	}
+
+	operatorExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://otel.example.test/v1/logs",
+			"protocol": "json",
+		},
+	}
+	operatorOtel, err := json.Marshal(map[string]interface{}{"exporter": operatorExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorNotify, err := json.Marshal([]string{"operator-notify", "notify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorRestored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   operatorOtel,
+			HadNotify:      true,
+			OriginalNotify: operatorNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operatorRestored.Data, &operatorConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !codexValueMatches(operatorConfig["notify"], []interface{}{"operator-notify", "notify"}) {
+		t.Fatalf("restore discarded operator notify: %#v", operatorConfig)
+	}
+	operatorRestoredOtel, ok := operatorConfig["otel"].(map[string]interface{})
+	if !ok || !codexValueMatches(operatorRestoredOtel["exporter"], operatorExporter) {
+		t.Fatalf("restore discarded operator exporter: %#v", operatorConfig)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("c", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	raw, err := toml.Marshal(map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           managedOtel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := map[string]interface{}{"environment": "staging"}
+	for index, key := range codexOtelExporterKeys {
+		contaminatedOtel[key] = map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": fmt.Sprintf("https://otel.example.test/v1/signal-%d", index),
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"authorization":        "redacted-test-credential",
+					"x-defenseclaw-source": "obsolete-marker-value",
+					"x-defenseclaw-client": "obsolete-client-value",
+				},
+			},
+		}
+	}
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{HadOtelBlock: true, OriginalOtel: originalOtel},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	restoredOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || restoredOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := restoredOtel[key]; exists {
+			t.Fatalf("restore resurrected drifted marker residue at otel.%s", key)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") ||
+		strings.Contains(string(restored.Data), "redacted-test-credential") {
+		t.Fatalf("restore retained contaminated telemetry metadata: %s", restored.Data)
+	}
+}
+
+func TestCodexNotifyLooksManagedAcceptsSameBoundLegacyBridgePath(t *testing.T) {
+	dataDir := t.TempDir()
+	nested := filepath.Join(dataDir, "legacy-path-segment")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(dataDir, "notify-bridge.sh")
+	if err := os.WriteFile(bridge, []byte("synthetic bridge\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := filepath.Join(nested, "..", "notify-bridge.sh")
+	if !codexNotifyLooksManaged([]interface{}{"bash", equivalent}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("same bound legacy bridge path was not recognized: %q", equivalent)
+	}
+	foreign := filepath.Join(filepath.Dir(dataDir), "other", "notify-bridge.sh")
+	if codexNotifyLooksManaged([]interface{}{"bash", foreign}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("foreign legacy bridge path was accepted: %q", foreign)
+	}
+}
+
+func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "bin", windowsHookBinaryName))
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	pristine := []byte("model_provider = \"openai\"\n")
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	connector := NewCodexConnector()
+	first := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	if err := connector.patchCodexConfig(first, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("first config patch: %v", err)
+	}
+	// Model an upgrade from a predecessor that wrote the field-level backup but
+	// not the newer managed-file snapshot. The candidate must not treat the
+	// already-managed current config as pristine and resurrect it on uninstall.
+	discardManagedFileBackup(dir, connector.Name(), "config.toml")
+	second := first
+	second.APIAddr = "127.0.0.1:43189"
+	if err := connector.patchCodexConfig(second, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("second config patch: %v", err)
+	}
+	if err := connector.restoreCodexConfig(second); err != nil {
+		t.Fatalf("config restore after port change: %v", err)
+	}
+
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(got, &restoredCfg); err != nil {
+		t.Fatalf("parse restored config: %v", err)
+	}
+	pristineCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(pristine, &pristineCfg); err != nil {
+		t.Fatalf("parse pristine config: %v", err)
+	}
+	if !codexValueMatches(restoredCfg, pristineCfg) {
+		t.Fatalf("restored config differs semantically from pristine state: %#v", restoredCfg)
+	}
+	if strings.Contains(strings.ToLower(string(got)), "defenseclaw") {
+		t.Fatalf("restored config retained a managed registration: %s", got)
 	}
 }
 

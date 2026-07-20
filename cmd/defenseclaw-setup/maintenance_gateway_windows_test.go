@@ -27,6 +27,21 @@ func TestMain(m *testing.M) {
 		fmt.Printf(`{"schema_version":1,"name":"defenseclaw-gateway","version":%q}`, maintenanceGatewayTestVersion)
 		os.Exit(0)
 	}
+	if os.Getenv("DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER") == "1" {
+		signal := ""
+		switch {
+		case len(os.Args) == 2 && os.Args[1] == "stop":
+			signal = os.Getenv("DEFENSECLAW_SETUP_TEST_GATEWAY_STOP")
+		case len(os.Args) == 3 && os.Args[1] == "watchdog" && os.Args[2] == "stop":
+			signal = os.Getenv("DEFENSECLAW_SETUP_TEST_WATCHDOG_STOP")
+		}
+		if signal != "" {
+			if err := os.WriteFile(signal, []byte("stop"), 0o600); err != nil {
+				os.Exit(3)
+			}
+			os.Exit(0)
+		}
+	}
 	os.Exit(m.Run())
 }
 

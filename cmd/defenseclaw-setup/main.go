@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/mod/semver"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed payload/*
@@ -52,6 +55,8 @@ const (
 	setupValidationTimeout     = 30 * time.Second
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
+	nativeConnectorStateLimit  = int64(64 << 10)
+	nativeConfigRosterLimit    = int64(4 << 20)
 	maxRunCommandUTF16Units    = 260
 )
 
@@ -474,11 +479,11 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
-	tryRestore := func(cause error) (int, error) {
-		return rollbackSetupIntent(transaction, cause)
+	tryAbort := func(cause error) (int, error) {
+		return abortSetupIntent(transaction, cause)
 	}
 	if err := checkSetupContext(ctx); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
 	}
 
 	if err := stageInstallTree(
@@ -493,10 +498,36 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		pathValueCreated,
 		opts,
 	); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
 	}
 	if err := checkSetupContext(ctx); err != nil {
-		return tryRestore(err)
+		return tryAbort(err)
+	}
+	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
+		if err := runPackagedMigrationPreflightWithEnv(
+			transaction.StagingPath,
+			transaction.DataRoot,
+			transaction.FromVersion,
+			transaction.TargetVersion,
+			transactionChildEnv(transaction),
+		); err != nil {
+			return tryAbort(fmt.Errorf("preflight packaged migrations with staged target runtime: %w", err))
+		}
+	}
+	if err := checkSetupContext(ctx); err != nil {
+		return tryAbort(err)
+	}
+	// The v2 intent phase authorizes staging only. Durably enter quiescing
+	// before the first service or live-tree mutation so recovery can distinguish
+	// a preflight refusal from an interrupted publication.
+	if err := markSetupTransactionQuiescing(transaction); err != nil {
+		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
+			return retryRequiredCode, fmt.Errorf("record quiescing setup transaction; recovery is required before retrying: %w", err)
+		}
+		return tryAbort(fmt.Errorf("record quiescing setup transaction: %w", err))
+	}
+	tryRestore := func(cause error) (int, error) {
+		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
 	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
@@ -548,17 +579,32 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := publishMaintenanceCopyForTransaction(transaction, payload.Manifest.Unsigned); err != nil {
 		return tryRestore(err)
 	}
-	// Cancellation is honored through the last rollback-safe boundary. After
-	// the committed phase is durable, setup must converge or leave recovery in
-	// the journal instead of partially undoing externally visible registration.
+	// Record publication before the live migration. Recovery can then resume
+	// with the same target runtime after a crash, while an ordinary migration
+	// refusal still rolls application, maintenance, and service state back.
 	if err := checkSetupContext(ctx); err != nil {
 		return tryRestore(err)
 	}
-	if err := markSetupTransactionCommitted(transaction); err != nil {
+	if err := markSetupTransactionPublished(transaction); err != nil {
 		if errors.Is(err, errSetupJournalDurabilityAmbiguous) {
-			return retryRequiredCode, fmt.Errorf("commit setup transaction; recovery is required before retrying: %w", err)
+			return retryRequiredCode, fmt.Errorf("record published setup transaction; recovery is required before retrying: %w", err)
 		}
-		return tryRestore(fmt.Errorf("commit setup transaction: %w", err))
+		return tryRestore(fmt.Errorf("record published setup transaction: %w", err))
+	}
+	tryRestorePublished := func(cause error) (int, error) {
+		return rollbackPublishedSetup(transaction, cause)
+	}
+	if err := activatePublishedSetupTransaction(transaction); err != nil {
+		if errors.Is(err, errPublishedActivationStateChanged) {
+			return retryRequiredCode, fmt.Errorf("activate published setup transaction; target runtime retained for recovery: %w", err)
+		}
+		return tryRestorePublished(err)
+	}
+	// Successful activation may have published config v8. From this point the
+	// target application must remain paired with that config, so a journal
+	// transition failure is recovered by idempotently resuming publication.
+	if err := markSetupTransactionCommitted(transaction); err != nil {
+		return retryRequiredCode, fmt.Errorf("commit activated setup transaction; recovery is required before retrying: %w", err)
 	}
 	if _, err := finishCommittedSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, fmt.Errorf("installation committed but convergence is pending: %w", err)
@@ -577,9 +623,40 @@ type rollbackSetupTransactionFunc func(setupTransaction) error
 type completeSetupTransactionFunc func(setupTransaction, string) error
 
 func rollbackSetupIntent(transaction setupTransaction, cause error) (int, error) {
-	return rollbackSetupIntentWith(
+	return rollbackSetupPhaseWith(
 		transaction,
 		cause,
+		setupPhaseIntent,
+		rollbackSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func abortSetupIntent(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhaseIntent,
+		abortPreparedSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func rollbackQuiescingSetup(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhaseQuiescing,
+		rollbackSetupTransaction,
+		markSetupTransactionComplete,
+	)
+}
+
+func rollbackPublishedSetup(transaction setupTransaction, cause error) (int, error) {
+	return rollbackSetupPhaseWith(
+		transaction,
+		cause,
+		setupPhasePublished,
 		rollbackSetupTransaction,
 		markSetupTransactionComplete,
 	)
@@ -591,9 +668,19 @@ func rollbackSetupIntentWith(
 	rollback rollbackSetupTransactionFunc,
 	complete completeSetupTransactionFunc,
 ) (int, error) {
+	return rollbackSetupPhaseWith(transaction, cause, setupPhaseIntent, rollback, complete)
+}
+
+func rollbackSetupPhaseWith(
+	transaction setupTransaction,
+	cause error,
+	phase string,
+	rollback rollbackSetupTransactionFunc,
+	complete completeSetupTransactionFunc,
+) (int, error) {
 	rollbackErr := rollback(transaction)
 	if rollbackErr == nil {
-		rollbackErr = complete(transaction, setupPhaseIntent)
+		rollbackErr = complete(transaction, phase)
 	}
 	if rollbackErr != nil {
 		return retryRequiredCode, errors.Join(cause, fmt.Errorf("transaction rollback remains pending: %w", rollbackErr))
@@ -739,6 +826,13 @@ type serviceState struct {
 	Watchdog bool `json:"watchdog"`
 }
 
+type managedProcessProof struct {
+	PID           uint32
+	Executable    string
+	StartIdentity string
+	ProcessHandle uintptr
+}
+
 func (state serviceState) any() bool {
 	return state.Gateway || state.Watchdog
 }
@@ -752,7 +846,7 @@ func requestedServices(opts options, previous serviceState) serviceState {
 	}
 }
 
-func connectorsForNativeUninstall(state *installState, dataRoot string) []string {
+func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	connectors := make([]string, 0, 2)
 	add := func(name string) {
@@ -764,13 +858,249 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) []string
 	if state != nil {
 		add(state.Connector)
 	}
-	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) {
+	active, err := readNativeActiveConnectors(dataRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read active connector state: %w", err)
+	}
+	for _, name := range active {
+		add(name)
+	}
+	configured, err := readNativeConfiguredConnectors(dataRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read configured connector roster: %w", err)
+	}
+	for _, name := range configured {
+		add(name)
+	}
+	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "codex_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")) {
 		add("codex")
 	}
-	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) {
+	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "claudecode", "settings.json.json")) {
 		add("claudecode")
 	}
-	return connectors
+	return connectors, nil
+}
+
+// readNativeActiveConnectors consumes the small, durable roster written by the
+// gateway after connector activation. Native Setup cannot depend on backup
+// markers alone: exact restoration legitimately removes those markers, while
+// the active roster remains the authority for integrations that uninstall must
+// tear down. Bind the read to one regular, non-reparse file and cap its size so
+// an untrusted profile entry cannot redirect or exhaust the installer.
+func readNativeActiveConnectors(dataRoot string) ([]string, error) {
+	statePath := filepath.Join(dataRoot, "active_connector.json")
+	data, exists, err := readBoundedNativeStateFile(statePath, nativeConnectorStateLimit)
+	if err != nil || !exists {
+		return nil, err
+	}
+
+	var state struct {
+		Names []string `json:"names"`
+		Name  string   `json:"name"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse active connector state: %w", err)
+	}
+	if len(state.Names) > 0 {
+		return state.Names, nil
+	}
+	if strings.TrimSpace(state.Name) != "" {
+		return []string{state.Name}, nil
+	}
+	return nil, nil
+}
+
+// readNativeConfiguredConnectors consumes only the connector names that the
+// runtime treats as active. Native Setup cannot rely exclusively on installer
+// selection, runtime state, or backup markers: users may add connectors later
+// through the CLI, and those auxiliary markers can be absent after recovery.
+// Parse into a YAML node tree so aliases are not expanded and never include a
+// configuration value in an error returned by this classifier.
+func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
+	data, exists, err := readBoundedNativeStateFile(
+		filepath.Join(dataRoot, "config.yaml"),
+		nativeConfigRosterLimit,
+	)
+	if err != nil || !exists {
+		return nil, err
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("parse config roster: invalid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse config roster: invalid YAML document count")
+	}
+	root, err := nativeYAMLMappingRoot(&document)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	add := func(value string) {
+		name := normalizeConnector(strings.TrimSpace(value))
+		if name == "codex" || name == "claudecode" {
+			seen[name] = true
+		}
+	}
+	result := func() []string {
+		connectors := make([]string, 0, len(seen))
+		for name := range seen {
+			connectors = append(connectors, name)
+		}
+		sort.Strings(connectors)
+		return connectors
+	}
+
+	guardrail, err := nativeYAMLMappingChild(root, "guardrail")
+	if err != nil {
+		return nil, err
+	}
+	if guardrail != nil {
+		connectors, err := nativeYAMLMappingChild(guardrail, "connectors")
+		if err != nil {
+			return nil, err
+		}
+		if connectors != nil && len(connectors.Content) > 0 {
+			for index := 0; index+1 < len(connectors.Content); index += 2 {
+				key := connectors.Content[index]
+				if key.Kind != yaml.ScalarNode {
+					return nil, fmt.Errorf("config connector roster contains a non-scalar name")
+				}
+				if strings.TrimSpace(key.Value) == "" {
+					return nil, fmt.Errorf("config connector roster contains an empty name")
+				}
+				add(key.Value)
+			}
+			return result(), nil
+		}
+		connector, err := nativeYAMLScalarChild(guardrail, "connector")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(connector) != "" {
+			add(connector)
+			return result(), nil
+		}
+	}
+	claw, err := nativeYAMLMappingChild(root, "claw")
+	if err != nil {
+		return nil, err
+	}
+	if claw != nil {
+		mode, err := nativeYAMLScalarChild(claw, "mode")
+		if err != nil {
+			return nil, err
+		}
+		add(mode)
+	}
+	return result(), nil
+}
+
+func nativeYAMLMappingRoot(document *yaml.Node) (*yaml.Node, error) {
+	if document == nil || document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil, fmt.Errorf("config roster has an invalid document shape")
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster root is not a mapping")
+	}
+	return root, nil
+}
+
+func nativeYAMLChild(mapping *yaml.Node, name string) (*yaml.Node, error) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster section is not a mapping")
+	}
+	var found *yaml.Node
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		if key.Kind != yaml.ScalarNode || key.Value != name {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("config roster contains a duplicate %s field", name)
+		}
+		found = mapping.Content[index+1]
+	}
+	return found, nil
+}
+
+func nativeYAMLMappingChild(mapping *yaml.Node, name string) (*yaml.Node, error) {
+	child, err := nativeYAMLChild(mapping, name)
+	if err != nil || child == nil {
+		return child, err
+	}
+	if child.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config roster %s field is not a mapping", name)
+	}
+	return child, nil
+}
+
+func nativeYAMLScalarChild(mapping *yaml.Node, name string) (string, error) {
+	child, err := nativeYAMLChild(mapping, name)
+	if err != nil || child == nil {
+		return "", err
+	}
+	if child.Kind != yaml.ScalarNode {
+		return "", fmt.Errorf("config roster %s field is not a scalar", name)
+	}
+	return child.Value, nil
+}
+
+func readBoundedNativeStateFile(path string, limit int64) ([]byte, bool, error) {
+	if err := rejectReparseAncestors(path); err != nil {
+		return nil, false, err
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("native state path is not a regular file")
+	}
+	if before.Size() > limit {
+		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, false, fmt.Errorf("native state changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(opened, after) {
+		return nil, false, fmt.Errorf("native state changed while reading")
+	}
+	if err := rejectReparseAncestors(path); err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
@@ -781,17 +1111,61 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	if !pathExists(gatewayPath) {
 		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
 	}
-	args := []string{
-		"connector", action,
-		"--connector", connectorName,
-		"--data-dir", dataRoot,
-		"--json",
+	args, err := connectorLifecycleCommandArgs(dataRoot, connectorName, action, env)
+	if err != nil {
+		return fmt.Errorf("connector %s %s config home: %w", connectorName, action, err)
 	}
 	output, err := runCapturedSetupCommand(setupControlCommandTimeout, env, gatewayPath, args...)
 	if err != nil {
 		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {
+	configHome, err := connectorLifecycleConfigHome(env, connectorName)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"connector", action,
+		"--connector", connectorName,
+		"--data-dir", dataRoot,
+		"--config-home", configHome,
+		"--json",
+	}, nil
+}
+
+func connectorLifecycleConfigHome(env []string, connectorName string) (string, error) {
+	variable := ""
+	switch connectorName {
+	case "codex":
+		variable = "CODEX_HOME"
+	case "claudecode":
+		variable = "CLAUDE_CONFIG_DIR"
+	default:
+		return "", fmt.Errorf("unsupported native connector %q", connectorName)
+	}
+	value := ""
+	found := false
+	for _, entry := range env {
+		name, candidate, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, variable) {
+			if found {
+				return "", fmt.Errorf("%s is duplicated", variable)
+			}
+			value = candidate
+			found = true
+		}
+	}
+	if value == "" {
+		return "", fmt.Errorf("%s is empty", variable)
+	}
+	if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") ||
+		!filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return "", fmt.Errorf("%s is not an absolute normalized path", variable)
+	}
+	return value, nil
 }
 
 type gatewayAutoStartSnapshot struct {
@@ -1201,7 +1575,7 @@ func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []s
 	return nil
 }
 
-const packagedMigrationScript = `import json, sys
+const packagedMigrationScript = `import inspect, json, sys
 from defenseclaw import migration_state
 from defenseclaw.migrations import run_migrations
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
@@ -1209,12 +1583,58 @@ with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-count = run_migrations(from_version, to_version, openclaw_home, data_root)
+required = tuple(manifest.get("required_cli_migrations", ()))
+parameters = inspect.signature(run_migrations).parameters
+accepts_kwargs = any(
+    parameter.kind == inspect.Parameter.VAR_KEYWORD
+    for parameter in parameters.values()
+)
+
+def supports_keyword(name):
+    parameter = parameters.get(name)
+    return accepts_kwargs or (
+        parameter is not None
+        and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    )
+
+kwargs = {}
+if supports_keyword("upgrade_handles_local_bundle"):
+    kwargs["upgrade_handles_local_bundle"] = True
+if supports_keyword("strict_required"):
+    kwargs["strict_required"] = required
+count = run_migrations(
+    from_version,
+    to_version,
+    openclaw_home,
+    data_root,
+    **kwargs,
+)
 state = migration_state.load(data_root)
 applied = set(state.applied if state else ())
-missing = [value for value in manifest.get("required_cli_migrations", ()) if value not in applied]
+missing = [value for value in required if value not in applied]
 if missing:
     raise SystemExit("required migrations are missing: " + ", ".join(missing))
+print(count)`
+
+const packagedMigrationPreflightScript = `import json, sys
+from defenseclaw.migrations import preflight_required_migrations
+from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+if manifest.get("release_version") != to_version:
+    raise SystemExit("upgrade manifest version mismatch")
+required = manifest.get("required_cli_migrations", ())
+count = preflight_required_migrations(
+    from_version,
+    to_version,
+    openclaw_home,
+    data_root,
+    required,
+    scratch_dir,
+)
 print(count)`
 
 func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
@@ -1229,13 +1649,70 @@ func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string,
 	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
 	defer cancel()
 	cmd := newPackagedMigrationCommand(ctx, root, dataRoot, openClawRoot, fromVersion, toVersion)
-	cmd.Env = env
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
 	output, err := processutil.CombinedOutputTree(cmd, false)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("run packaged migrations timed out after %s: %w: %s", setupMigrationTimeout, ctxErr, strings.TrimSpace(string(output)))
 	}
 	if err != nil {
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func runPackagedMigrationPreflightWithEnv(
+	root, dataRoot, fromVersion, toVersion string,
+	env []string,
+) (resultErr error) {
+	openClawRoot, err := defaultOpenClawRoot()
+	if err != nil {
+		return err
+	}
+	scratch, err := safeJoin(root, "installer/.migration-preflight")
+	if err != nil {
+		return err
+	}
+	if err := rejectReparseAncestors(filepath.Dir(scratch)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		return fmt.Errorf("create migration preflight root: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, removeTransactionTree(scratch, root))
+	}()
+	if err := safefile.ProtectDirectory(scratch); err != nil {
+		return fmt.Errorf("protect migration preflight root: %w", err)
+	}
+	if err := validatePrivateTransactionPath(scratch, true); err != nil {
+		return fmt.Errorf("validate migration preflight root: %w", err)
+	}
+	if err := rejectReparseTree(scratch); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newPackagedMigrationPreflightCommand(
+		ctx,
+		root,
+		dataRoot,
+		openClawRoot,
+		fromVersion,
+		toVersion,
+		scratch,
+	)
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf(
+			"preflight packaged migrations timed out after %s: %w: %s",
+			setupMigrationTimeout,
+			ctxErr,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("preflight packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -1260,8 +1737,56 @@ func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRo
 		dataRoot,
 		manifest,
 	)
-	cmd.Env = managedChildEnv(dataRoot)
+	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
 	return cmd
+}
+
+func newPackagedMigrationPreflightCommand(
+	ctx context.Context,
+	root, dataRoot, openClawRoot, fromVersion, toVersion, scratch string,
+) *exec.Cmd {
+	python := filepath.Join(root, "runtime", "python", "python.exe")
+	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
+	cmd := newCapturedSetupCommand(
+		ctx,
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationPreflightScript,
+		fromVersion,
+		toVersion,
+		openClawRoot,
+		dataRoot,
+		manifest,
+		scratch,
+	)
+	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
+	return cmd
+}
+
+func packagedTargetRuntimeEnv(input []string, root, dataRoot string) []string {
+	filtered := make([]string, 0, len(input)+4)
+	for _, entry := range input {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(name) {
+		case "DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_INSTALL_ROOT", "DEFENSECLAW_GATEWAY_BIN":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(
+		filtered,
+		"DEFENSECLAW_HOME="+dataRoot,
+		"DEFENSECLAW_CONFIG="+filepath.Join(dataRoot, "config.yaml"),
+		"DEFENSECLAW_INSTALL_ROOT="+root,
+		"DEFENSECLAW_GATEWAY_BIN="+filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
+	)
 }
 
 func startGateway(gatewayPath, dataRoot string) error {
@@ -1288,14 +1813,16 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 	if !pathExists(gatewayPath) {
 		return serviceState{}, nil
 	}
-	watchdogOwned, err := managedProcessOwnedBy(gatewayPath, dataRoot, "watchdog.pid")
+	watchdogProof, watchdogOwned, err := managedProcessProofFor(gatewayPath, dataRoot, "watchdog.pid")
 	if err != nil {
 		return serviceState{}, err
 	}
-	gatewayOwned, err := managedProcessOwnedBy(gatewayPath, dataRoot, "gateway.pid")
+	defer func() { _ = closeManagedProcessProof(watchdogProof) }()
+	gatewayProof, gatewayOwned, err := managedProcessProofFor(gatewayPath, dataRoot, "gateway.pid")
 	if err != nil {
 		return serviceState{}, err
 	}
+	defer func() { _ = closeManagedProcessProof(gatewayProof) }()
 	stopped := serviceState{}
 	if watchdogOwned {
 		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "watchdog", "stop")
@@ -1303,6 +1830,9 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 			return serviceState{}, fmt.Errorf("stop managed watchdog: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Watchdog = true
+		if err := waitForManagedProcessExitContext(ctx, watchdogProof, setupExecutableReleaseTimeout); err != nil {
+			return serviceState{}, fmt.Errorf("wait for managed watchdog exit: %w", err)
+		}
 	}
 	if gatewayOwned {
 		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "stop")
@@ -1313,6 +1843,12 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 			return serviceState{}, fmt.Errorf("stop managed gateway: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Gateway = true
+		if err := waitForManagedProcessExitContext(ctx, gatewayProof, setupExecutableReleaseTimeout); err != nil {
+			if stopped.Watchdog {
+				_ = startWatchdog(gatewayPath, dataRoot)
+			}
+			return serviceState{}, fmt.Errorf("wait for managed gateway exit: %w", err)
+		}
 	}
 	return stopped, nil
 }

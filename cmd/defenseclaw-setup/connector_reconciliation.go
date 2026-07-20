@@ -156,17 +156,136 @@ func reconcileRemovedConnectors(
 ) connectorReconciliationRecorder {
 	reconciliation := connectorReconciliationRecorder{}
 	for _, connectorName := range transaction.PreviousConnectors {
-		configHome := connectorConfigHome(transaction, connectorName, true)
-		if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
+		homes := connectorCleanupHomes(transaction, connectorName)
+		if len(homes) == 0 {
+			continue
+		}
+		primaryHome := homes[0]
+		if !reconciliation.run(transaction.ID, connectorName, primaryHome, "teardown", func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "teardown", childEnv)
 		}) {
 			continue
 		}
-		reconciliation.run(transaction.ID, connectorName, configHome, "verify", func() error {
+		if !reconciliation.run(transaction.ID, connectorName, primaryHome, "verify", func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", childEnv)
-		})
+		}) {
+			continue
+		}
+
+		// The managed backup binding is the first restore authority, but an
+		// older/repeated setup can leave strict product residue at another home
+		// already bound into the transaction: the persisted install-state home or
+		// the validated current home. Verify these finite candidates before any
+		// fallback mutation. This preserves unrelated operator configuration and
+		// closes the gap where teardown and VerifyClean could agree on a stale
+		// historical target after consuming its shared backup metadata.
+		for _, configHome := range homes[1:] {
+			env := connectorLifecycleEnvForHome(transaction, connectorName, configHome)
+			verify := func() error {
+				return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
+			}
+			if err := verify(); err == nil {
+				reconciliation.run(transaction.ID, connectorName, configHome, "verify", func() error { return nil })
+				continue
+			}
+			if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
+				return run(gatewayPath, transaction.DataRoot, connectorName, "teardown", env)
+			}) {
+				continue
+			}
+			reconciliation.run(transaction.ID, connectorName, configHome, "verify", verify)
+		}
 	}
 	return reconciliation
+}
+
+func connectorCleanupHomes(transaction setupTransaction, connectorName string) []string {
+	candidates := []string{connectorConfigHome(transaction, connectorName, true)}
+	if transaction.PreviousState != nil {
+		switch connectorName {
+		case "codex":
+			candidates = append(candidates, transaction.PreviousState.CodexHome)
+		case "claudecode":
+			candidates = append(candidates, transaction.PreviousState.ClaudeConfigDir)
+		}
+	}
+	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
+	if !connectorManagedBackupExists(transaction.DataRoot, connectorName) {
+		// A predecessor or concurrent reconcile can discard its exact managed
+		// backup after detecting config drift while retaining the field-level
+		// cleanup authority. Installer state from a pre-home-binding release can
+		// then name only a stale override. The native data root is already bound
+		// to %USERPROFILE%\.defenseclaw, so its finite sibling is the only safe
+		// default-home fallback. Verification runs before any mutation, and the
+		// lifecycle command still rejects reparse points and unsafe ownership.
+		candidates = append(candidates, connectorDefaultHomeBesideDataRoot(
+			transaction.DataRoot,
+			connectorName,
+		))
+	}
+
+	homes := make([]string, 0, len(candidates))
+	for index, candidate := range candidates {
+		// Preserve the primary candidate even when corrupt or empty. The lifecycle
+		// command is the path-validation authority and must record a fail-closed
+		// refusal instead of allowing Setup to silently skip connector cleanup.
+		if index > 0 && candidate == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range homes {
+			if samePath(existing, candidate) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			homes = append(homes, candidate)
+		}
+	}
+	return homes
+}
+
+func connectorManagedBackupExists(dataRoot, connectorName string) bool {
+	logicalName := ""
+	switch connectorName {
+	case "codex":
+		logicalName = "config.toml"
+	case "claudecode":
+		logicalName = "settings.json"
+	default:
+		return false
+	}
+	backupName := strings.NewReplacer("/", "_", `\`, "_", ":", "_", " ", "_").Replace(logicalName)
+	return pathExists(filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json"))
+}
+
+func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
+	cleanDataRoot := filepath.Clean(dataRoot)
+	if !filepath.IsAbs(cleanDataRoot) || !strings.EqualFold(filepath.Base(cleanDataRoot), ".defenseclaw") {
+		return ""
+	}
+	directory := ""
+	switch connectorName {
+	case "codex":
+		directory = ".codex"
+	case "claudecode":
+		directory = ".claude"
+	default:
+		return ""
+	}
+	return filepath.Join(filepath.Dir(cleanDataRoot), directory)
+}
+
+func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, configHome string) []string {
+	codexHome := transaction.PreviousCodexHome
+	claudeHome := transaction.PreviousClaudeConfigDir
+	if connectorName == "codex" {
+		codexHome = configHome
+	} else if connectorName == "claudecode" {
+		claudeHome = configHome
+	}
+	return transactionChildEnvForHomes(transaction, codexHome, claudeHome)
 }
 
 func reconcilePreservedConnectors(
