@@ -12,6 +12,14 @@ keywords:
 
 DefenseClaw ships a single command — `defenseclaw setup splunk` — with three independent pipelines you can mix and match:
 
+<Callout type="warning" title="Native Windows local mode is optional and narrowly certified">
+Remote HEC and Splunk Observability destinations do not require Docker. The
+local Windows Docker mode requires native x64 Windows Pro, Enterprise, or
+Education; Hyper-V; machine-installed Docker Desktop using Linux containers;
+Compose v2; and a real `docker.exe`. WSL2/per-user engines, Windows containers,
+and command-wrapper shims are outside that certification.
+</Callout>
+
 | Pipeline | Use case | What it does |
 | --- | --- | --- |
 | `--logs` | Local demo / dev | Brings up Splunk Free in Docker, installs the bundled local-mode app, sends events via HEC |
@@ -49,7 +57,9 @@ What happens:
   </Step>
 </Steps>
 
-Open Splunk at [http://localhost:8000](http://localhost:8000) (default credentials are surfaced by `defenseclaw setup splunk --show-credentials`). The bundled app shows up as **DefenseClaw (local mode)**.
+Open Splunk at [http://localhost:8000](http://localhost:8000). The bundled app
+shows up as **DefenseClaw (local mode)**. Generated HEC and bootstrap values are
+sensitive; do not reveal them in routine diagnostics or support output.
 
 ### Bundled dashboards
 

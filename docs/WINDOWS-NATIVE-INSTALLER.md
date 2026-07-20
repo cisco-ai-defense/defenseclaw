@@ -1,5 +1,12 @@
 # Native Windows Installer Architecture
 
+> **Implementation reference:** This file documents installer architecture and
+> release engineering. End users should follow the
+> [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+> for the certified support matrix, installation lifecycle, connector scope,
+> security boundaries, and troubleshooting. The guide is authoritative for
+> user-facing support classifications.
+
 ## Existing release inputs
 
 The installer composes the established release outputs instead of creating a

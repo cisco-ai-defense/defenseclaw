@@ -22,9 +22,9 @@ artifact below.
 </Callout>
 
 <Callout title="Signed native Windows Setup in 0.8.6">
-`DefenseClawSetup-x64.exe` provides a graphical wizard and silent mode for the
-CLI/TUI, native gateway, no-console hook launcher, and an embedded managed
-Python runtime. Application files live under
+`DefenseClawSetup-x64.exe` provides a graphical wizard and a quiet,
+wizard-suppressed mode for the CLI/TUI, native gateway, no-console hook
+launcher, and an embedded managed Python runtime. Application files live under
 `%LOCALAPPDATA%\Programs\DefenseClaw`; user state remains under
 `%USERPROFILE%\.defenseclaw`.
 </Callout>
@@ -58,8 +58,10 @@ platform SHA-256 before executing it, verifies the DefenseClaw release, and
 retires the temporary verifier. Nothing is installed globally.
 
 The `0.8.6` native Windows Setup bundles its managed runtime. A packaged Windows
-install does not require Python, `uv`, Go, Node.js, Git, or a
-PowerShell installation command after the signed Setup artifact is downloaded.
+install does not require Python, `uv`, Go, Node.js, Git, or a PowerShell
+installation command after the signed Setup artifact is downloaded. This does
+not remove an upstream agent prerequisite such as Claude Code's Git for Windows
+requirement.
 
 ## What's bundled (LLM backends)
 
@@ -71,7 +73,7 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 | AWS Bedrock | bundled | `boto3` ships in `[project].dependencies` so SigV4, IAM credential modes, and Anthropic-on-Bedrock bearer tokens work without a follow-up `pip install`. |
 | Google Vertex AI | **opt-in extra** | The Vertex SDK pulls ~286 MB of transitive deps (BigQuery, Cloud Storage, gRPC, protobuf). The `[vertex]` project extra is available to isolated source builds; do not package-install DefenseClaw over a release-managed runtime to add it. The gateway falls back to LiteLLM's REST transport when the SDK is absent, so basic Vertex calls still work — only service-account / workload-identity auth needs the SDK. |
 | Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
-| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-internal-self-hosted-endpoints). |
+| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-internal--self-hosted-endpoints). |
 
 ## Pick an install path
 
@@ -122,7 +124,8 @@ hook launcher, and managed runtime for the current Windows user. The finish
 screen will point to `defenseclaw init` and `defenseclaw tui`; Setup does not
 install a separate native DefenseClaw GUI application.
 
-For non-interactive installs, pass properties directly:
+For a quiet install in the signed-in, non-elevated user's interactive desktop
+session, pass properties directly:
 
 ```powershell
 .\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
@@ -132,6 +135,11 @@ Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
 later. The setup executable contains the offline payload required for install;
 after download it does not require Python, `uv`, Go, Node.js, Git, or a
 PowerShell installation command.
+
+Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
+background/batch installation. A configured Codex or Claude Code connector
+requires gateway startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported
+stopped CLI-only install.
 
 Native Windows uses agent hooks rather than the OpenClaw/ZeptoClaw proxy path.
 See [Native Windows](/docs/get-started/windows) for the connector
@@ -244,8 +252,10 @@ With the `0.8.6` native package, use the setup executable for product uninstall:
 .\DefenseClawSetup-x64.exe /uninstall /quiet DELETEUSERDATA=1
 ```
 
-The first command preserves `%USERPROFILE%\.defenseclaw`; the second explicitly
-removes user data.
+The first command preserves `%USERPROFILE%\.defenseclaw`; the second requests
+user-data removal after connector cleanup succeeds. If teardown or recovery is
+unresolved, Setup retains the data root and retry evidence. See
+[Install and maintain](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
 
 ## Next
 

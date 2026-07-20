@@ -1,0 +1,105 @@
+---
+title: Native Windows
+description: The support boundary for certified native Windows x64 installs, connectors, enforcement, telemetry, and operations.
+keywords:
+  - DefenseClaw native Windows
+  - DefenseClaw Windows support
+  - DefenseClaw Windows x64
+  - DefenseClaw Windows connectors
+  - DefenseClaw WSL
+---
+
+DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It installs a
+local gateway, native hook launcher, CLI, TUI, scanners, and managed Python
+runtime. The certified connector scope is deliberately narrow: **Codex** and
+**Claude Code**.
+
+<Callout type="warning" title="WSL is not supported">
+This guide is for DefenseClaw, the agent, and its configuration running in the
+same native Windows user session. Do not install DefenseClaw in WSL, point a
+native agent at a WSL installation, or mix native and WSL connector homes.
+</Callout>
+
+## Support language
+
+| Status | Meaning in this guide |
+| --- | --- |
+| **Supported** | Implemented and covered by the required native Windows x64 test or release contract. |
+| **Limited** | Supported only on the stated surface, with optional configuration, an extra dependency, or a narrower guarantee. |
+| **Not certified** | Code exists, but the native Windows release contract does not qualify it. Do not treat it as supported. |
+| **Unsupported** | Rejected, unavailable, or outside the native Windows product contract. |
+| **Not applicable** | A platform-specific concept is intentionally absent from the Windows design. |
+
+## Certified connector scope
+
+| Connector | Setup name | Native Windows x64 | Enforcement topology |
+| --- | --- | --- | --- |
+| Codex | `codex` | **Supported** | Native hooks to the loopback gateway; native OTLP is observation-only. |
+| Claude Code | `claudecode` | **Supported** | Native hooks to the loopback gateway; native OTLP is observation-only. |
+| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, Hermes | — | **Not certified** | Their setup code is not a Windows support commitment. |
+| OpenHands, OmniGent, OpenClaw, ZeptoClaw | — | **Unsupported** | Their required sandbox, terminal, or proxy topology is not hosted by native Windows DefenseClaw. |
+
+Both supported connectors remain connected directly to their normal upstream
+service. DefenseClaw does **not** insert a model proxy on Windows. It can only
+protect and observe events the installed agent emits through its documented
+hook and native telemetry surfaces.
+
+<Cards>
+  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, signed Setup, repair, upgrade qualification, recovery, and uninstall." />
+  <Card title="Connectors and enforcement" href="/docs/get-started/windows/connectors-enforcement" description="Exact Codex and Claude Code events, observe/action behavior, fail modes, and enable/disable controls." />
+  <Card title="Capabilities and commands" href="/docs/get-started/windows/capabilities-commands" description="Windows-specific capability and complete public command-family matrices." />
+  <Card title="Telemetry and security" href="/docs/get-started/windows/telemetry-security" description="Native OTLP, local audit, scoped credentials, loopback boundaries, signing, and recovery guarantees." />
+  <Card title="Paths and troubleshooting" href="/docs/get-started/windows/paths-troubleshooting" description="Filesystem reference, safe diagnostics, terminal guidance, and verification checklists." />
+</Cards>
+
+## Certified architecture
+
+The normal installation is one current-user application:
+
+1. `DefenseClawSetup-x64.exe` installs product-owned files and an embedded
+   runtime below the current user's Programs directory.
+2. Connector setup registers `defenseclaw-hook.exe` in the selected agent's
+   user-level configuration.
+3. The hook sends supported lifecycle events to an authenticated gateway API
+   on loopback. Action mode can return a decision only where that agent event
+   supports one.
+4. Native OTLP from the agent enters a connector-scoped loopback receiver. It
+   adds telemetry; it is never an enforcement path.
+5. The gateway evaluates policy and persists mandatory local audit data. Any
+   outbound observability destination is an additional, explicit choice.
+
+See [Telemetry and security](/docs/get-started/windows/telemetry-security) for
+the authentication, redaction, and local-storage boundaries.
+
+## What is outside the support boundary
+
+| Item | Status | Boundary |
+| --- | --- | --- |
+| WSL installation or a mixed native/WSL connector | **Unsupported** | Native and WSL executables, profiles, and hook paths are different trust domains. |
+| Windows x86 | **Unsupported** | Setup requires an `amd64` process and payload. |
+| Windows ARM64, including x64 emulation | **Not certified** | Setup rejects it rather than relying on emulation. |
+| Machine-wide Setup or MSI | **Unsupported** | The public package accepts `INSTALLSCOPE=user` only. |
+| Elevated, service, session-zero, or background Setup | **Unsupported** | State-changing Setup actions require the signed-in, non-elevated interactive user. |
+| Windows model-proxy connectors | **Unsupported** | The native Windows gateway is hook-only. |
+| A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
+| OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
+| `systemd`, `launchd`, Unix sockets, and POSIX hook shells | **Not applicable** | Windows uses native processes, Windows process identity, and a native hook executable. |
+| General enterprise hook guardian | **Unsupported** | The public per-user package does not install an elevated guardian or system service. A narrow Claude Code administrator-managed policy path is documented separately. |
+| Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
+
+No roadmap is implied by these classifications.
+
+## If you are migrating
+
+From macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
+HKCU `PATH` and Run registration instead of a service manager, native process
+identity instead of PID-only signaling, and a native hook executable instead
+of Bash hooks. Sandbox and proxy connector features do not move with you.
+
+From WSL, perform a fresh native install. Install Codex or Claude Code natively
+for the same Windows user, then run native connector setup. Do not copy a WSL
+data directory, hook scripts, tokens, virtual environment, gateway binary, or
+connector configuration into the Windows profile.
+
+Continue with [Install and maintain](/docs/get-started/windows/install-lifecycle),
+then use the [post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist).

@@ -1,0 +1,225 @@
+---
+title: Telemetry and security
+description: Native Windows telemetry channels, local audit persistence, credential scope, signing, and operational security boundaries.
+keywords:
+  - DefenseClaw Windows telemetry
+  - DefenseClaw Windows OTLP
+  - DefenseClaw Windows audit
+  - DefenseClaw Windows security
+  - DefenseClaw token rotation
+---
+
+Windows enforcement and telemetry are separate paths. Hooks can return a
+decision; native OTLP cannot. Both enter an authenticated loopback gateway and
+then use the same local audit and optional outbound observability pipeline.
+
+## Connector telemetry channels
+
+| Connector | Hook channel | Native telemetry | Configuration surface |
+| --- | --- | --- | --- |
+| Codex | Ten current lifecycle/tool events; the only enforcement path. | OTLP logs, metrics, and traces over HTTP/JSON. | Hooks in `%CODEX_HOME%\managed_config.toml`; marked OTLP/notify fields in `%CODEX_HOME%\config.toml`. |
+| Claude Code | 28 current lifecycle/tool/configuration events; the only enforcement path. | OTLP logs and metrics over HTTP/JSON; traces are explicitly disabled. | Marked hooks and OTLP environment entries in `%CLAUDE_CONFIG_DIR%\settings.json`. |
+
+Both connectors configure a connector-scoped bearer and source/client identity
+for native OTLP. Codex does not place the credential in the endpoint URL.
+Claude Code stores the managed exporter settings in its configuration, not in
+the interactive shell. A scoped credential is accepted only for its connector
+and OTLP route; it cannot authenticate the management API, another connector,
+or a non-loopback request.
+
+<Callout type="info" title="Native OTLP is observation-only">
+A native OTLP log, metric, or trace can enrich audit and dashboards, but it
+arrives after or beside agent activity. It cannot block a prompt or tool. Only
+the declared hook response surfaces can enforce action mode.
+</Callout>
+
+## Local audit is always present
+
+The v8 observability pipeline writes mandatory local SQLite audit data to
+`%USERPROFILE%\.defenseclaw\audit.db`. That local store continues when:
+
+- no remote observability destination is configured;
+- the installation is operating without an OpenClaw fleet uplink; or
+- an optional remote destination is temporarily degraded.
+
+In the supported standalone hook topology, “gateway disabled” in a fleet row
+means there is no OpenClaw fleet WebSocket to dial. It does not mean the local
+hook API, policy evaluation, native OTLP ingest, local audit, alerts, or TUI
+have stopped.
+
+`gateway.jsonl` is **not** a default audit file. It exists only if an optional
+`kind: jsonl` destination is configured to write that path. The detached
+gateway's process log is a different file,
+`%USERPROFILE%\.defenseclaw\gateway.log`.
+
+## Privacy and redaction boundary
+
+Supported connector profiles enable source capture of user-prompt facts so the
+v8 router can apply destination-specific policy. The fresh v8 redaction profile
+is `none`. Therefore:
+
+- local SQLite can contain unredacted prompt, tool, decision, and telemetry
+  content permitted by the event schema;
+- adding an outbound destination does not automatically make its projection
+  safe for a different audience; and
+- source-side suppression cannot be assumed to recover content that was never
+  captured.
+
+Treat the data directory and any audit export as sensitive user data. Configure
+and verify [redaction profiles](/docs/reference/redaction) before routing
+records to another system. `defenseclaw config show` masks secret values by
+default; do not add `--reveal` to diagnostic output.
+
+The gateway records authentication and delivery failures without putting raw
+scoped credentials into route names or operational telemetry. That does not
+make a copied database, log, connector configuration, backup, or crash artifact
+safe to publish.
+
+## Credential model
+
+DefenseClaw uses distinct credentials for distinct jobs:
+
+| Credential class | Scope | Operator rule |
+| --- | --- | --- |
+| Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
+| Connector hook credential | One connector's hook API route. | Managed by setup/teardown; never copy its sidecar. |
+| Connector native-OTLP credential | One connector's OTLP routes only. | Stable across unrelated master-token rotation and revoked during connector teardown. |
+| Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
+
+### Rotate safely
+
+Token rotation is global because the gateway master token and active connector
+generation must move together:
+
+```powershell
+defenseclaw setup rotate-token --yes
+```
+
+The transaction verifies gateway A, stops that exact owned process, durably
+commits the new protected value, starts gateway B, reconciles all active
+connectors, reloads their persisted native-OTLP settings, and authentication-probes
+each supported signal. A post-stop failure restores the exact prior protected
+file and ready gateway generation. `--no-restart` is intentionally refused,
+and an externally managed noncanonical token environment is not rewritten.
+
+Connector-scoped OTLP credentials remain distinct from the master token. The
+rotation does not expose them and does not turn one connector's credential into
+a cross-connector credential. Restart every configured agent after a successful
+rotation so its next hook subprocess uses the reconciled generation.
+
+Verify without reading any token:
+
+```powershell
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw doctor
+```
+
+## Loopback and network boundaries
+
+The certified connector topology uses the current user's native agent and
+gateway on loopback, normally `127.0.0.1:18970`. The loopback HTTP receiver is
+authenticated; it is not a claim that localhost is inherently trusted.
+
+- A connector-scoped token is restricted by connector, route, signal, and
+  loopback origin.
+- Management routes require their own authentication.
+- A non-loopback agent-to-gateway deployment is not native Windows-certified.
+- Outbound OTLP, Splunk, Galileo, webhooks, and provider calls are independent
+  client connections. Their availability does not expand hook coverage.
+- Windows OpenClaw/ZeptoClaw proxy listeners are unsupported.
+
+Do not expose the local API to a LAN merely to make a remote agent work. That
+changes the tested topology and adds authentication, TLS, firewall, and host
+ownership requirements this guide does not certify.
+
+## Release and installer trust
+
+A production native Windows release requires:
+
+1. release checksum and Sigstore provenance validation;
+2. the exact Setup SHA-256 named by the release metadata;
+3. a valid Authenticode signature from `Cisco Systems, Inc.` on Setup;
+4. signed and verified inner product executables; and
+5. release-pipeline certification of that exact signed Setup with pinned real
+   Codex and Claude Code versions.
+
+Pull-request and local Setup artifacts are unsigned test builds. Passing the
+deterministic PR suite proves code and lifecycle behavior, not production
+publisher identity. The release pipeline separately signs and certifies the
+exact artifact it publishes.
+
+The native upgrader refuses a missing or invalid signature, digest, provenance,
+publisher, or Windows source baseline. Its verification bypass is not supported
+for native Windows. See [Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade-and-release-eligibility).
+
+## Ownership and filesystem boundary
+
+The public package runs as the current user and owns only exact state it
+created or recorded. Security-sensitive installer transaction directories,
+credentials, audit storage, and identity records use current-user ownership,
+non-reparse checks, and private Windows DACL validation. This is not a blanket
+claim that every file below every user-selected connector root has an identical
+DACL.
+
+Setup and lifecycle commands:
+
+- refuse an existing application directory without valid DefenseClaw installer
+  state;
+- recheck state identity around live mutation;
+- reject unsafe reparse ancestry for protected transaction and recorded
+  connector-home paths;
+- stop only a gateway/watchdog whose executable, PID start identity, data root,
+  and protected record agree;
+- refuse to replace a foreign HKCU Run value, PATH mutation, Installed Apps
+  record, listener, process, or connector file; and
+- retain ambiguous recovery evidence instead of deleting it as cleanup.
+
+Product executables opt into Windows long-path behavior, and installer journals
+and process identity are tested beyond legacy `MAX_PATH`. Do not extrapolate
+that guarantee to every third-party agent/plugin. Avoid connector paths that
+differ only by case; the product does not advertise case-distinct Windows
+connector homes as separate supported identities.
+
+## Transaction and fail-closed boundaries
+
+“Fail closed” has several precise meanings:
+
+| Boundary | Proven behavior |
+| --- | --- |
+| Setup verification | Invalid architecture, launch identity, signature, payload, path, ownership, or prior state refuses before live mutation where possible. |
+| Setup transaction | Pre-commit failure rolls back owned changes; ambiguous or committed phases retain a journal and require safe recovery/convergence. |
+| Hook delivery/response | Effective `closed` blocks supported events for transport and malformed/unauthorized response failures. |
+| Managed enterprise hook | The narrow administrator-managed Claude Code path fails closed when protected policy identity is invalid. |
+| Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. |
+| Internal evaluator panic | Fails open with warning and telemetry because no authoritative verdict was produced. |
+| Optional exporter outage | Local SQLite and healthy gateway operation continue; the destination is reported degraded. |
+
+Malformed v8 configuration prevents strict gateway startup rather than silently
+loading legacy semantics. A disabled connector is reconciled out of the active
+roster; a persisted change made with `--no-restart` is reported as desired/runtime
+drift until restart.
+
+## Administrator-managed Claude Code exception
+
+The public per-user Setup does not install a machine-wide service or enterprise
+guardian. A separate, limited gateway command can publish Claude Code managed
+hooks for allow-listed interactive users only when the gateway and hook binary
+have first been deployed in a protected Administrator/LocalSystem-owned machine
+path. A user-writable `%LOCALAPPDATA%` installation is deliberately rejected as
+the elevated command source.
+
+That path does not provide a machine-scope Setup/MSI, general Windows connector
+guardian, remote gateway, private distribution credentials, or Codex managed
+hook support. Follow the exact prerequisites in
+[Enterprise deployment](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks).
+
+## Security operations links
+
+- [Configuration](/docs/reference/configuration)
+- [Environment variables](/docs/reference/env-vars)
+- [Fail modes](/docs/reference/fail-modes)
+- [Redaction](/docs/reference/redaction)
+- [Observability](/docs/observability)
+- [Skill scanner](/docs/setup/skill-scanner)
+- [MCP scanner](/docs/setup/mcp-scanner)
