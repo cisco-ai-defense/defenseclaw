@@ -4548,6 +4548,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         controller_home_override: bool = False,
         installed_local_bundle: bool = False,
         bundle_refresh_side_effect=None,
+        supersede_side_effect=None,
     ):
         runner = CliRunner()
         app = AppContext()
@@ -4698,6 +4699,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                     side_effect=bundle_refresh_side_effect,
                 )
             )
+            if supersede_side_effect is not None:
+                stack.enter_context(
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade.supersede_prior_upgrade_receipts",
+                        side_effect=supersede_side_effect,
+                    )
+                )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._check_post_upgrade_drift"))
             self.prepare_rollback = stack.enter_context(
                 patch(
@@ -4793,6 +4801,17 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(receipt.status, "succeeded")
         self.assertEqual(receipt.failure_code, "")
         self.assertIn("Upgrade Complete", result.output)
+        poll_health.assert_called_once()
+
+    def test_supersession_cleanup_failure_does_not_block_success_receipt(self):
+        result, receipt, poll_health = self._invoke_upgrade(
+            supersede_side_effect=OSError("receipt queue changed"),
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(receipt.status, "succeeded")
+        self.assertEqual(receipt.failure_code, "")
+        self.assertIn("old upgrade receipt cleanup was deferred", result.output)
         poll_health.assert_called_once()
 
     def test_verified_receipt_precedes_target_migrations_and_bundle_refresh(self):
