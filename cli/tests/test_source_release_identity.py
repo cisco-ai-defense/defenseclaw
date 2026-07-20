@@ -289,7 +289,13 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     assert "Require reviewed source release identity" not in workflow
     assert "git diff --exit-code --" not in workflow[tracked:expected]
     assert '--target "$RELEASE_COMMIT"' in workflow[publish:]
-    assert 'test "$remote_commit" = "$RELEASE_COMMIT"' in workflow[publish:]
+    proof = workflow.index("scripts/release_api_retry.py prove-published", publish)
+    assert publish < proof
+    proof_command = workflow[proof : proof + 500]
+    assert '--tag "$RELEASE_TAG"' in proof_command
+    assert '--commit "$RELEASE_COMMIT"' in proof_command
+    assert "--candidate-root release-candidate" in proof_command
+    assert "--omit-windows-binaries" in proof_command
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")

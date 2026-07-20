@@ -55,6 +55,7 @@
     "scripts/upgrade.ps1",
     "scripts/release_candidate.py",
     "scripts/release_certification.py",
+    "scripts/release_api_retry.py",
     "scripts/resolve_upgrade_baselines.py",
     "scripts/generate-upgrade-manifest.py",
     "scripts/historical_release_auth.py",
