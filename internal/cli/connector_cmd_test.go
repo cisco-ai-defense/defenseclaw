@@ -202,6 +202,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origName := connectorFlagName
 	origJSON := connectorFlagJSON
 	origDir := connectorFlagDataDir
+	origConfigHome := connectorFlagConfigHome
 	origExit := connectorExit
 
 	cfg = &config.Config{
@@ -214,12 +215,14 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	connectorFlagName = ""
 	connectorFlagJSON = false
 	connectorFlagDataDir = dataDir
+	connectorFlagConfigHome = ""
 
 	return func() {
 		cfg = origCfg
 		connectorFlagName = origName
 		connectorFlagJSON = origJSON
 		connectorFlagDataDir = origDir
+		connectorFlagConfigHome = origConfigHome
 		connectorExit = origExit
 	}
 }
@@ -241,7 +244,7 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	sub := args[0]
 	tail := args[1:]
 
-	for _, candidate := range []string{"--connector", "--data-dir"} {
+	for _, candidate := range []string{"--connector", "--data-dir", "--config-home"} {
 		for i, a := range tail {
 			if a == candidate && i+1 < len(tail) {
 				switch candidate {
@@ -249,6 +252,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 					connectorFlagName = tail[i+1]
 				case "--data-dir":
 					connectorFlagDataDir = tail[i+1]
+				case "--config-home":
+					connectorFlagConfigHome = tail[i+1]
 				}
 			}
 		}

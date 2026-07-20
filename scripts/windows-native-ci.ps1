@@ -2195,9 +2195,129 @@ function Assert-NoDefenseClawRegistration([string[]]$Paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         $content = [IO.File]::ReadAllText($path)
         if ($content -match '(?i)defenseclaw') {
-            throw "unexpected DefenseClaw connector registration remains in $path"
+            $locations = @(Get-DefenseClawRegistrationLocations $content)
+            $detail = if ($locations.Count) {
+                ' (safe fields: ' + ($locations -join ', ') + ')'
+            } else {
+                ' (safe field: unclassified)'
+            }
+            throw "unexpected DefenseClaw connector registration remains in $path$detail"
         }
     }
+}
+
+function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector) {
+    $relativePaths = switch ($Connector) {
+        'codex' {
+            @(
+                'codex_config_backup.json',
+                'connector_backups\codex\config.toml.json'
+            )
+        }
+        'claudecode' {
+            @(
+                'claudecode_backup.json',
+                'connector_backups\claudecode\settings.json.json'
+            )
+        }
+        default { throw "unsupported native connector backup marker: $Connector" }
+    }
+    return @($relativePaths | Where-Object {
+        Test-Path -LiteralPath (Join-Path $DataRoot $_) -PathType Leaf
+    })
+}
+
+function Assert-NativeConnectorCleanupAuthorityPresent(
+    [string]$DataRoot,
+    [string[]]$ConfiguredConnectors
+) {
+    $configured = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in @($ConfiguredConnectors)) {
+        if ([string]$name -notin @('codex', 'claudecode')) {
+            throw 'native Setup acceptance received an unsupported configured connector'
+        }
+        $null = $configured.Add([string]$name)
+    }
+    foreach ($connector in @('codex', 'claudecode')) {
+        # Setup intentionally classifies uninstall work from the configured
+        # roster as well as active state and backup markers. Exact connector
+        # restoration can consume a marker before uninstall, so the validated
+        # target-runtime roster remains sufficient durable cleanup authority.
+        if (-not $configured.Contains($connector) -and
+            @(Get-NativeConnectorBackupMarkers $DataRoot $connector).Count -eq 0) {
+            throw "native Setup acceptance lost $connector cleanup authority before uninstall"
+        }
+    }
+}
+
+function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
+    $remaining = [Collections.Generic.List[string]]::new()
+    foreach ($connector in @('codex', 'claudecode')) {
+        foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
+            $remaining.Add("$connector/$relativePath")
+        }
+    }
+    if ($remaining.Count -ne 0) {
+        throw "native Setup uninstall left connector backup markers unconsumed: $($remaining -join ', ')"
+    }
+}
+
+function Get-DefenseClawRegistrationLocations([string]$Content) {
+    # Report only bounded structural locations. Agent configs may contain
+    # credentials or private paths, so the matching line/value must never be
+    # included in CI output even when this assertion is the only available
+    # failure evidence from a disposable standard-user process.
+    $locations = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $table = 'root'
+    $lines = [regex]::Split($Content, '\r?\n')
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(?<table>[A-Za-z0-9_.-]{1,160})\]$') {
+            $candidateTable = [string]$Matches['table']
+            if ($candidateTable -match '^(?:otel(?:\.(?:exporter|trace_exporter|metrics_exporter|otlp-http|headers))*)$') {
+                $table = $candidateTable
+            } elseif ($candidateTable -eq 'hooks' -or $candidateTable -eq 'features') {
+                $table = $candidateTable
+            } else {
+                $table = 'other-table'
+            }
+        } elseif ($trimmed.StartsWith('[')) {
+            # A quoted/dynamic table can contain private names. Keep only a
+            # fixed classifier instead of copying any part of it.
+            $table = 'nonstandard-table'
+        }
+        if ($line -notmatch '(?i)defenseclaw') { continue }
+
+        $field = 'array-or-value'
+        if ($trimmed.StartsWith('#')) {
+            $field = 'comment'
+        } elseif ($trimmed -match '^(?<key>[A-Za-z0-9_.-]{1,96})\s*=') {
+            $candidateField = [string]$Matches['key']
+            if ($candidateField -match '^(?:notify|openai_base_url|hooks|command|command_windows|endpoint|headers|x-defenseclaw-(?:source|client|token))$') {
+                $field = $candidateField
+            } else {
+                $field = 'other-field'
+            }
+        } elseif ($trimmed -match '^"(?<key>[A-Za-z0-9_.-]{1,96})"\s*:') {
+            $candidateField = [string]$Matches['key']
+            if ($candidateField -match '^(?:notify|openai_base_url|hooks|command|command_windows|endpoint|headers|x-defenseclaw-(?:source|client|token))$') {
+                $field = $candidateField
+            } else {
+                $field = 'other-field'
+            }
+        } elseif ($trimmed.StartsWith('[')) {
+            $field = 'table-name'
+        }
+        $location = if ($table -eq 'root') { $field } else { "$table.$field" }
+        $descriptor = "line $($index + 1): $location"
+        if ($seen.Add($descriptor)) {
+            $locations.Add($descriptor)
+            if ($locations.Count -ge 8) { break }
+        }
+    }
+    return @($locations)
 }
 
 function Assert-NoInstalledGatewayProcess([string]$GatewayPath) {
@@ -2852,6 +2972,7 @@ function Invoke-SetupAcceptance {
         $fixtureSearchPath = [string]$agentFixtures.SearchPath
         $env:PATH = "$fixtureSearchPath;$processPathBefore"
     }
+    $acceptanceFailure = $null
     try {
         if ($disposableGithubRunner) {
             Invoke-WizardConfigureLaterAcceptance `
@@ -2957,19 +3078,17 @@ function Invoke-SetupAcceptance {
         [IO.Directory]::CreateDirectory($hostileGatewayRoot) | Out-Null
         Copy-Item -LiteralPath $gateway `
             -Destination (Join-Path $hostileGatewayRoot 'defenseclaw-gateway.exe') -Force
-        try {
-            Invoke-Installed $launcher @(
-                'setup', 'codex', '--yes', '--restart', '--mode', 'observe'
-            ) -Timeout 300 -Log (Join-Path $logs 'setup-hostile-cwd-restart.log') `
-                -WorkingDirectory $hostileGatewayRoot | Out-Null
-            Assert-OwnedManagedProcess (Get-GatewayIdentity $dataRoot) $gateway `
-                'hostile-working-directory gateway restart'
-            Assert-OwnedManagedProcess (Get-WatchdogIdentity $dataRoot) $gateway `
-                'hostile-working-directory watchdog restart'
-        } finally {
-            Invoke-Installed $gateway @('stop') @(0, 1) 90 `
-                (Join-Path $logs 'setup-hostile-cwd-stop.log') | Out-Null
-        }
+        Invoke-Installed $launcher @(
+            'setup', 'codex', '--yes', '--restart', '--mode', 'observe'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-hostile-cwd-restart.log') `
+            -WorkingDirectory $hostileGatewayRoot | Out-Null
+        Assert-OwnedManagedProcess (Get-GatewayIdentity $dataRoot) $gateway `
+            'hostile-working-directory gateway restart'
+        Assert-OwnedManagedProcess (Get-WatchdogIdentity $dataRoot) $gateway `
+            'hostile-working-directory watchdog restart'
+        # Keep both owned services running: the seeded 0.8.0 upgrade below
+        # snapshots this exact prior state and must prove transactional restore.
+        # The enclosing finally block remains the failure-path cleanup authority.
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
         # installer acceptance must preserve the product's current support
@@ -3004,16 +3123,173 @@ function Invoke-SetupAcceptance {
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
-        $installedState.version = '0.0.0'
+        # Model the exact native 0.8.0 -> current-candidate observability-v8
+        # boundary with a realistic, valid v7 configuration. The setup must
+        # preflight this configuration with the staged target runtime before
+        # it stops these owned services or publishes either managed tree.
+        $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $configPath = Join-Path $dataRoot 'config.yaml'
+        $yamlDataRoot = $dataRoot.Replace("'", "''")
+        $v7Fixture = @"
+# native Setup 0.8.0 observability migration acceptance fixture
+config_version: 7
+data_dir: '$yamlDataRoot'
+audit_db: '$yamlDataRoot\state\audit.db'
+judge_bodies_db: '$yamlDataRoot\state\judge-bodies.db'
+guardrail:
+  enabled: true
+  retain_judge_bodies: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
+otel:
+  enabled: true
+  protocol: http
+  endpoint: http://127.0.0.1:4318
+  traces:
+    enabled: true
+    sampler: always_on
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    temporality: delta
+  logs:
+    enabled: true
+"@.Replace("`r`n", "`n")
+        [IO.File]::WriteAllText($configPath, $v7Fixture, [Text.UTF8Encoding]::new($false))
+        $seedCursor = @'
+import sys
+from defenseclaw import migration_state
+from defenseclaw.migrations import MIGRATIONS
+state = migration_state.bootstrap(
+    None,
+    from_version="0.8.0",
+    package_version="0.8.0",
+    registry_versions=[version for version, _description, _migration in MIGRATIONS],
+)
+migration_state.save(sys.argv[1], state)
+'@
+        Invoke-Installed $python @('-I', '-c', $seedCursor, $dataRoot) -Timeout 120 `
+            -Log (Join-Path $logs 'setup-seed-080-migration-cursor.log') | Out-Null
+        $v7Hash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+        $gatewayBeforeSeededUpgrade = Get-GatewayIdentity $dataRoot
+        $watchdogBeforeSeededUpgrade = Get-WatchdogIdentity $dataRoot
         Invoke-WindowsSetupStandardUserProcess $setup @(
             '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
-            'FROMVERSION=0.0.0'
+            'FROMVERSION=0.8.0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
         $upgradedState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$upgradedState.version -ne $targetVersion) {
             throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
         }
+        if ((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ceq $v7Hash) {
+            throw 'seeded setup upgrade did not activate the preflighted v8 candidate'
+        }
+        Invoke-Installed $gateway @(
+            'config-v8', 'validate', '--config', $configPath, '--data-dir', $dataRoot
+        ) -Timeout 120 -Log (Join-Path $logs 'setup-seeded-v8-validation.log') | Out-Null
+        $assertMigratedConfig = @'
+import sys
+import yaml
+document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+assert document.get("config_version") == 8
+observability = document.get("observability") or {}
+assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
+otlp = next(
+    destination
+    for destination in observability.get("destinations", [])
+    if destination.get("kind") == "otlp"
+)
+assert (otlp.get("tls") or {}).get("insecure") is True
+assert (otlp.get("network_safety") or {}).get("allow_private_networks") is True
+assert (document.get("guardrail") or {}).get("retain_judge_bodies") is True
+assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"codex", "claudecode"}
+'@
+        Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath) -Timeout 120 `
+            -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
+        $migrationCursor = Get-Content -LiteralPath (Join-Path $dataRoot '.migration_state.json') `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ('0.8.5' -notin @($migrationCursor.applied)) {
+            throw 'seeded setup upgrade did not durably record observability-v8 activation'
+        }
+        $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
+        $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot
+        Assert-OwnedManagedProcess $gatewayAfterSeededUpgrade $gateway 'seeded upgrade-restored gateway'
+        Assert-OwnedManagedProcess $watchdogAfterSeededUpgrade $gateway 'seeded upgrade-restored watchdog'
+        if (-not (Test-GatewayIdentityChanged $gatewayBeforeSeededUpgrade $gatewayAfterSeededUpgrade)) {
+            throw 'seeded setup upgrade did not restore the previously running gateway'
+        }
+        if (-not (Test-GatewayIdentityChanged $watchdogBeforeSeededUpgrade $watchdogAfterSeededUpgrade)) {
+            throw 'seeded setup upgrade did not restore the previously running watchdog'
+        }
+
+		# Model a committed transaction produced by the legacy Setup journal
+		# schema while its journal-owned maintenance executable differs from the
+		# replacement installer. Recovery must run in the replacement Setup
+		# process; the cached executable is authentication state, never delegated
+		# recovery authority. Keep the real installed gateway and watchdog alive
+		# so this crosses the executable-release race seen in manual validation.
+		$journalPath = Join-Path $localAppData 'DefenseClaw\InstallerState\setup-transaction.json'
+		$cachedSetup = Join-Path $cacheRoot 'DefenseClawSetup-x64.exe'
+		if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) {
+			throw "setup acceptance transaction journal is missing: $journalPath"
+		}
+		if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
+			throw "setup acceptance maintenance executable is missing: $cachedSetup"
+		}
+		$legacyJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$legacyJournal.phase -cne 'complete') {
+			throw "setup acceptance journal phase is $($legacyJournal.phase), expected complete"
+		}
+		$replacementSetupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+		Copy-Item -LiteralPath $startup -Destination $cachedSetup -Force
+		$legacyMaintenanceHash = (Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash
+		if ($legacyMaintenanceHash -ceq $replacementSetupHash) {
+			throw 'legacy maintenance fixture unexpectedly matches the replacement Setup bytes'
+		}
+		$legacyJournal.schema_version = 1
+		$legacyJournal.phase = 'committed'
+		$legacyJournal.transaction.maintenance_sha256 = $legacyMaintenanceHash.ToLowerInvariant()
+		$legacyJournalText = ($legacyJournal | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
+		[IO.File]::WriteAllText($journalPath, $legacyJournalText, [Text.UTF8Encoding]::new($false))
+		$gatewayBeforeLegacyRecovery = Get-GatewayIdentity $dataRoot
+		$watchdogBeforeLegacyRecovery = Get-WatchdogIdentity $dataRoot
+		Assert-OwnedManagedProcess $gatewayBeforeLegacyRecovery $gateway `
+			'legacy committed recovery starting gateway'
+		Assert-OwnedManagedProcess $watchdogBeforeLegacyRecovery $gateway `
+			'legacy committed recovery starting watchdog'
+		Invoke-WindowsSetupStandardUserProcess $setup @(
+			'/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
+		) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-legacy-committed-recovery.log') | Out-Null
+		$recoveredJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$recoveredJournal.phase -cne 'complete') {
+			throw "replacement Setup left legacy recovery in phase $($recoveredJournal.phase)"
+		}
+		if ((Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash -cne $replacementSetupHash) {
+			throw 'replacement Setup did not publish its candidate maintenance executable'
+		}
+		$recoveredState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$recoveredState.source_commit -cne [string]$upgradedState.source_commit) {
+			throw 'replacement Setup did not retain the exact candidate source commit'
+		}
+		$gatewayAfterLegacyRecovery = Get-GatewayIdentity $dataRoot
+		$watchdogAfterLegacyRecovery = Get-WatchdogIdentity $dataRoot
+		Assert-OwnedManagedProcess $gatewayAfterLegacyRecovery $gateway `
+			'legacy committed recovery-restored gateway'
+		Assert-OwnedManagedProcess $watchdogAfterLegacyRecovery $gateway `
+			'legacy committed recovery-restored watchdog'
+		if (-not (Test-GatewayIdentityChanged $gatewayBeforeLegacyRecovery $gatewayAfterLegacyRecovery)) {
+			throw 'replacement Setup did not restore the gateway after legacy committed recovery'
+		}
+		if (-not (Test-GatewayIdentityChanged $watchdogBeforeLegacyRecovery $watchdogAfterLegacyRecovery)) {
+			throw 'replacement Setup did not restore the watchdog after legacy committed recovery'
+		}
 
         $stateHashBeforeLockedRepair = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
         $installParent = Split-Path -Parent $installRoot
@@ -3114,11 +3390,13 @@ function Invoke-SetupAcceptance {
             throw 'setup repair did not preserve user data'
         }
 
+        Assert-NativeConnectorCleanupAuthorityPresent $dataRoot $repairedRoster
         Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
+        Assert-NativeConnectorBackupMarkersConsumed $dataRoot
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Assert-NoGatewayAutoStart
         Assert-UserPathRegistrySnapshot $userPathBefore `
@@ -3146,6 +3424,9 @@ function Invoke-SetupAcceptance {
             throw "cached setup self-uninstall left installer cache behind: $cacheRoot"
         }
         Assert-NoGatewayAutoStart
+    } catch {
+        $acceptanceFailure = $_
+        throw
     } finally {
         $env:PATH = $processPathBefore
         Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
@@ -3173,12 +3454,34 @@ function Invoke-SetupAcceptance {
         for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
             Start-Sleep -Milliseconds 250
         }
-        if (Test-Path -LiteralPath $cacheRoot) { throw "setup uninstall left installer cache behind: $cacheRoot" }
-        if ($disposableGithubRunner) {
-            Assert-NoDefenseClawRegistration $connectorConfigPaths
+        $finalValidationFailures = [Collections.Generic.List[string]]::new()
+        if (Test-Path -LiteralPath $cacheRoot) {
+            $finalValidationFailures.Add("setup uninstall left installer cache behind: $cacheRoot")
         }
-        Assert-UserPathRegistrySnapshot $userPathBefore `
-            'setup failure cleanup did not restore the original user PATH exactly'
+        if ($disposableGithubRunner) {
+            try {
+                Assert-NoDefenseClawRegistration $connectorConfigPaths
+            } catch {
+                $finalValidationFailures.Add($_.Exception.Message)
+            }
+        }
+        try {
+            Assert-UserPathRegistrySnapshot $userPathBefore `
+                'setup failure cleanup did not restore the original user PATH exactly'
+        } catch {
+            $finalValidationFailures.Add($_.Exception.Message)
+        }
+        if ($finalValidationFailures.Count -ne 0) {
+            if ($null -eq $acceptanceFailure) {
+                throw ($finalValidationFailures -join '; ')
+            }
+            # Preserve the first actionable Setup failure. Registration assertions
+            # emit only bounded field locations, never config values, so retaining
+            # cleanup failures as warnings is safe context without masking root cause.
+            foreach ($validationFailure in $finalValidationFailures) {
+                Write-Warning $validationFailure
+            }
+        }
     }
 }
 

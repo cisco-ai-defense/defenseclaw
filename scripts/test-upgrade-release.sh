@@ -1401,6 +1401,9 @@ PRESERVE_UPGRADE_SMOKE_ENV=preserved
 DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
+    # A working native-v8 host has already completed gateway first boot. Seed
+    # one canonical gateway credential before the continuity snapshot so the
+    # target runtime cannot manufacture an unrelated dotenv mutation.
     "${baseline_python}" -I - "${data_dir}/.env" <<'PY'
 from pathlib import Path
 import secrets
@@ -1848,6 +1851,17 @@ config_bytes = config_path.read_bytes()
 environment_bytes = environment_path.read_bytes()
 historical_config = (evidence_dir / "config.historical.source").read_bytes()
 historical_environment = (evidence_dir / "environment.historical.source").read_bytes()
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if (
+    not isinstance(historical_gateway_token, str)
+    or len(historical_gateway_token) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in historical_gateway_token
+    )
+):
+    raise SystemExit("native-v8 fixture has no canonical generated gateway token")
 
 if config_bytes != historical_config:
     raise SystemExit("native-v8 config bytes changed without a target config migration")
@@ -1874,21 +1888,11 @@ if destinations["existing-otlp"].get("headers") != {
 if destinations["v8-http-protected"].get("bearer_env") != "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER":
     raise SystemExit("native-v8 HTTP secret reference changed across the upgrade")
 
-historical_environment_values = dotenv_values(
-    evidence_dir / "environment.historical.source"
-)
-gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
-if (
-    not isinstance(gateway_token, str)
-    or len(gateway_token) != 64
-    or any(character not in "0123456789abcdef" for character in gateway_token)
-):
-    raise SystemExit("native-v8 fixture has no canonical generated gateway token")
 expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
-    "DEFENSECLAW_GATEWAY_TOKEN": gateway_token,
+    "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
 }
 actual_environment = dotenv_values(environment_path)
 if any(actual_environment.get(name) != value for name, value in expected_environment.items()):

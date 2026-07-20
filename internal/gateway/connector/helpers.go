@@ -600,6 +600,7 @@ func isDefenseClawHookExecutable(exe string) bool {
 	}
 	for _, owned := range []string{
 		defenseclawGatewayBinary(), // legacy pre-launcher config
+		canonicalNativeWindowsInstalledGatewayBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	} {

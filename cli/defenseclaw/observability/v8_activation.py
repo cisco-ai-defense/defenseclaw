@@ -89,6 +89,15 @@ FaultInjector = Callable[[str], None]
 PrivateFileTransform = Callable[[bytes], bytes | None]
 
 
+class V8CandidateValidationError(RuntimeError):
+    """A target-compiler refusal containing only reviewed safe diagnostics."""
+
+    def __init__(self, field_path: str, reason: str) -> None:
+        self.field_path = field_path
+        self.reason = reason
+        super().__init__(f"candidate field={field_path}; reason={reason}")
+
+
 class V8ActivationError(RuntimeError):
     """A value-safe activation failure.
 
@@ -105,6 +114,8 @@ class V8ActivationError(RuntimeError):
         target_path: str | None = None,
         backup_directory: str | None = None,
         recovery_paths: tuple[str, ...] = (),
+        field_path: str | None = None,
+        reason: str | None = None,
     ) -> None:
         self.code = code
         self.stage = stage
@@ -113,6 +124,8 @@ class V8ActivationError(RuntimeError):
         self.recovery_paths = tuple(
             dict.fromkeys(path for path in ((backup_directory,) if backup_directory else ()) + recovery_paths if path)
         )
+        self.field_path = field_path
+        self.reason = reason
         message = f"observability v8 activation failed ({code}) at {stage}"
         if target_path:
             message += f"; target={target_path}"
@@ -121,6 +134,8 @@ class V8ActivationError(RuntimeError):
         additional_recovery = tuple(path for path in self.recovery_paths if path != backup_directory)
         if additional_recovery:
             message += f"; recovery paths={','.join(additional_recovery)}"
+        if field_path and reason:
+            message += f"; field={field_path}; reason={reason}"
         super().__init__(message)
 
 
@@ -363,6 +378,14 @@ def activate_v8_migration(
         _inject_fault(fault_injector, "before_validator")
         try:
             validator(migration.candidate, validator_environment)
+        except V8CandidateValidationError as exc:
+            raise V8ActivationError(
+                "candidate_validation_failed",
+                "target_go_validation",
+                target_path=active_config,
+                field_path=exc.field_path,
+                reason=exc.reason,
+            ) from None
         except Exception:
             raise V8ActivationError(
                 "candidate_validation_failed",
@@ -3342,6 +3365,7 @@ __all__ = [
     "V8ActivationError",
     "V8ActivationResult",
     "V8ActivationRollbackError",
+    "V8CandidateValidationError",
     "activate_v8_migration",
     "resolve_active_config_path",
     "update_private_file",

@@ -110,6 +110,22 @@ try {
     . $harness -NoRun
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
 
+    $safeRegistrationLocations = @(Get-DefenseClawRegistrationLocations @'
+notify = ["C:\synthetic-private-path\DefenseClaw\bin\launcher.exe", "notify"]
+
+[otel.exporter.otlp-http.headers]
+x-defenseclaw-client = "synthetic-sensitive-value"
+
+[mcp_servers.private-customer-name]
+private-secret-name = "DefenseClaw must remain redacted"
+'@)
+    Assert-True (($safeRegistrationLocations -join '|') -ceq
+        'line 1: notify|line 4: otel.exporter.otlp-http.headers.x-defenseclaw-client|line 7: other-table.other-field') `
+        "connector residue diagnostics return only exact structural locations: $($safeRegistrationLocations -join '|')"
+    Assert-True (($safeRegistrationLocations -join '|') -notmatch
+        '(?i)synthetic-private-path|synthetic-sensitive-value|launcher\.exe|private-customer-name|private-secret-name') `
+        'connector residue diagnostics do not disclose matched config values or private schema names'
+
     $savedDefenseClawHome = $env:DEFENSECLAW_HOME
     $savedResultsPath = $script:ResultsPath
     $savedAgentVersion = Get-Variable -Name AgentVersion -Scope Script -ErrorAction SilentlyContinue

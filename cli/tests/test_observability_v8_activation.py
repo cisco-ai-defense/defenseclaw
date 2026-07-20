@@ -35,6 +35,7 @@ from defenseclaw import windows_acl
 from defenseclaw.observability.v8_activation import (
     V8ActivationError,
     V8ActivationRollbackError,
+    V8CandidateValidationError,
     activate_v8_migration,
     resolve_active_config_path,
 )
@@ -495,6 +496,32 @@ def test_validator_failure_is_value_safe_and_does_not_create_backup(tmp_path: Pa
     assert captured.value.code == "candidate_validation_failed"
     assert fixture["secret"] not in str(captured.value)
     assert fixture["secret"] not in repr(captured.value)
+    assert fixture["config_path"].read_bytes() == fixture["source"]
+    assert fixture["environment_path"].read_bytes() == fixture["environment"]
+    assert not (fixture["data_dir"] / "backups").exists()
+
+
+def test_validator_safe_diagnostic_survives_activation_boundary(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    field_path = "$.observability.destinations[0].protocol"
+    reason = "[config_schema_invalid] unsupported protocol"
+
+    def reject(_candidate: bytes, _environment: object) -> None:
+        raise V8CandidateValidationError(field_path, reason)
+
+    with pytest.raises(V8ActivationError) as captured:
+        activate_v8_migration(
+            fixture["migration"],
+            validator=reject,
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+        )
+
+    assert captured.value.code == "candidate_validation_failed"
+    assert captured.value.field_path == field_path
+    assert captured.value.reason == reason
+    assert f"field={field_path}; reason={reason}" in str(captured.value)
+    assert fixture["secret"] not in str(captured.value)
     assert fixture["config_path"].read_bytes() == fixture["source"]
     assert fixture["environment_path"].read_bytes() == fixture["environment"]
     assert not (fixture["data_dir"] / "backups").exists()

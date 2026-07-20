@@ -63,6 +63,18 @@ func canonicalNativeWindowsInstalledHookBinary() string {
 	return filepath.Join(root, "bin", windowsHookBinaryName)
 }
 
+// canonicalNativeWindowsInstalledGatewayBinary is the legacy install-tree
+// gateway path used by native Codex notify registrations before the dedicated
+// no-console hook launcher shipped. It is teardown authority only; new
+// registrations must continue to use the stable HookRuntime launcher.
+func canonicalNativeWindowsInstalledGatewayBinary() string {
+	root := canonicalNativeWindowsInstallRoot()
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(root, "bin", windowsGatewayBinaryName)
+}
+
 func nativeWindowsPathHasNoReparsePoints(path string) bool {
 	current, err := filepath.Abs(path)
 	if err != nil {

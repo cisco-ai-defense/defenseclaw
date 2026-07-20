@@ -19,10 +19,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,6 +48,14 @@ type configV8WireResponse struct {
 	Effective         json.RawMessage `json:"effective,omitempty"`
 }
 
+type configV8WireFailure struct {
+	WireVersion   int    `json:"wire_version"`
+	Kind          string `json:"kind"`
+	ConfigVersion int    `json:"config_version"`
+	Path          string `json:"path"`
+	Reason        string `json:"reason"`
+}
+
 // config-v8 is a machine-facing bridge for the Python operator CLI. Keeping
 // effective-plan compilation here means config show/validate/plan can use the
 // same compiler as gateway startup without starting the gateway, opening its
@@ -67,7 +77,11 @@ var configV8ValidateCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		compiled, source, gatewayAPIPort, err := compileConfigV8File(configV8ConfigPath, configV8DataDir)
 		if err != nil {
-			return err
+			failure := configV8ValidationFailure(err)
+			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {
+				return errors.New("configuration validation failed and its safe diagnostic could not be written")
+			}
+			return fmt.Errorf("configuration validation failed at %s: %s", failure.Path, failure.Reason)
 		}
 		valid := true
 		result := configV8WireResponse{
@@ -85,6 +99,95 @@ var configV8ValidateCmd = &cobra.Command{
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)
 	},
+}
+
+func configV8ValidationFailure(err error) configV8WireFailure {
+	result := configV8WireFailure{
+		WireVersion:   configV8WireVersion,
+		Kind:          "validation_error",
+		ConfigVersion: config.ObservabilityV8ConfigVersion,
+		Path:          "$",
+		Reason:        "configuration could not be compiled safely",
+	}
+	var yamlError *config.V8YAMLError
+	var schemaError *config.V8SchemaError
+	var semanticError *config.V8SemanticError
+	var secretError *config.V8SecretReferenceError
+	switch {
+	case errors.As(err, &secretError):
+		result.Path = "$." + secretError.Path
+		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"
+	case errors.As(err, &yamlError):
+		result.Path = configV8DiagnosticPath(yamlError.Path)
+		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
+	case errors.As(err, &schemaError):
+		result.Path = configV8DiagnosticPath(schemaError.Path)
+		detail := schemaError.Expected
+		if schemaError.Suggestion != "" {
+			if detail != "" {
+				detail += "; "
+			}
+			detail += "suggested field " + schemaError.Suggestion
+		}
+		result.Reason = configV8DiagnosticReason("config_schema_invalid", schemaError.Summary, detail, schemaError.Action)
+	case errors.As(err, &semanticError):
+		result.Path = configV8DiagnosticPath(semanticError.Path)
+		result.Reason = configV8DiagnosticReason(
+			"config_semantic_invalid",
+			semanticError.Summary,
+			semanticError.Expected,
+			semanticError.Action,
+		)
+	}
+	return result
+}
+
+func configV8DiagnosticPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "$") || len(value) > 512 {
+		return "$"
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return "$"
+		}
+	}
+	return value
+}
+
+func configV8DiagnosticReason(code, summary, detail, action string) string {
+	parts := make([]string, 0, 3)
+	if value := configV8DiagnosticText(summary); value != "" {
+		parts = append(parts, value)
+	}
+	if value := configV8DiagnosticText(detail); value != "" {
+		parts = append(parts, "expected "+value)
+	}
+	if value := configV8DiagnosticText(action); value != "" {
+		parts = append(parts, value)
+	}
+	code = configV8DiagnosticText(code)
+	if code == "" {
+		code = "configuration_invalid"
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "configuration could not be compiled safely")
+	}
+	reason := "[" + code + "] " + strings.Join(parts, "; ")
+	if len(reason) > 1_000 {
+		reason = reason[:1_000]
+	}
+	return reason
+}
+
+func configV8DiagnosticText(value string) string {
+	value = strings.TrimSpace(value)
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return ""
+		}
+	}
+	return value
 }
 
 var configV8EffectiveCmd = &cobra.Command{
@@ -201,6 +304,7 @@ func compileConfigV8File(path, defaultDataDir string) (*config.ObservabilityV8Co
 type loadedConfigV8File struct {
 	compiled       *config.ObservabilityV8CompiledConfig
 	document       *config.V8YAMLDocument
+	runtime        *config.Config
 	source         string
 	raw            []byte
 	gatewayAPIPort int
@@ -253,6 +357,13 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	if err != nil {
 		return nil, err
 	}
+	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRuntimeV8ConnectorRoster(document, runtimeCandidate); err != nil {
+		return nil, err
+	}
 	gatewayAPIPort := config.DefaultGatewayAPIPort
 	if gateway, ok := document.Plain["gateway"].(map[string]any); ok {
 		if rawPort, exists := gateway["api_port"]; exists {
@@ -266,10 +377,57 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	return &loadedConfigV8File{
 		compiled:       compiled,
 		document:       document,
+		runtime:        runtimeCandidate,
 		source:         absPath,
 		raw:            append([]byte(nil), raw...),
 		gatewayAPIPort: gatewayAPIPort,
 	}, nil
+}
+
+func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate *config.Config) error {
+	if document == nil || candidate == nil {
+		return &config.V8SemanticError{
+			Path:     "$.guardrail.connectors",
+			Summary:  "target runtime returned no connector candidate",
+			Expected: "the configured connector roster to survive target-runtime decoding",
+			Action:   "use the packaged target runtime to validate the complete candidate",
+		}
+	}
+	guardrail, ok := document.Plain["guardrail"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	configured, ok := guardrail["connectors"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, retained := candidate.Guardrail.Connectors[name]; retained {
+			continue
+		}
+		return &config.V8SemanticError{
+			Source:   document.Source,
+			Path:     "$.guardrail.connectors." + name,
+			Summary:  "target runtime did not retain the configured connector",
+			Expected: "the staged runtime connector roster to match the candidate source",
+			Action:   "refuse activation and keep the live configuration unchanged",
+		}
+	}
+	if len(candidate.Guardrail.Connectors) != len(configured) {
+		return &config.V8SemanticError{
+			Source:   document.Source,
+			Path:     "$.guardrail.connectors",
+			Summary:  "target runtime changed the configured connector roster",
+			Expected: "the staged runtime connector roster to match the candidate source",
+			Action:   "refuse activation and keep the live configuration unchanged",
+		}
+	}
+	return nil
 }
 
 func readConfigV8Source(path string) ([]byte, error) {
