@@ -441,9 +441,9 @@ func assertOperatorCodexStatePreserved(
 }
 
 func TestAuthenticatedSessionStartRejectsUnsafeRuntimeEvidenceWithoutMutation(t *testing.T) {
-	// Deliberately use the ordinary shared test temp tree rather than
-	// testenv.PrivateTempDir. The protected runtime reader must reject its
-	// inherited broad ACL and return before the guard can call Codex Setup.
+	// A non-regular protected evidence path is invalid on every filesystem and
+	// host ACL. Keep a sentinel inside the directory to prove the fail-closed
+	// read returns before Codex Setup can replace or mutate any evidence.
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "defenseclaw-home")
 	codexHome := filepath.Join(root, "codex-home")
@@ -462,16 +462,22 @@ func TestAuthenticatedSessionStartRejectsUnsafeRuntimeEvidenceWithoutMutation(t 
 	operatorConfig := []byte("model = \"operator-model\"\n[operator_preferences]\ntelemetry = \"minimal\"\n")
 	operatorManaged := []byte("[operator_policy]\nmode = \"strict\"\n")
 	foreignManaged := []byte("[foreign_profile]\nowner = \"operator\"\n")
-	unsafeEvidence := []byte(`{"version":2,"gateway":"127.0.0.1:18970","fail_modes":{"codex":"open"},"managed":false}`)
+	sentinelPath := filepath.Join(sharedPath, "sentinel")
+	sentinelBody := []byte("non-regular protected runtime evidence\n")
 	for path, body := range map[string][]byte{
 		configPath:  operatorConfig,
 		managedPath: operatorManaged,
 		foreignPath: foreignManaged,
-		sharedPath:  unsafeEvidence,
 	} {
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			t.Fatalf("seed %s: %v", path, err)
 		}
+	}
+	if err := os.Mkdir(sharedPath, 0o700); err != nil {
+		t.Fatalf("create non-regular runtime evidence: %v", err)
+	}
+	if err := os.WriteFile(sentinelPath, sentinelBody, 0o600); err != nil {
+		t.Fatalf("seed runtime evidence sentinel: %v", err)
 	}
 
 	previousConfigPath := connector.CodexConfigPathOverride
@@ -515,7 +521,6 @@ func TestAuthenticatedSessionStartRejectsUnsafeRuntimeEvidenceWithoutMutation(t 
 		configPath:  operatorConfig,
 		managedPath: operatorManaged,
 		foreignPath: foreignManaged,
-		sharedPath:  unsafeEvidence,
 	} {
 		got, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -525,11 +530,32 @@ func TestAuthenticatedSessionStartRejectsUnsafeRuntimeEvidenceWithoutMutation(t 
 			t.Fatalf("unsafe evidence refusal mutated %s:\n%s\nwant exact preimage:\n%s", path, got, want)
 		}
 	}
+	sharedInfo, err := os.Lstat(sharedPath)
+	if err != nil {
+		t.Fatalf("inspect preserved non-regular runtime evidence: %v", err)
+	}
+	if !sharedInfo.IsDir() {
+		t.Fatalf("unsafe evidence refusal replaced runtime evidence directory: mode=%v", sharedInfo.Mode())
+	}
+	sentinelAfter, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("read preserved runtime evidence sentinel: %v", err)
+	}
+	if !bytes.Equal(sentinelAfter, sentinelBody) {
+		t.Fatalf("unsafe evidence refusal mutated sentinel: got %q, want %q", sentinelAfter, sentinelBody)
+	}
+	sharedEntries, err := os.ReadDir(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sharedEntries) != 1 || sharedEntries[0].Name() != "sentinel" {
+		t.Fatalf("unsafe evidence refusal mutated runtime evidence directory: %v", sharedEntries)
+	}
 	entries, err := os.ReadDir(hookDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != ".hookcfg" {
+	if len(entries) != 1 || entries[0].Name() != ".hookcfg" || !entries[0].IsDir() {
 		t.Fatalf("unsafe evidence refusal published hook artifacts: %v", entries)
 	}
 	if _, err := os.Lstat(filepath.Join(dataDir, "hook_contract_lock.json")); !errors.Is(err, os.ErrNotExist) {
