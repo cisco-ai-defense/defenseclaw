@@ -325,8 +325,16 @@ func assertPythonGuardrailStatusHasNoCodexRegistrationDrift(t *testing.T, codexH
 	pythonPath := filepath.Clean(filepath.Join(workingDir, "..", "..", "cli"))
 	const script = `
 import os
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import patch
+
+# The native Go-only workflow intentionally does not install the Python
+# project's dependencies. This acceptance supplies its Config object directly,
+# so importing the real status command must not require YAML I/O. Keep the
+# sentinel deliberately API-empty: an unexpected parse or write still fails.
+sys.modules["yaml"] = types.ModuleType("yaml")
 
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
