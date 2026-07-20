@@ -172,6 +172,22 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		req.CWD = sanitizeHookCWD(req.CWD)
+		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
+		// proves the connector hook route authenticated the request. A fresh
+		// SessionStart is the last authoritative recovery signal before a
+		// Codex session proceeds; synchronously upsert a missing managed runtime
+		// registration through the Sidecar-owned guard. No other connector/event
+		// may mutate registration from hook input.
+		if connectorName == "codex" && req.HookEventName == "SessionStart" {
+			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+					"error": "Codex runtime registration is unavailable",
+				})
+				return
+			}
+		}
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for export, not for policy
