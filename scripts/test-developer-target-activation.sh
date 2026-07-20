@@ -460,6 +460,7 @@ expected_environment = (
     if legacy_source
     else {
         "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+        "DEFENSECLAW_GATEWAY_TOKEN": "upgrade-smoke-v8-gateway-fixture",
         "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION":
             "Bearer upgrade-smoke-v8-otlp-value",
         "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",

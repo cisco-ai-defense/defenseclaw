@@ -13,7 +13,11 @@ from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.context import AppContext
-from defenseclaw.fail_mode import resolve_connector_fail_mode
+from defenseclaw.fail_mode import (
+    ConnectorFailModeState,
+    connector_fail_mode_report,
+    resolve_connector_fail_mode,
+)
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
 
@@ -124,6 +128,46 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     )
 
 
+def test_fail_mode_state_reports_effective_provenance() -> None:
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="closed",
+        runtime="open",
+        sources=(
+            ("config", "closed"),
+            ("windows-sidecar", "closed"),
+            ("process-env", "open"),
+            ("registration-lock", "open"),
+        ),
+        drift=("process-env-open",),
+    )
+
+    report = state.to_report()
+
+    assert report["effective"] == "open"
+    assert report["provenance"] == "process-env"
+    assert report["configured"] == "closed"
+    assert report["drift"] == ["process-env-open"]
+
+
+def test_connector_fail_mode_report_uses_disposable_windows_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "closed"})
+    _write_current_runtime(cfg, home, {"codex": "closed"})
+
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+
+    assert report["effective"] == "closed"
+    assert report["provenance"] == "windows-sidecar"
+    assert report["current"] is True
+
+
 def test_windows_registration_freshness_uses_authenticated_packaged_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -168,6 +212,29 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
 
     assert drift == "registration-policy-blocked"
     assert observed["connector"] == "codex"
+
+
+def test_windows_codex_presence_uses_native_registration_validator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open"})
+    _write_current_runtime(cfg, home, {"codex": "open"})
+    (home / ".codex" / "managed_config.toml").write_text(
+        '[[hooks.SessionStart]]\ncommand = "defenseclaw hook --connector codex"\n',
+        encoding="utf-8",
+    )
+
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch(
+            "defenseclaw.fail_mode._codex_registration_current",
+            side_effect=AssertionError("legacy text probe must not own Windows managed registration"),
+        ),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+
+    assert "registration-missing" not in state.drift
 
 
 def test_windows_resolver_reports_effective_mixed_modes(

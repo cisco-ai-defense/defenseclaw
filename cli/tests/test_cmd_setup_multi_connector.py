@@ -36,6 +36,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -43,6 +44,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 
 pytestmark = pytest.mark.supported_connector_host
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
     _print_observability_summary,
@@ -70,7 +72,7 @@ def _setup_patches(prompt=None):
     patched to return it ("a"/"r"/"c").
     """
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
+        restart = stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
         stack.enter_context(patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None))
         stack.enter_context(
             patch(
@@ -80,7 +82,7 @@ def _setup_patches(prompt=None):
         )
         if prompt is not None:
             stack.enter_context(patch("defenseclaw.commands.cmd_setup.click.prompt", return_value=prompt))
-        yield
+        yield restart
 
 
 class TestAdditiveSetupCommand(unittest.TestCase):
@@ -114,6 +116,67 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         self.assertEqual(self.app.cfg.active_connectors(), ["codex", "cursor"])
+
+    def test_bare_batch_restart_waits_for_every_active_connector(self):
+        self._seed_map("codex", "cursor")
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            result = _invoke(["-c", "codex", "-c", "cursor", "--yes"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_called_once_with(
+            self.app.cfg.data_dir,
+            self.app.cfg.gateway.host,
+            self.app.cfg.gateway.port,
+            connector="codex",
+            connectors=["codex", "cursor"],
+            wait_for_connector_ready=True,
+            start_if_stopped=True,
+        )
+
+    def test_bare_batch_cannot_report_success_when_readiness_gate_fails(self):
+        self._seed_map("codex", "cursor")
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            restart.side_effect = click.ClickException("connector runtime readiness failed")
+            result = _invoke(["-c", "codex", "-c", "cursor", "--yes"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("connector runtime readiness failed", result.output)
+
+    def test_bare_batch_no_restart_remains_offline_staging(self):
+        self._seed_map("codex", "cursor")
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway") as generic,
+        ):
+            result = _invoke(
+                ["-c", "codex", "-c", "cursor", "--yes", "--no-restart"],
+                self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("--no-restart", result.output)
+        restart.assert_not_called()
+        generic.assert_not_called()
+
+    def test_unrelated_setup_callback_keeps_generic_restart_policy(self):
+        self._seed_map("codex", "cursor")
+        ctx = click.Context(setup_group, obj=self.app)
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = None
+        with open(self.cfg_path, "w", encoding="utf-8") as config_file:
+            config_file.write("unrelated: true\n")
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True),
+            patch("defenseclaw.commands.cmd_setup._restart_services") as readiness,
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True) as generic,
+        ):
+            cmd_setup._auto_restart_sidecar_after_setup()
+        readiness.assert_not_called()
+        generic.assert_called_once_with(self.app.cfg.data_dir, start_if_stopped=False)
 
     # D3: --replace forces overwrite even non-interactively.
     def test_replace_flag_overwrites_multi_set(self):
@@ -177,12 +240,13 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_no_restart_suppresses_parent_auto_restart_for_hook_alias(self):
         self._seed_map("antigravity", "codex", "hermes", "opencode")
         with (
-            _setup_patches(),
+            _setup_patches() as restart,
             patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True),
             patch("defenseclaw.commands.cmd_setup._restart_defense_gateway") as bounce,
         ):
             result = _invoke(["hermes", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_not_called()
         bounce.assert_not_called()
 
     def test_no_restart_allows_explicit_offline_connector_staging(self):

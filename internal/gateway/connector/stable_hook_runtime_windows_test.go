@@ -20,6 +20,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestHookRuntimeFlatEvidenceRequiresCanonicalExactBody(t *testing.T) {
+	canonical := []byte("DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n")
+	if !hookRuntimeFlatEvidenceCurrent(canonical, "codex", "open") {
+		t.Fatal("canonical Codex flat runtime evidence was rejected")
+	}
+	for name, body := range map[string][]byte{
+		"duplicate-mode": append(append([]byte(nil), canonical...), []byte("DEFENSECLAW_FAIL_MODE=closed\n")...),
+		"extra-entry":    append(append([]byte(nil), canonical...), []byte("UNRELATED=value\n")...),
+		"reordered":      []byte("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_CONNECTOR=codex\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if hookRuntimeFlatEvidenceCurrent(body, "codex", "open") {
+				t.Fatalf("non-canonical flat runtime evidence was accepted: %q", body)
+			}
+		})
+	}
+}
+
 // packagedWindowsHookBinaryAtUninstallRoot is a test-only strict resolver for
 // exercising uninstall-trash layout validation without adding an otherwise
 // unused production wrapper around the two production primitives.

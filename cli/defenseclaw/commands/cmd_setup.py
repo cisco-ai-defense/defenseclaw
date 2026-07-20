@@ -108,6 +108,11 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # ``setup guardrail --restart``); the auto-restart result callback
 # below honors this flag and becomes a no-op to avoid a double bounce.
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
+# Set only by the bare connector batch after it has staged every selected
+# target. The result callback consumes this exact roster to make that batch's
+# default restart a synchronous readiness gate, without changing restart
+# policy for unrelated setup subcommands that merely share the same config.
+_SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
@@ -5937,11 +5942,15 @@ def _apply_setup_batch(
     click.echo()
     click.echo(f"  ✓ Configured {len(applied)} connector(s): {', '.join(applied)}")
 
-    # Restart handling: when restart is on, let the group's auto-restart result
-    # callback bounce the gateway once (config.yaml changed above). For
-    # --no-restart, mark the restart handled so the callback stays out and warn
-    # that teardown/wiring is deferred to the next boot.
-    if not restart:
+    # Restart handling: the bare batch owns one narrow result-callback marker.
+    # Its default restart must start or restart the gateway and verify every
+    # selected target, even when the gateway was stopped or the config bytes
+    # were already current. Unrelated setup subcommands never set this marker.
+    if restart:
+        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(
+            sorted({normalize_connector(name) for name in connectors if name})
+        )
+    else:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo("  --no-restart: config updated; restart defenseclaw-gateway to wire the connector hooks.")
 
@@ -8211,6 +8220,7 @@ def _restart_services(
     connector: str = "openclaw",
     connectors: list[str] | None = None,
     wait_for_connector_ready: bool = False,
+    start_if_stopped: bool = True,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -8228,7 +8238,10 @@ def _restart_services(
     Avarice F-0142/F-0143: a failed gateway restart is fatal. We collect
     every restart failure and raise a ``ClickException`` at the end so the
     setup command exits non-zero (fail closed) instead of reporting
-    success while the gateway is down and hooks fail open."""
+    success while the gateway is down and hooks fail open.
+
+    ``start_if_stopped=False`` preserves the setup result callback's policy
+    of never starting a gateway the operator deliberately stopped."""
     ux.section("Restarting services")
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
@@ -8248,7 +8261,11 @@ def _restart_services(
         _hook_contract_lock_marker(data_dir) if wait_for_connector_ready and hook_targets else None
     )
 
-    gateway_restarted = _restart_defense_gateway(data_dir)
+    gateway_restarted = (
+        _restart_defense_gateway(data_dir)
+        if start_if_stopped
+        else _restart_defense_gateway(data_dir, start_if_stopped=False)
+    )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
@@ -8795,10 +8812,12 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
       * ``app.cfg`` isn't loaded (e.g. ``setup --help``, or a recovery
         invocation that bypassed the loader) — nothing to do.
       * config.yaml mtime unchanged — the subcommand was read-only
-        (``setup llm --show``, etc.).
-      * Gateway PID file shows the process is not running — we don't
-        auto-start a sidecar an operator deliberately stopped. A hint
-        is printed so they can start it manually if desired.
+        (``setup llm --show``, etc.). The bare connector batch is the narrow
+        exception: its explicit readiness marker always runs the gate.
+      * Gateway PID file shows the process is not running — generic setup does
+        not auto-start a sidecar an operator deliberately stopped. A bare
+        connector batch with restart enabled explicitly requests start plus
+        all-target verification; only its ``--no-restart`` form stages offline.
     """
     app = ctx.find_object(AppContext)
     if app is None or app.cfg is None:
@@ -8812,10 +8831,36 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     cfg_path = _config_yaml_path_from_ctx(ctx)
     before = ctx.meta.get(_SETUP_CFG_MTIME_KEY)
     after = _safe_mtime(cfg_path)
-    if cfg_path is None or after is None or before == after:
+    batch_targets_raw = ctx.meta.get(_SETUP_BATCH_READINESS_KEY)
+    batch_targets = (
+        [normalize_connector(name) for name in batch_targets_raw if isinstance(name, str) and name]
+        if isinstance(batch_targets_raw, (list, tuple))
+        else []
+    )
+    if not batch_targets and (cfg_path is None or after is None or before == after):
         return
 
     data_dir = app.cfg.data_dir
+    if batch_targets:
+        click.echo("")
+        click.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
+        primary = (
+            normalize_connector(app.cfg.active_connector())
+            if hasattr(app.cfg, "active_connector")
+            and normalize_connector(app.cfg.active_connector()) in batch_targets
+            else batch_targets[0]
+        )
+        _restart_services(
+            data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=primary,
+            connectors=batch_targets,
+            wait_for_connector_ready=True,
+            start_if_stopped=True,
+        )
+        return
+
     pid_file = os.path.join(data_dir, "gateway.pid")
     if not _is_pid_alive(pid_file):
         click.echo("")

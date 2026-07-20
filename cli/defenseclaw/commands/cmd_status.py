@@ -22,6 +22,7 @@ Mirrors internal/cli/status.go.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def _status_row(key: str, value: str) -> None:
     """
     label_padded = (key + ":").ljust(_STATUS_LABEL_WIDTH)
     rendered_value = ux.dim("—") if not value else value
-    click.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
+    ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
 def _openshell_available(cfg) -> bool:
@@ -96,7 +97,7 @@ def _openshell_available(cfg) -> bool:
     help=(
         "Emit status as a JSON document (environment, scanners, enforcement, "
         "activity, and the full per-connector roster with effective mode). "
-        "Config/DB-derived; no live /health counters."
+        "Includes authenticated, profile-bound sidecar state when available."
     ),
 )
 @pass_ctx
@@ -122,9 +123,9 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Title block — `═` divider matches the legacy double-line look
     # but now scales to the title length and renders cyan-bold.
-    click.echo()
-    click.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
-    click.echo(ux._style("══════════════════", fg="cyan"))
+    ux.echo()
+    ux.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
+    ux.echo(ux._style("══════════════════", fg="cyan"))
 
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
@@ -133,7 +134,7 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Config", str(config_path()))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
-    click.echo()
+    ux.echo()
 
     # Sandbox
     if _openshell_available(cfg):
@@ -153,11 +154,11 @@ def status(app: AppContext, as_json: bool) -> None:
     ]
     for name, binary in scanner_bins:
         if binary == "built-in":
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux.dim('built-in')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux.dim('built-in')}")
         elif resolve_scanner_binary(binary):
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('installed', fg='green')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('installed', fg='green')}")
         else:
-            click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
+            ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
     # N3: surface the active policy's scanner action overrides (data.json).
     # Only `policy show` exposed these before, so `status` was blind to a
@@ -165,7 +166,7 @@ def status(app: AppContext, as_json: bool) -> None:
     # policy that declares none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
-        click.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
+        ux.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
 
     # Counts from DB. The numeric labels stay tight-aligned to match
     # the legacy 16-char column; we color the labels and leave the
@@ -194,12 +195,9 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Blocked MCPs", counts.blocked_mcps),
                 ("Allowed MCPs", counts.allowed_mcps),
             ):
-                click.echo(f"    {_label((label + ':').ljust(16))} {val}")
+                ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(
-                f"    {ux._style('unavailable', fg='yellow')} "
-                f"{ux.dim(f'(audit DB error: {db_error})')}"
-            )
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
         ux.section("Activity")
         if counts is not None:
@@ -207,18 +205,15 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
             ):
-                click.echo(f"    {_label((label + ':').ljust(16))} {val}")
+                ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(
-                f"    {ux._style('unavailable', fg='yellow')} "
-                f"{ux.dim(f'(audit DB error: {db_error})')}"
-            )
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     # Canonical v8 collection, routing, redaction, and destination status.
     _print_observability_status(cfg)
 
     # Sidecar status
-    click.echo()
+    ux.echo()
     from defenseclaw.gateway import OrchestratorClient
 
     bind = "127.0.0.1"
@@ -233,13 +228,13 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Render the "Agents" roster uniformly — one section that lists every
     # active connector with its effective mode (and, when the sidecar is up,
-    # live /health counters per connector). The same code path drives a
-    # single-connector install (one row) and a fan-out install (N rows), so the
-    # output never branches on connector count.
-    if client.is_running():
+    # live counters from its identity-bound status snapshot). The same code
+    # path drives a single-connector install (one row) and a fan-out install
+    # (N rows), so the output never branches on connector count.
+    health = _fetch_runtime_bound_health(client, cfg)
+    if health is not None:
         _status_row("Sidecar", ux._style("running", fg="green"))
-        health = _fetch_health(bind, cfg.gateway.api_port)
-        _print_agents(cfg, bind, cfg.gateway.api_port, health=health)
+        _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_hook_guardian(cfg)
         hint(
@@ -308,8 +303,6 @@ def _connector_scope_text(cfg) -> str:
 
 def _print_agents(
     cfg,
-    host: str | None = None,
-    port: int | None = None,
     *,
     health: dict | None = None,
 ) -> None:
@@ -323,16 +316,15 @@ def _print_agents(
     single-connector install and N on a fan-out install, so the same loop
     drives both.
 
-    When ``host``/``port`` are supplied and the sidecar is up, *every*
-    connector is annotated with its own live state and counters (read from
-    ``/health`` ``connectors[]``). There is no privileged "primary" — each
-    active agent reports its own tally.
+    When a runtime-bound health snapshot is supplied, *every* connector is
+    annotated with its own live state and counters. There is no privileged
+    "primary" — each active agent reports its own tally.
     """
     try:
         manual_actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
     except Exception:
         manual_actives = []
-    health_map = _fetch_health_connectors(host, port, health=health) if (host and port) or health else {}
+    health_map = _fetch_health_connectors(health=health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -381,6 +373,8 @@ def _print_agents(
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
+        fail_mode = _effective_status_fail_mode(cfg, conn)
+        fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
         if not _is_enabled(conn):
             # Operator-disabled: hooks were torn down, so there is no live
@@ -388,67 +382,85 @@ def _print_agents(
             # the dim "not reporting" branch, which is indistinguishable from a
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
-            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}")
-            click.echo(f"                {disabled_text} — {disabled_label}")
+            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}")
+            ux.echo(f"                {disabled_text} — {disabled_label}")
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
         if hc:
             suffix = _connector_state_verb(str(hc.get("state") or ""))
-            click.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{source_suffix}{suffix}")
+            ux.echo(
+                f"                {friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{suffix}"
+            )
             _print_agent_counters(hc, indent="                  ")
         else:
-            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{source_suffix}")
-            click.echo(f"                {dim_text}")
+            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}")
+            ux.echo(f"                {dim_text}")
 
 
-def _fetch_health(host: str | None, port: int | None) -> dict | None:
-    """Return the parsed ``/health`` document (or ``None``).
-
-    Failures are intentionally swallowed — the sidecar may have just come up,
-    or the operator may be on an old gateway build. We never want
-    ``defenseclaw status`` to error because of an optional UX line.
-    """
-    if not host or not port:
+def _canonical_data_dir(value) -> str | None:
+    """Return the platform-canonical absolute form of a configured data dir."""
+    try:
+        raw = os.fspath(value)
+    except TypeError:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
         return None
     try:
-        import json as _json
-        import urllib.request as _urlreq
+        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
+    except (OSError, ValueError):
+        return None
 
-        url = f"http://{host}:{port}/health"
-        req = _urlreq.Request(url)
-        with _urlreq.urlopen(req, timeout=3) as resp:  # noqa: S310 — loopback only
-            data = _json.loads(resp.read().decode("utf-8"))
+
+def _fetch_runtime_bound_health(client, cfg) -> dict | None:
+    """Fetch health only from the sidecar owned by the resolved data dir.
+
+    ``/health`` is intentionally unauthenticated and a different profile may
+    already own the configured loopback port. The authenticated ``/status``
+    response includes both the health snapshot and ``runtime.data_dir``. Treat
+    missing, malformed, or mismatched identity as unavailable so status never
+    splices another profile's connectors or application-protection paths into
+    this profile's output.
+    """
+    try:
+        document = client.status()
     except Exception:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(document, dict):
+        return None
+    runtime = document.get("runtime")
+    health = document.get("health")
+    if not isinstance(runtime, dict) or not isinstance(health, dict):
+        return None
+    expected = _canonical_data_dir(getattr(cfg, "data_dir", None))
+    actual = _canonical_data_dir(runtime.get("data_dir"))
+    if expected is None or actual is None or expected != actual:
+        return None
+    return health
 
 
 def _fetch_health_connectors(
-    host: str | None,
-    port: int | None,
     *,
     health: dict | None = None,
 ) -> dict[str, dict]:
-    """Map ``connector-name`` → its ``ConnectorHealth`` from ``/health``.
+    """Map ``connector-name`` → its bound ``ConnectorHealth`` snapshot.
 
     Reads the per-connector ``connectors[]`` array so every active connector
     can render its own live counters. Falls back to folding in the singular
     ``connector`` field so an older gateway (which only reports the primary)
     still surfaces at least that connector's counters.
     """
-    data = health if isinstance(health, dict) else _fetch_health(host, port)
-    if not isinstance(data, dict):
+    if not isinstance(health, dict):
         return {}
     out: dict[str, dict] = {}
-    conns = data.get("connectors")
+    conns = health.get("connectors")
     if isinstance(conns, list):
         for c in conns:
             if isinstance(c, dict):
                 nm = str(c.get("name") or "").strip().lower()
                 if nm:
                     out[nm] = c
-    single = data.get("connector")
+    single = health.get("connector")
     if isinstance(single, dict):
         nm = str(single.get("name") or "").strip().lower()
         if nm and nm not in out:
@@ -473,6 +485,32 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
     return ""
 
 
+def _effective_status_fail_mode(cfg, connector: str) -> dict:
+    """Return the shared fail-mode report without making status fragile."""
+
+    try:
+        from defenseclaw.fail_mode import connector_fail_mode_report
+
+        return connector_fail_mode_report(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        guardrail = getattr(cfg, "guardrail", None)
+        resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+        try:
+            effective = str(resolver(connector) if callable(resolver) else "").strip().lower()
+        except Exception:  # noqa: BLE001 - preserve the informational command.
+            effective = ""
+        return {
+            "effective": effective or "unknown",
+            "provenance": "config-unverified",
+            "configured": effective or "unknown",
+            "desired": effective or "unknown",
+            "runtime": None,
+            "current": None,
+            "drift": ["report-unavailable"],
+            "sources": [],
+        }
+
+
 def _connector_state_verb(state: str) -> str:
     """Format a connector state as a colored ``— STATE`` suffix.
 
@@ -492,7 +530,7 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
     tool_mode = str(conn.get("tool_inspection_mode") or "").strip()
     sub_policy = str(conn.get("subprocess_policy") or "").strip()
     if tool_mode or sub_policy:
-        click.echo(
+        ux.echo(
             f"{indent}{ux.dim('tool inspection:')} {tool_mode or 'n/a'}    "
             f"{ux.dim('subprocess:')} {sub_policy or 'n/a'}"
         )
@@ -512,7 +550,7 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
         if sub_blocks
         else ux.dim(f"subprocess blocks: {sub_blocks}")
     )
-    click.echo(
+    ux.echo(
         f"{indent}{ux.dim(f'requests: {requests}')}  {err_text}  "
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
         f"{block_text_sub}"
@@ -530,12 +568,9 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     guardrail_mode = str(state.get("guardrail_mode") or "observe")
     asset_mode = str(state.get("asset_policy_mode") or "observe")
     trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"
-    click.echo(
+    ux.echo(
         "                "
-        + ux.dim(
-            f"auto guardrail={guardrail_mode} asset_policy={asset_mode} "
-            f"trusted-path-check={trust_check}"
-        )
+        + ux.dim(f"auto guardrail={guardrail_mode} asset_policy={asset_mode} trusted-path-check={trust_check}")
     )
 
     discovered = [r for r in state.get("discovered") or [] if isinstance(r, dict)]
@@ -543,41 +578,38 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     skipped = [r for r in state.get("skipped") or [] if isinstance(r, dict)]
     errors = state.get("last_activation_errors") or {}
     if not discovered and not active and not skipped and not errors:
-        click.echo("                " + ux.dim("(awaiting discovery scan)"))
+        ux.echo("                " + ux.dim("(awaiting discovery scan)"))
         return
 
     if discovered:
-        click.echo("                " + ux.bold("discovered"))
+        ux.echo("                " + ux.bold("discovered"))
         for row in discovered[:8]:
             conn = str(row.get("connector") or "").strip()
             conf = row.get("confidence")
             conf_text = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
             state_text = str(row.get("state") or "active")
-            click.echo(
+            ux.echo(
                 f"                  {_friendly_connector_name(conn)} ({conn}) — "
                 f"confidence={conf_text} state={state_text}"
             )
     if active:
-        click.echo("                " + ux.bold("auto-protected"))
+        ux.echo("                " + ux.bold("auto-protected"))
         for row in active:
             conn = str(row.get("connector") or "").strip()
             source = str(row.get("source") or "automatic")
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — source={source}")
+            ux.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — source={source}")
     if skipped:
-        click.echo("                " + ux.bold("skipped"))
+        ux.echo("                " + ux.bold("skipped"))
         for row in skipped[:8]:
             conn = str(row.get("connector") or "").strip()
             reason = str(row.get("reason") or "unknown")
             detail = str(row.get("detail") or "")
             suffix = f" — {detail}" if detail else ""
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {reason}{ux.dim(suffix)}")
+            ux.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {reason}{ux.dim(suffix)}")
     if isinstance(errors, dict) and errors:
-        click.echo("                " + ux.bold("last activation errors"))
+        ux.echo("                " + ux.bold("last activation errors"))
         for conn, err in sorted(errors.items()):
-            click.echo(
-                f"                  {_friendly_connector_name(conn)} ({conn}) — "
-                f"{ux._style(str(err), fg='yellow')}"
-            )
+            ux.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {ux._style(str(err), fg='yellow')}")
 
 
 def _application_protection_status(cfg, health: dict | None = None) -> dict:
@@ -666,7 +698,7 @@ def _print_hook_guardian(cfg) -> None:
 
     if not state.get("configured"):
         _status_row("Hook guardian", ux._style("not reconciled", fg="yellow"))
-        click.echo("                " + ux.dim("(no hook_guardian_state.json yet)"))
+        ux.echo("                " + ux.dim("(no hook_guardian_state.json yet)"))
         return
 
     ok = bool(state.get("ok"))
@@ -687,7 +719,7 @@ def _print_hook_guardian(cfg) -> None:
             detail.append(f"last run: {updated}")
         if manifest:
             detail.append(f"manifest: {manifest}")
-        click.echo("                " + ux.dim("  ".join(detail)))
+        ux.echo("                " + ux.dim("  ".join(detail)))
 
     results = [r for r in state.get("results") or [] if isinstance(r, dict)]
     for row in results[:8]:
@@ -697,10 +729,10 @@ def _print_hook_guardian(cfg) -> None:
         if user:
             label += f" for {user}"
         if row.get("ok"):
-            click.echo(f"                  {label} — ok")
+            ux.echo(f"                  {label} — ok")
         else:
             err = str(row.get("error") or "failed")
-            click.echo(f"                  {label} — {ux._style(err, fg='yellow')}")
+            ux.echo(f"                  {label} — {ux._style(err, fg='yellow')}")
 
 
 def _hook_guardian_status(cfg) -> dict:
@@ -731,21 +763,21 @@ def _print_observability_status(cfg) -> None:
     try:
         status = inspect_v8_operator_status(config_path_for_data_dir(cfg.data_dir))
     except Exception as exc:  # noqa: BLE001 - status remains useful when the sidecar is stopped.
-        click.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
+        ux.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
         return
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
-    click.echo(f"    {ux.dim('plan:')} {status.plan_digest[:12]}  {ux.dim('retention:')} {retention}")
+    ux.echo(f"    {ux.dim('plan:')} {status.plan_digest[:12]}  {ux.dim('retention:')} {retention}")
     for destination in status.destinations:
         state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")
         signals = ",".join(destination.selected_signals) or "none"
-        click.echo(
+        ux.echo(
             f"    {ux.bold(f'{destination.name:<26s}')}"
             f"{ux.dim(f'[{destination.kind}]')} {state}  "
             f"{signals}  {destination.redaction_label}"
         )
         if destination.endpoint:
-            click.echo(f"      {ux.dim('target:')} {destination.endpoint}")
+            ux.echo(f"      {ux.dim('target:')} {destination.endpoint}")
 
 
 def _scanner_overrides_summary(cfg) -> str:
@@ -780,9 +812,7 @@ def _scanner_overrides_summary(cfg) -> str:
                 for surface in ("install", "file", "runtime"):
                     action = surface_actions.get(surface)
                     if action:
-                        flat.append(
-                            (str(scanner_type), str(severity), surface, str(action))
-                        )
+                        flat.append((str(scanner_type), str(severity), surface, str(action)))
     return format_scanner_overrides_summary(tuple(flat))
 
 
@@ -838,12 +868,13 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             "name": c,
             "friendly": _friendly_connector_name(c),
             "mode": _mode(c),
+            "fail_mode": _effective_status_fail_mode(cfg, c),
             "enabled": _enabled(c),
             "source": "manual",
         }
         for c in actives
     }
-    for name, hc in _fetch_health_connectors(None, None, health=health).items():
+    for name, hc in _fetch_health_connectors(health=health).items():
         source = str(hc.get("source") or "").strip().lower()
         if source != "automatic":
             continue
@@ -851,6 +882,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             "name": name,
             "friendly": _friendly_connector_name(name),
             "mode": _effective_status_mode(cfg, name, source),
+            "fail_mode": _effective_status_fail_mode(cfg, name),
             "enabled": True,
             "source": "automatic",
             "state": hc.get("state"),
@@ -862,22 +894,26 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         name = str(row.get("connector") or "").strip().lower()
         if not name:
             continue
-        rows.setdefault(name, {
-            "name": name,
-            "friendly": _friendly_connector_name(name),
-            "mode": _effective_status_mode(cfg, name, "automatic"),
-            "enabled": True,
-            "source": "automatic",
-        })
+        rows.setdefault(
+            name,
+            {
+                "name": name,
+                "friendly": _friendly_connector_name(name),
+                "mode": _effective_status_mode(cfg, name, "automatic"),
+                "fail_mode": _effective_status_fail_mode(cfg, name),
+                "enabled": True,
+                "source": "automatic",
+            },
+        )
     return [rows[name] for name in sorted(rows)]
 
 
 def _status_payload(app) -> dict:
     """Build the machine-readable status document for ``status --json`` (SU-13).
 
-    Config + audit-DB derived only (no live ``/health`` call) so the JSON is
-    fast and reliable for automation even when the sidecar is down. Includes a
-    cheap ``sidecar.running`` probe but not per-connector live counters.
+    Config + audit-DB data forms the reliable baseline for automation. Live
+    sidecar state is accepted only from an authenticated ``/status`` response
+    whose runtime data directory matches the resolved configuration.
     SU-05: audit-DB read failures surface as ``enforcement``/``activity`` =
     ``null`` plus an ``audit_db_error`` field, never a silent drop.
     """
@@ -918,18 +954,18 @@ def _status_payload(app) -> dict:
     bind = "127.0.0.1"
     if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
         bind = cfg.guardrail.host
-    try:
-        from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient
 
+    try:
         client = OrchestratorClient(
             host=bind,
             port=cfg.gateway.api_port,
             token=cfg.gateway.resolved_token(),
         )
-        running = bool(client.is_running())
+        health = _fetch_runtime_bound_health(client, cfg)
     except Exception:
-        running = False
-    health = _fetch_health(bind, cfg.gateway.api_port) if running else None
+        health = None
+    running = health is not None
     payload["sidecar"] = {"running": running}
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)

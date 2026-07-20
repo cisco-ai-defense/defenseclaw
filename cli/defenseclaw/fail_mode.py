@@ -62,6 +62,47 @@ class ConnectorFailModeState:
     def current(self) -> bool:
         return not self.drift and self.runtime == self.desired
 
+    @property
+    def effective(self) -> str:
+        """Return the mode a reporting surface should present as effective."""
+
+        return self.runtime or self.desired
+
+    @property
+    def provenance(self) -> str:
+        """Return the source that supplied :attr:`effective`.
+
+        ``registration-lock`` is verification evidence, not an input to the
+        runtime selection order.  Every other non-empty runtime source appears
+        in the order in which :func:`resolve_connector_fail_mode` applies it,
+        so the last one is authoritative.  When no runtime value is readable,
+        reporting falls back to configured intent and names that provenance
+        explicitly.
+        """
+
+        if self.runtime is None:
+            return "config"
+        source = "config"
+        for candidate, mode in self.sources:
+            if candidate in {"config", "registration-lock"} or mode is None:
+                continue
+            source = candidate
+        return source
+
+    def to_report(self) -> dict[str, Any]:
+        """Return the canonical JSON-friendly reporting projection."""
+
+        return {
+            "effective": self.effective,
+            "provenance": self.provenance,
+            "configured": self.configured,
+            "desired": self.desired,
+            "runtime": self.runtime,
+            "current": self.current,
+            "drift": list(self.drift),
+            "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
+        }
+
 
 def resolve_connector_fail_mode(
     cfg: Any,
@@ -102,7 +143,12 @@ def resolve_connector_fail_mode(
             runtime = claude_env
         if not registered:
             drift.append("registration-missing")
-    elif name == "codex" and not _codex_registration_current(workspace):
+    # Windows managed Codex registration is a structured event matrix whose
+    # native validator below checks the exact command, launcher, contract,
+    # policy, and file identities. The legacy text probe only understands the
+    # user-scoped ``[hooks]`` placeholder and would falsely mark a valid
+    # ``managed_config.toml`` matrix missing before that authoritative check.
+    elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
@@ -146,6 +192,36 @@ def resolve_connector_fail_mode(
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
     )
+
+
+def connector_fail_mode_report(
+    cfg: Any,
+    connector: str,
+    *,
+    inspect_effective_policy: bool = True,
+) -> dict[str, Any]:
+    """Return the canonical read-only fail-mode report for a connector."""
+
+    name = normalize(connector)
+    guardrail = cfg.guardrail
+    resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+    configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    if name in _EXPECTED_CONTRACTS:
+        return resolve_connector_fail_mode(
+            cfg,
+            name,
+            inspect_effective_policy=inspect_effective_policy,
+        ).to_report()
+    return {
+        "effective": configured,
+        "provenance": "config",
+        "configured": configured,
+        "desired": configured,
+        "runtime": None,
+        "current": None,
+        "drift": [],
+        "sources": [{"name": "config", "mode": configured}],
+    }
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:

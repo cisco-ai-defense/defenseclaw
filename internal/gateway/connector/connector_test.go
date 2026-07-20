@@ -5052,6 +5052,245 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 	}
 }
 
+func TestCodexExactRestoreSanitizesStaleManagedTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "codex", "config.toml")
+	dataDir := filepath.Join(dir, "defenseclaw")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("create Codex config directory: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	otel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("build stale managed Codex OTel block: %v", err)
+	}
+	otel["operator_note"] = "preserve"
+	notify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		notify = codexNativeNotifyCommand()
+	}
+	stale := map[string]interface{}{
+		"model":  "gpt-5",
+		"otel":   otel,
+		"notify": notify,
+	}
+	staleRaw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal stale managed Codex config: %v", err)
+	}
+	if err := os.WriteFile(configPath, staleRaw, 0o600); err != nil {
+		t.Fatalf("write stale managed Codex config: %v", err)
+	}
+	managedBackup := &managedFileBackup{
+		Existed:       true,
+		PristineBytes: staleRaw,
+		PostSHA256:    managedFileSnapshotHash(staleRaw, true),
+	}
+	exact, ok := managedFileBackupTransform(managedBackup, staleRaw, true)
+	if !ok || exact.Remove {
+		t.Fatalf("contaminated managed backup did not select exact restore: ok=%t remove=%t", ok, exact.Remove)
+	}
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		exact.Data,
+		true,
+		codexConfigBackup{},
+		opts,
+		configPath,
+	)
+	if err != nil {
+		t.Fatalf("sanitize contaminated pristine snapshot: %v", err)
+	}
+	if cleaned.Remove {
+		t.Fatal("contaminated pristine snapshot removed unrelated operator config")
+	}
+	if bytes.Equal(cleaned.Data, exact.Data) {
+		t.Fatal("contaminated pristine snapshot was reported unchanged")
+	}
+	if err := os.WriteFile(configPath, cleaned.Data, 0o600); err != nil {
+		t.Fatalf("publish sanitized exact restore: %v", err)
+	}
+	restored := map[string]interface{}{}
+	restoredRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read sanitized Codex config: %v", err)
+	}
+	if err := toml.Unmarshal(restoredRaw, &restored); err != nil {
+		t.Fatalf("parse sanitized Codex config: %v", err)
+	}
+	if restored["model"] != "gpt-5" {
+		t.Fatalf("teardown changed unrelated Codex config: %#v", restored)
+	}
+	restoredOtel, _ := restored["otel"].(map[string]interface{})
+	if len(restoredOtel) != 1 || restoredOtel["operator_note"] != "preserve" {
+		t.Fatalf("teardown did not preserve only operator OTel config: %#v", restoredOtel)
+	}
+	if _, exists := restored["notify"]; exists {
+		t.Fatalf("teardown resurrected managed Codex notify config: %#v", restored["notify"])
+	}
+	if err := NewCodexConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after contaminated-pristine teardown: %v", err)
+	}
+}
+
+func TestCodexExactRestorePreservesOperatorTelemetryBytes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	operator := []byte(`# operator formatting must survive exact restoration
+notify = ["operator-notify.exe", "--quiet"]
+
+[otel]
+log_user_prompt = true
+operator_note = "preserve"
+
+[otel.exporter.otlp-http]
+endpoint = "https://otel.example.com/v1/logs"
+protocol = "json"
+`)
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operator, &operatorConfig); err != nil {
+		t.Fatalf("parse operator-only pristine snapshot: %v", err)
+	}
+	originalOtel, err := json.Marshal(operatorConfig["otel"])
+	if err != nil {
+		t.Fatalf("capture operator OTel preimage: %v", err)
+	}
+	originalNotify, err := json.Marshal(operatorConfig["notify"])
+	if err != nil {
+		t.Fatalf("capture operator notify preimage: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		operator,
+		true,
+		backup,
+		opts,
+		configPath,
+	)
+	if err != nil {
+		t.Fatalf("inspect operator-only pristine snapshot: %v", err)
+	}
+	if cleaned.Remove {
+		t.Fatal("operator-only pristine snapshot was reported removed")
+	}
+	if !bytes.Equal(cleaned.Data, operator) {
+		t.Fatalf("operator-only pristine snapshot changed byte-for-byte:\n%s", cleaned.Data)
+	}
+}
+
+func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	currentOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatalf("build managed Codex OTel block: %v", err)
+	}
+	staleOtel := make(map[string]interface{}, len(currentOtel)+1)
+	for key, value := range currentOtel {
+		staleOtel[key] = value
+	}
+	staleOtel["operator_note"] = "preserve"
+	notify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		notify = codexNativeNotifyCommand()
+	}
+	originalOtel, err := json.Marshal(staleOtel)
+	if err != nil {
+		t.Fatalf("marshal contaminated Codex OTel field backup: %v", err)
+	}
+	originalNotify, err := json.Marshal(notify)
+	if err != nil {
+		t.Fatalf("marshal contaminated Codex notify field backup: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+	cfg := map[string]interface{}{"otel": currentOtel, "notify": notify}
+
+	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		t.Fatalf("restore Codex notify: %v", err)
+	}
+	restoredOtel, _ := cfg["otel"].(map[string]interface{})
+	if len(restoredOtel) != 1 || restoredOtel["operator_note"] != "preserve" {
+		t.Fatalf("surgical restore resurrected managed Codex OTel config: %#v", restoredOtel)
+	}
+	if _, exists := cfg["notify"]; exists {
+		t.Fatalf("surgical restore resurrected managed Codex notify config: %#v", cfg["notify"])
+	}
+}
+
+func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("c", 64))
+	if err != nil {
+		t.Fatalf("build managed Codex OTel block: %v", err)
+	}
+	operatorOtel := map[string]interface{}{
+		"log_user_prompt": false,
+		"operator_note":   "preserve",
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "https://otel.example.com/v1/logs",
+				"protocol": "json",
+			},
+		},
+	}
+	operatorNotify := []interface{}{"operator-notify.exe", "--quiet"}
+	originalOtel, err := json.Marshal(operatorOtel)
+	if err != nil {
+		t.Fatalf("marshal operator Codex OTel field backup: %v", err)
+	}
+	originalNotify, err := json.Marshal(operatorNotify)
+	if err != nil {
+		t.Fatalf("marshal operator Codex notify field backup: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+	managedNotify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		managedNotify = codexNativeNotifyCommand()
+	}
+	cfg := map[string]interface{}{"otel": managedOtel, "notify": managedNotify}
+
+	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		t.Fatalf("restore Codex notify: %v", err)
+	}
+	if !codexValueMatches(cfg["otel"], operatorOtel) {
+		t.Fatalf("surgical restore changed operator Codex OTel config: %#v", cfg["otel"])
+	}
+	if !codexValueMatches(cfg["notify"], operatorNotify) {
+		t.Fatalf("surgical restore changed operator Codex notify config: %#v", cfg["notify"])
+	}
+}
+
 func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

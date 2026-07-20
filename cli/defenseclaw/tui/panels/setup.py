@@ -5554,17 +5554,17 @@ def _effective_guardrail_value(
     guardrail = getattr(cfg, "guardrail", None)
     if method_name == "effective_hook_fail_mode" and connector in {"claudecode", "codex"} and hasattr(cfg, "data_dir"):
         try:
-            from defenseclaw.fail_mode import resolve_connector_fail_mode
+            from defenseclaw.fail_mode import connector_fail_mode_report
 
-            state = resolve_connector_fail_mode(
+            report = connector_fail_mode_report(
                 cfg,
                 connector,
                 inspect_effective_policy=False,
             )
-            value = state.runtime or state.desired or "unknown"
-            if state.drift:
-                return f"{value} (status: {', '.join(state.drift)})"
-            return value
+            detail = f"provenance: {report['provenance']}"
+            if report["drift"]:
+                detail += f"; status: {', '.join(report['drift'])}"
+            return f"{report['effective']} ({detail})"
         except Exception:  # noqa: BLE001 - config editor must remain available during drift.
             pass
     resolver = getattr(guardrail, method_name, None) if guardrail is not None else None

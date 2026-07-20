@@ -95,6 +95,7 @@ _OBJECT_INHERIT_ACE = 0x01
 _CONTAINER_INHERIT_ACE = 0x02
 _INHERIT_ONLY_ACE = 0x08
 _INHERITED_ACE = 0x10
+_EMPTY_ACL = struct.pack("<BBHHH", _ACL_REVISION, 0, 8, 0, 0)
 
 _FILE_WRITE_DATA = 0x00000002
 _FILE_APPEND_DATA = 0x00000004
@@ -171,15 +172,40 @@ class WindowsFileSecurity:
         )
 
     def staging_copy(self) -> WindowsFileSecurity:
-        """Protect a staged copy so its ACL cannot be widened by inheritance."""
+        """Protect a staged copy without rewriting its DACL representation.
+
+        ``INHERITED_ACE`` records how an ACE reached the source object; the
+        independent protected control bit prevents future parent propagation.
+        CreateFile preserves those provenance bits on a protected descriptor,
+        so retaining the captured DACL also keeps later checks byte-exact.
+        """
 
         return WindowsFileSecurity(
             self.owner,
-            _protected_dacl_copy(self.dacl),
+            self.dacl,
             True,
             self.mandatory_label,
             self.sacl_protected,
         )
+
+
+def _security_difference_names(
+    actual: WindowsFileSecurity,
+    expected: WindowsFileSecurity,
+) -> tuple[str, ...]:
+    """Name mismatched components without disclosing descriptor contents."""
+
+    return tuple(
+        name
+        for name in (
+            "owner",
+            "dacl",
+            "dacl_protected",
+            "mandatory_label",
+            "sacl_protected",
+        )
+        if getattr(actual, name) != getattr(expected, name)
+    )
 
 
 class _WindowsApi(Protocol):
@@ -202,6 +228,13 @@ class _WindowsApi(Protocol):
     def get_security(self, handle: int) -> WindowsFileSecurity: ...
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None: ...
+
+    def set_new_file_security_exact(
+        self,
+        handle: int,
+        current: WindowsFileSecurity,
+        security: WindowsFileSecurity,
+    ) -> None: ...
 
     def create_file(self, path: str, security: WindowsFileSecurity) -> int: ...
 
@@ -341,16 +374,8 @@ def _security_mismatch_summary(
     )
 
 
-def _protected_dacl_copy(dacl: bytes) -> bytes:
-    """Return the exact explicit-ACE form Windows stores on a protected DACL.
-
-    An ACE cannot remain *inherited* once inheritance is disabled.  Windows
-    therefore clears ``INHERITED_ACE`` while applying a protected descriptor,
-    even though the SID, access mask, order, and all inheritance-propagation
-    flags remain unchanged.  Normalize that one kernel-defined transition
-    before creating a staged file so later byte-for-byte verification still
-    rejects every authorization-relevant drift.
-    """
+def _dacl_with_inherited_markers_cleared(dacl: bytes) -> bytes:
+    """Clear only provenance markers while preserving every other DACL byte."""
 
     if len(dacl) < 8:
         raise WindowsAclError("DACL header is truncated")
@@ -370,6 +395,25 @@ def _protected_dacl_copy(dacl: bytes) -> bytes:
     if cursor != acl_size:
         raise WindowsAclError("DACL contains trailing data outside its ACE inventory")
     return bytes(normalized)
+
+
+def _staged_security_for_observed_dacl(
+    requested: WindowsFileSecurity,
+    observed_dacl: bytes,
+) -> WindowsFileSecurity:
+    """Select one of the two exact Win32 staged-DACL representations."""
+
+    if observed_dacl == requested.dacl:
+        return requested
+    if observed_dacl == _dacl_with_inherited_markers_cleared(requested.dacl):
+        return WindowsFileSecurity(
+            requested.owner,
+            observed_dacl,
+            requested.dacl_protected,
+            requested.mandatory_label,
+            requested.sacl_protected,
+        )
+    return requested
 
 
 def _explicit_dacl_copy(dacl: bytes) -> bytes:
@@ -805,6 +849,56 @@ class _CtypesWindowsApi:
         if status != _ERROR_SUCCESS:
             self._raise_status("SetSecurityInfo", int(status))
 
+    def set_new_file_security_exact(
+        self,
+        handle: int,
+        current: WindowsFileSecurity,
+        security: WindowsFileSecurity,
+    ) -> None:
+        """Replace only differing components on one exclusive empty file."""
+
+        owner_buffer = None
+        dacl_buffer = None
+        label_buffer = None
+        information = 0
+        if current.owner != security.owner:
+            owner_buffer = ctypes.create_string_buffer(security.owner)
+            information |= _OWNER_SECURITY_INFORMATION
+        if current.dacl != security.dacl or current.dacl_protected != security.dacl_protected:
+            dacl_buffer = ctypes.create_string_buffer(security.dacl)
+            information |= _DACL_SECURITY_INFORMATION
+            information |= (
+                _PROTECTED_DACL_SECURITY_INFORMATION
+                if security.dacl_protected
+                else _UNPROTECTED_DACL_SECURITY_INFORMATION
+            )
+        if current.mandatory_label != security.mandatory_label:
+            # LABEL_SECURITY_INFORMATION with an empty ACL explicitly removes
+            # a provider-added mandatory label.
+            label = security.mandatory_label if security.mandatory_label is not None else _EMPTY_ACL
+            label_buffer = ctypes.create_string_buffer(label)
+            information |= _LABEL_SECURITY_INFORMATION
+        # SACL protection changes can require privileges even when no SACL
+        # contents are supplied, so request only an observed state transition.
+        # The caller still verifies the complete security snapshot afterward.
+        if current.sacl_protected != security.sacl_protected:
+            information |= (
+                _PROTECTED_SACL_SECURITY_INFORMATION
+                if security.sacl_protected
+                else _UNPROTECTED_SACL_SECURITY_INFORMATION
+            )
+        status = self._set_security_info(
+            handle,
+            _SE_FILE_OBJECT,
+            information,
+            owner_buffer,
+            None,
+            dacl_buffer,
+            label_buffer,
+        )
+        if status != _ERROR_SUCCESS:
+            self._raise_status("SetSecurityInfo(exact new file)", int(status))
+
     def _absolute_descriptor(self, security: WindowsFileSecurity):
         owner_buffer = ctypes.create_string_buffer(security.owner)
         dacl_buffer = ctypes.create_string_buffer(security.dacl)
@@ -852,7 +946,11 @@ class _CtypesWindowsApi:
         handle = self._create_file(
             path,
             _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _WRITE_DAC | _WRITE_OWNER | _DELETE,
-            _FILE_SHARE_READ,
+            # Keep the empty candidate exclusive until its exact descriptor,
+            # payload, and flush have all been verified. A reader admitted by
+            # a transient CreateFileW descriptor could otherwise retain its
+            # handle after the descriptor is repaired.
+            0,
             ctypes.byref(attributes),
             _CREATE_NEW,
             _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_WRITE_THROUGH,
@@ -1272,20 +1370,36 @@ def apply_path(path: str, security: WindowsFileSecurity, *, directory: bool = Fa
         api.close_handle(handle)
 
 
-def write_new_file(path: str, payload: bytes, security: WindowsFileSecurity) -> None:
+def write_new_file(path: str, payload: bytes, security: WindowsFileSecurity) -> WindowsFileSecurity:
     """Create, secure, write, flush, and verify a never-before-existing file."""
 
     api = _get_api()
-    staged_security = security.staging_copy()
-    handle = api.create_file(path, staged_security)
+    requested_staging = security.staging_copy()
+    handle = api.create_file(path, requested_staging)
     try:
-        # CreateFileW applied the protected descriptor before this first byte.
-        if api.get_security(handle) != staged_security:
-            raise WindowsAclError("new file security does not match before write")
+        # CreateFileW received the protected descriptor before this first byte.
+        # Some Windows security providers do not return the exact requested
+        # descriptor from CREATE_NEW even though the handle is still bound to
+        # the empty candidate. Reapply that same descriptor through the
+        # claimed handle, then keep the exact comparison as the write gate.
+        actual_security = api.get_security(handle)
+        staged_security = _staged_security_for_observed_dacl(requested_staging, actual_security.dacl)
+        if actual_security != staged_security:
+            api.set_new_file_security_exact(handle, actual_security, staged_security)
+            actual_security = api.get_security(handle)
+            staged_security = _staged_security_for_observed_dacl(requested_staging, actual_security.dacl)
+        if actual_security != staged_security:
+            # The exclusive candidate still contains zero payload bytes. Do
+            # not path-delete it here: a later name could identify a different
+            # file after this exact handle is closed. Name components only;
+            # owner, ACL, and label bytes are intentionally not disclosed.
+            differences = ", ".join(_security_difference_names(actual_security, staged_security))
+            raise WindowsAclError(f"new file security does not match before write ({differences})")
         api.write_all(handle, payload)
         api.flush(handle)
         if api.get_security(handle) != staged_security:
             raise WindowsAclError("new file security changed while writing")
+        return staged_security
     finally:
         api.close_handle(handle)
 

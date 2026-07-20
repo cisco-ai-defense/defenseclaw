@@ -152,6 +152,13 @@ type APIServer struct {
 	hookAPITokenMu sync.RWMutex
 	hookAPITokens  map[string]string
 
+	// hookRegistrationRepair is the narrow authenticated bridge from a fresh
+	// connector SessionStart to the Sidecar-owned hook guard. The Sidecar owns
+	// connector selection and SetupOpts; the API never resolves an ambient
+	// profile or constructs a second registration writer.
+	hookRegistrationRepairMu sync.RWMutex
+	hookRegistrationRepair   func(context.Context, string) error
+
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
@@ -315,6 +322,32 @@ func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
 		}
 	}
 	a.hookAPITokens = cp
+}
+
+// SetHookRegistrationRepair wires the active Sidecar hook-guard registry into
+// authenticated hook handling. Passing nil detaches the retiring API server
+// before its guards stop, so a stale request cannot write through an old
+// connector generation.
+func (a *APIServer) SetHookRegistrationRepair(repair func(context.Context, string) error) {
+	if a == nil {
+		return
+	}
+	a.hookRegistrationRepairMu.Lock()
+	a.hookRegistrationRepair = repair
+	a.hookRegistrationRepairMu.Unlock()
+}
+
+func (a *APIServer) ensureHookRegistration(ctx context.Context, connectorName string) error {
+	if a == nil {
+		return nil
+	}
+	a.hookRegistrationRepairMu.RLock()
+	repair := a.hookRegistrationRepair
+	a.hookRegistrationRepairMu.RUnlock()
+	if repair == nil {
+		return nil
+	}
+	return repair(ctx, connectorName)
 }
 
 // otlpPathTokenStatMinInterval bounds secure file revalidation on the hot

@@ -1549,6 +1549,27 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
 }
 
+func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
+	if !codexNotifyLooksManaged(cfg["notify"], opts) {
+		return nil
+	}
+	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
+		var original interface{}
+		if err := json.Unmarshal(backup.OriginalNotify, &original); err != nil {
+			return fmt.Errorf("restore original Codex notify config: %w", err)
+		}
+		if !codexNotifyLooksManaged(original, opts) {
+			cfg["notify"] = original
+			return nil
+		}
+	}
+	// A stale predecessor backup may describe DefenseClaw's own notifier as the
+	// operator preimage. Strong argv ownership makes deletion safe; unrelated
+	// notifiers never reach this branch.
+	delete(cfg, "notify")
+	return nil
+}
+
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
 // shell shim codex invokes on agent-turn-complete. The script POSTs
 // codex's JSON arg to /api/v1/codex/notify with the gateway token
@@ -1773,22 +1794,8 @@ func restoreOwnedCodexConfigFromTOML(
 	// structural and never loads or mints the scoped credential.
 	restoreCodexOtelEntries(cfg, backup, opts)
 
-	managedNotify := codexNotifyLooksManaged(cfg["notify"], opts)
-	if managedNotify && backup.HadNotify && len(backup.OriginalNotify) > 0 {
-		var orig interface{}
-		if err := json.Unmarshal(backup.OriginalNotify, &orig); err != nil {
-			return atomicTransformResult{}, fmt.Errorf("restore original Codex notify config: %w", err)
-		}
-		// A predecessor may have captured an already-managed command as the
-		// operator's original value during an upgrade. Reapplying that stale
-		// registration would defeat the current snapshot filter above.
-		if codexNotifyLooksManaged(orig, opts) {
-			delete(cfg, "notify")
-		} else {
-			cfg["notify"] = orig
-		}
-	} else if managedNotify {
-		delete(cfg, "notify")
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		return atomicTransformResult{}, err
 	}
 
 	restoredShape, err := json.Marshal(cfg)
@@ -2463,10 +2470,12 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	var originalValue interface{}
 	originalDecoded := false
 	original := map[string]interface{}(nil)
+	originalLooksManaged := false
 	if backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
 		if err := json.Unmarshal(backup.OriginalOtel, &originalValue); err == nil {
 			originalDecoded = true
 			original, _ = originalValue.(map[string]interface{})
+			originalLooksManaged = codexOtelBlockLooksManaged(original, opts)
 		}
 	}
 
@@ -2522,7 +2531,13 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	if value, exists := current["log_user_prompt"]; exists && value == true {
 		if original != nil {
 			if saved, hadSaved := original["log_user_prompt"]; hadSaved {
-				current["log_user_prompt"] = saved
+				// A stale managed snapshot cannot prove that Setup's true value
+				// belonged to the operator; a distinct saved value still can.
+				if originalLooksManaged && saved == true {
+					delete(current, "log_user_prompt")
+				} else {
+					current["log_user_prompt"] = saved
+				}
 			} else {
 				delete(current, "log_user_prompt")
 			}

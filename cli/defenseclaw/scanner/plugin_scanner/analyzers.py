@@ -30,8 +30,11 @@ import stat
 
 from defenseclaw.scanner.plugin_scanner.helpers import (
     _SKIP_DIRS,
+    STANDARD_MANIFEST_DIRS,
+    PathLinkStatus,
     collect_files,
     downgrade,
+    inspect_path_link,
     is_comment_line,
     is_test_path,
     make_finding,
@@ -357,54 +360,60 @@ def _emit_collection_findings(
 
     for esc in symlink_escapes:
         rel = esc.replace(directory + os.sep, "")
-        findings.append(make_finding(
-            0,
-            rule_id="STRUCT-SYMLINK-ESCAPE",
-            severity="HIGH",
-            confidence=0.95,
-            title=f"Symlink escapes plugin directory{label_suffix}",
-            description=(
-                f"Symlink at '{rel}' points outside the plugin root. "
-                "This could allow the plugin to read host files."
-            ),
-            location=rel,
-            remediation="Remove symlinks that reference paths outside the plugin directory.",
-            tags=["supply-chain"],
-        ))
+        findings.append(
+            make_finding(
+                0,
+                rule_id="STRUCT-SYMLINK-ESCAPE",
+                severity="HIGH",
+                confidence=0.95,
+                title=f"Symlink escapes plugin directory{label_suffix}",
+                description=(
+                    f"Symlink at '{rel}' points outside the plugin root. "
+                    "This could allow the plugin to read host files."
+                ),
+                location=rel,
+                remediation="Remove symlinks that reference paths outside the plugin directory.",
+                tags=["supply-chain"],
+            )
+        )
 
     for trunc in depth_truncations:
         rel = trunc.replace(directory + os.sep, "")
-        findings.append(make_finding(
-            0,
-            rule_id="SCAN-DEPTH-LIMIT",
-            severity="MEDIUM",
-            confidence=0.9,
-            title=f"Directory depth limit reached{label_suffix}",
-            description=(
-                f"Directory '{rel}' was not scanned because it exceeds the depth limit. "
-                "A plugin may hide malicious code in deeply nested directories."
-            ),
-            location=rel,
-            remediation="Inspect deeply nested directories manually.",
-            tags=["supply-chain"],
-        ))
+        findings.append(
+            make_finding(
+                0,
+                rule_id="SCAN-DEPTH-LIMIT",
+                severity="MEDIUM",
+                confidence=0.9,
+                title=f"Directory depth limit reached{label_suffix}",
+                description=(
+                    f"Directory '{rel}' was not scanned because it exceeds the depth limit. "
+                    "A plugin may hide malicious code in deeply nested directories."
+                ),
+                location=rel,
+                remediation="Inspect deeply nested directories manually.",
+                tags=["supply-chain"],
+            )
+        )
 
-    for path in (oversized_files or []):
+    for path in oversized_files or []:
         rel = path.replace(directory + os.sep, "")
-        findings.append(make_finding(
-            0,
-            rule_id="SCAN-OVERSIZED-FILE",
-            severity="LOW",
-            confidence=0.9,
-            title=f"File skipped: exceeds size limit{label_suffix}",
-            description=(
-                f"File '{rel}' exceeds the per-file size limit and was not scanned. "
-                "Oversized files may be used to evade static analysis."
-            ),
-            location=rel,
-            remediation="Investigate oversized files and remove them if unnecessary.",
-            tags=["supply-chain"],
-        ))
+        findings.append(
+            make_finding(
+                0,
+                rule_id="SCAN-OVERSIZED-FILE",
+                severity="LOW",
+                confidence=0.9,
+                title=f"File skipped: exceeds size limit{label_suffix}",
+                description=(
+                    f"File '{rel}' exceeds the per-file size limit and was not scanned. "
+                    "Oversized files may be used to evade static analysis."
+                ),
+                location=rel,
+                remediation="Investigate oversized files and remove them if unnecessary.",
+                tags=["supply-chain"],
+            )
+        )
 
 
 def scan_source_files(
@@ -592,8 +601,7 @@ def _check_for_hardcoded_secrets(
                         ),
                         location=f"{rel_path}:{line_idx + 1}",
                         remediation=(
-                            "Remove the credential from source code. "
-                            "Use environment variables or a secrets manager."
+                            "Remove the credential from source code. Use environment variables or a secrets manager."
                         ),
                         tags=["credential-theft"],
                     )
@@ -791,8 +799,7 @@ def _check_for_obfuscation(
                 title="String.fromCharCode obfuscation detected",
                 evidence=sanitise_evidence(code_lines[idx]) if idx >= 0 else None,
                 description=(
-                    "Plugin constructs strings from character codes, "
-                    "a technique used to evade static analysis."
+                    "Plugin constructs strings from character codes, a technique used to evade static analysis."
                 ),
                 location=f"{rel_path}:{idx + 1 if idx >= 0 else 0}",
                 remediation="Evaluate the constructed string and replace with a readable literal if safe.",
@@ -803,9 +810,7 @@ def _check_for_obfuscation(
     # Hex escape sequences
     hex_re = re.compile(r"(?:\\x[0-9a-fA-F]{2}){4,}")
     if hex_re.search(code_content):
-        idx = next(
-            (i for i, ln in enumerate(code_lines) if hex_re.search(ln)), -1
-        )
+        idx = next((i for i, ln in enumerate(code_lines) if hex_re.search(ln)), -1)
         findings.append(
             make_finding(
                 len(findings) + 1,
@@ -815,8 +820,7 @@ def _check_for_obfuscation(
                 title="Hex escape sequence obfuscation detected",
                 evidence=sanitise_evidence(code_lines[idx]) if idx >= 0 else None,
                 description=(
-                    "Plugin uses hex escape sequences to build strings, "
-                    "a common technique for hiding commands."
+                    "Plugin uses hex escape sequences to build strings, a common technique for hiding commands."
                 ),
                 location=f"{rel_path}:{idx + 1 if idx >= 0 else 0}",
                 remediation="Decode the hex sequence and review the resulting string.",
@@ -827,9 +831,7 @@ def _check_for_obfuscation(
     # String concatenation evasion
     concat_re = re.compile(r"""['"](?:ev|cu|ch|ex|sp)['"]\s*\+\s*['"](?:al|rl|ild|ec|awn)""")
     if concat_re.search(code_content):
-        idx = next(
-            (i for i, ln in enumerate(code_lines) if concat_re.search(ln)), -1
-        )
+        idx = next((i for i, ln in enumerate(code_lines) if concat_re.search(ln)), -1)
         findings.append(
             make_finding(
                 len(findings) + 1,
@@ -951,20 +953,42 @@ def _check_for_cost_runaway(
 _STRUCT_MAX_DEPTH = 20
 
 
+def _check_hidden_struct_entry(
+    directory: str,
+    entry: str,
+    findings: list[Finding],
+) -> None:
+    if not entry.startswith(".") or entry in SAFE_DOTFILES:
+        return
+    findings.append(
+        make_finding(
+            len(findings) + 1,
+            rule_id="STRUCT-HIDDEN",
+            severity="LOW",
+            confidence=0.5,
+            title=f"Hidden file found: {entry}",
+            evidence=f"File: {entry}",
+            description=f'Plugin contains hidden file "{entry}" which may conceal configuration or data.',
+            location=f"{directory}/{entry}",
+            remediation="Review the hidden file and remove if unnecessary.",
+        )
+    )
+
+
 def _check_struct_entry(
     directory: str,
     entry: str,
     findings: list[Finding],
     *,
-    top_level: bool,
+    check_hidden: bool,
 ) -> None:
     """Emit a structure finding for a single file entry.
 
-    The ``top_level`` flag gates the generic STRUCT-HIDDEN check: hidden
-    files are only flagged at the plugin root to preserve historical
-    behaviour and avoid a flood of nested dot-file findings. Binary,
-    script, and environment files are flagged at any depth so a payload
-    cannot hide simply by living under ``dist/`` (F-0381).
+    The ``check_hidden`` flag gates STRUCT-HIDDEN. It is enabled at the
+    plugin root and while traversing an exact standard manifest directory,
+    but remains disabled for ordinary nested directories to avoid a flood
+    of dot-file findings. Binary, script, and environment files are flagged
+    at any depth so a payload cannot hide under ``dist/`` (F-0381).
     """
     dot_idx = entry.rfind(".")
     ext = entry[dot_idx:] if dot_idx >= 0 else ""
@@ -1023,26 +1047,35 @@ def _check_struct_entry(
                 tags=["supply-chain"],
             )
         )
-    elif top_level and entry.startswith(".") and entry not in SAFE_DOTFILES:
-        findings.append(
-            make_finding(
-                len(findings) + 1,
-                rule_id="STRUCT-HIDDEN",
-                severity="LOW",
-                confidence=0.5,
-                title=f"Hidden file found: {entry}",
-                evidence=f"File: {entry}",
-                description=f'Plugin contains hidden file "{entry}" which may conceal configuration or data.',
-                location=f"{directory}/{entry}",
-                remediation="Review the hidden file and remove if unnecessary.",
-            )
-        )
+    elif check_hidden:
+        _check_hidden_struct_entry(directory, entry, findings)
+
+
+def _is_contained(path: str, scan_root: str) -> bool:
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+        return os.path.commonpath((scan_root, real)) == scan_root
+    except (OSError, ValueError):
+        return False
+
+
+def _is_real_contained_directory(path: str, scan_root: str) -> bool:
+    link_status, info = inspect_path_link(path)
+    return (
+        link_status is PathLinkStatus.PLAIN
+        and info is not None
+        and stat.S_ISDIR(info.st_mode)
+        and _is_contained(path, scan_root)
+    )
 
 
 def _scan_nested_structure(
     directory: str,
     findings: list[Finding],
     depth: int,
+    *,
+    scan_root: str,
+    check_hidden: bool,
 ) -> None:
     """Recurse into a subdirectory looking for nested binaries/scripts/env files.
 
@@ -1062,14 +1095,24 @@ def _scan_nested_structure(
     for entry in entries:
         full_path = os.path.join(directory, entry)
         try:
-            if os.path.islink(full_path):
+            if check_hidden:
+                _check_struct_entry(directory, entry, findings, check_hidden=True)
+            link_status, info = inspect_path_link(full_path)
+            if link_status is not PathLinkStatus.PLAIN or info is None or not _is_contained(full_path, scan_root):
                 continue
-            if os.path.isdir(full_path):
+            if stat.S_ISDIR(info.st_mode):
                 if entry in _SKIP_DIRS:
                     continue
-                _scan_nested_structure(full_path, findings, depth + 1)
+                _scan_nested_structure(
+                    full_path,
+                    findings,
+                    depth + 1,
+                    scan_root=scan_root,
+                    check_hidden=False,
+                )
             else:
-                _check_struct_entry(directory, entry, findings, top_level=False)
+                if not check_hidden:
+                    _check_struct_entry(directory, entry, findings, check_hidden=False)
         except OSError:
             continue
 
@@ -1079,18 +1122,30 @@ def scan_directory_structure(
     findings: list[Finding],
 ) -> None:
     try:
+        scan_root = os.path.normcase(os.path.realpath(directory))
+    except OSError:
+        return
+    try:
         entries = os.listdir(directory)
     except OSError:
         return
 
     for entry in entries:
         full_path = os.path.join(directory, entry)
+        standard_manifest_directory = entry in STANDARD_MANIFEST_DIRS and _is_real_contained_directory(
+            full_path, scan_root
+        )
 
         # Top-level name-based checks. Preserve the historical skip of
         # node_modules/dist for the flat name checks so root-level
         # behaviour is unchanged.
         if entry not in ("node_modules", "dist"):
-            _check_struct_entry(directory, entry, findings, top_level=True)
+            _check_struct_entry(
+                directory,
+                entry,
+                findings,
+                check_hidden=not standard_manifest_directory,
+            )
 
         # Recurse into real subdirectories so nested binaries/scripts/env
         # files (e.g. dist/addon.so) are no longer invisible (F-0381).
@@ -1098,10 +1153,17 @@ def scan_directory_structure(
         if entry in _SKIP_DIRS:
             continue
         try:
-            if os.path.islink(full_path):
+            link_status, info = inspect_path_link(full_path)
+            if link_status is not PathLinkStatus.PLAIN or info is None or not _is_contained(full_path, scan_root):
                 continue
-            if os.path.isdir(full_path):
-                _scan_nested_structure(full_path, findings, depth=1)
+            if stat.S_ISDIR(info.st_mode):
+                _scan_nested_structure(
+                    full_path,
+                    findings,
+                    depth=1,
+                    scan_root=scan_root,
+                    check_hidden=standard_manifest_directory,
+                )
         except OSError:
             continue
 
@@ -1136,8 +1198,7 @@ def _check_for_ssrf(
                         ),
                         location=f"{rel_path}:{i + 1}",
                         remediation=(
-                            "Remove the metadata endpoint reference. "
-                            "Plugins should not access cloud instance metadata."
+                            "Remove the metadata endpoint reference. Plugins should not access cloud instance metadata."
                         ),
                         tags=["exfiltration"],
                     )
@@ -1179,8 +1240,7 @@ def _check_for_ssrf(
                     title="Internal hostname in network context",
                     evidence=sanitise_evidence(line),
                     description=(
-                        "Plugin references an internal hostname "
-                        "(localhost, corp, internal, etc.) in a network call."
+                        "Plugin references an internal hostname (localhost, corp, internal, etc.) in a network call."
                     ),
                     location=f"{rel_path}:{i + 1}",
                     remediation="Verify the hostname is intentional and not an SSRF target.",
@@ -1406,8 +1466,7 @@ def scan_bundle_size(
                     ),
                     location=f"{directory}/{entry}",
                     remediation=(
-                        "Ship source code instead of bundles, "
-                        "or provide source maps and unminified source for review."
+                        "Ship source code instead of bundles, or provide source maps and unminified source for review."
                     ),
                     tags=["obfuscation"],
                 )

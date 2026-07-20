@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,7 @@ const (
 	agentSelectionSchemaVersion = 1
 	agentSelectionMaxBytes      = 64 << 10
 	hookContractLockMaxBytes    = 2 << 20
+	hookRuntimeEvidenceMaxBytes = 64 << 10
 	agentSelectionMaxLifetime   = 15 * time.Minute
 	agentSelectionClockSkew     = 5 * time.Minute
 )
@@ -644,6 +646,139 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		entry.ContractID = opts.HookContractID
 	}
 	return entry
+}
+
+// HookRuntimeRegistrationCurrent verifies the complete Windows Codex
+// registration acknowledgement that setup publishes after the agent-visible
+// managed hook matrix is effective. The shared/connector runtime records and
+// protected hook-contract lock must all describe the exact current SetupOpts
+// and generated artifacts. Missing or ordinary stale evidence is repairable
+// and returns false; unsafe, unstable, or malformed protected state returns an
+// error so an authenticated hook cannot mutate through an untrusted path.
+//
+// Other connectors and hosts retain their established registration contract.
+// The concrete type check deliberately excludes test/future connectors that
+// happen to reuse the name "codex" without owning this Windows evidence.
+func HookRuntimeRegistrationCurrent(
+	opts SetupOpts,
+	conn Connector,
+	defenseClawVersion string,
+) (bool, error) {
+	if !RequiresHookRuntimeRegistrationEvidence(conn) {
+		return true, nil
+	}
+	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
+		return false, errors.New("Codex runtime registration requires an absolute data directory")
+	}
+
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	sharedBody, exists, err := readRequiredStablePrivateStateFile(
+		hookDir,
+		hookConfigSidecarName,
+		hookRuntimeEvidenceMaxBytes,
+	)
+	if err != nil || !exists {
+		return false, err
+	}
+	var runtimeState hookConfigSidecar
+	if err := json.Unmarshal(sharedBody, &runtimeState); err != nil {
+		return false, fmt.Errorf("parse Codex hook runtime evidence: %w", err)
+	}
+	if runtimeState.Version != 2 {
+		return false, fmt.Errorf("unsupported Codex hook runtime evidence version %d", runtimeState.Version)
+	}
+	wantMode := normalizeHookFailMode(opts.HookFailMode)
+	if strings.TrimSpace(runtimeState.GatewayAddr) != strings.TrimSpace(opts.APIAddr) ||
+		runtimeState.FailModes["codex"] != wantMode ||
+		runtimeState.Managed != opts.ManagedEnterprise {
+		return false, nil
+	}
+
+	flatBody, exists, err := readRequiredStablePrivateStateFile(
+		hookDir,
+		hookConfigSidecarName+".codex",
+		hookRuntimeEvidenceMaxBytes,
+	)
+	if err != nil || !exists {
+		return false, err
+	}
+	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode) {
+		return false, nil
+	}
+
+	lockBody, exists, err := readRequiredStablePrivateStateFile(
+		opts.DataDir,
+		hookContractLockFile,
+		hookContractLockMaxBytes,
+	)
+	if err != nil || !exists {
+		return false, err
+	}
+	var lock hookContractLock
+	if err := json.Unmarshal(lockBody, &lock); err != nil {
+		return false, fmt.Errorf("parse Codex hook contract lock: %w", err)
+	}
+	if lock.Version < 1 || lock.Version > hookContractLockVersion || lock.Connectors == nil {
+		return false, fmt.Errorf("unsupported Codex hook contract lock version %d", lock.Version)
+	}
+	stored, ok := lock.Connectors["codex"]
+	if !ok {
+		return false, nil
+	}
+	if _, err := time.Parse(time.RFC3339, lock.UpdatedAt); err != nil {
+		return false, nil
+	}
+	if _, err := time.Parse(time.RFC3339, stored.UpdatedAt); err != nil {
+		return false, nil
+	}
+	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
+		return false, errors.New("newer explicit Codex setup selection supersedes the active registration owner")
+	}
+	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
+	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
+	removeSharedHookScriptDigests(expected.HookScriptDigests)
+	stored.UpdatedAt = ""
+	expected.UpdatedAt = ""
+	if !reflect.DeepEqual(stored, expected) || !reflect.DeepEqual(lock.SharedHookScriptDigests, expectedShared) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode string) bool {
+	expected := fmt.Sprintf(
+		"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+		normalizeConnectorName(connectorName),
+		normalizeHookFailMode(failMode),
+	)
+	return bytes.Equal(body, []byte(expected))
+}
+
+// RequiresHookRuntimeRegistrationEvidence identifies the concrete Windows
+// Codex writer whose readiness contract includes .hookcfg and the protected
+// hook-contract lock. A named test double or future connector does not inherit
+// this filesystem contract merely by returning "codex" from Name.
+func RequiresHookRuntimeRegistrationEvidence(conn Connector) bool {
+	if runtime.GOOS != "windows" || conn == nil || normalizeConnectorName(conn.Name()) != "codex" {
+		return false
+	}
+	_, ok := conn.(*CodexConnector)
+	return ok
+}
+
+func readRequiredStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool, error) {
+	path := filepath.Join(dataDir, name)
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("inspect protected state %s: %w", path, err)
+	}
+	body, ok := readStablePrivateStateFile(dataDir, name, limit)
+	if !ok {
+		return nil, false, fmt.Errorf("protected state is unsafe or changed while reading: %s", path)
+	}
+	return body, true, nil
 }
 
 // setupSelectedAgentExecutableEvidence binds the exact regular executable
