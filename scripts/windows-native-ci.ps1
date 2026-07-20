@@ -3151,6 +3151,68 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw 'seeded setup upgrade did not restore the previously running watchdog'
         }
 
+		# Model a committed transaction produced by the legacy Setup journal
+		# schema while its journal-owned maintenance executable differs from the
+		# replacement installer. Recovery must run in the replacement Setup
+		# process; the cached executable is authentication state, never delegated
+		# recovery authority. Keep the real installed gateway and watchdog alive
+		# so this crosses the executable-release race seen in manual validation.
+		$journalPath = Join-Path $localAppData 'DefenseClaw\InstallerState\setup-transaction.json'
+		$cachedSetup = Join-Path $cacheRoot 'DefenseClawSetup-x64.exe'
+		if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) {
+			throw "setup acceptance transaction journal is missing: $journalPath"
+		}
+		if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
+			throw "setup acceptance maintenance executable is missing: $cachedSetup"
+		}
+		$legacyJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$legacyJournal.phase -cne 'complete') {
+			throw "setup acceptance journal phase is $($legacyJournal.phase), expected complete"
+		}
+		$replacementSetupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+		Copy-Item -LiteralPath $startup -Destination $cachedSetup -Force
+		$legacyMaintenanceHash = (Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash
+		if ($legacyMaintenanceHash -ceq $replacementSetupHash) {
+			throw 'legacy maintenance fixture unexpectedly matches the replacement Setup bytes'
+		}
+		$legacyJournal.schema_version = 1
+		$legacyJournal.phase = 'committed'
+		$legacyJournal.transaction.maintenance_sha256 = $legacyMaintenanceHash.ToLowerInvariant()
+		$legacyJournalText = ($legacyJournal | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
+		[IO.File]::WriteAllText($journalPath, $legacyJournalText, [Text.UTF8Encoding]::new($false))
+		$gatewayBeforeLegacyRecovery = Get-GatewayIdentity $dataRoot
+		$watchdogBeforeLegacyRecovery = Get-WatchdogIdentity $dataRoot
+		Assert-OwnedManagedProcess $gatewayBeforeLegacyRecovery $gateway `
+			'legacy committed recovery starting gateway'
+		Assert-OwnedManagedProcess $watchdogBeforeLegacyRecovery $gateway `
+			'legacy committed recovery starting watchdog'
+		Invoke-WindowsSetupStandardUserProcess $setup @(
+			'/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
+		) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-legacy-committed-recovery.log') | Out-Null
+		$recoveredJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$recoveredJournal.phase -cne 'complete') {
+			throw "replacement Setup left legacy recovery in phase $($recoveredJournal.phase)"
+		}
+		if ((Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash -cne $replacementSetupHash) {
+			throw 'replacement Setup did not publish its candidate maintenance executable'
+		}
+		$recoveredState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+		if ([string]$recoveredState.source_commit -cne [string]$upgradedState.source_commit) {
+			throw 'replacement Setup did not retain the exact candidate source commit'
+		}
+		$gatewayAfterLegacyRecovery = Get-GatewayIdentity $dataRoot
+		$watchdogAfterLegacyRecovery = Get-WatchdogIdentity $dataRoot
+		Assert-OwnedManagedProcess $gatewayAfterLegacyRecovery $gateway `
+			'legacy committed recovery-restored gateway'
+		Assert-OwnedManagedProcess $watchdogAfterLegacyRecovery $gateway `
+			'legacy committed recovery-restored watchdog'
+		if (-not (Test-GatewayIdentityChanged $gatewayBeforeLegacyRecovery $gatewayAfterLegacyRecovery)) {
+			throw 'replacement Setup did not restore the gateway after legacy committed recovery'
+		}
+		if (-not (Test-GatewayIdentityChanged $watchdogBeforeLegacyRecovery $watchdogAfterLegacyRecovery)) {
+			throw 'replacement Setup did not restore the watchdog after legacy committed recovery'
+		}
+
         $stateHashBeforeLockedRepair = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
         $installParent = Split-Path -Parent $installRoot
         $transactionTreesBeforeLockedRepair = @(

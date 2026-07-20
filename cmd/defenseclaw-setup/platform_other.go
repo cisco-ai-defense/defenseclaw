@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,6 +17,13 @@ import (
 func requireNativeWindowsX64() error { return errors.New("windows-only operation") }
 
 func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
+func managedProcessProofFor(_, _, _ string) (managedProcessProof, bool, error) {
+	return managedProcessProof{}, false, nil
+}
+func closeManagedProcessProof(_ managedProcessProof) error { return nil }
+func waitForManagedProcessExitContext(_ context.Context, _ managedProcessProof, _ time.Duration) error {
+	return nil
+}
 func liveProcessWithinInstallRoot(_ string, _ ...string) (uint32, string, error) {
 	return 0, "", nil
 }

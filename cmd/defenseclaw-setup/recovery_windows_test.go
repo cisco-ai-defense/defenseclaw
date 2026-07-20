@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -211,6 +212,141 @@ func TestCommittedRecoveryWaitsForLockedGatewayBeforeConvergence(t *testing.T) {
 	wantCalls := "authenticate-stop:gateway+watchdog,verify-release,converge,journal:converged,cleanup,journal:complete"
 	if got := strings.Join(calls, ","); got != wantCalls {
 		t.Fatalf("committed recovery calls = %q, want %q", got, wantCalls)
+	}
+}
+
+func TestWaitForExecutableReleaseRejectsRunningGatewayImageUntilExit(t *testing.T) {
+	installRoot, _, _ := testTransactionRoots(t)
+	binDir := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayPath := filepath.Join(binDir, "defenseclaw-gateway.exe")
+	copyExecutable(t, source, gatewayPath)
+	ready := filepath.Join(t.TempDir(), "gateway-ready")
+	gateway := exec.Command(gatewayPath, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
+	gateway.Env = append(os.Environ(),
+		"GO_WANT_SETUP_PROCESS_HELPER=1",
+		"GO_SETUP_PROCESS_READY="+ready,
+	)
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := false
+	t.Cleanup(func() {
+		if !exited {
+			_ = gateway.Process.Kill()
+			_, _ = gateway.Process.Wait()
+		}
+	})
+	waitForRecoveryFixture(t, ready)
+
+	if err := waitForExecutableRelease(gatewayPath, 150*time.Millisecond); err == nil ||
+		!strings.Contains(err.Error(), "timed out waiting for executable handle release") {
+		t.Fatalf("running gateway release proof = %v, want bounded sharing timeout", err)
+	}
+	if err := gateway.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.Process.Wait(); err != nil && !strings.Contains(err.Error(), "signal: killed") {
+		t.Fatal(err)
+	}
+	exited = true
+	if err := waitForExecutableRelease(gatewayPath, time.Second); err != nil {
+		t.Fatalf("released gateway image remained locked: %v", err)
+	}
+}
+
+func TestStopOwnedServicesWaitsForAuthenticatedGatewayAndWatchdogExit(t *testing.T) {
+	installRoot, dataRoot, _ := testTransactionRoots(t)
+	binDir := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayPath := filepath.Join(binDir, "defenseclaw-gateway.exe")
+	copyExecutable(t, source, gatewayPath)
+	t.Setenv("DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER", "1")
+
+	type runningFixture struct {
+		command *exec.Cmd
+		exited  bool
+	}
+	start := func(name string) *runningFixture {
+		t.Helper()
+		ready := filepath.Join(t.TempDir(), name+"-ready")
+		stop := filepath.Join(t.TempDir(), name+"-stop")
+		command := exec.Command(gatewayPath, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
+		command.Env = append(os.Environ(),
+			"GO_WANT_SETUP_PROCESS_HELPER=1",
+			"GO_SETUP_PROCESS_READY="+ready,
+			"GO_SETUP_PROCESS_STOP="+stop,
+		)
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		fixture := &runningFixture{command: command}
+		t.Cleanup(func() {
+			if !fixture.exited {
+				_ = command.Process.Kill()
+				_, _ = command.Process.Wait()
+			}
+		})
+		waitForRecoveryFixture(t, ready)
+		switch name {
+		case "gateway":
+			t.Setenv("DEFENSECLAW_SETUP_TEST_GATEWAY_STOP", stop)
+		case "watchdog":
+			t.Setenv("DEFENSECLAW_SETUP_TEST_WATCHDOG_STOP", stop)
+		default:
+			t.Fatalf("unexpected service fixture %q", name)
+		}
+		imagePath, startIdentity, err := processIdentity(uint32(command.Process.Pid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := json.Marshal(pidState{
+			PID:           command.Process.Pid,
+			Executable:    imagePath,
+			StartIdentity: startIdentity,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dataRoot, name+".pid"), state, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return fixture
+	}
+	gateway := start("gateway")
+	watchdog := start("watchdog")
+
+	stopped, err := stopOwnedServices(gatewayPath, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped != (serviceState{Gateway: true, Watchdog: true}) {
+		t.Fatalf("stopped services = %+v", stopped)
+	}
+	for name, fixture := range map[string]*runningFixture{"gateway": gateway, "watchdog": watchdog} {
+		if _, _, err := processIdentity(uint32(fixture.command.Process.Pid)); !errors.Is(err, os.ErrProcessDone) {
+			t.Fatalf("%s still owns the installed executable after stop returned: %v", name, err)
+		}
+		_, _ = fixture.command.Process.Wait()
+		fixture.exited = true
+	}
+	if err := waitForExecutableRelease(gatewayPath, time.Second); err != nil {
+		t.Fatalf("stopped service images retained the gateway executable: %v", err)
 	}
 }
 

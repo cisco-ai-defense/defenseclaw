@@ -826,6 +826,13 @@ type serviceState struct {
 	Watchdog bool `json:"watchdog"`
 }
 
+type managedProcessProof struct {
+	PID           uint32
+	Executable    string
+	StartIdentity string
+	ProcessHandle uintptr
+}
+
 func (state serviceState) any() bool {
 	return state.Gateway || state.Watchdog
 }
@@ -1806,14 +1813,16 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 	if !pathExists(gatewayPath) {
 		return serviceState{}, nil
 	}
-	watchdogOwned, err := managedProcessOwnedBy(gatewayPath, dataRoot, "watchdog.pid")
+	watchdogProof, watchdogOwned, err := managedProcessProofFor(gatewayPath, dataRoot, "watchdog.pid")
 	if err != nil {
 		return serviceState{}, err
 	}
-	gatewayOwned, err := managedProcessOwnedBy(gatewayPath, dataRoot, "gateway.pid")
+	defer func() { _ = closeManagedProcessProof(watchdogProof) }()
+	gatewayProof, gatewayOwned, err := managedProcessProofFor(gatewayPath, dataRoot, "gateway.pid")
 	if err != nil {
 		return serviceState{}, err
 	}
+	defer func() { _ = closeManagedProcessProof(gatewayProof) }()
 	stopped := serviceState{}
 	if watchdogOwned {
 		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "watchdog", "stop")
@@ -1821,6 +1830,9 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 			return serviceState{}, fmt.Errorf("stop managed watchdog: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Watchdog = true
+		if err := waitForManagedProcessExitContext(ctx, watchdogProof, setupExecutableReleaseTimeout); err != nil {
+			return serviceState{}, fmt.Errorf("wait for managed watchdog exit: %w", err)
+		}
 	}
 	if gatewayOwned {
 		output, stopErr := runCapturedSetupCommandContext(ctx, setupControlCommandTimeout, false, managedChildEnv(dataRoot), gatewayPath, "stop")
@@ -1831,6 +1843,12 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 			return serviceState{}, fmt.Errorf("stop managed gateway: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Gateway = true
+		if err := waitForManagedProcessExitContext(ctx, gatewayProof, setupExecutableReleaseTimeout); err != nil {
+			if stopped.Watchdog {
+				_ = startWatchdog(gatewayPath, dataRoot)
+			}
+			return serviceState{}, fmt.Errorf("wait for managed gateway exit: %w", err)
+		}
 	}
 	return stopped, nil
 }

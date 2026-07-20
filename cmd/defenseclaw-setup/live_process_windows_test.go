@@ -160,6 +160,21 @@ func TestLiveProcessWithinInstallRootHelper(t *testing.T) {
 	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
 		os.Exit(3)
 	}
+	if stop := os.Getenv("GO_SETUP_PROCESS_STOP"); stop != "" {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, err := os.Stat(stop); err == nil {
+				time.Sleep(250 * time.Millisecond)
+				return
+			} else if !errors.Is(err, os.ErrNotExist) {
+				os.Exit(4)
+			}
+			if !time.Now().Before(deadline) {
+				os.Exit(5)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 	time.Sleep(2 * time.Minute)
 }
 

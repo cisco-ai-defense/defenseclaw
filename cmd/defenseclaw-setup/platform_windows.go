@@ -96,50 +96,119 @@ func acquireSetupLock() (func() error, error) {
 }
 
 func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) {
+	proof, owned, err := managedProcessProofFor(gatewayPath, dataRoot, pidFile)
+	closeErr := closeManagedProcessProof(proof)
+	if err == nil {
+		err = closeErr
+	}
+	return owned, err
+}
+
+func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProcessProof, bool, error) {
 	pidPath := filepath.Join(dataRoot, pidFile)
 	info, err := os.Lstat(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return managedProcessProof{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	}
 	if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
 	}
 	if reparse, err := isReparsePoint(pidPath); err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	} else if reparse {
-		return false, fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
 	}
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	}
 	var state pidState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return false, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
+		return managedProcessProof{}, false, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
 	}
 	if state.PID <= 0 || strings.TrimSpace(state.Executable) == "" {
-		return false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
 	}
 	if !pathidentity.Same(state.Executable, gatewayPath) {
-		return false, nil
+		return managedProcessProof{}, false, nil
 	}
-	livePath, identity, err := processIdentity(uint32(state.PID))
-	if errors.Is(err, os.ErrProcessDone) {
-		return false, nil
+	handle, err := windows.OpenProcess(
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
+		false,
+		uint32(state.PID),
+	)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return managedProcessProof{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
+	}
+	livePath, identity, err := processIdentityFromHandle(handle)
+	if errors.Is(err, os.ErrProcessDone) {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
+	}
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, err
 	}
 	if !pathidentity.Same(livePath, gatewayPath) {
-		return false, nil
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
 	}
 	if state.StartIdentity != "" && state.StartIdentity != identity {
-		return false, nil
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
 	}
-	return true, nil
+	return managedProcessProof{
+		PID:           uint32(state.PID),
+		Executable:    livePath,
+		StartIdentity: identity,
+		ProcessHandle: uintptr(handle),
+	}, true, nil
+}
+
+func closeManagedProcessProof(proof managedProcessProof) error {
+	if proof.ProcessHandle == 0 {
+		return nil
+	}
+	return windows.CloseHandle(windows.Handle(proof.ProcessHandle))
+}
+
+func waitForManagedProcessExitContext(
+	ctx context.Context,
+	proof managedProcessProof,
+	timeout time.Duration,
+) error {
+	if proof.PID == 0 || strings.TrimSpace(proof.Executable) == "" || proof.StartIdentity == "" ||
+		proof.ProcessHandle == 0 {
+		return errors.New("managed process exit proof is incomplete")
+	}
+	handle := windows.Handle(proof.ProcessHandle)
+	deadline := time.Now().Add(timeout)
+	for {
+		result, err := windows.WaitForSingleObject(handle, 25)
+		if err != nil {
+			return err
+		}
+		if result == uint32(windows.WAIT_OBJECT_0) {
+			return nil
+		}
+		if result != uint32(windows.WAIT_TIMEOUT) {
+			return fmt.Errorf("unexpected authenticated process wait result %#x", result)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for authenticated process %d to exit", proof.PID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
 }
 
 func waitForExecutableRelease(path string, timeout time.Duration) error {
@@ -185,7 +254,13 @@ func probeExecutableRelease(path string) error {
 	}
 	handle, err := windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_READ|windows.DELETE,
+		// Stable-hook publication immediately opens this executable read/write
+		// before tightening its DACL. A read/delete-only probe can succeed while
+		// a legacy gateway or watchdog image still denies write sharing, creating
+		// a false release proof followed by ERROR_SHARING_VIOLATION. Request the
+		// same write authority here without mutating the file so recovery waits
+		// for every executable image handle to drain first.
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -532,6 +607,10 @@ func processIdentity(pid uint32) (string, string, error) {
 		return "", "", err
 	}
 	defer windows.CloseHandle(handle)
+	return processIdentityFromHandle(handle)
+}
+
+func processIdentityFromHandle(handle windows.Handle) (string, string, error) {
 	waitResult, err := windows.WaitForSingleObject(handle, 0)
 	if err != nil {
 		return "", "", err
