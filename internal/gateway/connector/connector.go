@@ -23,6 +23,7 @@ package connector
 import (
 	"context"
 	"net/http"
+	"os"
 )
 
 // ToolInspectionMode describes how a connector monitors tool calls.
@@ -162,6 +163,40 @@ type Connector interface {
 // the route dynamically at boot instead of hardcoding paths in api.go.
 type HookEndpoint interface {
 	HookAPIPath() string
+}
+
+// HookConfigStub describes the bytes + mode a connector wants written
+// when its native hook config file is absent on a fresh target (the
+// agent binary was never launched by this user, so its default config
+// file doesn't exist yet). DefenseClaw is a customer endpoint product —
+// fresh Macs where the user hasn't opened Cursor / launched Claude Code
+// still need hooks wired at pkg-install time. Without a bootstrap the
+// guardian's per-target Install would refuse with
+// "hook config file missing" and enforcement never engages until the
+// user happens to launch each agent once.
+//
+// The stub bytes must be the minimal-valid config the agent will
+// accept unchanged. The connector's Setup() will subsequently patch
+// the DefenseClaw-owned entries in — the stub is only enough for the
+// installer's validateActivationSurfaces check to pass.
+//
+// Empty ContentPath signals "no bootstrap for this connector" — the
+// installer falls back to the strict "must exist" precondition.
+type HookConfigStub struct {
+	ContentPath string      // absolute path (must be one HookConfigPathsForConnector returned)
+	Contents    []byte      // minimal-valid config bytes
+	Mode        os.FileMode // file mode after write (typically 0o600)
+}
+
+// HookConfigBootstrap is the optional Connector-side hook. When a
+// connector implements it the installer calls DefaultHookConfigStub
+// under withOwnerCredentials, so the stub is written as the target
+// user with the correct uid/gid. Connectors that don't implement it
+// fall back to whatever DefaultHookConfigStubForConnector resolves in
+// the installer package (kept there so the three shipped connectors
+// don't each need a near-identical method).
+type HookConfigBootstrap interface {
+	DefaultHookConfigStub(opts SetupOpts) HookConfigStub
 }
 
 // HookCapability describes the actual lifecycle hook controls a connector
