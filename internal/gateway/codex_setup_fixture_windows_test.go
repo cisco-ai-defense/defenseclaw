@@ -6,10 +6,14 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -87,4 +91,42 @@ func prepareCodexSetupPolicyFixture(
 	opts.AgentExecutable = entry.AgentExecutable
 	opts.HookContractID = entry.ContractID
 	t.Setenv(codexSetupAppServerHelperEnv, "1")
+}
+
+func publishCodexSetupSelectionFixture(
+	t *testing.T,
+	dataDir string,
+	opts connector.SetupOpts,
+) {
+	t.Helper()
+	body, err := os.ReadFile(opts.AgentExecutable)
+	if err != nil {
+		t.Fatalf("read selected Codex fixture executable: %v", err)
+	}
+	digest := sha256.Sum256(body)
+	resolution := connector.ResolveHookContract("codex", opts.AgentVersion)
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := map[string]interface{}{
+		"schema_version": 1,
+		"updated_at":     now.Format(time.RFC3339),
+		"selections": map[string]interface{}{
+			"codex": map[string]interface{}{
+				"connector":          "codex",
+				"source":             "setup-selected",
+				"executable":         opts.AgentExecutable,
+				"raw_version":        resolution.RawVersion,
+				"normalized_version": resolution.NormalizedVersion,
+				"sha256":             hex.EncodeToString(digest[:]),
+				"selected_at":        now.Format(time.RFC3339),
+				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	encoded, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal Codex setup selection fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_selection.json"), append(encoded, '\n'), 0o600); err != nil {
+		t.Fatalf("publish Codex setup selection fixture: %v", err)
+	}
 }

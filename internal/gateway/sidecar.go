@@ -90,6 +90,7 @@ type Sidecar struct {
 	apiServer                *APIServer
 	hookGuardsMu             sync.RWMutex
 	hookGuards               map[*HookConfigGuard]struct{}
+	hookGuardsChanged        chan struct{}
 	proxyMu                  sync.RWMutex
 	guardrailProxy           *GuardrailProxy
 	apiRestartCh             chan struct{}
@@ -1531,6 +1532,7 @@ func (s *Sidecar) registerHookConfigGuard(guard *HookConfigGuard) {
 		s.hookGuards = make(map[*HookConfigGuard]struct{})
 	}
 	s.hookGuards[guard] = struct{}{}
+	s.signalHookGuardsChangedLocked()
 	s.hookGuardsMu.Unlock()
 	guard.SetDeactivationNotifier(s.unregisterHookConfigGuard)
 }
@@ -1541,8 +1543,18 @@ func (s *Sidecar) unregisterHookConfigGuard(guard *HookConfigGuard) {
 	}
 	s.hookGuardsMu.Lock()
 	delete(s.hookGuards, guard)
+	s.signalHookGuardsChangedLocked()
 	s.hookGuardsMu.Unlock()
 }
+
+func (s *Sidecar) signalHookGuardsChangedLocked() {
+	if s.hookGuardsChanged != nil {
+		close(s.hookGuardsChanged)
+	}
+	s.hookGuardsChanged = make(chan struct{})
+}
+
+const hookRegistrationOwnerWaitTimeout = 10 * time.Second
 
 func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorName string) error {
 	if s == nil {
@@ -1563,26 +1575,64 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 	if name != "codex" {
 		return fmt.Errorf("hook registration repair is unsupported for connector %q", name)
 	}
-	dataDir := cfg.DataDir
-	s.hookGuardsMu.RLock()
-	guards := make([]*HookConfigGuard, 0, len(s.hookGuards))
-	for guard := range s.hookGuards {
-		guards = append(guards, guard)
+	if !cfg.EffectiveGuardrailEnabledForConnector(name) {
+		return nil
 	}
-	s.hookGuardsMu.RUnlock()
-	var owner *HookConfigGuard
-	for _, guard := range guards {
-		if guard.MatchesActiveConnector(name, dataDir) {
-			if owner != nil {
-				return fmt.Errorf("multiple active hook registration guards claim connector %s in the configured data home", name)
-			}
-			owner = guard
+	dataDir := cfg.DataDir
+	configured := false
+	for _, active := range cfg.ActiveConnectors() {
+		if strings.EqualFold(strings.TrimSpace(active), name) {
+			configured = true
+			break
 		}
 	}
-	if owner != nil {
-		return owner.EnsurePresent(ctx, name, dataDir, "authenticated SessionStart")
+	if !configured {
+		return fmt.Errorf("no configured hook registration owner exists for connector %s", name)
 	}
-	return fmt.Errorf("no active hook registration guard owns connector %s in the configured data home", name)
+	if connector.ConnectorExplicitlyInactive(dataDir, name) {
+		return fmt.Errorf("connector %s is explicitly inactive", name)
+	}
+
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(waitCtx, hookRegistrationOwnerWaitTimeout)
+	defer cancel()
+	for {
+		s.hookGuardsMu.Lock()
+		if s.hookGuardsChanged == nil {
+			s.hookGuardsChanged = make(chan struct{})
+		}
+		changed := s.hookGuardsChanged
+		guards := make([]*HookConfigGuard, 0, len(s.hookGuards))
+		for guard := range s.hookGuards {
+			guards = append(guards, guard)
+		}
+		s.hookGuardsMu.Unlock()
+
+		var owner *HookConfigGuard
+		for _, guard := range guards {
+			if guard.MatchesActiveConnector(name, dataDir) {
+				if owner != nil {
+					return fmt.Errorf("multiple active hook registration guards claim connector %s in the configured data home", name)
+				}
+				owner = guard
+			}
+		}
+		if owner != nil {
+			return owner.EnsurePresent(ctx, name, dataDir, "authenticated SessionStart")
+		}
+		if connector.ConnectorExplicitlyInactive(dataDir, name) {
+			return fmt.Errorf("connector %s is explicitly inactive", name)
+		}
+		select {
+		case <-changed:
+			continue
+		case <-waitCtx.Done():
+			return fmt.Errorf("no active hook registration guard owns connector %s in the configured data home: %w", name, waitCtx.Err())
+		}
+	}
 }
 
 // pickInspector selects the AID inspector implementation based on
@@ -3474,8 +3524,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		}
 		return fmt.Errorf("connector %s registration verification failed: %w", conn.Name(), err)
 	}
-	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveFreshHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
+	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
 		return fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 	}
 	return nil
@@ -3872,10 +3921,28 @@ func (s *Sidecar) saveSingleConnectorReadyState(ctx context.Context, opts connec
 	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
-	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveFreshHookContractLockEntry(opts.DataDir, lockEntry); err != nil {
+	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
 		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 		return s.failGuardrailWithRollback(ctx, opts, conn, "hook contract lock", lockErr)
+	}
+	return nil
+}
+
+func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {
+	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveFreshHookContractLockEntry(opts.DataDir, lockEntry); err != nil {
+		return err
+	}
+	current, err := connector.HookRuntimeRegistrationCurrent(
+		opts,
+		conn,
+		version.Current().BinaryVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("verify fresh runtime registration evidence: %w", err)
+	}
+	if !current {
+		return errors.New("fresh runtime registration evidence does not match the active connector contract")
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 const (
@@ -601,9 +602,21 @@ func (g *HookConfigGuard) repairCurrent(
 		g.reportPolicyFailure(conn, err)
 		return err
 	}
+	evidenceCurrent, err := connector.HookRuntimeRegistrationCurrent(
+		opts,
+		conn,
+		version.Current().BinaryVersion,
+	)
+	if err != nil {
+		g.reportPolicyFailure(conn, err)
+		return err
+	}
 	g.clearPolicyFailure()
-	if present {
+	if present && evidenceCurrent {
 		return nil
+	}
+	if present && !evidenceCurrent {
+		changed = append(changed, "stale runtime registration evidence")
 	}
 	if suppressed {
 		return errors.New("hook registration repair is suppressed during connector transition")
@@ -772,6 +785,18 @@ func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Con
 				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
 		}
 		return err
+	}
+	if connector.RequiresHookRuntimeRegistrationEvidence(conn) {
+		if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
+			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v\n", connName, err)
+			emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+				fmt.Sprintf("re-installed %s hook config but registration evidence is unavailable", connName), err)
+			if g.logger != nil {
+				_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+					fmt.Sprintf("hook self-heal registration evidence failed: %v", err), "", connName)
+			}
+			return err
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)

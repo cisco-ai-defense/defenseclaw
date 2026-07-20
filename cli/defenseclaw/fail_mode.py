@@ -143,7 +143,12 @@ def resolve_connector_fail_mode(
             runtime = claude_env
         if not registered:
             drift.append("registration-missing")
-    elif name == "codex" and not _codex_registration_current(workspace):
+    # Windows managed Codex registration is a structured event matrix whose
+    # native validator below checks the exact command, launcher, contract,
+    # policy, and file identities. The legacy text probe only understands the
+    # user-scoped ``[hooks]`` placeholder and would falsely mark a valid
+    # ``managed_config.toml`` matrix missing before that authoritative check.
+    elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)

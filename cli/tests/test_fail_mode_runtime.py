@@ -214,6 +214,29 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
     assert observed["connector"] == "codex"
 
 
+def test_windows_codex_presence_uses_native_registration_validator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open"})
+    _write_current_runtime(cfg, home, {"codex": "open"})
+    (home / ".codex" / "managed_config.toml").write_text(
+        '[[hooks.SessionStart]]\ncommand = "defenseclaw hook --connector codex"\n',
+        encoding="utf-8",
+    )
+
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch(
+            "defenseclaw.fail_mode._codex_registration_current",
+            side_effect=AssertionError("legacy text probe must not own Windows managed registration"),
+        ),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+
+    assert "registration-missing" not in state.drift
+
+
 def test_windows_resolver_reports_effective_mixed_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
