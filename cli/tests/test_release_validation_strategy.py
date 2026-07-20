@@ -35,6 +35,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     assert "if" not in deterministic
     assert deterministic["name"] == "Release Regression (deterministic)"
     assert "test_release_certification.py" in _render(deterministic)
+    assert "test_release_api_retry.py" in _render(deterministic)
 
     plan = _render(jobs["release-validation-plan"])
     assert "scripts/release_certification.py paths" in plan
@@ -89,6 +90,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
         "scripts/resolve_upgrade_baselines.py",
+        "scripts/release_api_retry.py",
         "scripts/generate-upgrade-manifest.py",
         "scripts/verify-sigstore-blob.py",
         "scripts/check_observability_v8_upgrade_continuity.py",
@@ -214,8 +216,22 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "needs.select-candidate.result == 'success'" in publish["if"]
     assert publish["permissions"] == {"contents": "write"}
     rendered_publish = _render(publish)
-    assert 'git/ref/heads/main" --jq .object.sha' in rendered_publish
-    assert 'remote_main" != "$RELEASE_COMMIT' in rendered_publish
+    assert "scripts/release_api_retry.py reconcile-create" in rendered_publish
+    preflight = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Recheck remote release namespace"
+    )
+    assert "scripts/release_api_retry.py reconcile-create" in preflight
+    assert '--commit "$RELEASE_COMMIT"' in preflight
+    assert "--candidate-root release-candidate" in preflight
+    assert "--check-main" in preflight
+    create = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Publish tag and selected sealed assets"
+    )
+    assert create["if"] == "steps.release-namespace.outputs.create_required == 'true'"
 
     # Release owns the unchanged Fulcio identity and candidate construction,
     # while expensive test implementations stay in the reusable workflow.

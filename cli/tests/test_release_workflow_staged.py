@@ -100,8 +100,10 @@ def test_release_immutability_preflight_uses_operator_confirmation_without_admin
     assert "IMMUTABLE_RELEASES_CONFIRMED" in text
     assert "inputs.immutable_releases_confirmed" in text
     assert "Immutable Releases confirmation required" in text
-    assert "--json tagName,isDraft,isImmutable,assets" in text
-    assert "scripts/release_candidate.py verify-published" in text
+    assert "scripts/release_api_retry.py prove-published" in text
+    helper = (ROOT / "scripts/release_api_retry.py").read_text(encoding="utf-8")
+    assert '"isImmutable": payload.get("immutable")' in helper
+    assert "verify_published_release" in helper
 
 
 def test_release_automation_never_publishes_runtime_to_python_package_indexes() -> None:
@@ -186,7 +188,7 @@ def test_windows_release_binaries_are_disabled_and_omitted() -> None:
     assert "windows_prebridge_baselines == '[]'" in certification["windows-unpublished-refusal"]["if"]
 
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
-    assert workflow_text.count("--omit-windows-binaries") == 2
+    assert workflow_text.count("--omit-windows-binaries") == 4
     assert "publish_windows_binaries" not in workflow_text
     assert "Windows-specific binaries and SBOMs will not be published" in workflow_text
 
@@ -498,7 +500,42 @@ def test_only_final_step_can_create_remote_release_or_tag() -> None:
     assert "git push" not in text
     assert "push:\n" not in text
     assert "Publish tag and selected sealed assets" in text
-    assert "verify-published" in text
+    assert "prove-published" in text
+
+
+def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    publish = _workflow()["jobs"]["publish-release"]
+    rendered = "\n".join(step.get("run", "") for step in publish["steps"])
+    namespace_step = next(step for step in publish["steps"] if step.get("id") == "release-namespace")
+    create_step = next(
+        step for step in publish["steps"] if step.get("name") == "Publish tag and selected sealed assets"
+    )
+
+    assert publish["timeout-minutes"] == "45"
+    assert text.count("scripts/release_api_retry.py require-absent") == 1
+    assert "scripts/release_api_retry.py reconcile-create" in namespace_step["run"]
+    assert "--candidate-root release-candidate" in namespace_step["run"]
+    assert "--omit-windows-binaries" in namespace_step["run"]
+    assert "--check-main" in namespace_step["run"]
+    assert "create_required=false" in namespace_step["run"]
+    assert "create_required=true" in namespace_step["run"]
+    assert create_step["if"] == "steps.release-namespace.outputs.create_required == 'true'"
+    assert "for attempt in 1 2 3" in rendered
+    assert "timeout --signal=TERM --kill-after=30s 10m" in rendered
+    assert "scripts/release_api_retry.py reconcile-create" in rendered
+    assert rendered.count("--check-main") == 2
+    assert 'reconcile_status" != "10"' in rendered
+    assert "refusing another create" in rendered
+    assert "Release API retries exhausted" in rendered
+    assert "scripts/release_api_retry.py prove-published" in rendered
+    create_index = rendered.index('gh release create "$RELEASE_TAG"')
+    precheck_index = rendered.index("scripts/release_api_retry.py reconcile-create")
+    reconcile_index = rendered.rindex("scripts/release_api_retry.py reconcile-create")
+    prove_index = rendered.index("scripts/release_api_retry.py prove-published")
+    assert precheck_index < create_index < reconcile_index < prove_index
+    assert 'git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG"' not in rendered
+    assert 'gh release view "$RELEASE_TAG"' not in rendered
 
 
 def test_every_remote_action_is_commit_pinned() -> None:

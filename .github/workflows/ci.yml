@@ -530,6 +530,7 @@ jobs:
             cli/tests/test_verify_sigstore_blob.py \
             cli/tests/test_observability_v8_upgrade_continuity_checker.py \
             cli/tests/test_resolve_upgrade_baselines.py \
+            cli/tests/test_release_api_retry.py \
             cli/tests/test_release_workflow_staged.py \
             cli/tests/test_upgrade_smoke_static.py \
             cli/tests/test_upgrade_release_smoke_contract.py \
