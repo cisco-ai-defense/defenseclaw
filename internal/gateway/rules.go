@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -295,62 +296,38 @@ var trustExploitRules = []PatternRule{
 // ---------------------------------------------------------------------------
 // Agent sandbox-escape rules
 //
-// Coding agents run in a sandbox, but they can still WRITE files and config
-// that a trusted, unsandboxed host component later EXECUTES. That write-then-
-// execute indirection is the escape: the agent never runs the payload itself,
-// it plants a future input for the IDE, the language extension, git, or a
-// local daemon to run outside the sandbox.
-//
-// Each rule requires a sensitive target AND a dangerous payload token to
-// co-occur. The whole tool-call args JSON — file_path plus content — is
-// scanned as one blob, so scaffolding a plain config file does not fire; only
-// the executable shape does. Patterns match barewords with bounded gaps
-// because the content is JSON-escaped (quotes arrive as \"). RE2 keeps the
-// bounded [\s\S]{0,N} gaps linear-time.
+// Catch the write-then-execute class: an agent writes a file or config that a
+// trusted, unsandboxed host component (IDE, language extension, git, daemon)
+// later executes. Each rule requires a sensitive target AND a dangerous
+// payload token to co-occur, so scaffolding a plain config file does not fire.
+// The whole args JSON is scanned as one blob; patterns match barewords with
+// bounded gaps because content arrives JSON-escaped.
 //
 // Related advisories: CVE-2026-48124, GHSA-pc9j-3qc2-95wv,
 // GHSA-p9g2-cr55-cw9c, GHSA-v4xv-rqh3-w9mc.
 // ---------------------------------------------------------------------------
 
 var agentEscapeRules = []PatternRule{
-	// A workspace .claude settings file that wires a hook to a shell command:
-	// the host agent runs that command unsandboxed. A settings file that only
-	// sets model/permissions/env has no hooks->command pair and won't match.
+	// .claude settings that wire a hook to a shell command; a model/permissions
+	// settings file has no hooks->command pair and won't match.
 	{ID: "ESC-CLAUDE-HOOK", Pattern: regexp.MustCompile(`(?i)\.claude[\\/][^"\s]*?\.json[\s\S]{0,1000}?\bhooks\b[\s\S]{0,800}?\bcommand\b\s*\\?["']?\s*[:=]`), Title: "Workspace .claude hook installs a command", Severity: "CRITICAL", Confidence: 0.88, Tags: []string{"agent-escape", "write-then-execute"}},
-	// A file written directly into .claude/hooks/, where the agent executes
-	// hook scripts.
+	// File written directly into .claude/hooks/, where hook scripts run.
 	{ID: "ESC-CLAUDE-HOOK-DIR", Pattern: regexp.MustCompile(`(?i)\.claude[\\/]hooks[\\/][\w.-]+`), Title: "Write into .claude/hooks directory", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
-
-	// A pyvenv.cfg redirects a virtualenv interpreter's "home" to an
-	// attacker-chosen dir; the language extension then executes that
-	// interpreter unsandboxed during environment discovery. pyvenv.cfg is
-	// almost never referenced on a command line, so this stays specific.
-	// Tampering the interpreter binary itself is left to the install watcher
-	// (which no longer skips .venv) — a bare interpreter-path rule would fire
-	// on every legitimate `.venv/bin/python script.py` execution.
+	// pyvenv.cfg redirects a virtualenv interpreter's home; the language
+	// extension then runs that interpreter unsandboxed. Rarely on a command
+	// line, so it stays specific. Binary tampering is left to the watcher.
 	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)(?:^|["'\s/\\])(?:\.venv|venv|env)[\\/]pyvenv\.cfg`), Title: "Virtualenv interpreter redirect (pyvenv.cfg)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
-
-	// git config keys that turn an ordinary git operation into code execution:
-	// hooksPath/fsmonitor/sshCommand run programs; textconv/diff.external/
-	// filter clean|smudge run a helper on content; packObjectsHook runs on
-	// fetch. Two forms: the command form `git config <dotted.key> <value>`,
-	// and the config-file/INI form where a bare key is assigned under a
-	// section (`[core]` + `fsmonitor = ...`). Ordinary git usage never touches
-	// these keys, and prose mentioning e.g. "core.fsmonitor" has neither a
-	// `git config` prefix nor a trailing `=`/`:`, so it won't match.
-	{ID: "ESC-GIT-CONFIG-EXEC", Pattern: regexp.MustCompile(`(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge)|uploadpack\.packObjectsHook)\b|(?:^|[\s"'\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["']?\s*[=:])`), Title: "git config execution-indirection key set", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
-
-	// An allowlisted read-only git verb invoked with a flag that writes a file
-	// (--output/-O) or runs a helper (--ext-diff/--textconv). This models the
-	// invocation, not just the command name. Normal `git show HEAD` /
-	// `git log --oneline` carry none of these flags.
-	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|format-patch|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)`), Title: "Read-only git command with file-writing/exec flag", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "code-execution"}},
-
-	// Access to the local Docker daemon socket: a root-equivalent, unsandboxed
-	// execution environment. Application code essentially never references the
-	// socket path, so this is high-signal. PATH-DOCKER covers the *credential*
-	// file ~/.docker/config.json; this is the daemon socket — a distinct
-	// threat, so it is a separate rule in the agent-escape category.
+	// git config keys that turn an ordinary git op into code execution. Two
+	// forms: the command form `git config <dotted.key> <value>`, and the INI
+	// form (`[core]` + `fsmonitor = ...`). Prose lacks the assignment, so it
+	// won't match.
+	{ID: "ESC-GIT-CONFIG-EXEC", Pattern: regexp.MustCompile(`(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|(?:^|[\s"'\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["']?\s*[=:])`), Title: "git config execution-indirection key set", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
+	// Read-only git verb with a flag that writes a file (--output/-O) or runs a
+	// helper (--ext-diff/--textconv). format-patch is excluded: -o output is
+	// its normal function and it runs no code.
+	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)`), Title: "Read-only git command with file-writing/exec flag", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "code-execution"}},
+	// Docker daemon socket: a root-equivalent, unsandboxed exec environment.
+	// Distinct from PATH-DOCKER, which covers the ~/.docker/config.json creds.
 	{ID: "ESC-DOCKER-SOCK", Pattern: regexp.MustCompile(`(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)`), Title: "Docker daemon socket access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "privilege-escalation"}},
 }
 
@@ -738,8 +715,31 @@ var shellNormalizeReplacer = strings.NewReplacer(
 var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)
 var shellGlobPattern = regexp.MustCompile(`\?`)
 
+// shellUnicodeEscape matches JSON \uXXXX escapes. Decoding them on the
+// normalized pass defeats evasions like hooks / command that hide a
+// keyword from the raw scan while a JSON parser (and thus the host) still reads
+// it as "hooks" / "command".
+var shellUnicodeEscape = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
+
+func decodeUnicodeEscapes(s string) string {
+	if !strings.Contains(s, `\u`) {
+		return s
+	}
+	return shellUnicodeEscape.ReplaceAllStringFunc(s, func(m string) string {
+		// m is `\uXXXX`; parse the 4 hex digits after the `\u`.
+		code, err := strconv.ParseInt(m[2:], 16, 32)
+		if err != nil {
+			return m
+		}
+		return string(rune(code))
+	})
+}
+
 func normalizeShell(s string) string {
-	n := shellNormalizeReplacer.Replace(s)
+	// Decode JSON unicode escapes first so a keyword hidden as \uXXXX is
+	// visible to the subsequent de-obfuscation and rule matching.
+	n := decodeUnicodeEscapes(s)
+	n = shellNormalizeReplacer.Replace(n)
 	// Expand globs: replace ? with each common character so /etc/shad?w → /etc/shadow
 	n = shellGlobPattern.ReplaceAllString(n, "o")
 	// Strip variable references: ${P}/shadow → /shadow, $HOME/.ssh → /.ssh

@@ -699,6 +699,11 @@ func TestAgentEscapeRules_TruePositives(t *testing.T) {
 		{"git hooksPath config", `git config core.hooksPath /tmp/evil-hooks`, "ESC-GIT-CONFIG-EXEC"},
 		{"git fsmonitor in config file", `{"file_path": ".git/config", "content": "[core]\n\tfsmonitor = /tmp/x"}`, "ESC-GIT-CONFIG-EXEC"},
 		{"gitattributes textconv", `{"file_path": ".gitattributes", "content": "*.md diff=evil\n[diff \"evil\"]\n\ttextconv = /tmp/run"}`, "ESC-GIT-CONFIG-EXEC"},
+		{"git filter process driver", `git config filter.lfs.process /tmp/evil`, "ESC-GIT-CONFIG-EXEC"},
+		// "hooks"/"command" hidden as JSON \uXXXX escapes: the raw scan
+		// misses them, but the normalized pass decodes the escapes so the
+		// rule still fires. \\u0068 -> h ("hooks"), \\u0063 -> c ("command").
+		{"claude hook unicode-escaped", ".claude/settings.json \"\\u0068ooks\": [{\"\\u0063ommand\": \"evil\"}]", "ESC-CLAUDE-HOOK"},
 		{"git show output flag", `git show HEAD:file --output=/tmp/pwn`, "ESC-GIT-READ-WEAPONIZED"},
 		{"git log ext-diff", `git log -p --ext-diff`, "ESC-GIT-READ-WEAPONIZED"},
 		{"docker socket path", `curl --unix-socket /var/run/docker.sock http://localhost/containers/json`, "ESC-DOCKER-SOCK"},
@@ -743,6 +748,10 @@ func TestAgentEscapeRules_FalsePositives(t *testing.T) {
 		{"plain git show", `git show HEAD`},
 		{"git log oneline", `git log --oneline -n 20`},
 		{"git diff stat", `git diff --stat main`},
+		// format-patch writing to an output dir is its normal function, not a
+		// weaponized read — must not fire ESC-GIT-READ-WEAPONIZED.
+		{"git format-patch output dir", `git format-patch -o outgoing/ HEAD~3`},
+		{"git format-patch long flag", `git format-patch --output-directory=/tmp/patches main`},
 		// docker without the socket
 		{"docker build", `docker build -t myapp .`},
 		{"docker run normal", `docker run --rm myapp npm test`},
