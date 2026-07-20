@@ -489,6 +489,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         ambient = {
             "PATH": "D:\\fixture-bin",
             "SystemRoot": "D:\\fixture-windows",
+            "USERPROFILE": "D:\\foreign-user-profile",
+            "CODEX_HOME": "D:\\authoritative-codex-home",
+            "CLAUDE_CONFIG_DIR": "D:\\authoritative-claude-home",
+            "DEFENSECLAW_INSTALL_ROOT": "D:\\ambient-install-root",
             "UNRELATED_SENTINEL": "sentinel-value",
             "UNRELATED_SECRET": "private-fixture-value",
             cmd_setup._GATEWAY_TOKEN_ENV: "ambient-gateway-value",
@@ -509,17 +513,24 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertNotIn(explicit_token, " ".join(argv))
         self.assertEqual(child_env["PATH"], ambient["PATH"])
         self.assertEqual(child_env["SystemRoot"], ambient["SystemRoot"])
+        self.assertEqual(child_env["USERPROFILE"], ambient["USERPROFILE"])
+        self.assertEqual(child_env["CODEX_HOME"], ambient["CODEX_HOME"])
+        self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], ambient["CLAUDE_CONFIG_DIR"])
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_HOME_ENV], os.path.abspath(data_dir))
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_DATA_DIR_ENV], os.path.abspath(data_dir))
         self.assertEqual(child_env[cmd_setup._GATEWAY_TOKEN_ENV], explicit_token)
         self.assertNotIn("UNRELATED_SENTINEL", child_env)
         self.assertNotIn("UNRELATED_SECRET", child_env)
+        self.assertNotIn("DEFENSECLAW_INSTALL_ROOT", child_env)
         self.assertNotIn(cmd_setup._LEGACY_GATEWAY_TOKEN_ENV, child_env)
         self.assertEqual(
             set(child_env),
             {
                 "PATH",
                 "SystemRoot",
+                "USERPROFILE",
+                "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR",
                 cmd_setup._DEFENSECLAW_HOME_ENV,
                 cmd_setup._DEFENSECLAW_DATA_DIR_ENV,
                 cmd_setup._GATEWAY_TOKEN_ENV,
@@ -535,11 +546,34 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             original = b"KEEP=unchanged\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n"
             with open(dotenv, "wb") as fh:
                 fh.write(original)
-            events: list[tuple[str, bool]] = []
+            connector_state = os.path.join(td, "connector-token-state")
+
+            def connector_bytes(token: str) -> bytes:
+                return b"connector-token=" + token.encode("ascii") + b"\r\n"
+
+            original_connector = connector_bytes("a" * 64)
+            with open(connector_state, "wb") as fh:
+                fh.write(original_connector)
+            events: list[tuple[str, bool, str, bytes, bytes]] = []
 
             def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
-                events.append((action, cleanup))
-                if events == [("stop", False), ("start", False)]:
+                # Model the gateway's connector refresh before readiness. A
+                # rejected B start has already persisted B into connector
+                # state; restarting A must deterministically restore A.
+                if action == "start":
+                    with open(connector_state, "wb") as fh:
+                        fh.write(connector_bytes(token))
+                with open(dotenv, "rb") as fh:
+                    dotenv_state = fh.read()
+                with open(connector_state, "rb") as fh:
+                    persisted_connector_state = fh.read()
+                events.append(
+                    (action, cleanup, token, dotenv_state, persisted_connector_state),
+                )
+                if [(event[0], event[1]) for event in events] == [
+                    ("stop", False),
+                    ("start", False),
+                ]:
                     raise click.ClickException("fixture failure that must stay redacted")
 
             with (
@@ -554,13 +588,26 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 )
             with open(dotenv, "rb") as fh:
                 restored = fh.read()
+            with open(connector_state, "rb") as fh:
+                restored_connector = fh.read()
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(
-            events,
+            [(action, cleanup) for action, cleanup, *_ in events],
             [("stop", False), ("start", False), ("stop", True), ("start", False)],
         )
+        self.assertEqual(
+            [token for _, _, token, _, _ in events],
+            ["a" * 64, "b" * 64, "b" * 64, "a" * 64],
+        )
+        self.assertEqual(events[0][3], original)
+        self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, events[1][3])
+        self.assertEqual(events[1][4], connector_bytes("b" * 64))
+        self.assertEqual(events[2][4], connector_bytes("b" * 64))
+        self.assertEqual(events[3][3], original)
+        self.assertEqual(events[3][4], original_connector)
         self.assertEqual(restored, original)
+        self.assertEqual(restored_connector, original_connector)
         self.assertNotIn("b" * 64, result.output)
         self.assertNotIn("Hook scripts refreshed", result.output)
 

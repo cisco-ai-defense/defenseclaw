@@ -142,6 +142,10 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "TEMP",
     "TMP",
     "USERPROFILE",
+    # The native launcher replaces these selectors with installer-recorded
+    # connector homes; preserve that binding across every rotation child.
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"

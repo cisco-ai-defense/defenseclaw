@@ -288,6 +288,126 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesPersistedClaudeHeaderLiter
 	}
 }
 
+func TestVerifyRotationConnectorOTLPAuthenticationLoadsExactPersistedClaudeCredentials(t *testing.T) {
+	originalSettingsOverride := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = originalSettingsOverride })
+
+	logsCredential := strings.Repeat("l", 64)
+	metricsCredential := strings.Repeat("m", 64)
+
+	for _, tc := range []struct {
+		name           string
+		rejectedSignal connector.NativeOTLPSignal
+		wantError      bool
+	}{
+		{name: "both signals accepted"},
+		{name: "logs rejected", rejectedSignal: connector.NativeOTLPSignalLogs, wantError: true},
+		{name: "metrics rejected", rejectedSignal: connector.NativeOTLPSignalMetrics, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			fallbackHome := t.TempDir()
+			t.Setenv("HOME", fallbackHome)
+			t.Setenv("USERPROFILE", fallbackHome)
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+			var logsSeen atomic.Int32
+			var metricsSeen atomic.Int32
+			var requestMismatch atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var signal connector.NativeOTLPSignal
+				var expectedAuthorization string
+				var seen *atomic.Int32
+				switch r.URL.Path {
+				case "/v1/logs":
+					signal = connector.NativeOTLPSignalLogs
+					expectedAuthorization = "Bearer " + logsCredential
+					seen = &logsSeen
+				case "/v1/metrics":
+					signal = connector.NativeOTLPSignalMetrics
+					expectedAuthorization = "Bearer " + metricsCredential
+					seen = &metricsSeen
+				default:
+					requestMismatch.Store(true)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				seen.Add(1)
+				if r.Method != http.MethodGet ||
+					r.Header.Get("Authorization") != expectedAuthorization ||
+					r.Header.Get("X-DefenseClaw-Client") != "claudecode-otel/1.0" ||
+					r.Header.Get("X-DefenseClaw-Source") != "claudecode" {
+					requestMismatch.Store(true)
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if tc.rejectedSignal == signal {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}))
+			defer server.Close()
+
+			literalHeaders := func(credential string) string {
+				return "authorization=Bearer " + credential +
+					",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode"
+			}
+			settings := map[string]interface{}{
+				"env": map[string]interface{}{
+					"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
+					"OTEL_LOGS_EXPORTER":                  "otlp",
+					"OTEL_METRICS_EXPORTER":               "otlp",
+					"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
+					"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+					"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    server.URL + "/v1/logs",
+					"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": server.URL + "/v1/metrics",
+					"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     literalHeaders(logsCredential),
+					"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  literalHeaders(metricsCredential),
+				},
+			}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatalf("marshal Claude settings fixture: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0o600); err != nil {
+				t.Fatalf("write Claude settings fixture: %v", err)
+			}
+
+			err = verifyRotationConnectorOTLPAuthentication(
+				server.Client(), server.URL+"/status", t.TempDir(), []string{"claudecode"},
+			)
+			if requestMismatch.Load() {
+				t.Fatal("Claude convergence probe did not preserve an exact persisted endpoint or header value")
+			}
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "claudecode") || !strings.Contains(err.Error(), "401") {
+					t.Fatalf("rejected Claude %s probe error = %v, want redacted HTTP 401 failure", tc.rejectedSignal, err)
+				}
+				for _, credential := range []string{logsCredential, metricsCredential} {
+					if strings.Contains(err.Error(), credential) {
+						t.Fatalf("rejected Claude %s probe error leaked a persisted credential", tc.rejectedSignal)
+					}
+				}
+				if tc.rejectedSignal == connector.NativeOTLPSignalLogs && logsSeen.Load() != 1 {
+					t.Fatal("rejected persisted Claude logs credential was not probed")
+				}
+				if tc.rejectedSignal == connector.NativeOTLPSignalMetrics && metricsSeen.Load() != 1 {
+					t.Fatal("rejected persisted Claude metrics credential was not probed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("persisted Claude convergence probes failed: %v", err)
+			}
+			if logsSeen.Load() != 1 || metricsSeen.Load() != 1 {
+				t.Fatalf("persisted Claude probes: logs=%d metrics=%d, want one each", logsSeen.Load(), metricsSeen.Load())
+			}
+		})
+	}
+}
+
 func TestVerifyRotationConnectorOTLPAuthenticationRefusesNonLoopbackEndpoint(t *testing.T) {
 	err := verifyRotationConnectorOTLPAuthentication(
 		&http.Client{}, "http://collector.example.test/status", "D:\\fixture-data", []string{"claudecode"},

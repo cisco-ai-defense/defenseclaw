@@ -278,6 +278,50 @@ def test_minimal_gateway_fixture_disables_external_v8_destinations() -> None:
     assert minimal.index("cfg.save()") < minimal.index("mutate_v8_config(")
 
 
+def test_packaged_rotation_probes_only_the_owned_configured_gateway_without_secret_output() -> None:
+    process = _function("Invoke-WindowsNativeProcess")
+    rotation = _function("Assert-PackagedClaudeTokenRotation")
+    authentication = _function("Assert-ClaudeNativeOtlpRotationAuthentication")
+    authority = _function("Assert-ClaudeNativeOtlpProbeAuthority")
+    listener = _function("Assert-OwnedGatewayApiListener")
+    owned_process = _function("Assert-OwnedManagedProcess")
+    stale_identity = _function("Assert-StaleGatewayProcessIdentityRejected")
+    port = _function("Get-PackagedGatewayApiPort")
+
+    assert "[switch]$SuppressOutput" in process
+    assert "if ($combined -and -not $SuppressOutput)" in process
+    assert "[credential-bearing process output intentionally suppressed]" in process
+    assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
+    assert rotation.count("-SuppressOutput") == 4
+    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState" in rotation
+    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenBState" in rotation
+    assert "[string]::Equals($tokenA, $tokenB" in rotation
+    assert "Assert-WindowsNativeCredentialValuesAbsent" in rotation
+    assert "Get-ClaudeNativeOtlpRotationProbes $ClaudeHome" in rotation
+    assert "Assert-ClaudeNativeOtlpForeignPortRejected" in rotation
+    assert "substituted a gateway master token for scoped credentials" in rotation
+    assert "$scopedTokens[0], $scopedTokens[1]" in rotation
+
+    assert "os.environ.pop('DEFENSECLAW_CONFIG', None)" in port
+    assert "cfg = load(data_dir=root)" in port
+    assert "Path(cfg.data_dir).resolve() != root" in port
+    assert "$endpoint.Port -ne $GatewayPort" in authority
+    assert "Get-NetTCPConnection -State Listen -LocalPort $GatewayPort" in listener
+    assert "OwningProcess -ne [int]$GatewayIdentity.ProcessId" in listener
+    assert "Assert-OwnedManagedProcess $GatewayIdentity $GatewayPath" in listener
+    assert "$liveStartIdentity -cne [string]$Identity.StartIdentity" in owned_process
+    assert "Assert-OwnedManagedProcess $stale $GatewayPath" in stale_identity
+    assert "accepted a stale or reused gateway process identity" in stale_identity
+    assert "Assert-StaleGatewayProcessIdentityRejected" in rotation
+    assert "[Net.IPAddress]::IsLoopback($address)" in listener
+    assert authentication.index("Assert-ClaudeNativeOtlpProbeAuthority") < authentication.index(
+        "[Net.Http.HttpClientHandler]::new()"
+    )
+    assert authentication.index("Assert-OwnedGatewayApiListener") < authentication.index(
+        "[Net.Http.HttpClientHandler]::new()"
+    )
+
+
 def test_setup_uninstall_acceptance_uses_validated_roster_and_backup_markers() -> None:
     acceptance = _function("Invoke-SetupAcceptance")
     authority = _function("Assert-NativeConnectorCleanupAuthorityPresent")

@@ -586,7 +586,8 @@ function Invoke-WindowsNativeProcess {
         [int[]]$AllowedExitCodes = @(0),
         [ValidateRange(1, 4200)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
-        [string]$WorkingDirectory = ''
+        [string]$WorkingDirectory = '',
+        [switch]$SuppressOutput
     )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
@@ -660,8 +661,15 @@ function Invoke-WindowsNativeProcess {
         }
         $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
-        if ($combined) { Write-Host $combined }
-        if ($LogPath) { Write-BoundedText -Path $LogPath -Text $combined }
+        if ($combined -and -not $SuppressOutput) { Write-Host $combined }
+        if ($LogPath) {
+            $logText = if ($SuppressOutput) {
+                '[credential-bearing process output intentionally suppressed]'
+            } else {
+                $combined
+            }
+            Write-BoundedText -Path $LogPath -Text $logText
+        }
         $result = [pscustomobject]@{
             ExitCode = $exitCode
             StdOut = $stdout
@@ -671,10 +679,12 @@ function Invoke-WindowsNativeProcess {
         }
         Write-WindowsNativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($outputReadFailed) { 'failed-output' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
         if ($outputReadFailed) {
+            if ($SuppressOutput) { throw "$FilePath redirected output capture failed" }
             throw "$FilePath redirected output capture failed`n$combined"
         }
         if ($exitCode -notin $AllowedExitCodes) {
             $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
+            if ($SuppressOutput) { throw "$FilePath $reason" }
             throw "$FilePath $reason`n$combined"
         }
         return $result
@@ -2373,6 +2383,23 @@ function Assert-OwnedManagedProcess([object]$Identity, [string]$GatewayPath, [st
             [StringComparison]::OrdinalIgnoreCase
         )) {
         throw "$Label process identity does not resolve to the installed gateway executable"
+    }
+    $native = $null
+    try {
+        $native = [Diagnostics.Process]::GetProcessById([int]$Identity.ProcessId)
+        $unixTicks = [long](
+            $native.StartTime.ToUniversalTime().Ticks - [DateTime]::UnixEpoch.Ticks
+        )
+        $liveStartIdentity = ([long]($unixTicks * 100)).ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    } catch {
+        throw "$Label process start identity could not be queried"
+    } finally {
+        if ($null -ne $native) { $native.Dispose() }
+    }
+    if ($liveStartIdentity -cne [string]$Identity.StartIdentity) {
+        throw "$Label process start identity changed"
     }
 }
 
@@ -4114,6 +4141,449 @@ function Invoke-WindowsReleaseCertification {
     }
 }
 
+function Test-WindowsNativeByteArraysEqual([byte[]]$Left, [byte[]]$Right) {
+    if ($null -eq $Left -or $null -eq $Right -or $Left.Length -ne $Right.Length) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        if ($Left[$index] -ne $Right[$index]) { return $false }
+    }
+    return $true
+}
+
+function Get-WindowsNativeGatewayTokenFromDotenvState([byte[]]$State) {
+    if ($null -eq $State -or $State.Length -eq 0) {
+        throw 'packaged gateway dotenv snapshot is empty'
+    }
+    try {
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($State)
+    } catch {
+        throw 'packaged gateway dotenv snapshot is not valid UTF-8'
+    }
+    $pattern = '(?m)^DEFENSECLAW_GATEWAY_TOKEN=(?:' +
+        '"(?<double>[0-9a-f]{64})"|''(?<single>[0-9a-f]{64})''|' +
+        '(?<plain>[0-9a-f]{64}))\r?$'
+    $tokenMatches = [Text.RegularExpressions.Regex]::Matches(
+        $text,
+        $pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if ($tokenMatches.Count -ne 1) {
+        throw 'packaged gateway dotenv did not contain exactly one canonical token'
+    }
+    foreach ($groupName in @('double', 'single', 'plain')) {
+        $group = $tokenMatches[0].Groups[$groupName]
+        if ($group.Success) { return [string]$group.Value }
+    }
+    throw 'packaged gateway dotenv canonical token could not be resolved'
+}
+
+function Assert-WindowsNativeCredentialValuesAbsent(
+    [object[]]$Results,
+    [string[]]$LogPaths,
+    [string[]]$CredentialValues
+) {
+    $values = @($CredentialValues | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_) -and ([string]$_).Length -ge 8
+    } | Sort-Object -Unique)
+    if ($values.Count -eq 0) {
+        throw 'credential-output assertion received no known credentials'
+    }
+    foreach ($result in $Results) {
+        if ($null -eq $result) {
+            throw 'credential-output assertion received a missing process result'
+        }
+        foreach ($field in @('StdOut', 'StdErr')) {
+            $property = $result.PSObject.Properties[$field]
+            if ($null -eq $property) {
+                throw 'credential-output assertion received an incomplete process result'
+            }
+            $captured = [string]$property.Value
+            foreach ($value in $values) {
+                if ($captured.IndexOf([string]$value, [StringComparison]::Ordinal) -ge 0) {
+                    throw 'credential-bearing packaged process output was not redacted'
+                }
+            }
+        }
+    }
+    foreach ($logPath in $LogPaths) {
+        if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+            throw 'credential-bearing packaged process log is missing'
+        }
+        $logText = [IO.File]::ReadAllText([IO.Path]::GetFullPath($logPath))
+        foreach ($value in $values) {
+            if ($logText.IndexOf([string]$value, [StringComparison]::Ordinal) -ge 0) {
+                throw 'credential-bearing packaged process log was not redacted'
+            }
+        }
+    }
+}
+
+function Get-PackagedGatewayApiPort([string]$Python, [string]$DataRoot) {
+    $code = @'
+import os
+import sys
+from pathlib import Path
+from defenseclaw.config import load
+
+root = Path(sys.argv[1]).resolve()
+os.environ.pop('DEFENSECLAW_CONFIG', None)
+cfg = load(data_dir=root)
+if Path(cfg.data_dir).resolve() != root:
+    raise SystemExit('packaged gateway config resolved outside the installed data root')
+port = int(cfg.gateway.api_port)
+if port < 1 or port > 65535:
+    raise SystemExit('configured gateway API port is invalid')
+print('DC_GATEWAY_API_PORT=' + str(port))
+'@
+    $result = Invoke-WindowsNativeProcess $Python @(
+        '-I', '-X', 'utf8', '-c', $code, ([IO.Path]::GetFullPath($DataRoot))
+    ) -TimeoutSeconds 60 -SuppressOutput
+    $lines = @($result.StdOut -split "`r?`n" | Where-Object {
+        $_.StartsWith('DC_GATEWAY_API_PORT=', [StringComparison]::Ordinal)
+    })
+    $port = 0
+    if ($lines.Count -ne 1 -or
+        -not [int]::TryParse($lines[0].Substring('DC_GATEWAY_API_PORT='.Length), [ref]$port) -or
+        $port -lt 1 -or $port -gt 65535) {
+        throw 'packaged gateway API port probe returned invalid structured output'
+    }
+    return $port
+}
+
+function Assert-ClaudeNativeOtlpProbeAuthority([object[]]$Probes, [int]$GatewayPort) {
+    if ($Probes.Count -ne 2 -or
+        (@($Probes | ForEach-Object { [string]$_.Signal }) -join ',') -cne 'logs,metrics') {
+        throw 'packaged rotation did not persist exactly the Claude logs and metrics probes'
+    }
+    foreach ($probe in $Probes) {
+        $endpoint = $probe.Endpoint
+        if ($null -eq $endpoint -or $endpoint -isnot [Uri] -or
+            $endpoint.Port -ne $GatewayPort -or
+            $endpoint.DnsSafeHost.ToLowerInvariant() -notin @('127.0.0.1', '::1')) {
+            throw 'refusing Claude native OTLP credentials for an endpoint outside the configured gateway listener'
+        }
+    }
+}
+
+function Assert-ClaudeNativeOtlpForeignPortRejected([object[]]$Probes, [int]$GatewayPort) {
+    $foreignPort = if ($GatewayPort -eq 65535) { 65534 } else { $GatewayPort + 1 }
+    $foreignProbes = @($Probes | ForEach-Object {
+        $builder = [UriBuilder]::new($_.Endpoint)
+        $builder.Port = $foreignPort
+        [pscustomobject]@{
+            Signal = [string]$_.Signal
+            Endpoint = $builder.Uri
+            Headers = $_.Headers
+        }
+    })
+    $rejected = $false
+    try {
+        Assert-ClaudeNativeOtlpProbeAuthority $foreignProbes $GatewayPort
+    } catch {
+        if ($_.Exception.Message -cne
+            'refusing Claude native OTLP credentials for an endpoint outside the configured gateway listener') {
+            throw
+        }
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'Claude native OTLP authority guard accepted a foreign loopback port'
+    }
+}
+
+function Assert-OwnedGatewayApiListener(
+    [object]$GatewayIdentity,
+    [string]$GatewayPath,
+    [int]$GatewayPort
+) {
+    Assert-OwnedManagedProcess $GatewayIdentity $GatewayPath 'rotated gateway'
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $GatewayPort -ErrorAction Stop)
+    if ($listeners.Count -eq 0) {
+        throw 'configured gateway API port has no live listener'
+    }
+    foreach ($listener in $listeners) {
+        $address = $null
+        if ([int]$listener.OwningProcess -ne [int]$GatewayIdentity.ProcessId -or
+            -not [Net.IPAddress]::TryParse([string]$listener.LocalAddress, [ref]$address) -or
+            -not [Net.IPAddress]::IsLoopback($address)) {
+            throw 'configured gateway API listener is not loopback-only or is owned by a foreign process'
+        }
+    }
+}
+
+function Assert-StaleGatewayProcessIdentityRejected(
+    [object]$GatewayIdentity,
+    [string]$GatewayPath
+) {
+    $stale = [pscustomobject]@{
+        ProcessId = [int]$GatewayIdentity.ProcessId
+        StartIdentity = [string]$GatewayIdentity.StartIdentity + '-stale'
+        Executable = [string]$GatewayIdentity.Executable
+    }
+    $rejected = $false
+    try {
+        Assert-OwnedManagedProcess $stale $GatewayPath 'stale rotated gateway'
+    } catch {
+        if ($_.Exception.Message -cne 'stale rotated gateway process start identity changed') {
+            throw
+        }
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'packaged rotation accepted a stale or reused gateway process identity'
+    }
+}
+
+function Get-ClaudeNativeOtlpRotationProbes([string]$ClaudeHome) {
+    $settingsPath = Join-Path ([IO.Path]::GetFullPath($ClaudeHome)) 'settings.json'
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        throw 'packaged rotation did not persist Claude native OTLP settings'
+    }
+    try {
+        $settings = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw 'packaged rotation persisted invalid Claude settings JSON'
+    }
+    $settingsEnvProperty = $settings.PSObject.Properties['env']
+    if ($null -eq $settingsEnvProperty) {
+        throw 'packaged rotation persisted no Claude native OTLP environment'
+    }
+    $settingsEnv = $settingsEnvProperty.Value
+    $telemetryProperty = $settingsEnv.PSObject.Properties['CLAUDE_CODE_ENABLE_TELEMETRY']
+    if ($null -eq $telemetryProperty -or $telemetryProperty.Value -isnot [string] -or
+        [string]$telemetryProperty.Value -cne '1') {
+        throw 'packaged rotation did not enable Claude native telemetry'
+    }
+
+    $probes = [Collections.Generic.List[object]]::new()
+    foreach ($signal in @('logs', 'metrics')) {
+        $upperSignal = $signal.ToUpperInvariant()
+        $prefix = "OTEL_EXPORTER_OTLP_$upperSignal"
+        $requiredValues = @{}
+        foreach ($name in @(
+            "OTEL_${upperSignal}_EXPORTER",
+            "${prefix}_PROTOCOL",
+            "${prefix}_ENDPOINT",
+            "${prefix}_HEADERS"
+        )) {
+            $property = $settingsEnv.PSObject.Properties[$name]
+            if ($null -eq $property -or $property.Value -isnot [string] -or
+                [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                throw "packaged rotation persisted incomplete Claude $signal OTLP settings"
+            }
+            $requiredValues[$name] = [string]$property.Value
+        }
+        if ($requiredValues["OTEL_${upperSignal}_EXPORTER"] -cne 'otlp' -or
+            $requiredValues["${prefix}_PROTOCOL"] -cne 'http/json') {
+            throw "packaged rotation persisted an unsupported Claude $signal OTLP transport"
+        }
+
+        $endpointText = $requiredValues["${prefix}_ENDPOINT"].Trim()
+        $endpoint = $null
+        if ($endpointText.Contains('\') -or $endpointText.Contains('?') -or
+            $endpointText.Contains('#') -or
+            -not [Uri]::TryCreate($endpointText, [UriKind]::Absolute, [ref]$endpoint) -or
+            $endpoint.Scheme -cne 'http' -or
+            -not [string]::IsNullOrEmpty($endpoint.UserInfo) -or
+            -not [string]::IsNullOrEmpty($endpoint.Query) -or
+            -not [string]::IsNullOrEmpty($endpoint.Fragment) -or
+            $endpoint.Port -lt 1 -or $endpoint.Port -gt 65535 -or
+            $endpoint.AbsolutePath -cne "/v1/$signal") {
+            throw "refusing an unsafe Claude $signal OTLP authentication probe"
+        }
+        $hostName = $endpoint.DnsSafeHost.ToLowerInvariant()
+        if ($hostName -notin @('127.0.0.1', '::1')) {
+            throw "refusing a non-loopback Claude $signal OTLP authentication probe"
+        }
+
+        $headers = [Collections.Generic.Dictionary[string,string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        foreach ($part in $requiredValues["${prefix}_HEADERS"].Split(',')) {
+            $trimmedPart = $part.Trim()
+            $separator = $trimmedPart.IndexOf('=')
+            if ($separator -le 0) {
+                throw "packaged rotation persisted invalid Claude $signal OTLP headers"
+            }
+            $name = $trimmedPart.Substring(0, $separator).Trim().ToLowerInvariant()
+            $value = $trimmedPart.Substring($separator + 1)
+            if ($name -notin @('authorization', 'x-defenseclaw-client', 'x-defenseclaw-source') -or
+                [string]::IsNullOrEmpty($value) -or $value.Contains("`r") -or $value.Contains("`n") -or
+                $headers.ContainsKey($name)) {
+                throw "packaged rotation persisted invalid Claude $signal OTLP headers"
+            }
+            $headers.Add($name, $value)
+        }
+        if ($headers.Count -ne 3 -or
+            $headers['authorization'] -cnotmatch '^Bearer [0-9a-f]{64}$' -or
+            $headers['x-defenseclaw-client'] -cne 'claudecode-otel/1.0' -or
+            $headers['x-defenseclaw-source'] -cne 'claudecode') {
+            throw "packaged rotation persisted invalid Claude $signal OTLP identity headers"
+        }
+        $probes.Add([pscustomobject]@{
+            Signal = $signal
+            Endpoint = $endpoint
+            Headers = $headers
+        })
+    }
+    if (-not [string]::Equals(
+        $probes[0].Endpoint.GetLeftPart([UriPartial]::Authority),
+        $probes[1].Endpoint.GetLeftPart([UriPartial]::Authority),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Claude logs and metrics OTLP endpoints do not share one loopback gateway'
+    }
+    return @($probes)
+}
+
+function Assert-ClaudeNativeOtlpRotationAuthentication(
+    [object[]]$Probes,
+    [int]$GatewayPort,
+    [object]$GatewayIdentity,
+    [string]$GatewayPath
+) {
+    Assert-ClaudeNativeOtlpProbeAuthority $Probes $GatewayPort
+    Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $handler.UseDefaultCredentials = $false
+    $handler.UseProxy = $false
+    $client = [Net.Http.HttpClient]::new($handler, $true)
+    $client.Timeout = [TimeSpan]::FromSeconds(10)
+    try {
+        foreach ($probe in $Probes) {
+            Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
+            $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $probe.Endpoint)
+            $response = $null
+            try {
+                foreach ($header in $probe.Headers.GetEnumerator()) {
+                    if (-not $request.Headers.TryAddWithoutValidation($header.Key, $header.Value)) {
+                        throw "could not construct the Claude $($probe.Signal) OTLP authentication probe"
+                    }
+                }
+                try {
+                    $response = $client.SendAsync($request).GetAwaiter().GetResult()
+                } catch {
+                    throw "Claude $($probe.Signal) OTLP authentication probe did not reach the loopback gateway"
+                }
+                if ($response.StatusCode -ne [Net.HttpStatusCode]::MethodNotAllowed) {
+                    throw "persisted Claude $($probe.Signal) OTLP credentials were not accepted by the rotated gateway"
+                }
+                Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
+            } finally {
+                if ($null -ne $response) { $response.Dispose() }
+                $request.Dispose()
+            }
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Assert-PackagedClaudeTokenRotation(
+    [string]$Launcher,
+    [string]$Python,
+    [string]$GatewayPath,
+    [string]$DataRoot,
+    [string]$CodexHome,
+    [string]$ClaudeHome,
+    [string]$DefaultCodexHome,
+    [string]$DefaultClaudeHome,
+    [string]$Logs
+) {
+    $credentialLogPaths = @(
+        (Join-Path $Logs 'rotation-setup-codex.log'),
+        (Join-Path $Logs 'rotation-setup-claudecode.log'),
+        (Join-Path $Logs 'rotation-success.log'),
+        (Join-Path $Logs 'rotation-status.json')
+    )
+    $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
+        'setup', 'codex', '--yes', '--mode', 'observe', '--restart'
+    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
+    $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
+        'setup', 'claude-code', '--yes', '--mode', 'observe', '--restart'
+    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
+
+    foreach ($requiredConfig in @(
+        (Join-Path $CodexHome 'config.toml'),
+        (Join-Path $ClaudeHome 'settings.json')
+    )) {
+        if (-not (Test-Path -LiteralPath $requiredConfig -PathType Leaf)) {
+            throw 'packaged dual-connector setup did not use the installer-recorded connector homes'
+        }
+    }
+    foreach ($defaultHome in @($DefaultCodexHome, $DefaultClaudeHome)) {
+        if (Test-Path -LiteralPath $defaultHome) {
+            throw 'packaged dual-connector setup wrote to a fallback connector home'
+        }
+    }
+
+    $dotenvPath = Join-Path ([IO.Path]::GetFullPath($DataRoot)) '.env'
+    if (-not (Test-Path -LiteralPath $dotenvPath -PathType Leaf)) {
+        throw 'packaged dual-connector setup did not persist the gateway dotenv'
+    }
+    $tokenAState = [IO.File]::ReadAllBytes($dotenvPath)
+    $tokenA = Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState
+    $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
+        -TimeoutSeconds 300 -LogPath $credentialLogPaths[2] -SuppressOutput
+    $tokenBState = [IO.File]::ReadAllBytes($dotenvPath)
+    if (Test-WindowsNativeByteArraysEqual $tokenAState $tokenBState) {
+        throw 'packaged token rotation did not replace the durable gateway token state'
+    }
+    $tokenB = Get-WindowsNativeGatewayTokenFromDotenvState $tokenBState
+    if ([string]::Equals($tokenA, $tokenB, [StringComparison]::Ordinal)) {
+        throw 'packaged token rotation rewrote dotenv bytes without replacing the gateway token'
+    }
+
+    $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+        -TimeoutSeconds 120 -LogPath $credentialLogPaths[3] -SuppressOutput
+    try { $status = $statusResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'packaged token rotation status was not valid JSON' }
+    $connectors = @($status.connectors)
+    $activeNames = @($connectors | Where-Object { [bool]$_.enabled } |
+        ForEach-Object { [string]$_.name } | Sort-Object -Unique)
+    if (-not [bool]$status.sidecar.running -or $connectors.Count -ne 2 -or
+        ($activeNames -join ',') -cne 'claudecode,codex') {
+        throw 'packaged token rotation did not preserve the ready dual-connector roster'
+    }
+    $gatewayPort = Get-PackagedGatewayApiPort $Python $DataRoot
+    $gatewayIdentity = Get-GatewayIdentity $DataRoot
+    Assert-StaleGatewayProcessIdentityRejected $gatewayIdentity $GatewayPath
+    $probes = @(Get-ClaudeNativeOtlpRotationProbes $ClaudeHome)
+    $credentialValues = [Collections.Generic.List[string]]::new()
+    [void]$credentialValues.Add($tokenA)
+    [void]$credentialValues.Add($tokenB)
+    $scopedTokens = [Collections.Generic.List[string]]::new()
+    foreach ($probe in $probes) {
+        $authorization = [string]$probe.Headers['authorization']
+        $scopedToken = $authorization.Substring('Bearer '.Length)
+        if ([string]::Equals($scopedToken, $tokenA, [StringComparison]::Ordinal) -or
+            [string]::Equals($scopedToken, $tokenB, [StringComparison]::Ordinal)) {
+            throw 'packaged Claude OTLP settings substituted a gateway master token for scoped credentials'
+        }
+        [void]$scopedTokens.Add($scopedToken)
+        [void]$credentialValues.Add($authorization)
+        [void]$credentialValues.Add($scopedToken)
+    }
+    if ($scopedTokens.Count -ne 2 -or
+        -not [string]::Equals($scopedTokens[0], $scopedTokens[1], [StringComparison]::Ordinal)) {
+        throw 'packaged Claude logs and metrics did not persist the same scoped credential'
+    }
+    Assert-WindowsNativeCredentialValuesAbsent `
+        @($setupCodexResult, $setupClaudeResult, $rotateResult, $statusResult) `
+        $credentialLogPaths @($credentialValues)
+    Assert-ClaudeNativeOtlpForeignPortRejected $probes $gatewayPort
+    Assert-ClaudeNativeOtlpRotationAuthentication `
+        $probes $gatewayPort $gatewayIdentity $GatewayPath
+    foreach ($defaultHome in @($DefaultCodexHome, $DefaultClaudeHome)) {
+        if (Test-Path -LiteralPath $defaultHome) {
+            throw 'packaged token rotation wrote to a fallback connector home'
+        }
+    }
+    Write-Host 'Packaged dual-connector token rotation authenticated exact Claude logs and metrics settings.'
+}
+
 function Invoke-Contract {
     Assert-NativeWindowsX64
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for contract' }
@@ -4250,6 +4720,12 @@ function Invoke-Contract {
         }
         if (Test-Path -LiteralPath $unrelatedConfig) {
             throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
+        }
+        if ($Connector -eq 'claudecode') {
+            Assert-PackagedClaudeTokenRotation `
+                $launcher (Join-Path $managedPython 'python.exe') $gateway `
+                $dataRoot $codexHome $claudeHome `
+                $defaultCodexHome $defaultClaudeHome $root
         }
     } finally {
         $cleanupErrors = [Collections.Generic.List[object]]::new()
