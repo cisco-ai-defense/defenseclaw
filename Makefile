@@ -683,13 +683,13 @@ plugin-install: _source-install-preflight gateway-install
 test: cli-test gateway-test
 
 cli-test: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests -q
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q
 
 cli-test-cov: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 cli-test-snap:
-	$(VENV)/bin/python -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
 
 gateway-test: sync-openclaw-extension
 	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
@@ -834,7 +834,7 @@ go-connector-matrix-test: sync-openclaw-extension
 		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
 
 py-connector-matrix-test:
-	$(VENV)/bin/python -m pytest -q \
+	$(VENV_BIN)/python$(EXE) -m pytest -q \
 		cli/tests/test_agent_discovery.py \
 		cli/tests/test_cmd_guardrail_matrix.py \
 		cli/tests/test_cmd_init.py \
@@ -856,11 +856,11 @@ rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v
 
 test-verbose:
-	$(VENV)/bin/python -m unittest discover -s cli/tests -v --failfast
+	$(VENV_BIN)/python$(EXE) -m unittest discover -s cli/tests -v --failfast
 
 test-file:
 	@test -n "$(FILE)" || { echo "Usage: make test-file FILE=test_config"; exit 1; }
-	$(VENV)/bin/python -m unittest cli.tests.$(FILE) -v
+	$(VENV_BIN)/python$(EXE) -m unittest cli.tests.$(FILE) -v
 
 # ---------------------------------------------------------------------------
 # v7 parity gates — prevent drift between Go (source of truth),
@@ -875,35 +875,35 @@ check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes chec
 	@echo "check-v7: all parity gates passed."
 
 check-audit-actions:
-	@$(VENV)/bin/python scripts/check_audit_actions.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_actions.py
 
 check-audit-no-raw-literals:
-	@$(VENV)/bin/python scripts/check_audit_no_raw_literals.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_no_raw_literals.py
 
 check-error-codes:
-	@$(VENV)/bin/python scripts/check_error_codes.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_error_codes.py
 
 check-schemas:
-	@$(VENV)/bin/python scripts/check_schemas.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_schemas.py
 
 telemetry-generate:
-	@$(VENV)/bin/python scripts/generate_telemetry_registry.py --write
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --write
 
 telemetry-check:
-	@$(VENV)/bin/python scripts/generate_telemetry_registry.py --check
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --check
 
 # Semantic hard-cut gate: v7 may remain only inside the explicit
 # upgrade/recovery boundaries. It checks forbidden ownership paths and
 # patterns, not fragile repository-wide inventory totals.
 check-observability-v8-hard-cut:
-	@$(VENV)/bin/python scripts/check_observability_v8_hard_cut.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_hard_cut.py
 
 check-observability-v8-spec:
-	@$(VENV)/bin/python scripts/check_observability_v8_spec.py \
+	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_spec.py \
 		--package docs/design/observability-v8
 
 check-grafana-dashboards: _bundle-data
-	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
+	@$(VENV_BIN)/python$(EXE) scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
@@ -930,7 +930,7 @@ check-provider-coverage: sync-openclaw-extension
 # model (so it stays hand-maintained), but the model list still rots as
 # providers ship and retire models — this gate catches that drift.
 check-llm-catalog:
-	@$(VENV)/bin/python scripts/check_llm_catalog.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
@@ -963,7 +963,7 @@ upgrade-signed-protocol-matrix:
 # ---------------------------------------------------------------------------
 
 lint: py-lint go-lint
-	$(VENV)/bin/python -m py_compile cli/defenseclaw/main.py
+	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
 
 py-lint:
 	$(RUFF) check cli/defenseclaw/

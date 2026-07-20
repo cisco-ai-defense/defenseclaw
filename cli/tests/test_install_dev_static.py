@@ -36,6 +36,13 @@ def test_optional_developer_entry_points_do_not_abort_make_install() -> None:
     assert '"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true;' in text
 
 
+def test_make_python_recipes_use_cross_platform_venv_path() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+
+    assert "$(VENV)/bin/python" not in text
+    assert "$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q" in text
+
+
 def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:
     text = INSTALL_DEV.read_text(encoding="utf-8")
     install_cli = text[
