@@ -22,7 +22,7 @@ Connector configuration, process, MCP, package, provider-domain, and environment
 
 ![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
 
-The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores. Model columns appear when the snapshot contains local models.
+The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents. Local models appear in their own compact provenance table above the agent/tool inventory, so high-cardinality model IDs and lineage columns do not make the main discovery table unreadably wide.
 
 <Cards>
   <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
@@ -116,7 +116,7 @@ The generic `/v1/models` integrations are recorded with `status=installed`; `sta
 
 For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in signature recognizes the `lemonade`, `lemond`, `lemonade-tray`, and `LemonadeServer.exe` binaries/processes, the desktop app, [documented configuration locations](https://lemonade-server.ai/docs/guide/configuration/), environment-variable names, and the default loopback port `13305`. Its model list includes only downloaded local entries; `downloaded=false` and cloud-recipe entries are ignored. Configured `models_dir` and `extra_models_dir` values are also added as filesystem model roots.
 
-**Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets; it never opens model binaries. Small Ollama manifest JSON is the only model-store content read, and that read is regular-file checked and bounded by the configured file-size limit.
+**Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets. It never reads tensor payloads: provenance extraction is limited to a regular-file-checked GGUF header prefix and small adjacent JSON configuration/Ollama manifests, each with explicit byte, count, string, and array bounds.
 
 Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then the operator's `scan_roots`. Setting `--scan-roots` adds broad roots; it does not disable the specialized stores.
 
@@ -132,12 +132,35 @@ Each `local_model` signal keeps its potentially high-cardinality identity under 
     "format": "gguf",
     "provider": "lemonade",
     "recipe": "llamacpp",
-    "size_bytes": 380000000
+    "size_bytes": 380000000,
+    "provenance": {
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen3-0.6B",
+      "quantized": true,
+      "quantization": "Q4_K_M",
+      "derivation": "quantized",
+      "source": "gguf_metadata",
+      "confidence": "medium"
+    }
   }
 }
 ```
 
 Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plus a separate runtime block when the server reports a PID. The model ID is not copied into `product` or `component`, which keeps product and telemetry labels bounded.
+
+The country is the ISO 3166-1 alpha-2 country associated with the organization that released the resolved root/base weights—not the quantizer, Hub uploader, local runtime, or download location. The TUI and macOS app derive the flag locally (`CN 🇨🇳`); emoji is never stored on the wire. `base_models`, `quantized`, `distilled`, and `derivation` preserve the detected lineage, while `source` and `confidence` distinguish embedded/runtime evidence from catalog or Hub enrichment. Missing evidence stays absent/unknown rather than becoming a guess.
+
+**Optional Hugging Face enrichment.** Set `ai_discovery.lookup_model_provenance_online=true` (or pass `--lookup-model-provenance-online` to `agent discovery enable`) to look up public model-card ancestry. This is off by default because a lookup transmits a model repository ID. The resolver calls only the fixed public Hugging Face model-info endpoint, refuses redirects, bounds responses and recursion, caches positive and negative results, and starts only from an exact ID recovered from a Hugging Face cache path, an explicit `huggingface.co` URL in embedded metadata, or a reviewed exact lineage rule. It does not send local paths or slash-shaped relative aliases, fuzzy-search arbitrary filenames, or use a private Hub token. Transient failures retain a previously resolved result for at most seven days; a definitive not-found response clears it. A fully renamed GGUF can still resolve when its embedded `general.source.*` or `general.base_model.*` repository URL survives conversion; if identifiers and metadata were stripped, discovery reports the provenance as unknown.
+
+New `config.yaml` files persist the opt-in explicitly as disabled:
+
+```yaml
+ai_discovery:
+  lookup_model_provenance_online: false
+```
+
+Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -272,9 +295,9 @@ Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspa
   </Tab>
 </Tabs>
 
-### TUI behavior
+### TUI and macOS behavior
 
-The full `AI Discovery` panel groups local models by model ID and conditionally adds `Model`, `Model status`, and `Format` columns. Its detail view shows the remaining model metadata, including recipe, modality, device, `size_bytes`, and pinned state. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
+The full `AI Discovery` panel groups local models case-insensitively by model ID in a separate compact table with state, model, country/flag, publisher, root, derivation, status, and format. Everything else remains in the existing agent/tool table. Model detail shows base models, quantization/distillation, recipe, modality, device, `size_bytes`, pinned state, and provenance source/confidence. The macOS app decodes the same wire shape and presents the same model/non-model split and detail fields. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
 
 ### `agent confidence`
 

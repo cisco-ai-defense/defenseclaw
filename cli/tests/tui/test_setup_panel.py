@@ -201,6 +201,16 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.max_per_minute"].kind == "int"
 
 
+def test_ai_discovery_config_editor_exposes_online_provenance_opt_in() -> None:
+    field = _field_by_key(
+        build_setup_sections({}),
+        "ai_discovery.lookup_model_provenance_online",
+    )
+
+    assert field.kind == "bool"
+    assert "Hugging Face" in field.hint
+
+
 def test_action_matrix_has_header_and_severity_triplets() -> None:
     fields = action_matrix_fields("skill_actions", {})
 
@@ -1335,6 +1345,7 @@ def test_ai_discovery_wizard_maps_to_enable_or_disable() -> None:
     assert "--mode" in argv
     assert "--scan-interval-min" in argv
     assert "--include-shell-history" in argv  # default-on bool
+    assert "--no-lookup-model-provenance-online" in argv  # privacy-safe default
     # Defaults match the CLI's defaults so the wizard only emits the
     # opt-out variant when the operator flips a toggle.
     assert "--no-restart" not in argv
@@ -1355,6 +1366,13 @@ def test_ai_discovery_wizard_maps_to_enable_or_disable() -> None:
     argv = _build_ai_discovery_args(flipped)
     assert "--no-include-shell-history" in argv
     assert "--include-shell-history" not in argv
+
+    # The network lookup is a separate, explicit opt-in. The wizard must
+    # forward both sides of the toggle instead of silently dropping it.
+    online = _with_field(fields, "Online Model Provenance", "yes")
+    argv = _build_ai_discovery_args(online)
+    assert "--lookup-model-provenance-online" in argv
+    assert "--no-lookup-model-provenance-online" not in argv
 
 
 def test_splunk_dashboards_wizard_apply_destroy_round_trips() -> None:

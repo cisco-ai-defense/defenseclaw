@@ -64,6 +64,50 @@ def _coerce_bool(value: Any) -> bool:
     return False
 
 
+def _coerce_optional_bool(value: Any) -> bool | None:
+    """Parse an optional wire boolean without conflating unknown with false."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
+def _normalize_country_code(value: Any) -> str:
+    code = str(value or "").strip().upper()
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        return ""
+    return code
+
+
+def country_flag(country_code: str) -> str:
+    """Return the regional-indicator flag for a validated alpha-2 code."""
+
+    code = _normalize_country_code(country_code)
+    if not code:
+        return ""
+    return "".join(chr(0x1F1E6 + ord(letter) - ord("A")) for letter in code)
+
+
+def format_model_country(country_code: str) -> str:
+    """Render an accessible country label; the code survives missing emoji fonts."""
+
+    code = _normalize_country_code(country_code)
+    if not code:
+        return ""
+    flag = country_flag(code)
+    return f"{code} {flag}" if flag else code
+
+
 @dataclass(frozen=True)
 class AIUsageComponent:
     ecosystem: str = ""
@@ -107,6 +151,80 @@ class AIUsageRuntime:
 
 
 @dataclass(frozen=True)
+class AIUsageModelProvenance:
+    publisher: str = ""
+    country_code: str = ""
+    root_model: str = ""
+    base_models: tuple[str, ...] = ()
+    quantized: bool | None = None
+    quantization: str = ""
+    distilled: bool | None = None
+    derivation: str = ""
+    source: str = ""
+    confidence: str = ""
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None,
+    ) -> AIUsageModelProvenance | None:
+        if not raw:
+            return None
+        base_models_raw = raw.get("base_models") or ()
+        if isinstance(base_models_raw, str):
+            base_models = (base_models_raw,) if base_models_raw.strip() else ()
+        elif isinstance(base_models_raw, Sequence):
+            base_models = tuple(
+                str(item).strip()
+                for item in base_models_raw
+                if item is not None and str(item).strip()
+            )
+        else:
+            base_models = ()
+        return cls(
+            publisher=str(raw.get("publisher") or ""),
+            country_code=_normalize_country_code(raw.get("country_code")),
+            root_model=str(raw.get("root_model") or ""),
+            base_models=base_models,
+            quantized=_coerce_optional_bool(raw.get("quantized")),
+            quantization=str(raw.get("quantization") or ""),
+            distilled=_coerce_optional_bool(raw.get("distilled")),
+            derivation=str(raw.get("derivation") or ""),
+            source=str(raw.get("source") or ""),
+            confidence=str(raw.get("confidence") or ""),
+        )
+
+    @property
+    def country_label(self) -> str:
+        return format_model_country(self.country_code)
+
+    @property
+    def root_label(self) -> str:
+        if self.root_model:
+            return self.root_model
+        if self.base_models:
+            return f"ambiguous ({len(self.base_models)})"
+        return ""
+
+    @property
+    def derivation_label(self) -> str:
+        parts: list[str] = []
+        if self.derivation:
+            parts.append(self.derivation)
+        elif self.quantized is True and self.distilled is True:
+            parts.append("distilled+quantized")
+        elif self.quantized is True:
+            parts.append("quantized")
+        elif self.distilled is True:
+            parts.append("distilled")
+        elif self.quantized is False and self.distilled is False:
+            parts.append("base")
+        if self.quantization and self.quantization.casefold() not in {part.casefold() for part in parts}:
+            parts.append(self.quantization)
+        return " · ".join(parts)
+
+
+@dataclass(frozen=True)
 class AIUsageModel:
     id: str = ""
     status: str = ""
@@ -117,11 +235,13 @@ class AIUsageModel:
     device: str = ""
     size_bytes: int = 0
     pinned: bool = False
+    provenance: AIUsageModelProvenance | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> AIUsageModel | None:
         if not raw:
             return None
+        provenance_raw = raw.get("provenance")
         return cls(
             id=str(raw.get("id") or ""),
             status=str(raw.get("status") or ""),
@@ -132,6 +252,9 @@ class AIUsageModel:
             device=str(raw.get("device") or ""),
             size_bytes=_coerce_nonnegative_int(raw.get("size_bytes")),
             pinned=_coerce_bool(raw.get("pinned")),
+            provenance=AIUsageModelProvenance.from_mapping(
+                provenance_raw if isinstance(provenance_raw, Mapping) else None
+            ),
         )
 
 
@@ -271,6 +394,8 @@ class AIDiscoveryRow:
     model: str = ""
     model_statuses: tuple[str, ...] = ()
     model_formats: tuple[str, ...] = ()
+    model_providers: tuple[str, ...] = ()
+    model_provenance: AIUsageModelProvenance | None = None
     categories: tuple[str, ...] = ()
     detectors: tuple[str, ...] = ()
     identity_score: float = 0.0
@@ -294,6 +419,30 @@ class AIDiscoveryRow:
     @property
     def presence_label(self) -> str:
         return format_confidence(self.presence_score, self.presence_band)
+
+    @property
+    def model_country_label(self) -> str:
+        if self.model_provenance is None:
+            return ""
+        return self.model_provenance.country_label
+
+    @property
+    def model_publisher(self) -> str:
+        if self.model_provenance is None:
+            return ""
+        return self.model_provenance.publisher
+
+    @property
+    def model_root(self) -> str:
+        if self.model_provenance is None:
+            return ""
+        return self.model_provenance.root_label
+
+    @property
+    def model_derivation(self) -> str:
+        if self.model_provenance is None:
+            return ""
+        return self.model_provenance.derivation_label
 
 
 @dataclass(frozen=True)
@@ -325,7 +474,11 @@ class AIDiscoveryPanelModel:
         self.snapshot: AIUsageSnapshot | None = None
         self.rows: tuple[AIDiscoveryRow, ...] = ()
         self.filtered: tuple[AIDiscoveryRow, ...] = ()
+        self.model_rows: tuple[AIDiscoveryRow, ...] = ()
+        self.filtered_models: tuple[AIDiscoveryRow, ...] = ()
         self.cursor = 0
+        self.model_cursor = 0
+        self.active_table: Literal["agents", "models"] = "agents"
         self.width = 0
         self.height = 0
         self.filter_text = ""
@@ -358,20 +511,45 @@ class AIDiscoveryPanelModel:
         self._apply_filter()
 
     def selected(self) -> AIDiscoveryRow | None:
+        if self.active_table == "models":
+            return self.selected_model()
+        return self.selected_agent()
+
+    def selected_agent(self) -> AIDiscoveryRow | None:
         if 0 <= self.cursor < len(self.filtered):
             return self.filtered[self.cursor]
         return None
 
+    def selected_model(self) -> AIDiscoveryRow | None:
+        if 0 <= self.model_cursor < len(self.filtered_models):
+            return self.filtered_models[self.model_cursor]
+        return None
+
     def cursor_up(self) -> None:
+        if self.active_table == "models":
+            if self.model_cursor > 0:
+                self.model_cursor -= 1
+            return
         if self.cursor > 0:
             self.cursor -= 1
 
     def cursor_down(self) -> None:
+        if self.active_table == "models":
+            if self.model_cursor < len(self.filtered_models) - 1:
+                self.model_cursor += 1
+            return
         if self.cursor < len(self.filtered) - 1:
             self.cursor += 1
 
     def set_cursor(self, index: int) -> None:
         self.cursor = max(0, min(index, max(len(self.filtered) - 1, 0)))
+        if self.filtered:
+            self.active_table = "agents"
+
+    def set_model_cursor(self, index: int) -> None:
+        self.model_cursor = max(0, min(index, max(len(self.filtered_models) - 1, 0)))
+        if self.filtered_models:
+            self.active_table = "models"
 
     def cursor_at(self) -> int:
         return self.cursor
@@ -414,6 +592,8 @@ class AIDiscoveryPanelModel:
         )
 
     def handle_key(self, key: str) -> AIDiscoveryPanelAction:
+        if self.filtering:
+            return self._handle_filter_key(key)
         if key in {"j", "down"}:
             self.cursor_down()
             return AIDiscoveryPanelAction(True)
@@ -423,6 +603,9 @@ class AIDiscoveryPanelModel:
         if key == "esc" and self.detail_open:
             self.toggle_detail()
             return AIDiscoveryPanelAction(True, detail_closed=True)
+        if key == "esc" and self.filter_text:
+            self.clear_filter()
+            return AIDiscoveryPanelAction(True, hint="AI discovery filter cleared.")
         if key == "enter":
             if self.selected() is None:
                 return AIDiscoveryPanelAction(True, hint="(no AI discovery row selected)")
@@ -432,6 +615,29 @@ class AIDiscoveryPanelModel:
             return AIDiscoveryPanelAction(True, self.load_intent())
         if key == "s":
             return AIDiscoveryPanelAction(True, self.scan_intent())
+        if key == "/":
+            self.filter_text = ""
+            self.start_filter()
+            self._apply_filter()
+            return AIDiscoveryPanelAction(
+                True,
+                hint="Type to filter products and models. Enter applies; Esc clears.",
+            )
+        return AIDiscoveryPanelAction(False)
+
+    def _handle_filter_key(self, key: str) -> AIDiscoveryPanelAction:
+        if key == "enter":
+            self.stop_filter()
+            return AIDiscoveryPanelAction(True, hint="AI discovery filter applied.")
+        if key == "esc":
+            self.clear_filter()
+            return AIDiscoveryPanelAction(True, hint="AI discovery filter cleared.")
+        if key == "backspace":
+            self.set_filter(self.filter_text[:-1])
+            return AIDiscoveryPanelAction(True)
+        if len(key) == 1:
+            self.set_filter(self.filter_text + key)
+            return AIDiscoveryPanelAction(True)
         return AIDiscoveryPanelAction(False)
 
     def empty_state(self) -> str:
@@ -442,9 +648,9 @@ class AIDiscoveryPanelModel:
             )
         if not self.snapshot.enabled:
             return "AI discovery disabled. Run: defenseclaw agent discovery enable"
-        if self.filter_text and not self.filtered:
+        if self.filter_text and not self.filtered and not self.filtered_models:
             return "No matching signals."
-        if not self.rows:
+        if not self.rows and not self.model_rows:
             return "No AI usage detected yet. Run: defenseclaw agent discovery scan"
         return ""
 
@@ -478,6 +684,26 @@ class AIDiscoveryPanelModel:
             return ()
         now = now or datetime.now(timezone.utc)
         lines: list[str] = []
+        if self.detail_row.model_provenance:
+            provenance = self.detail_row.model_provenance
+            parts = ["provenance:"]
+            for label, value in (
+                ("publisher", provenance.publisher),
+                ("country", provenance.country_label),
+                ("root", provenance.root_model),
+                ("base_models", ",".join(provenance.base_models)),
+                ("derivation", provenance.derivation),
+                ("quantization", provenance.quantization),
+                ("source", provenance.source),
+                ("confidence", provenance.confidence),
+            ):
+                if value:
+                    parts.append(f"{label}={value}")
+            if provenance.quantized is not None:
+                parts.append(f"quantized={str(provenance.quantized).lower()}")
+            if provenance.distilled is not None:
+                parts.append(f"distilled={str(provenance.distilled).lower()}")
+            lines.append(" ".join(parts))
         for index, signal in enumerate(self.detail_row.signals):
             if index >= limit:
                 lines.append(
@@ -495,6 +721,7 @@ class AIDiscoveryPanelModel:
                 for label, value in (
                     ("status", model.status),
                     ("format", model.format),
+                    ("provider", model.provider),
                     ("recipe", model.recipe),
                     ("modality", model.modality),
                     ("device", model.device),
@@ -522,34 +749,26 @@ class AIDiscoveryPanelModel:
         return tuple(lines)
 
     def data_table_columns(self) -> tuple[str, ...]:
-        columns = [
+        return (
             "State",
             "Categories",
             "Product",
-        ]
-        if any(row.model for row in self.rows):
-            columns.extend(("Model", "Model status", "Format"))
-        columns.extend((
-            "Component", "Version", "Vendor", "Detectors", "Count", "Identity", "Presence",
-        ))
-        return tuple(columns)
+            "Component",
+            "Version",
+            "Vendor",
+            "Detectors",
+            "Count",
+            "Identity",
+            "Presence",
+        )
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
-        has_models = any(row.model for row in self.rows)
         rendered: list[tuple[str, ...]] = []
         for row in self.filtered:
             cells = [
                 row.state,
                 format_csv_truncated(row.categories, 2),
                 row.product,
-            ]
-            if has_models:
-                cells.extend((
-                    row.model,
-                    format_csv_truncated(row.model_statuses, 2),
-                    format_csv_truncated(row.model_formats, 2),
-                ))
-            cells.extend((
                 row.component_label,
                 row.version,
                 row.vendor,
@@ -557,19 +776,69 @@ class AIDiscoveryPanelModel:
                 str(row.count),
                 row.identity_label,
                 row.presence_label,
-            ))
+            ]
             rendered.append(tuple(cells))
         return tuple(rendered)
 
+    def model_table_columns(self) -> tuple[str, ...]:
+        return (
+            "State",
+            "Model",
+            "Country",
+            "Publisher",
+            "Root",
+            "Derivation",
+            "Status",
+            "Format",
+        )
+
+    def model_table_rows(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            (
+                row.state,
+                row.model,
+                row.model_country_label,
+                row.model_publisher,
+                row.model_root,
+                row.model_derivation,
+                format_csv_truncated(row.model_statuses, 2),
+                format_csv_truncated(row.model_formats, 2),
+            )
+            for row in self.filtered_models
+        )
+
     def _rebuild(self) -> None:
         self.rows = ()
+        self.model_rows = ()
         if self.snapshot is None:
             self._apply_filter()
             return
 
-        groups: dict[tuple[str, str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
-        order: list[tuple[str, str, str, str, str, str, str]] = []
+        groups: dict[tuple[str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
+        order: list[tuple[str, str, str, str, str, str]] = []
+        model_groups: dict[str, _MutableAIDiscoveryRow] = {}
+        model_order: list[str] = []
         for signal in self.snapshot.signals:
+            if signal.model is not None and signal.model.id:
+                model_key = signal.model.id.casefold()
+                model_row = model_groups.get(model_key)
+                if model_row is None:
+                    model_row = _MutableAIDiscoveryRow(
+                        state=signal.state,
+                        product=signal.product,
+                        vendor=signal.vendor,
+                        model=signal.model.id,
+                    )
+                    model_groups[model_key] = model_row
+                    model_order.append(model_key)
+                elif state_weight(signal.state) < state_weight(model_row.state):
+                    # A model can be observed through artifact, API, and runtime
+                    # detectors with different lifecycle states. Keep one inventory
+                    # row and surface the most actionable state across observations.
+                    model_row.state = signal.state
+                model_row.add(signal)
+                continue
+
             ecosystem = ""
             component_name = ""
             version = signal.version
@@ -578,8 +847,7 @@ class AIDiscoveryPanelModel:
                 component_name = signal.component.name.lower()
                 if signal.component.version:
                     version = signal.component.version
-            model_id = signal.model.id if signal.model else ""
-            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version, model_id)
+            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version)
             row = groups.get(key)
             if row is None:
                 row = _MutableAIDiscoveryRow(
@@ -589,7 +857,6 @@ class AIDiscoveryPanelModel:
                     ecosystem=signal.component.ecosystem if signal.component else "",
                     component=signal.component.name if signal.component else "",
                     version=version,
-                    model=model_id,
                 )
                 groups[key] = row
                 order.append(key)
@@ -602,15 +869,23 @@ class AIDiscoveryPanelModel:
                 key=lambda row: (state_weight(row.state), -row.count, row.product, row.model),
             )
         )
+        model_rows = [model_groups[key].freeze() for key in model_order]
+        self.model_rows = tuple(
+            sorted(
+                model_rows,
+                key=lambda row: (state_weight(row.state), row.model.casefold()),
+            )
+        )
         self._apply_filter()
 
     def _apply_filter(self) -> None:
         if not self.filter_text:
             self.filtered = self.rows
+            self.filtered_models = self.model_rows
         else:
             query = self.filter_text.lower()
-            filtered: list[AIDiscoveryRow] = []
-            for row in self.rows:
+
+            def matches(row: AIDiscoveryRow) -> bool:
                 parts: list[str] = [
                     row.state,
                     row.product,
@@ -621,13 +896,69 @@ class AIDiscoveryPanelModel:
                     row.model,
                     row.identity_band,
                     row.presence_band,
+                    *row.model_statuses,
+                    *row.model_formats,
+                    *row.model_providers,
                     *row.categories,
                     *row.detectors,
                 ]
-                if query in " ".join(parts).lower():
-                    filtered.append(row)
-            self.filtered = tuple(filtered)
-        self.set_cursor(self.cursor)
+                if row.model_provenance:
+                    provenance = row.model_provenance
+                    parts.extend(
+                        (
+                            provenance.publisher,
+                            provenance.country_code,
+                            provenance.country_label,
+                            provenance.root_model,
+                            *provenance.base_models,
+                            provenance.derivation,
+                            provenance.quantization,
+                            provenance.source,
+                            provenance.confidence,
+                        )
+                    )
+                return query in " ".join(parts).lower()
+
+            self.filtered = tuple(row for row in self.rows if matches(row))
+            self.filtered_models = tuple(row for row in self.model_rows if matches(row))
+        self.cursor = max(0, min(self.cursor, max(len(self.filtered) - 1, 0)))
+        self.model_cursor = max(
+            0,
+            min(self.model_cursor, max(len(self.filtered_models) - 1, 0)),
+        )
+        if self.active_table == "models" and not self.filtered_models and self.filtered:
+            self.active_table = "agents"
+        elif self.active_table == "agents" and not self.filtered and self.filtered_models:
+            self.active_table = "models"
+
+
+def _prefer_model_provenance(
+    current: AIUsageModelProvenance | None,
+    candidate: AIUsageModelProvenance | None,
+) -> bool:
+    if candidate is None:
+        return False
+    if current is None:
+        return True
+
+    confidence_rank = {"low": 1, "medium": 2, "high": 3}
+
+    def score(provenance: AIUsageModelProvenance) -> tuple[int, int]:
+        populated = sum(
+            bool(value)
+            for value in (
+                provenance.publisher,
+                provenance.country_code,
+                provenance.root_model,
+                provenance.base_models,
+                provenance.quantization,
+                provenance.derivation,
+                provenance.source,
+            )
+        )
+        return confidence_rank.get(provenance.confidence.casefold(), 0), populated
+
+    return score(candidate) > score(current)
 
 
 @dataclass
@@ -641,6 +972,8 @@ class _MutableAIDiscoveryRow:
     model: str = ""
     model_statuses: list[str] = field(default_factory=list)
     model_formats: list[str] = field(default_factory=list)
+    model_providers: list[str] = field(default_factory=list)
+    model_provenance: AIUsageModelProvenance | None = None
     categories: list[str] = field(default_factory=list)
     detectors: list[str] = field(default_factory=list)
     identity_score: float = 0.0
@@ -663,6 +996,10 @@ class _MutableAIDiscoveryRow:
                 self.model_statuses.append(signal.model.status)
             if signal.model.format and signal.model.format not in self.model_formats:
                 self.model_formats.append(signal.model.format)
+            if signal.model.provider and signal.model.provider not in self.model_providers:
+                self.model_providers.append(signal.model.provider)
+            if _prefer_model_provenance(self.model_provenance, signal.model.provenance):
+                self.model_provenance = signal.model.provenance
         if not self.identity_band and signal.identity_band:
             self.identity_band = signal.identity_band
             self.identity_score = signal.identity_score
@@ -685,6 +1022,8 @@ class _MutableAIDiscoveryRow:
             model=self.model,
             model_statuses=tuple(self.model_statuses),
             model_formats=tuple(self.model_formats),
+            model_providers=tuple(self.model_providers),
+            model_provenance=self.model_provenance,
             categories=tuple(self.categories),
             detectors=tuple(self.detectors),
             identity_score=self.identity_score,
@@ -774,13 +1113,16 @@ __all__ = [
     "AIDiscoveryState",
     "AIUsageComponent",
     "AIUsageModel",
+    "AIUsageModelProvenance",
     "AIUsageRuntime",
     "AIUsageSignal",
     "AIUsageSnapshot",
     "AIUsageSummary",
     "format_confidence",
     "format_csv_truncated",
+    "format_model_country",
     "humanize_age",
+    "country_flag",
     "sig_id",
     "state_weight",
 ]

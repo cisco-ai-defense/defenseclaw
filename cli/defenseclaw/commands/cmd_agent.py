@@ -986,6 +986,15 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--lookup-model-provenance-online/--no-lookup-model-provenance-online",
+    "lookup_model_provenance_online",
+    default=None,
+    help=(
+        "Send trusted exact model repository IDs to the fixed Hugging Face "
+        "API for lineage enrichment (default: off)."
+    ),
+)
+@click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
     "allow_workspace_signatures",
     default=None,
@@ -1030,6 +1039,7 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
+    lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     restart: bool,
@@ -1067,6 +1077,7 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1279,6 +1290,9 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
+        "lookup_model_provenance_online": bool(
+            ad.lookup_model_provenance_online
+        ),
     }
 
     live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
@@ -1480,6 +1494,10 @@ def discovery_setup(
         "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
+    lookup_model_provenance_online = click.confirm(
+        "  Look up trusted exact model IDs on Hugging Face for provenance?",
+        default=bool(ad.lookup_model_provenance_online),
+    )
 
     # ----- Safety ---------------------------------------------------------
     click.echo()
@@ -1507,6 +1525,7 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1706,6 +1725,7 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
+    lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1743,6 +1763,10 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
+    if lookup_model_provenance_online is not None:
+        overrides["lookup_model_provenance_online"] = bool(
+            lookup_model_provenance_online
+        )
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:

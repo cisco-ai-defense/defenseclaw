@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "publishers": [
+    {
+      "id": "qwen",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "canonical_namespace": "Qwen",
+      "namespaces": ["qwen", "qwenlm"],
+      "organization_aliases": ["qwen", "alibaba", "alibaba cloud"],
+      "family_tokens": ["qwen"],
+      "source_url": "https://huggingface.co/Qwen"
+    },
+    {
+      "id": "deepseek",
+      "publisher": "DeepSeek",
+      "country_code": "CN",
+      "canonical_namespace": "deepseek-ai",
+      "namespaces": ["deepseek-ai"],
+      "organization_aliases": ["deepseek", "deepseek ai", "deepseek-ai"],
+      "family_tokens": ["deepseek"],
+      "source_url": "https://huggingface.co/deepseek-ai"
+    },
+    {
+      "id": "meta-llama",
+      "publisher": "Meta",
+      "country_code": "US",
+      "canonical_namespace": "meta-llama",
+      "namespaces": ["meta-llama", "facebook", "meta"],
+      "organization_aliases": ["meta", "meta ai", "meta-llama"],
+      "family_tokens": ["meta-llama", "llama"],
+      "source_url": "https://huggingface.co/meta-llama"
+    },
+    {
+      "id": "mistral",
+      "publisher": "Mistral AI",
+      "country_code": "FR",
+      "canonical_namespace": "mistralai",
+      "namespaces": ["mistralai"],
+      "organization_aliases": ["mistral", "mistral ai", "mistralai"],
+      "family_tokens": ["mistral", "mixtral", "ministral", "codestral", "devstral"],
+      "source_url": "https://huggingface.co/mistralai"
+    },
+    {
+      "id": "google",
+      "publisher": "Google",
+      "country_code": "US",
+      "canonical_namespace": "google",
+      "namespaces": ["google"],
+      "organization_aliases": ["google", "google deepmind"],
+      "family_tokens": ["gemma"],
+      "source_url": "https://huggingface.co/google"
+    },
+    {
+      "id": "microsoft",
+      "publisher": "Microsoft",
+      "country_code": "US",
+      "canonical_namespace": "microsoft",
+      "namespaces": ["microsoft"],
+      "organization_aliases": ["microsoft", "microsoft research"],
+      "family_tokens": ["phi", "minilm"],
+      "source_url": "https://huggingface.co/microsoft"
+    },
+    {
+      "id": "ibm",
+      "publisher": "IBM",
+      "country_code": "US",
+      "canonical_namespace": "ibm-granite",
+      "namespaces": ["ibm", "ibm-granite"],
+      "organization_aliases": ["ibm", "ibm research", "ibm-granite"],
+      "family_tokens": ["granite"],
+      "source_url": "https://huggingface.co/ibm-granite"
+    },
+    {
+      "id": "tii",
+      "publisher": "Technology Innovation Institute",
+      "country_code": "AE",
+      "canonical_namespace": "tiiuae",
+      "namespaces": ["tiiuae"],
+      "organization_aliases": ["technology innovation institute", "tii", "tiiuae"],
+      "family_tokens": ["falcon"],
+      "source_url": "https://huggingface.co/tiiuae"
+    },
+    {
+      "id": "cohere",
+      "publisher": "Cohere",
+      "country_code": "CA",
+      "canonical_namespace": "CohereForAI",
+      "namespaces": ["cohere", "cohereforai"],
+      "organization_aliases": ["cohere", "cohere for ai", "cohereforai"],
+      "family_tokens": ["command-r", "aya"],
+      "source_url": "https://huggingface.co/CohereForAI"
+    },
+    {
+      "id": "nvidia",
+      "publisher": "NVIDIA",
+      "country_code": "US",
+      "canonical_namespace": "nvidia",
+      "namespaces": ["nvidia"],
+      "organization_aliases": ["nvidia"],
+      "family_tokens": ["nemotron"],
+      "source_url": "https://huggingface.co/nvidia"
+    },
+    {
+      "id": "apple",
+      "publisher": "Apple",
+      "country_code": "US",
+      "canonical_namespace": "apple",
+      "namespaces": ["apple"],
+      "organization_aliases": ["apple"],
+      "family_tokens": ["openelm"],
+      "source_url": "https://huggingface.co/apple"
+    },
+    {
+      "id": "stability-ai",
+      "publisher": "Stability AI",
+      "country_code": "GB",
+      "canonical_namespace": "stabilityai",
+      "namespaces": ["stabilityai"],
+      "organization_aliases": ["stability ai", "stabilityai"],
+      "family_tokens": ["stable-diffusion", "stablelm", "sdxl"],
+      "source_url": "https://huggingface.co/stabilityai"
+    },
+    {
+      "id": "black-forest-labs",
+      "publisher": "Black Forest Labs",
+      "country_code": "DE",
+      "canonical_namespace": "black-forest-labs",
+      "namespaces": ["black-forest-labs"],
+      "organization_aliases": ["black forest labs", "black-forest-labs"],
+      "family_tokens": ["flux"],
+      "source_url": "https://huggingface.co/black-forest-labs"
+    }
+  ],
+  "lineages": [
+    {
+      "id": "deepseek-r1-distill-qwen-1.5b",
+      "match": "deepseek-r1-distill-qwen-1.5b",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen2.5-Math-1.5B",
+      "base_models": ["Qwen/Qwen2.5-Math-1.5B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-distill-qwen-7b",
+      "match": "deepseek-r1-distill-qwen-7b",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen2.5-Math-7B",
+      "base_models": ["Qwen/Qwen2.5-Math-7B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-distill-qwen-14b",
+      "match": "deepseek-r1-distill-qwen-14b",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen2.5-14B",
+      "base_models": ["Qwen/Qwen2.5-14B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-distill-qwen-32b",
+      "match": "deepseek-r1-distill-qwen-32b",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen2.5-32B",
+      "base_models": ["Qwen/Qwen2.5-32B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-distill-llama-8b",
+      "match": "deepseek-r1-distill-llama-8b",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "meta-llama/Llama-3.1-8B",
+      "base_models": ["meta-llama/Llama-3.1-8B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-distill-llama-70b",
+      "match": "deepseek-r1-distill-llama-70b",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "meta-llama/Llama-3.3-70B-Instruct",
+      "base_models": ["meta-llama/Llama-3.3-70B-Instruct"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    }
+  ]
+}

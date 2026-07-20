@@ -61,9 +61,9 @@ def _make_ctx(*, enabled: bool = False, connector: str = "openclaw",
         include_package_manifests=True,
         include_env_var_names=True,
         include_network_domains=True,
+        lookup_model_provenance_online=False,
         max_files_per_scan=1000,
         max_file_bytes=512 * 1024,
-        emit_otel=True,
         allow_workspace_signatures=False,
         store_raw_local_paths=False,
     )
@@ -161,6 +161,7 @@ class DiscoveryEnableTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.ai_discovery.enabled)
+        self.assertFalse(app.cfg.ai_discovery.lookup_model_provenance_online)
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         # Restart MUST propagate the active connector — otherwise the
@@ -243,6 +244,19 @@ class DiscoveryEnableTests(unittest.TestCase):
             app.cfg.ai_discovery.scan_roots,
             ["~", "/workspace", "~/proj"],
         )
+
+    def test_online_model_provenance_requires_explicit_flag(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=False)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"), \
+                patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan", "--lookup-model-provenance-online"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.ai_discovery.lookup_model_provenance_online)
 
 
 class DiscoveryDisableTests(unittest.TestCase):
@@ -747,14 +761,15 @@ class DiscoverySetupTests(unittest.TestCase):
     #  9. package_man   (y/N)
     # 10. env_var_names (y/N)
     # 11. network_doms  (y/N)
-    # 12. allow_workspace_signatures (y/N)
-    # 13. store_raw_local_paths      (y/N)
-    # 14. final confirm "Save and apply?"  (only when --yes absent and there's a diff)
+    # 12. online model provenance    (y/N)
+    # 13. allow_workspace_signatures (y/N)
+    # 14. store_raw_local_paths      (y/N)
+    # 15. final confirm "Save and apply?"  (only when --yes absent and there's a diff)
 
     def _all_defaults(self) -> str:
-        # 13 prompts before the final confirm; --yes elides the final
+        # 14 prompts before the final confirm; --yes elides the final
         # one. Empty lines mean "accept default".
-        return "\n" * 13
+        return "\n" * 14
 
     def test_all_defaults_no_op(self):
         runner = CliRunner()
@@ -770,16 +785,34 @@ class DiscoverySetupTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("No changes", result.output)
         self.assertIn("vetted loopback model metadata APIs", result.output)
+        self.assertFalse(app.cfg.ai_discovery.lookup_model_provenance_online)
         # No save/restart when nothing actually changed.
         app.cfg.save.assert_not_called()
         restart_mock.assert_not_called()
         scan_mock.assert_not_called()
 
+    def test_interactive_setup_can_enable_online_model_provenance(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        # Accept prompts 1..11, opt in at prompt 12, then accept 13..14.
+        stdin = "\n" * 11 + "y\n" + "\n" * 2
+        with patch("defenseclaw.commands.cmd_setup._restart_services"), \
+                patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            result = runner.invoke(
+                cmd_agent.discovery_setup,
+                ["--yes", "--no-scan"],
+                input=stdin,
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.ai_discovery.lookup_model_provenance_online)
+        app.cfg.save.assert_called_once()
+
     def test_changes_scan_interval_only(self):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
-        # Sequence: enable=Y, mode=Enter, interval=15, then 10 more Enters.
-        stdin = "y\n\n15\n" + "\n" * 10
+        # Sequence: enable=Y, mode=Enter, interval=15, then 11 more Enters.
+        stdin = "y\n\n15\n" + "\n" * 11
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
                 patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
             result = runner.invoke(
@@ -802,9 +835,9 @@ class DiscoverySetupTests(unittest.TestCase):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
         # enable=Y, mode=Enter, interval=Enter, process=Enter, roots=",",
-        # then 8 more Enters. The wizard MUST detect the empty
+        # then 9 more Enters. The wizard MUST detect the empty
         # post-normalization list and revert.
-        stdin = "y\n\n\n\n,\n" + "\n" * 8
+        stdin = "y\n\n\n\n,\n" + "\n" * 9
         with patch("defenseclaw.commands.cmd_setup._restart_services"), \
                 patch.object(cmd_agent, "_trigger_post_enable_scan"):
             result = runner.invoke(

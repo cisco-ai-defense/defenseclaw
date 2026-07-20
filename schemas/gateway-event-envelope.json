@@ -282,7 +282,21 @@
             "modality":   { "type": ["string", "null"], "maxLength": 64 },
             "device":     { "type": ["string", "null"], "maxLength": 128 },
             "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
-            "pinned":     { "type": ["boolean", "null"] }
+            "pinned":     { "type": ["boolean", "null"] },
+            "provenance": { "type": ["object", "null"],
+              "properties": {
+                "publisher":    { "type": ["string", "null"], "maxLength": 128 },
+                "country_code": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" },
+                "root_model":   { "type": ["string", "null"], "maxLength": 512 },
+                "base_models":  { "type": ["array", "null"], "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 8, "uniqueItems": true },
+                "quantized":    { "type": ["boolean", "null"] },
+                "quantization": { "type": ["string", "null"], "maxLength": 64 },
+                "distilled":    { "type": ["boolean", "null"] },
+                "derivation":   { "type": ["string", "null"], "enum": ["distilled", "quantized", "distilled+quantized", null] },
+                "source":       { "type": ["string", "null"], "maxLength": 64 },
+                "confidence":   { "type": ["string", "null"], "enum": ["high", "medium", "low", null] }
+              }
+            }
           }
         },
         "runtime":        { "type": ["object", "null"],

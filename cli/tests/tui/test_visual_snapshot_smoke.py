@@ -19,7 +19,12 @@ import pytest
 from defenseclaw.config import RegistrySource
 from defenseclaw.models import Event
 from defenseclaw.tui.app import DefenseClawTUI
-from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSignal, AIUsageSnapshot
+from defenseclaw.tui.panels.ai_discovery import (
+    AIDiscoveryPanelModel,
+    AIUsageModel,
+    AIUsageSignal,
+    AIUsageSnapshot,
+)
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertsPanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel
 from defenseclaw.tui.panels.inventory import InventoryPanelModel, InventorySnapshot
@@ -32,6 +37,7 @@ from defenseclaw.tui.panels.setup import SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolRow, ToolsPanelModel
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
+from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen
 
 QA_SIZES = ((80, 24), (120, 40), (180, 50))
@@ -162,7 +168,31 @@ def _snapshot_app(tmp_path) -> DefenseClawTUI:
     ai_discovery.set_snapshot(
         AIUsageSnapshot(
             enabled=True,
-            signals=(AIUsageSignal(signal_id="sig1", state="new", product="Codex", vendor="OpenAI"),),
+            signals=(
+                AIUsageSignal(signal_id="sig1", state="new", product="Codex", vendor="OpenAI"),
+                AIUsageSignal(
+                    signal_id="model1",
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    vendor="Local",
+                    model=AIUsageModel(
+                        id="Qwen3-Q4_K_M",
+                        status="installed",
+                        format="gguf",
+                        provenance=AIUsageModelProvenance(
+                            publisher="Alibaba Cloud",
+                            country_code="CN",
+                            root_model="Qwen/Qwen3",
+                            quantized=True,
+                            quantization="Q4_K_M",
+                            derivation="quantized",
+                            source="catalog_exact",
+                            confidence="high",
+                        ),
+                    ),
+                ),
+            ),
         )
     )
 

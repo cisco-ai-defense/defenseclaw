@@ -44,6 +44,7 @@ from defenseclaw.tui.app import (
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
+    AIUsageModel,
     AIUsageSignal,
     AIUsageSnapshot,
     AIUsageSummary,
@@ -65,6 +66,7 @@ from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTa
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
+from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
@@ -2757,6 +2759,63 @@ async def test_ai_discovery_open_detail_toggles_when_row_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> None:
+    provenance = AIUsageModelProvenance(
+        publisher="Alibaba Cloud",
+        country_code="CN",
+        root_model="Qwen/Qwen3",
+        quantized=True,
+        quantization="Q4_K_M",
+        derivation="quantized",
+        source="catalog_exact",
+        confidence="high",
+    )
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(state="seen", product="Codex", vendor="OpenAI"),
+                AIUsageSignal(
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    detector="model_file",
+                    model=AIUsageModel(
+                        id="Qwen3-Q4_K_M",
+                        status="installed",
+                        format="gguf",
+                        provenance=provenance,
+                    ),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+        assert product_table.row_count == 1
+        assert model_table.row_count == 1
+        assert "Codex" in str(product_table.get_cell_at((0, 2)))
+        assert "Qwen3-Q4_K_M" in str(model_table.get_cell_at((0, 1)))
+        assert "CN 🇨🇳" in str(model_table.get_cell_at((0, 2)))
+        assert app.query_one("#ai-model-table-label", Static).has_class("hidden") is False
+
+        ai_model.set_model_cursor(0)
+        model_table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "publisher=Alibaba Cloud" in app.detail_text
+        assert "root=Qwen/Qwen3" in app.detail_text
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_enter_toggles_detail_exactly_once_per_press() -> None:
     """Each ``enter`` press flips the detail panel exactly once.
 
@@ -2827,7 +2886,25 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         enabled=True,
         summary=AIUsageSummary(scan_id="scan-1", total_signals=1),
         signals=(
-            AIUsageSignal(name="openai-agent", vendor="OpenAI", category="chat"),
+            AIUsageSignal(
+                name="local-model",
+                vendor="Local",
+                category="local_model",
+                model=AIUsageModel(
+                    id="Qwen3",
+                    status="installed",
+                    provenance=AIUsageModelProvenance(
+                        publisher="Alibaba Cloud",
+                        country_code="CN",
+                        root_model="Qwen/Qwen3",
+                        quantized=False,
+                        distilled=False,
+                        derivation="base",
+                        source="catalog_exact",
+                        confidence="high",
+                    ),
+                ),
+            ),
         ),
     )
     ai_model = AIDiscoveryPanelModel()
@@ -2846,7 +2923,9 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         body = json.loads(target.read_text())
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
-        assert body["signals"][0]["name"] == "openai-agent"
+        assert body["signals"][0]["name"] == "local-model"
+        assert body["signals"][0]["model"]["provenance"]["country_code"] == "CN"
+        assert body["signals"][0]["model"]["provenance"]["quantized"] is False
 
 
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:

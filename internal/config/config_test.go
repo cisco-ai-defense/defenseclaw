@@ -282,6 +282,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.AIDiscovery.RequireTrustedBinaryPaths {
 		t.Error("ai_discovery.require_trusted_binary_paths = true, want false")
 	}
+	if cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Error("ai_discovery.lookup_model_provenance_online = true, want false")
+	}
 	if len(cfg.AIDiscovery.TrustedBinaryPrefixes) != 0 {
 		t.Errorf("ai_discovery.trusted_binary_prefixes = %v, want empty", cfg.AIDiscovery.TrustedBinaryPrefixes)
 	}
@@ -326,6 +329,22 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
+	}
+}
+
+func TestLoadFromFileEnablesOnlineModelProvenanceOnlyWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 6\ndata_dir: " + dir + "\nai_discovery:\n  enabled: true\n  lookup_model_provenance_online: true\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if !cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Fatal("lookup_model_provenance_online was not loaded")
 	}
 }
 

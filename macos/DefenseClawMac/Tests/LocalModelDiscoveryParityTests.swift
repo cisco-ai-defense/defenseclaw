@@ -152,21 +152,25 @@ struct LocalModelDiscoveryParityTests {
             model: AIUsageModel(id: "Whisper-Tiny", status: "installed", format: "onnx")
         )
 
-        let rows = AIDiscoveryGrouping.rows(from: [whisper, installed, loaded])
+        let signals = [whisper, installed, loaded]
+        let rows = AIDiscoveryGrouping.modelRows(from: signals)
         expect(rows.count == 2, "distinct model ids remain separate")
-        expect(AIDiscoveryGrouping.hasModels(in: rows), "model columns are enabled")
+        expect(
+            AIDiscoveryGrouping.rows(from: signals).isEmpty,
+            "identified models leave the product table"
+        )
 
-        guard let qwen = rows.first(where: { $0.model == "Qwen3-0.6B-GGUF" }),
-              let whisperRow = rows.first(where: { $0.model == "Whisper-Tiny" }) else {
+        guard let qwen = rows.first(where: { $0.modelID == "Qwen3-0.6B-GGUF" }),
+              let whisperRow = rows.first(where: { $0.modelID == "Whisper-Tiny" }) else {
             fail("grouped model rows")
         }
         expect(qwen.count == 2, "installed and loaded signals group together")
-        expect(qwen.modelStatuses == ["installed", "loaded"], "statuses retain first-seen order")
-        expect(qwen.modelFormats == ["gguf"], "formats are deduplicated")
+        expect(qwen.statuses == ["installed", "loaded"], "statuses retain first-seen order")
+        expect(qwen.formats == ["gguf"], "formats are deduplicated")
         expect(qwen.id != whisperRow.id, "model id participates in stable row identity")
-        expect(AIDiscoveryGrouping.matches(qwen, query: "qwen3"), "model id is searchable")
-        expect(!AIDiscoveryGrouping.matches(whisperRow, query: "qwen3"), "search excludes other models")
-        expect(rows.map(\.model) == ["Qwen3-0.6B-GGUF", "Whisper-Tiny"], "model id breaks sort ties")
+        expect(qwen.matches("qwen3"), "model id is searchable")
+        expect(!whisperRow.matches("qwen3"), "search excludes other models")
+        expect(rows.map(\.modelID) == ["Qwen3-0.6B-GGUF", "Whisper-Tiny"], "model id breaks sort ties")
         expect(AIDiscoveryGrouping.detailSignalLimit == 50, "inspector detail is bounded")
     }
 

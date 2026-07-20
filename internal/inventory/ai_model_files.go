@@ -54,6 +54,7 @@ type modelFileAggregate struct {
 	id            string
 	format        string
 	provider      string
+	provenance    modelProvenanceHints
 	sizeBytes     int64
 	evidence      []AIEvidence
 	artifactKeys  map[string]struct{}
@@ -454,6 +455,7 @@ func mergeModelFileAggregateMetadata(existing, candidate *modelFileAggregate) {
 	if existing.provider == "" {
 		existing.provider = candidate.provider
 	}
+	existing.provenance = mergeModelProvenanceHints(existing.provenance, candidate.provenance)
 	if candidate.sizeBytes > 0 && existing.sizeBytes <= math.MaxInt64-candidate.sizeBytes {
 		existing.sizeBytes += candidate.sizeBytes
 	}
@@ -775,7 +777,9 @@ func isOllamaStorePath(path string, root modelScanRoot) bool {
 }
 
 func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root modelScanRoot, format string, directory bool, explicitID string) (modelFileAggregate, bool) {
-	info, err := os.Stat(path) // follows cache snapshot symlinks; content is never opened
+	// Follows cache snapshot symlinks. Weight tensors are never read; a bounded
+	// metadata prefix may be opened for self-describing containers such as GGUF.
+	info, err := os.Stat(path)
 	if err != nil || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
 		return modelFileAggregate{}, false
 	}
@@ -784,8 +788,12 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
 	}
+	provenance := modelProvenanceHints{}
 	if hfDir, hfID, ok := huggingFaceModelIdentity(path); ok {
 		id, key, provider = hfID, "huggingface:"+hfDir, "huggingface"
+		provenance.References = []string{hfID}
+		provenance.HuggingFaceRepoIDs = []string{hfID}
+		provenance.Source = "hf_cache"
 		if strings.HasPrefix(strings.ToLower(hfID), "mlx-community/") {
 			format, provider = "mlx", "mlx"
 		}
@@ -819,6 +827,9 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if id == "" {
 		return modelFileAggregate{}, false
 	}
+	if !directory {
+		provenance = mergeModelProvenanceHints(provenance, modelArtifactProvenanceHints(path, format))
+	}
 	workspaceHash := hashPath(root.path)
 	metadata := fmt.Sprintf("%s|%d|%d", format, info.Size(), info.ModTime().UTC().UnixNano())
 	evidence := AIEvidence{
@@ -838,7 +849,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 		sizeBytes = 0
 	}
 	return modelFileAggregate{
-		key: key, id: id, format: format, provider: provider,
+		key: key, id: id, format: format, provider: provider, provenance: provenance,
 		sizeBytes: sizeBytes,
 		evidence:  []AIEvidence{evidence}, artifactKey: artifactKey,
 	}, true
@@ -1024,6 +1035,11 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 		signal.Model = &LocalModelInfo{
 			ID: candidate.id, Status: "installed", Format: candidate.format,
 			Provider: candidate.provider, SizeBytes: candidate.sizeBytes,
+		}
+		enrichLocalModelProvenance(signal.Model, candidate.provenance)
+		if signal.Model.Provenance != nil {
+			provenanceJSON, _ := json.Marshal(signal.Model.Provenance)
+			signal.EvidenceHash = hashValue(signal.EvidenceHash + "|provenance:" + string(provenanceJSON))
 		}
 		out = append(out, signal)
 	}

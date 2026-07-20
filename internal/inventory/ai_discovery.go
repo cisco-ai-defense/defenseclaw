@@ -119,26 +119,27 @@ var allowedAISignalCategories = map[string]bool{
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
 type AIDiscoveryOptions struct {
-	Enabled                   bool
-	Mode                      string
-	ScanInterval              time.Duration
-	ProcessInterval           time.Duration
-	ScanRoots                 []string
-	SignaturePacks            []string
-	AllowWorkspaceSignatures  bool
-	DisabledSignatureIDs      []string
-	IncludeShellHistory       bool
-	IncludePackageManifests   bool
-	IncludeEnvVarNames        bool
-	IncludeNetworkDomains     bool
-	MaxFilesPerScan           int
-	MaxFileBytes              int64
-	StoreRawLocalPaths        bool
-	ConfidencePolicyPath      string
-	RequireTrustedBinaryPaths bool
-	TrustedBinaryPrefixes     []string
-	DataDir                   string
-	HomeDir                   string
+	Enabled                     bool
+	Mode                        string
+	ScanInterval                time.Duration
+	ProcessInterval             time.Duration
+	ScanRoots                   []string
+	SignaturePacks              []string
+	AllowWorkspaceSignatures    bool
+	DisabledSignatureIDs        []string
+	IncludeShellHistory         bool
+	IncludePackageManifests     bool
+	IncludeEnvVarNames          bool
+	IncludeNetworkDomains       bool
+	LookupModelProvenanceOnline bool
+	MaxFilesPerScan             int
+	MaxFileBytes                int64
+	StoreRawLocalPaths          bool
+	ConfidencePolicyPath        string
+	RequireTrustedBinaryPaths   bool
+	TrustedBinaryPrefixes       []string
+	DataDir                     string
+	HomeDir                     string
 	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
 	// controls only the managed endpoint-inventory callback; canonical v8
 	// telemetry remains owned by the bound observability runtime.
@@ -220,15 +221,45 @@ type ProcessRuntime struct {
 // unbounded. Keeping the identity in this dedicated block makes it available
 // to local API/CLI/TUI consumers without creating a high-cardinality metric.
 type LocalModelInfo struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"` // installed | loaded
-	Format    string `json:"format,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Recipe    string `json:"recipe,omitempty"`
-	Modality  string `json:"modality,omitempty"`
-	Device    string `json:"device,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	Pinned    bool   `json:"pinned,omitempty"`
+	ID         string                `json:"id"`
+	Status     string                `json:"status"` // installed | loaded
+	Format     string                `json:"format,omitempty"`
+	Provider   string                `json:"provider,omitempty"`
+	Recipe     string                `json:"recipe,omitempty"`
+	Modality   string                `json:"modality,omitempty"`
+	Device     string                `json:"device,omitempty"`
+	SizeBytes  int64                 `json:"size_bytes,omitempty"`
+	Pinned     bool                  `json:"pinned,omitempty"`
+	Provenance *LocalModelProvenance `json:"provenance,omitempty"`
+	// huggingFaceRepoIDs contains repository identifiers copied directly from
+	// trusted local metadata surfaces (for example a Hugging Face cache path or
+	// an embedded GGUF base-model record). It is deliberately never serialized:
+	// the list exists only long enough for an explicitly enabled Hub lookup and
+	// prevents a catalog-family guess derived from a private filename from
+	// becoming an outbound request.
+	huggingFaceRepoIDs []string
+}
+
+// LocalModelProvenance is bounded, deterministic lineage metadata derived
+// from local model metadata and the embedded publisher catalog. CountryCode
+// is the publisher's ISO 3166-1 alpha-2 code; presentation layers derive the
+// flag emoji so the wire format has one canonical country representation.
+//
+// Quantized and Distilled are pointers on purpose: nil means "unknown", while
+// false is reserved for metadata that positively identifies an original,
+// non-derived artifact. This prevents an absent hint from becoming a false
+// provenance claim.
+type LocalModelProvenance struct {
+	Publisher    string   `json:"publisher,omitempty"`
+	CountryCode  string   `json:"country_code,omitempty"`
+	RootModel    string   `json:"root_model,omitempty"`
+	BaseModels   []string `json:"base_models,omitempty"`
+	Quantized    *bool    `json:"quantized,omitempty"`
+	Quantization string   `json:"quantization,omitempty"`
+	Distilled    *bool    `json:"distilled,omitempty"`
+	Derivation   string   `json:"derivation,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Confidence   string   `json:"confidence,omitempty"`
 }
 
 // AISignal is the sanitized signal shape returned by API responses and used
@@ -270,6 +301,15 @@ type AISignal struct {
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
 	EvidenceHash       string          `json:"-"`
+	// ModelProvenanceHubResolvedAt is an internal freshness marker for optional
+	// Hub enrichment. It is mirrored by aiStoredSignal but never returned by the
+	// API or sent to telemetry sinks.
+	ModelProvenanceHubResolvedAt time.Time `json:"-"`
+	// ModelProvenanceHubHash participates in lifecycle classification without
+	// changing detector EvidenceHash. This lets late, rotating Hub enrichment
+	// emit one `changed` event to gateway/OTel consumers while keeping detector
+	// evidence semantics stable.
+	ModelProvenanceHubHash string `json:"-"`
 	// ModelAPISourceHash is an internal, privacy-preserving origin key used
 	// to apply lifecycle decisions only to the exact local server that was
 	// conclusively inventoried. It is persisted via aiStoredSignal but never
@@ -347,10 +387,12 @@ type AIDiscoveryReportObserver func(context.Context, AIDiscoveryReport)
 // per-evidence blob.
 type aiStoredSignal struct {
 	AISignal
-	RawPaths                 []string     `json:"raw_paths,omitempty"`
-	StoredEvidenceHash       string       `json:"evidence_hash,omitempty"`
-	StoredEvidence           []AIEvidence `json:"evidence,omitempty"`
-	StoredModelAPISourceHash string       `json:"model_api_source_hash,omitempty"`
+	RawPaths                           []string     `json:"raw_paths,omitempty"`
+	StoredEvidenceHash                 string       `json:"evidence_hash,omitempty"`
+	StoredEvidence                     []AIEvidence `json:"evidence,omitempty"`
+	StoredModelAPISourceHash           string       `json:"model_api_source_hash,omitempty"`
+	StoredModelProvenanceHubResolvedAt time.Time    `json:"model_provenance_hub_resolved_at,omitempty"`
+	StoredModelProvenanceHubHash       string       `json:"model_provenance_hub_hash,omitempty"`
 	// ModelAPIMisses provides one-scan hysteresis for model inventory read
 	// failures. A valid empty provider response is still conclusive and marks
 	// the old model gone immediately; an unreachable/malformed provider gets
@@ -420,6 +462,11 @@ type ContinuousDiscoveryService struct {
 	modelFileCursors    map[string]string
 	modelFileCycleMu    sync.Mutex
 	modelFileCycles     map[string]*modelFileCycle
+	// modelProvenanceHub exists only after the operator explicitly opts in to
+	// public model-card lookups. The cursor rotates the bounded online page so
+	// inventories larger than one request budget make progress across scans.
+	modelProvenanceHub       *huggingFaceProvenanceResolver
+	modelProvenanceHubCursor atomic.Uint64
 
 	// scanMu serializes runScan invocations so the scheduled-tick
 	// path, the process-tick path, and the API-triggered ScanNow
@@ -475,6 +522,9 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 		catalog:  catalog,
 		store:    NewAIStateStore(filepath.Join(opts.DataDir, "ai_discovery_state.json")),
 		triggers: make(chan chan scanResponse, 1),
+	}
+	if opts.LookupModelProvenanceOnline {
+		svc.modelProvenanceHub = newHuggingFaceProvenanceResolver()
 	}
 	// Try to open the SQLite history store. Failure is logged but
 	// not fatal -- the service stays functional, only history
@@ -536,27 +586,28 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 	home, _ := os.UserHomeDir()
 	ad := cfg.AIDiscovery
 	return normalizeAIDiscoveryOptions(AIDiscoveryOptions{
-		Enabled:                   ad.Enabled,
-		Mode:                      ad.Mode,
-		ScanInterval:              time.Duration(ad.ScanIntervalMin) * time.Minute,
-		ProcessInterval:           time.Duration(ad.ProcessIntervalSec) * time.Second,
-		ScanRoots:                 append([]string{}, ad.ScanRoots...),
-		SignaturePacks:            append([]string{}, ad.SignaturePacks...),
-		AllowWorkspaceSignatures:  ad.AllowWorkspaceSignatures,
-		DisabledSignatureIDs:      append([]string{}, ad.DisabledSignatureIDs...),
-		IncludeShellHistory:       ad.IncludeShellHistory,
-		IncludePackageManifests:   ad.IncludePackageManifests,
-		IncludeEnvVarNames:        ad.IncludeEnvVarNames,
-		IncludeNetworkDomains:     ad.IncludeNetworkDomains,
-		MaxFilesPerScan:           ad.MaxFilesPerScan,
-		MaxFileBytes:              int64(ad.MaxFileBytes),
-		StoreRawLocalPaths:        ad.StoreRawLocalPaths,
-		ConfidencePolicyPath:      ad.ConfidencePolicyPath,
-		RequireTrustedBinaryPaths: ad.RequireTrustedBinaryPaths,
-		TrustedBinaryPrefixes:     append([]string{}, ad.TrustedBinaryPrefixes...),
-		DataDir:                   cfg.DataDir,
-		HomeDir:                   home,
-		ManagedEnterprise:         managed.IsManagedEnterprise(cfg.DeploymentMode),
+		Enabled:                     ad.Enabled,
+		Mode:                        ad.Mode,
+		ScanInterval:                time.Duration(ad.ScanIntervalMin) * time.Minute,
+		ProcessInterval:             time.Duration(ad.ProcessIntervalSec) * time.Second,
+		ScanRoots:                   append([]string{}, ad.ScanRoots...),
+		SignaturePacks:              append([]string{}, ad.SignaturePacks...),
+		AllowWorkspaceSignatures:    ad.AllowWorkspaceSignatures,
+		DisabledSignatureIDs:        append([]string{}, ad.DisabledSignatureIDs...),
+		IncludeShellHistory:         ad.IncludeShellHistory,
+		IncludePackageManifests:     ad.IncludePackageManifests,
+		IncludeEnvVarNames:          ad.IncludeEnvVarNames,
+		IncludeNetworkDomains:       ad.IncludeNetworkDomains,
+		LookupModelProvenanceOnline: ad.LookupModelProvenanceOnline,
+		MaxFilesPerScan:             ad.MaxFilesPerScan,
+		MaxFileBytes:                int64(ad.MaxFileBytes),
+		StoreRawLocalPaths:          ad.StoreRawLocalPaths,
+		ConfidencePolicyPath:        ad.ConfidencePolicyPath,
+		RequireTrustedBinaryPaths:   ad.RequireTrustedBinaryPaths,
+		TrustedBinaryPrefixes:       append([]string{}, ad.TrustedBinaryPrefixes...),
+		DataDir:                     cfg.DataDir,
+		HomeDir:                     home,
+		ManagedEnterprise:           managed.IsManagedEnterprise(cfg.DeploymentMode),
 	})
 }
 
@@ -819,6 +870,19 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		full,
 		priorModelAPIFingerprints(prev.Signals),
 	)
+	if full && s.modelProvenanceHub != nil {
+		started := time.Now()
+		pageStart := s.modelProvenanceHubCursor.Load()
+		outcomes, attempted := enrichModelSignalsFromHuggingFace(
+			ctx, s.modelProvenanceHub, signals, pageStart,
+		)
+		if attempted > 0 {
+			s.modelProvenanceHubCursor.Add(uint64(attempted))
+		}
+		preserveHuggingFaceProvenance(signals, prev.Signals, outcomes, time.Now().UTC())
+		refreshHuggingFaceProvenanceHashes(signals)
+		stats.DetectorDurations["model_provenance_huggingface"] = int(time.Since(started).Milliseconds())
+	}
 	if err := ctx.Err(); err != nil {
 		// A canceled refresh/client request is not a complete inventory
 		// observation. The deferred v8 abort terminates the scan trace; do not
@@ -1125,13 +1189,17 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			if storedHash == "" {
 				storedHash = old.StoredEvidenceHash
 			}
+			storedHubHash := old.ModelProvenanceHubHash
+			if storedHubHash == "" {
+				storedHubHash = old.StoredModelProvenanceHubHash
+			}
 			// v1 → v2 grace: if the stored hash is empty (v1 migration
 			// or first scan), treat as `seen` to avoid a flood of
 			// spurious `changed` rows on the first post-upgrade scan.
 			switch {
 			case storedHash == "":
 				sig.State = AIStateSeen
-			case storedHash != sig.EvidenceHash:
+			case storedHash != sig.EvidenceHash || storedHubHash != sig.ModelProvenanceHubHash:
 				sig.State = AIStateChanged
 			default:
 				sig.State = AIStateSeen
@@ -1566,7 +1634,7 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 		for _, ext := range sig.ExtensionIDs {
 			ext = strings.ToLower(ext)
 			for _, entry := range entries {
-				if strings.Contains(entry, ext) {
+				if editorExtensionNameMatches(entry, ext) {
 					out = append(out, s.signalFromValue(sig, SignalEditorExtension, "editor_extension", ext))
 					break
 				}
@@ -1574,6 +1642,19 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 		}
 	}
 	return out
+}
+
+func editorExtensionNameMatches(entry, extensionID string) bool {
+	entry = strings.ToLower(strings.TrimSpace(entry))
+	extensionID = strings.ToLower(strings.TrimSpace(extensionID))
+	if entry == "" || extensionID == "" {
+		return false
+	}
+	if entry == extensionID {
+		return true
+	}
+	version := strings.TrimPrefix(entry, extensionID+"-")
+	return version != entry && version != "" && version[0] >= '0' && version[0] <= '9'
 }
 
 // safeLocalEndpointPaths is the allow-list of URL paths that
@@ -2907,6 +2988,15 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	report.Summary.Source = AISourceExternal
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
+		// Provenance country/publisher claims are catalog-controlled. An
+		// external discovery client may supply the model ID, but it cannot
+		// impersonate a higher-confidence publisher rule on outbound events.
+		// Recompute from the bounded ID with the same embedded resolver used by
+		// sidecar-native detections.
+		if report.Signals[i].Model != nil {
+			report.Signals[i].Model.Provenance = nil
+			enrichLocalModelProvenance(report.Signals[i].Model, modelProvenanceHints{})
+		}
 	}
 	s.fanoutReport(ctx, *report)
 	return nil
@@ -2968,6 +3058,9 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			}
 			if model.SizeBytes < 0 {
 				return errors.New("model size_bytes must be non-negative")
+			}
+			if err := validateLocalModelProvenance(model.Provenance); err != nil {
+				return err
 			}
 		}
 		// Phase-2 evidence bounds: keep the per-signal Evidence
@@ -3105,6 +3198,12 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 		if stored.AISignal.ModelAPISourceHash == "" && stored.StoredModelAPISourceHash != "" {
 			stored.AISignal.ModelAPISourceHash = stored.StoredModelAPISourceHash
 		}
+		if stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() && !stored.StoredModelProvenanceHubResolvedAt.IsZero() {
+			stored.AISignal.ModelProvenanceHubResolvedAt = stored.StoredModelProvenanceHubResolvedAt
+		}
+		if stored.AISignal.ModelProvenanceHubHash == "" && stored.StoredModelProvenanceHubHash != "" {
+			stored.AISignal.ModelProvenanceHubHash = stored.StoredModelProvenanceHubHash
+		}
 		out.Signals[fp] = stored
 	}
 	return out, nil
@@ -3131,6 +3230,12 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		}
 		if stored.StoredModelAPISourceHash == "" && stored.AISignal.ModelAPISourceHash != "" {
 			stored.StoredModelAPISourceHash = stored.AISignal.ModelAPISourceHash
+		}
+		if stored.StoredModelProvenanceHubResolvedAt.IsZero() && !stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() {
+			stored.StoredModelProvenanceHubResolvedAt = stored.AISignal.ModelProvenanceHubResolvedAt
+		}
+		if stored.StoredModelProvenanceHubHash == "" && stored.AISignal.ModelProvenanceHubHash != "" {
+			stored.StoredModelProvenanceHubHash = stored.AISignal.ModelProvenanceHubHash
 		}
 		state.Signals[fp] = stored
 	}
@@ -3370,7 +3475,11 @@ func applicationNameMatches(have, want string) bool {
 	if have == "" || want == "" {
 		return false
 	}
-	return have == want || strings.Contains(have, want)
+	// Exact names cover ordinary application bundles. A dot-delimited suffix
+	// additionally covers reverse-DNS Linux desktop IDs such as dev.zed.Zed
+	// without allowing adjacent products such as "Notion Calendar" to match
+	// the "Notion" signature.
+	return have == want || strings.HasSuffix(have, "."+want)
 }
 
 func isSafeLoopbackEndpoint(endpoint string) bool {

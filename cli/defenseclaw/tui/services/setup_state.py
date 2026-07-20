@@ -1093,6 +1093,7 @@ _BOOL_FIELD_KEYS = frozenset(
         "ai_discovery.include_package_manifests",
         "ai_discovery.include_env_var_names",
         "ai_discovery.include_network_domains",
+        "ai_discovery.lookup_model_provenance_online",
         "ai_discovery.store_raw_local_paths",
         "gateway.watcher.enabled",
         "gateway.watcher.skill.enabled",

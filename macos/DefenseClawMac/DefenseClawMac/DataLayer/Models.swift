@@ -644,7 +644,7 @@ struct AIUsageSnapshot: Sendable {
     var goneSignals: Int = 0
     var privacyMode: String = ""
 
-    /// Grouped one-row-per-product view, exactly as the TUI presents it.
+    /// Non-model discoveries stay in the existing one-row-per-product table.
     var rows: [AIDiscoveryRow] { AIDiscoveryGrouping.rows(from: signals) }
 
     /// TUI `header_parts`: a reported zero remains `active=0`; churn counters
@@ -657,6 +657,10 @@ struct AIUsageSnapshot: Sendable {
         parts.append("files=\(filesScanned)")
         return parts
     }
+
+    /// Local model signals use a dedicated compact table so high-cardinality
+    /// model IDs and lineage metadata do not crowd the product inventory.
+    var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
 }
 
 struct AIComponent: Identifiable, Sendable, Hashable {
@@ -670,17 +674,116 @@ struct AIComponent: Identifiable, Sendable, Hashable {
     var id: String { "\(ecosystem)/\(name)@\(version)" }
 }
 
-struct ConfidencePoint: Identifiable, Sendable {
-    var timestamp: Date
-    var confidence: Double
-    var id: Date { timestamp }
+/// Curated lineage for one locally observed model. Flags are intentionally
+/// derived by clients from the ISO country code instead of crossing the wire.
+struct AIModelProvenance: Sendable, Hashable {
+    var publisher: String = ""
+    var countryCode: String = ""
+    var rootModel: String = ""
+    var baseModels: [String] = []
+    /// nil means the catalog could not establish whether this is quantized.
+    var quantized: Bool? = nil
+    var quantization: String = ""
+    /// nil means the catalog could not establish whether this is distilled.
+    var distilled: Bool? = nil
+    var derivation: String = ""
+    var source: String = ""
+    var confidence: String = ""
+
+    static func fromMapping(_ raw: [String: Any]?) -> AIModelProvenance? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let bases: [String]
+        if let values = raw["base_models"] as? [String] {
+            bases = values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        } else if let values = raw["base_models"] as? [Any] {
+            bases = values.compactMap { $0 as? String }
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        } else if let value = raw["base_models"] as? String,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            bases = [value]
+        } else {
+            bases = []
+        }
+        return AIModelProvenance(
+            publisher: (raw["publisher"] as? String) ?? "",
+            countryCode: normalizedCountryCode((raw["country_code"] as? String) ?? ""),
+            rootModel: (raw["root_model"] as? String) ?? "",
+            baseModels: bases,
+            quantized: optionalBool(raw["quantized"]),
+            quantization: (raw["quantization"] as? String) ?? "",
+            distilled: optionalBool(raw["distilled"]),
+            derivation: (raw["derivation"] as? String) ?? "",
+            source: (raw["source"] as? String) ?? "",
+            confidence: (raw["confidence"] as? String) ?? ""
+        )
+    }
+
+    /// Text remains useful when the platform cannot render the flag glyph.
+    var countryDisplay: String {
+        guard !countryCode.isEmpty else { return "" }
+        let flag = countryFlag
+        return flag.isEmpty ? countryCode : "\(countryCode) \(flag)"
+    }
+
+    var countryFlag: String {
+        guard countryCode.unicodeScalars.count == 2 else { return "" }
+        let regionalIndicatorOffset: UInt32 = 127_397
+        return countryCode.unicodeScalars.compactMap { scalar in
+            UnicodeScalar(regionalIndicatorOffset + scalar.value)
+        }.map { String($0) }.joined()
+    }
+
+    var rootDisplay: String {
+        if !rootModel.isEmpty { return rootModel }
+        if !baseModels.isEmpty { return "ambiguous (\(baseModels.count))" }
+        return ""
+    }
+
+    var derivationDisplay: String {
+        var parts: [String] = []
+        if !derivation.isEmpty {
+            parts.append(derivation)
+        } else if quantized == true, distilled == true {
+            parts.append("distilled+quantized")
+        } else if quantized == true {
+            parts.append("quantized")
+        } else if distilled == true {
+            parts.append("distilled")
+        } else if quantized == false, distilled == false {
+            parts.append("base")
+        }
+        if !quantization.isEmpty,
+           !parts.contains(where: { $0.caseInsensitiveCompare(quantization) == .orderedSame }) {
+            parts.append(quantization)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func normalizedCountryCode(_ raw: String) -> String {
+        let code = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard code.unicodeScalars.count == 2,
+              code.unicodeScalars.allSatisfy({ (65...90).contains(Int($0.value)) })
+        else { return "" }
+        return code
+    }
+
+    private static func optionalBool(_ raw: Any?) -> Bool? {
+        if let value = raw as? Bool { return value }
+        if let value = raw as? NSNumber, value.doubleValue == 0 || value.doubleValue == 1 {
+            return value.boolValue
+        }
+        if let value = raw as? String {
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "on": return true
+            case "false", "0", "no", "off": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
 }
 
-/// Local-model metadata carried by `/api/v1/ai-usage` signals.
-///
-/// Model IDs deliberately remain separate from product/component identity:
-/// they are user-controlled, high-cardinality values that are useful in the
-/// local UI but unsuitable as telemetry labels.
+/// Model metadata emitted by the local model API and artifact detectors.
 struct AIUsageModel: Sendable, Hashable {
     var id: String = ""
     var status: String = ""
@@ -691,6 +794,39 @@ struct AIUsageModel: Sendable, Hashable {
     var device: String = ""
     var sizeBytes: Int64 = 0
     var pinned: Bool = false
+    var provenance: AIModelProvenance? = nil
+
+    static func fromMapping(_ raw: [String: Any]?) -> AIUsageModel? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return AIUsageModel(
+            id: (raw["id"] as? String) ?? "",
+            status: (raw["status"] as? String) ?? "",
+            format: (raw["format"] as? String) ?? "",
+            provider: (raw["provider"] as? String) ?? "",
+            recipe: (raw["recipe"] as? String) ?? "",
+            modality: (raw["modality"] as? String) ?? "",
+            device: (raw["device"] as? String) ?? "",
+            sizeBytes: nonnegativeInt64(raw["size_bytes"]),
+            pinned: (raw["pinned"] as? Bool) ?? false,
+            provenance: AIModelProvenance.fromMapping(raw["provenance"] as? [String: Any])
+        )
+    }
+
+    private static func nonnegativeInt64(_ raw: Any?) -> Int64 {
+        if raw is Bool { return 0 }
+        if let value = raw as? Int64 { return max(value, 0) }
+        if let value = raw as? Int { return value >= 0 ? Int64(value) : 0 }
+        guard let number = raw as? NSNumber else { return 0 }
+        let value = number.doubleValue
+        guard value.isFinite, value >= 0, value < Double(Int64.max) else { return 0 }
+        return Int64(value.rounded(.towardZero))
+    }
+}
+
+struct ConfidencePoint: Identifiable, Sendable {
+    var timestamp: Date
+    var confidence: Double
+    var id: Date { timestamp }
 }
 
 /// Sanitized process metadata for a discovered AI runtime. The gateway never
@@ -801,7 +937,10 @@ enum AISignalDecoding {
             modality: string(raw["modality"]),
             device: string(raw["device"]),
             sizeBytes: nonnegativeInt64(raw["size_bytes"]),
-            pinned: boolean(raw["pinned"])
+            pinned: boolean(raw["pinned"]),
+            provenance: AIModelProvenance.fromMapping(
+                nonemptyDictionary(raw["provenance"])
+            )
         )
     }
 
@@ -902,6 +1041,46 @@ struct AIDiscoveryRow: Identifiable, Sendable, Hashable {
     var componentLabel: String {
         if !ecosystem.isEmpty, !component.isEmpty { return "\(component) (\(ecosystem))" }
         return component
+    }
+}
+
+struct AIModelDiscoveryRowID: Sendable, Hashable {
+    var normalizedModelID: String
+}
+
+/// A model-centric row aggregated across artifact, API, and runtime sources.
+struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
+    var state: String
+    var modelID: String
+    var statuses: [String]
+    var formats: [String]
+    var providers: [String]
+    var products: [String]
+    var vendors: [String]
+    var detectors: [String]
+    var count: Int
+    var provenance: AIModelProvenance?
+    var lastActive: Date?
+    var signals: [AISignal]
+
+    var id: AIModelDiscoveryRowID {
+        AIModelDiscoveryRowID(
+            normalizedModelID: AIDiscoveryGrouping.normalizedModelID(modelID)
+        )
+    }
+
+    var maxSizeBytes: Int64 { signals.compactMap(\.model).map(\.sizeBytes).max() ?? 0 }
+    var isPinned: Bool { signals.compactMap(\.model).contains { $0.pinned } }
+
+    func matches(_ query: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        let provenanceParts = provenance.map {
+            [$0.publisher, $0.countryCode, $0.countryDisplay, $0.rootModel, $0.quantization,
+             $0.derivation, $0.source, $0.confidence] + $0.baseModels
+        } ?? []
+        let parts = [state, modelID] + statuses + formats + providers + products
+            + vendors + detectors + provenanceParts
+        return parts.joined(separator: " ").localizedCaseInsensitiveContains(query)
     }
 }
 
@@ -1032,15 +1211,20 @@ enum AIDiscoveryGrouping {
         return Int64(exactly: seconds)
     }
 
-    /// Port of AIDiscoveryPanelModel._rebuild(): group by
-    /// (state, product, vendor, ecosystem, component, version, model ID);
-    /// aggregate unique values in first-seen order; sort by state weight,
-    /// count descending, product, then model ID.
+    /// Port of AIDiscoveryPanelModel._rebuild(): group non-model signals by
+    /// (state, product, vendor, ecosystem, component, version); aggregate
+    /// unique categories/detectors in first-seen order; sort by state
+    /// weight, then count desc, then product. Identified models move to
+    /// `modelRows(from:)` and never appear in this product-row result.
     static func rows(from signals: [AISignal]) -> [AIDiscoveryRow] {
         var groups: [GroupKey: AIDiscoveryRow] = [:]
         var order: [GroupKey] = []
         for signal in signals {
-            let modelID = signal.model?.id ?? ""
+            if let model = signal.model,
+               !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
+            let modelID = ""
             let key = GroupKey(
                 state: signal.state,
                 product: signal.product,
@@ -1251,6 +1435,89 @@ enum AIOverviewGrouping {
 
     private static func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+}
+
+extension AIDiscoveryGrouping {
+
+    /// Collapse case variants of the same model ID across file, API, and
+    /// runtime detectors, surfacing the most actionable lifecycle state.
+    static func modelRows(from signals: [AISignal]) -> [AIModelDiscoveryRow] {
+        var groups: [AIModelDiscoveryRowID: AIModelDiscoveryRow] = [:]
+        var order: [AIModelDiscoveryRowID] = []
+        for signal in signals {
+            guard let model = signal.model,
+                  !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            let key = AIModelDiscoveryRowID(
+                normalizedModelID: normalizedModelID(model.id)
+            )
+            var row = groups[key] ?? AIModelDiscoveryRow(
+                state: signal.state,
+                modelID: model.id,
+                statuses: [], formats: [], providers: [], products: [], vendors: [], detectors: [],
+                count: 0, provenance: nil, lastActive: nil, signals: []
+            )
+            if groups[key] == nil { order.append(key) }
+            if stateWeight(signal.state) < stateWeight(row.state) {
+                row.state = signal.state
+            }
+            row.count += 1
+            row.signals.append(signal)
+            appendUnique(model.status, to: &row.statuses)
+            appendUnique(model.format, to: &row.formats)
+            appendUnique(model.provider, to: &row.providers)
+            appendUnique(signal.product, to: &row.products)
+            appendUnique(signal.vendor, to: &row.vendors)
+            appendUnique(signal.detector, to: &row.detectors)
+            if prefersModelProvenance(model.provenance, over: row.provenance) {
+                let provenance = model.provenance
+                row.provenance = provenance
+            }
+            if let active = signal.lastActive, row.lastActive.map({ active > $0 }) ?? true {
+                row.lastActive = active
+            }
+            groups[key] = row
+        }
+        return order.compactMap { groups[$0] }.sorted {
+            (stateWeight($0.state), normalizedModelID($0.modelID))
+                < (stateWeight($1.state), normalizedModelID($1.modelID))
+        }
+    }
+
+    static func normalizedModelID(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        guard !value.isEmpty, !values.contains(value) else { return }
+        values.append(value)
+    }
+
+    private static func prefersModelProvenance(
+        _ candidate: AIModelProvenance?,
+        over current: AIModelProvenance?
+    ) -> Bool {
+        guard let candidate else { return false }
+        guard let current else { return true }
+        let confidenceRank = ["low": 1, "medium": 2, "high": 3]
+        func score(_ provenance: AIModelProvenance) -> (Int, Int) {
+            let populated = [
+                !provenance.publisher.isEmpty,
+                !provenance.countryCode.isEmpty,
+                !provenance.rootModel.isEmpty,
+                !provenance.baseModels.isEmpty,
+                !provenance.quantization.isEmpty,
+                !provenance.derivation.isEmpty,
+                !provenance.source.isEmpty,
+            ].filter { $0 }.count
+            return (confidenceRank[provenance.confidence.lowercased(), default: 0], populated)
+        }
+        return score(candidate) > score(current)
     }
 }
 

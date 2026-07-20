@@ -3027,6 +3027,14 @@ def ai_discovery_wizard_fields(
             value=_cfg_bool("include_network_domains", True),
             default=_cfg_bool("include_network_domains", True),
         ),
+        WizardFormField(
+            "Online Model Provenance",
+            "bool",
+            "--lookup-model-provenance-online",
+            "--no-lookup-model-provenance-online",
+            value=_cfg_bool("lookup_model_provenance_online", False),
+            default=_cfg_bool("lookup_model_provenance_online", False),
+        ),
         WizardFormField("Output / Privacy", "section"),
         WizardFormField(
             "Honor Workspace Signatures",
@@ -3104,6 +3112,11 @@ def _build_ai_discovery_args(fields: Sequence[WizardFormField]) -> tuple[str, ..
         ("Package Manifests", "--include-package-manifests", "--no-include-package-manifests"),
         ("Env Var Names", "--include-env-var-names", "--no-include-env-var-names"),
         ("Network Domains", "--include-network-domains", "--no-include-network-domains"),
+        (
+            "Online Model Provenance",
+            "--lookup-model-provenance-online",
+            "--no-lookup-model-provenance-online",
+        ),
         ("Honor Workspace Signatures", "--allow-workspace-signatures", "--no-allow-workspace-signatures"),
         ("Store Raw Local Paths", "--store-raw-local-paths", "--no-store-raw-local-paths"),
     )
@@ -5546,6 +5559,13 @@ def _ai_discovery_section(cfg: object | Mapping[str, Any] | None) -> ConfigSecti
         _field(cfg, "Env Var Names", "ai_discovery.include_env_var_names", "bool", hint="Detect env var names only."),
         _field(
             cfg, "Provider Domains", "ai_discovery.include_network_domains", "bool", hint="Detect provider domains."
+        ),
+        _field(
+            cfg,
+            "Online Model Provenance",
+            "ai_discovery.lookup_model_provenance_online",
+            "bool",
+            hint="Send recovered public model repository IDs to Hugging Face for lineage enrichment.",
         ),
         _field(cfg, "Max Files", "ai_discovery.max_files_per_scan", "int", hint="Max files per scan."),
         _field(cfg, "Max File Bytes", "ai_discovery.max_file_bytes", "int", hint="Skip larger files."),

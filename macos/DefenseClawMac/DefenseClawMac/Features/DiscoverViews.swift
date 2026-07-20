@@ -440,21 +440,37 @@ struct InventoryView: View {
 
 // MARK: - AI Discovery
 
+private enum AIDiscoverySelection: Hashable {
+    case product(String)
+    case model(AIModelDiscoveryRowID)
+}
+
 struct AIDiscoveryView: View {
     @Environment(AppState.self) private var appState
     @State private var snapshot = AIUsageSnapshot()
     @State private var search = ""
-    @State private var selected: AIDiscoveryRow?
+    @State private var selection: AIDiscoverySelection?
     @State private var scanning = false
     @State private var error: String?
     @State private var loaded = false
 
-    /// Grouped rows filtered like the TUI's `_apply_filter`, including local
-    /// model identity without treating status/format as search dimensions.
-    private var filtered: [AIDiscoveryRow] {
-        let rows = snapshot.rows
+    /// Grouped non-model rows, filtered like the TUI's product table:
+    /// substring match across state/product/vendor/component/version/bands/categories/detectors.
+    private var filteredProducts: [AIDiscoveryRow] {
+        let rows = snapshot.rows.filter {
+            $0.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         guard !search.isEmpty else { return rows }
-        return rows.filter { AIDiscoveryGrouping.matches($0, query: search) }
+        return rows.filter { row in
+            let haystack = ([row.state, row.product, row.vendor, row.ecosystem, row.component,
+                             row.version, row.identityBand, row.presenceBand]
+                            + row.categories + row.detectors).joined(separator: " ")
+            return haystack.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private var filteredModels: [AIModelDiscoveryRow] {
+        snapshot.modelRows.filter { $0.matches(search) }
     }
 
     private var emptyState: (title: String, message: String) {
@@ -479,6 +495,16 @@ struct AIDiscoveryView: View {
         )
     }
 
+    private var selectedProduct: AIDiscoveryRow? {
+        guard case let .product(id) = selection else { return nil }
+        return filteredProducts.first { $0.id == id }
+    }
+
+    private var selectedModel: AIModelDiscoveryRow? {
+        guard case let .model(id) = selection else { return nil }
+        return filteredModels.first { $0.id == id }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Exact TUI header parts: active is always present (including a
@@ -500,7 +526,7 @@ struct AIDiscoveryView: View {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(Cisco.red).padding(6)
             }
-            if filtered.isEmpty {
+            if filteredProducts.isEmpty, filteredModels.isEmpty {
                 DCEmptyState(
                     title: emptyState.title,
                     message: emptyState.message,
@@ -508,15 +534,18 @@ struct AIDiscoveryView: View {
                 )
                 .frame(maxHeight: .infinity)
             } else {
-                discoveryTable
+                discoveryTables
             }
         }
         .inspector(isPresented: Binding(
-            get: { selected != nil },
-            set: { if !$0 { selected = nil } }
+            get: { selectedProduct != nil || selectedModel != nil },
+            set: { if !$0 { selection = nil } }
         )) {
-            if let row = selected {
-                rowInspector(row)
+            if let row = selectedModel {
+                modelInspector(row)
+                    .inspectorColumnWidth(min: 320, ideal: 400)
+            } else if let row = selectedProduct {
+                productInspector(row)
                     .inspectorColumnWidth(min: 320, ideal: 400)
             }
         }
@@ -544,6 +573,7 @@ struct AIDiscoveryView: View {
         // Pulse-fed retry: a transient gateway failure (restart mid-fetch,
         // token rotation) must not freeze the panel on a stale error.
         .task(id: appState.health.fetchedAt) { if error != nil || !loaded { await load() } }
+        .onChange(of: search) { selection = nil }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in Task { await load() } }
         .onReceive(NotificationCenter.default.publisher(for: .dcScanAIDiscovery)) { _ in
             guard !scanning,
@@ -554,28 +584,139 @@ struct AIDiscoveryView: View {
         }
     }
 
-    private var rowSelection: Binding<String?> {
+    private var productSelection: Binding<String?> {
         Binding<String?>(
-            get: { selected?.id },
-            set: { (id: String?) in selected = filtered.first { $0.id == id } }
+            get: {
+                guard case let .product(id) = selection else { return nil }
+                return id
+            },
+            set: { id in
+                if let id {
+                    selection = .product(id)
+                } else if case .product = selection {
+                    selection = nil
+                }
+            }
         )
     }
 
-    /// Model columns are based on the complete snapshot, not the filtered
-    /// rows, so searching never makes the table schema jump.
-    @ViewBuilder private var discoveryTable: some View {
-        if AIDiscoveryGrouping.hasModels(in: snapshot.rows) {
-            modelDiscoveryTable
+    private var modelSelection: Binding<AIModelDiscoveryRowID?> {
+        Binding<AIModelDiscoveryRowID?>(
+            get: {
+                guard case let .model(id) = selection else { return nil }
+                return id
+            },
+            set: { id in
+                if let id {
+                    selection = .model(id)
+                } else if case .model = selection {
+                    selection = nil
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var discoveryTables: some View {
+        if !filteredModels.isEmpty, !filteredProducts.isEmpty {
+            VSplitView {
+                modelSection
+                    .frame(minHeight: 140, idealHeight: 210, maxHeight: 280)
+                productSection
+                    .frame(minHeight: 220)
+            }
+        } else if !filteredModels.isEmpty {
+            modelSection
         } else {
-            standardDiscoveryTable
+            productSection
         }
     }
 
-    /// SwiftUI's table-column result builder supports ten top-level columns.
-    /// Grouping the column content preserves the TUI's complete thirteen-column
-    /// model table without replacing the native selectable macOS table.
-    private var modelDiscoveryTable: some View {
-        Table(filtered, selection: rowSelection) {
+    private var modelSection: some View {
+        VStack(spacing: 0) {
+            tableSectionHeader("Models", count: filteredModels.count, systemImage: "cpu")
+            Divider()
+            modelTable
+        }
+    }
+
+    private var productSection: some View {
+        VStack(spacing: 0) {
+            tableSectionHeader("AI Products & Surfaces", count: filteredProducts.count,
+                               systemImage: "sparkle.magnifyingglass")
+            Divider()
+            productTable
+        }
+    }
+
+    private func tableSectionHeader(_ title: String, count: Int, systemImage: String) -> some View {
+        HStack(spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+            Text("\(count)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Cisco.surfacePanel)
+    }
+
+    /// Compact model-centric table. Detailed lineage evidence remains in the
+    /// inspector so the model list stays useful in a short split pane.
+    private var modelTable: some View {
+        Table(filteredModels, selection: modelSelection) {
+            TableColumn("State") { (row: AIModelDiscoveryRow) in
+                StatePill(raw: row.state)
+            }
+            .width(80)
+            TableColumn("Model") { (row: AIModelDiscoveryRow) in
+                Text(row.modelID)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .help(row.modelID)
+            }
+            .width(min: 150, ideal: 240)
+            TableColumn("Country") { (row: AIModelDiscoveryRow) in
+                let country = row.provenance?.countryDisplay ?? ""
+                Text(country.isEmpty ? "—" : country)
+                    .font(.caption)
+                    .accessibilityLabel(country.isEmpty ? "Country unknown" : "Country \(country)")
+            }
+            .width(72)
+            TableColumn("Publisher") { (row: AIModelDiscoveryRow) in
+                let publisher = row.provenance?.publisher ?? ""
+                Text(publisher.isEmpty ? "—" : publisher).font(.caption).lineLimit(1)
+            }
+            .width(min: 90, ideal: 120)
+            TableColumn("Root") { (row: AIModelDiscoveryRow) in
+                let root = row.provenance?.rootDisplay ?? ""
+                Text(root.isEmpty ? "—" : root).font(.caption).lineLimit(1).help(root)
+            }
+            .width(min: 130, ideal: 210)
+            TableColumn("Derivation") { (row: AIModelDiscoveryRow) in
+                let derivation = row.provenance?.derivationDisplay ?? ""
+                Text(derivation.isEmpty ? "—" : derivation).font(.caption).lineLimit(1)
+            }
+            .width(115)
+            TableColumn("Status") { (row: AIModelDiscoveryRow) in
+                Text(AIDiscoveryGrouping.csvTruncated(row.statuses))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .width(100)
+            TableColumn("Format") { (row: AIModelDiscoveryRow) in
+                Text(AIDiscoveryGrouping.csvTruncated(row.formats))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .width(82)
+        }
+    }
+
+    /// Column set mirrors the TUI: State · Categories · Product · Component ·
+    /// Version · Vendor · Detectors · Count · Identity · Presence.
+    private var productTable: some View {
+        Table(filteredProducts, selection: productSelection) {
             Group {
                 TableColumn("State") { (r: AIDiscoveryRow) in
                     StatePill(raw: r.state)
@@ -590,20 +731,6 @@ struct AIDiscoveryView: View {
                     Text(r.product).font(.callout.weight(.medium))
                 }
                 .width(min: 110, ideal: 150)
-                TableColumn("Model") { (r: AIDiscoveryRow) in
-                    Text(r.model).font(.caption).lineLimit(1)
-                }
-                .width(min: 130, ideal: 210)
-                TableColumn("Model status") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.csvTruncated(r.modelStatuses))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .width(min: 100, ideal: 130)
-                TableColumn("Format") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.csvTruncated(r.modelFormats))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .width(min: 70, ideal: 90)
             }
             Group {
                 TableColumn("Component") { (r: AIDiscoveryRow) in
@@ -641,66 +768,74 @@ struct AIDiscoveryView: View {
         }
     }
 
-    private var standardDiscoveryTable: some View {
-        Table(filtered, selection: rowSelection) {
-            Group {
-                TableColumn("State") { (r: AIDiscoveryRow) in
-                    StatePill(raw: r.state)
-                }
-                .width(80)
-                TableColumn("Categories") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.csvTruncated(r.categories))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .width(min: 130, ideal: 190)
-                TableColumn("Product") { (r: AIDiscoveryRow) in
-                    Text(r.product).font(.callout.weight(.medium))
-                }
-                .width(min: 110, ideal: 150)
-            }
-            Group {
-                TableColumn("Component") { (r: AIDiscoveryRow) in
-                    Text(r.componentLabel).font(.caption)
-                }
-                .width(90)
-                TableColumn("Version") { (r: AIDiscoveryRow) in
-                    Text(r.version.isEmpty ? "—" : r.version).font(.caption)
-                }
-                .width(70)
-                TableColumn("Vendor") { (r: AIDiscoveryRow) in
-                    Text(r.vendor).font(.caption)
-                }
-                .width(90)
-                TableColumn("Detectors") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.csvTruncated(r.detectors))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .width(min: 130, ideal: 190)
-                TableColumn("Count") { (r: AIDiscoveryRow) in
-                    Text("\(r.count)").font(.caption.monospacedDigit())
-                }
-                .width(46)
-                TableColumn("Identity") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.formatConfidence(score: r.identityScore, band: r.identityBand))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .width(90)
-                TableColumn("Presence") { (r: AIDiscoveryRow) in
-                    Text(AIDiscoveryGrouping.formatConfidence(score: r.presenceScore, band: r.presenceBand))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .width(90)
-            }
+    private func modelInspector(_ row: AIModelDiscoveryRow) -> some View {
+        let provenance = row.provenance
+        let country = provenance?.countryDisplay ?? ""
+        let provenancePairs: [(String, String)]
+        if let provenance {
+            provenancePairs = [
+                ("Country", country.isEmpty ? "Unknown" : country),
+                ("Publisher", provenance.publisher),
+                ("Root model", provenance.rootDisplay),
+                ("Base models", provenance.baseModels.joined(separator: ", ")),
+                ("Derivation", provenance.derivationDisplay),
+                ("Quantized", optionalBooleanLabel(provenance.quantized)),
+                ("Quantization", provenance.quantization),
+                ("Distilled", optionalBooleanLabel(provenance.distilled)),
+                ("Provenance source", displayToken(provenance.source)),
+                ("Provenance confidence", displayToken(provenance.confidence)),
+            ]
+        } else {
+            provenancePairs = [("Provenance", "Unknown")]
         }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.modelID).font(.headline).textSelection(.enabled)
+                    Text("Local model").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { selection = nil } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.borderless)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    KeyValueGrid(pairs: ([
+                        ("State", row.state),
+                        ("Signals", "\(row.count)"),
+                        ("Status", row.statuses.joined(separator: ", ")),
+                        ("Format", row.formats.joined(separator: ", ")),
+                        ("Runtime / provider", row.providers.joined(separator: ", ")),
+                        ("Products", row.products.joined(separator: ", ")),
+                        ("Vendors", row.vendors.joined(separator: ", ")),
+                        ("Detectors", row.detectors.joined(separator: ", ")),
+                        ("Size", row.maxSizeBytes > 0
+                            ? ByteCountFormatter.string(fromByteCount: row.maxSizeBytes, countStyle: .file) : ""),
+                        ("Pinned", row.isPinned ? "Yes" : ""),
+                        ("Last active", DCDates.relative(row.lastActive)),
+                    ] + provenancePairs).filter { !$0.1.isEmpty })
+                    Divider()
+                    Text("Signals").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(row.signals.enumerated()), id: \.offset) { _, signal in
+                            modelSignalCard(signal)
+                        }
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding(12)
     }
 
-    private func rowInspector(_ row: AIDiscoveryRow) -> some View {
+    private func productInspector(_ row: AIDiscoveryRow) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(row.vendor.isEmpty ? row.product : "\(row.vendor) / \(row.product)")
                     .font(.headline)
                 Spacer()
-                Button { selected = nil } label: { Image(systemName: "xmark.circle.fill") }
+                Button { selection = nil } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
             }
             KeyValueGrid(pairs: [
@@ -771,6 +906,30 @@ struct AIDiscoveryView: View {
         .background(Cisco.surfacePanel, in: RoundedRectangle(cornerRadius: 6))
     }
 
+    private func modelSignalCard(_ signal: AISignal) -> some View {
+        signalInspector(signal)
+    }
+
+    private func optionalBooleanLabel(_ value: Bool?) -> String {
+        guard let value else { return "Unknown" }
+        return value ? "Yes" : "No"
+    }
+
+    private func displayToken(_ value: String) -> String {
+        value.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    private func reconcileSelection() {
+        switch selection {
+        case let .product(id) where !filteredProducts.contains(where: { $0.id == id }):
+            selection = nil
+        case let .model(id) where !filteredModels.contains(where: { $0.id == id }):
+            selection = nil
+        default:
+            break
+        }
+    }
+
     private func load() async {
         guard appState.gatewayReachable else { return }
         let installationGeneration = appState.installationGeneration
@@ -779,6 +938,7 @@ struct AIDiscoveryView: View {
             guard installationGeneration == appState.installationGeneration else { return }
             snapshot = freshSnapshot
             loaded = true
+            reconcileSelection()
             error = nil
         } catch {
             guard installationGeneration == appState.installationGeneration else { return }

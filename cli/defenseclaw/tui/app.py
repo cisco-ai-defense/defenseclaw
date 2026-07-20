@@ -402,6 +402,48 @@ class DefenseClawTUI(App[None]):
         display: none;
     }
 
+    #ai-model-table-label,
+    #ai-product-table-label {
+        height: 1;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #ai-model-table {
+        height: auto;
+        min-height: 2;
+        max-height: 8;
+        margin-bottom: 1;
+        border: none;
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #ai-model-table > .datatable--header {
+        background: TOKEN_SURFACE_PANEL;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #ai-model-table > .datatable--odd-row,
+    #ai-model-table > .datatable--even-row {
+        color: TOKEN_TEXT_PRIMARY;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #ai-model-table > .datatable--cursor,
+    #ai-model-table:focus > .datatable--cursor {
+        color: TOKEN_TEXT_PRIMARY;
+        background: TOKEN_SURFACE_SELECTED;
+        text-style: bold;
+    }
+
+    #ai-model-table.hidden,
+    #ai-model-table-label.hidden,
+    #ai-product-table-label.hidden {
+        display: none;
+    }
+
     #detail-panel {
         height: auto;
         max-height: 16;
@@ -789,6 +831,7 @@ class DefenseClawTUI(App[None]):
         self._last_table_signature: tuple[object, ...] | None = None
         self._rendered_table_row_keys: list[Any] = []
         self._next_table_row_key = 0
+        self._last_ai_model_table_signature: tuple[object, ...] | None = None
         # Overview renders ask for the same recent hook-event window several
         # times (header metrics, Enforcement, CONNECTORS rows). Cache it for a
         # single frame so keypresses don't wait behind repeated SQLite reads.
@@ -1080,10 +1123,10 @@ class DefenseClawTUI(App[None]):
                         tooltip="Reload the AI usage snapshot (`agent usage --json`)",
                     )
                     yield Button(
-                        "Open agent details",
+                        "Open details",
                         id="ai-open-detail",
                         compact=True,
-                        tooltip="Open the highlighted agent's detail view",
+                        tooltip="Open details for the highlighted product or model",
                     )
                     yield Button(
                         "Export JSON",
@@ -1286,6 +1329,16 @@ class DefenseClawTUI(App[None]):
                         compact=True,
                         tooltip="Open the per-row action menu (o)",
                     )
+                yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
+                yield DataTable(
+                    id="ai-model-table",
+                    classes="hidden",
+                    show_row_labels=False,
+                    show_cursor=True,
+                    cursor_type="row",
+                    zebra_stripes=True,
+                )
+                yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
                 yield DataTable(
                     id="panel-table",
                     classes="hidden",
@@ -2328,6 +2381,17 @@ class DefenseClawTUI(App[None]):
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
 
+    @on(DataTable.RowHighlighted, "#ai-model-table")
+    def _on_ai_model_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if self._restoring_table_cursor or self.active_panel != "ai":
+            return
+        if event.cursor_row == self.ai_discovery_model.model_cursor:
+            if self.ai_discovery_model.active_table != "models":
+                self.ai_discovery_model.set_model_cursor(event.cursor_row)
+            return
+        self.ai_discovery_model.set_model_cursor(event.cursor_row)
+        self._sync_ai_controls()
+
     @on(DataTable.RowSelected, "#panel-table")
     def _on_table_row_selected(self, event: DataTable.RowSelected) -> None:
         repeated_click = self._last_table_click == (self.active_panel, event.cursor_row)
@@ -2381,6 +2445,18 @@ class DefenseClawTUI(App[None]):
                 self._apply_setup_action(self._handle_setup_key("enter"))
             else:
                 self._update_body_only()
+
+    @on(DataTable.RowSelected, "#ai-model-table")
+    def _on_ai_model_row_selected(self, event: DataTable.RowSelected) -> None:
+        if self.active_panel != "ai":
+            return
+        repeated_click = self._last_table_click == ("ai-model", event.cursor_row)
+        self._last_table_click = ("ai-model", event.cursor_row)
+        self.ai_discovery_model.set_model_cursor(event.cursor_row)
+        if repeated_click:
+            self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("enter"))
+        else:
+            self._update_body_only()
 
     async def _run_command(
         self,
@@ -2905,10 +2981,17 @@ class DefenseClawTUI(App[None]):
                 detail = self._ai_discovery_detail_text()
             empty = self.ai_discovery_model.empty_state()
             header = ", ".join(self.ai_discovery_model.header_parts())
+            filter_prompt = ""
+            if self.ai_discovery_model.filtering:
+                filter_prompt = f"\nFilter: / {rich_escape(self.ai_discovery_model.filter_text)}"
+            elif self.ai_discovery_model.filter_text:
+                filter_prompt = f"\nFilter: {rich_escape(self.ai_discovery_model.filter_text)}"
             suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
             self.body_text = (
                 f"[bold #22D3EE]AI Discovery[/]  {header}\n"
-                "Keys: r refresh usage, s scan, Enter detail, / filter."
+                "Keys: r refresh usage, s scan, Enter detail, / filter. "
+                "Click either table to select a row."
+                f"{filter_prompt}"
                 f"{suffix}"
             )
             return self.body_text
@@ -2957,6 +3040,53 @@ class DefenseClawTUI(App[None]):
 
     def _render_native_widgets(self) -> None:
         self._render_overview_metrics()
+        self._render_ai_model_table()
+
+    def _render_ai_model_table(self) -> None:
+        """Render the compact provenance table above the normal product rows."""
+
+        try:
+            table = self.query_one("#ai-model-table", DataTable)
+            model_label = self.query_one("#ai-model-table-label", Static)
+            product_label = self.query_one("#ai-product-table-label", Static)
+        except NoMatches:
+            return
+
+        ai_visible = self.active_panel == "ai" and not self.help_open
+        columns = self.ai_discovery_model.model_table_columns()
+        rows = self.ai_discovery_model.model_table_rows()
+        model_visible = ai_visible and bool(rows)
+        product_label.set_class(not ai_visible, "hidden")
+        model_label.set_class(not model_visible, "hidden")
+        table.set_class(not model_visible, "hidden")
+
+        if not model_visible:
+            if self.focused is table:
+                self.set_focus(None)
+            if self._last_ai_model_table_signature is not None:
+                with self._programmatic_table_update():
+                    table.clear(columns=True)
+            self._last_ai_model_table_signature = None
+            return
+
+        cursor_row = max(0, min(self.ai_discovery_model.model_cursor, len(rows) - 1))
+        signature = (columns, rows, cursor_row)
+        if signature == self._last_ai_model_table_signature:
+            return
+
+        with self._programmatic_table_update():
+            table.clear(columns=True)
+            table.add_columns(*columns)
+            for index, row in enumerate(rows):
+                cells = (
+                    _styled_cell(column, value)
+                    for column, value in zip(columns, row, strict=True)
+                )
+                table.add_row(*cells, key=f"ai-model-row-{index}")
+            table.move_cursor(row=cursor_row, column=0, animate=False)
+            if not self.ai_discovery_model.filtered and self.focused is None:
+                table.focus()
+        self._last_ai_model_table_signature = signature
 
     def _render_overview_metrics(self) -> None:
         """Refresh only the native Overview metric tiles."""
