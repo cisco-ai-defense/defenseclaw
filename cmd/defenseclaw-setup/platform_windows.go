@@ -96,50 +96,197 @@ func acquireSetupLock() (func() error, error) {
 }
 
 func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) {
+	proof, owned, err := managedProcessProofFor(gatewayPath, dataRoot, pidFile)
+	closeErr := closeManagedProcessProof(proof)
+	if err == nil {
+		err = closeErr
+	}
+	return owned, err
+}
+
+func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProcessProof, bool, error) {
 	pidPath := filepath.Join(dataRoot, pidFile)
 	info, err := os.Lstat(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return managedProcessProof{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	}
 	if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
 	}
 	if reparse, err := isReparsePoint(pidPath); err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	} else if reparse {
-		return false, fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
 	}
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
 	}
 	var state pidState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return false, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
+		return managedProcessProof{}, false, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
 	}
 	if state.PID <= 0 || strings.TrimSpace(state.Executable) == "" {
-		return false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
+		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
 	}
 	if !pathidentity.Same(state.Executable, gatewayPath) {
-		return false, nil
+		return managedProcessProof{}, false, nil
 	}
-	livePath, identity, err := processIdentity(uint32(state.PID))
-	if errors.Is(err, os.ErrProcessDone) {
-		return false, nil
+	handle, err := windows.OpenProcess(
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
+		false,
+		uint32(state.PID),
+	)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return managedProcessProof{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return managedProcessProof{}, false, err
+	}
+	livePath, identity, err := processIdentityFromHandle(handle)
+	if errors.Is(err, os.ErrProcessDone) {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
+	}
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, err
 	}
 	if !pathidentity.Same(livePath, gatewayPath) {
-		return false, nil
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
 	}
 	if state.StartIdentity != "" && state.StartIdentity != identity {
-		return false, nil
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
 	}
-	return true, nil
+	return managedProcessProof{
+		PID:           uint32(state.PID),
+		Executable:    livePath,
+		StartIdentity: identity,
+		ProcessHandle: uintptr(handle),
+	}, true, nil
+}
+
+func closeManagedProcessProof(proof managedProcessProof) error {
+	if proof.ProcessHandle == 0 {
+		return nil
+	}
+	return windows.CloseHandle(windows.Handle(proof.ProcessHandle))
+}
+
+func waitForManagedProcessExitContext(
+	ctx context.Context,
+	proof managedProcessProof,
+	timeout time.Duration,
+) error {
+	if proof.PID == 0 || strings.TrimSpace(proof.Executable) == "" || proof.StartIdentity == "" ||
+		proof.ProcessHandle == 0 {
+		return errors.New("managed process exit proof is incomplete")
+	}
+	handle := windows.Handle(proof.ProcessHandle)
+	deadline := time.Now().Add(timeout)
+	for {
+		result, err := windows.WaitForSingleObject(handle, 25)
+		if err != nil {
+			return err
+		}
+		if result == uint32(windows.WAIT_OBJECT_0) {
+			return nil
+		}
+		if result != uint32(windows.WAIT_TIMEOUT) {
+			return fmt.Errorf("unexpected authenticated process wait result %#x", result)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for authenticated process %d to exit", proof.PID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+}
+
+func waitForExecutableRelease(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := probeExecutableRelease(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
+			!errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for executable handle release: %w", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func probeExecutableRelease(path string) error {
+	if err := rejectReparseAncestors(path); err != nil {
+		return err
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("executable release path is not a regular file: %s", path)
+	}
+	if reparse, err := isReparsePoint(path); err != nil {
+		return err
+	} else if reparse {
+		return fmt.Errorf("executable release path is a reparse point: %s", path)
+	}
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		// Stable-hook publication immediately opens this executable read/write
+		// before tightening its DACL. A read/delete-only probe can succeed while
+		// a legacy gateway or watchdog image still denies write sharing, creating
+		// a false release proof followed by ERROR_SHARING_VIOLATION. Request the
+		// same write authority here without mutating the file so recovery waits
+		// for every executable image handle to drain first.
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return os.ErrNotExist
+		}
+		return err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return fmt.Errorf("wrap executable release handle: %s", path)
+	}
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil {
+		return errors.Join(statErr, closeErr)
+	}
+	if !os.SameFile(before, opened) {
+		return fmt.Errorf("executable release path changed while opening: %s", path)
+	}
+	return nil
 }
 
 func defaultInstallRoot() (string, error) {
@@ -460,6 +607,10 @@ func processIdentity(pid uint32) (string, string, error) {
 		return "", "", err
 	}
 	defer windows.CloseHandle(handle)
+	return processIdentityFromHandle(handle)
+}
+
+func processIdentityFromHandle(handle windows.Handle) (string, string, error) {
 	waitResult, err := windows.WaitForSingleObject(handle, 0)
 	if err != nil {
 		return "", "", err
@@ -1091,6 +1242,7 @@ func registerInstalledAppAt(
 		previousState,
 		nil,
 		nil,
+		nil,
 	)
 }
 
@@ -1111,6 +1263,7 @@ func registerInstalledAppAtWithHook(
 		previousState,
 		beforeMutation,
 		nil,
+		nil,
 	)
 }
 
@@ -1119,11 +1272,20 @@ func registerInstalledAppAtWithHooks(
 	unsigned bool,
 	previousState *installState,
 	beforeExistingMutation func(),
+	afterExistingMutation func(),
 	beforeFreshPublication func(),
 ) error {
 	if !validSetupTransactionID(transactionID) {
 		return errors.New("refusing Apps & Features registration without a valid transaction identity")
 	}
+	values := newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	)
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
 		registryPath+`\`+registryKey,
@@ -1148,26 +1310,18 @@ func registerInstalledAppAtWithHooks(
 		if beforeExistingMutation != nil {
 			beforeExistingMutation()
 		}
-		writeErr := writeInstalledAppValues(
-			key,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
-		)
+		writeErr := writeInstalledAppValuesSnapshot(key, values)
 		closeErr := key.Close()
 		if writeErr != nil || closeErr != nil {
 			return errors.Join(writeErr, closeErr)
 		}
-		matches, verifyErr := installedAppValuesMatchAt(
+		if afterExistingMutation != nil {
+			afterExistingMutation()
+		}
+		matches, verifyErr := installedAppValuesMatchAtSnapshot(
 			registryPath,
 			registryKey,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
+			values,
 		)
 		if verifyErr != nil {
 			return verifyErr
@@ -1192,7 +1346,7 @@ func registerInstalledAppAtWithHooks(
 	if err != nil {
 		return err
 	}
-	writeErr := writeInstalledAppValues(key, maintenancePath, installRoot, version, transactionID, unsigned)
+	writeErr := writeInstalledAppValuesSnapshot(key, values)
 	closeErr := key.Close()
 	if writeErr != nil || closeErr != nil {
 		_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
@@ -1219,14 +1373,10 @@ func registerInstalledAppAtWithHooks(
 		// RegRenameKey may become visible before a later registry I/O error.
 		// A complete transaction-owned destination can be re-flushed safely;
 		// anything else remains pending without touching the concurrent key.
-		matches, inspectErr := installedAppValuesMatchAt(
+		matches, inspectErr := installedAppValuesMatchAtSnapshot(
 			registryPath,
 			registryKey,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
+			values,
 		)
 		if inspectErr != nil || !matches {
 			// Retain the transaction-owned pending key as evidence. The next
@@ -1238,14 +1388,10 @@ func registerInstalledAppAtWithHooks(
 	if err := flushRegistryKey(parent); err != nil {
 		return err
 	}
-	matches, err := installedAppValuesMatchAt(
+	matches, err := installedAppValuesMatchAtSnapshot(
 		registryPath,
 		registryKey,
-		maintenancePath,
-		installRoot,
-		version,
-		transactionID,
-		unsigned,
+		values,
 	)
 	if err != nil {
 		return err
@@ -1256,47 +1402,88 @@ func registerInstalledAppAtWithHooks(
 	return nil
 }
 
+type installedAppValues struct {
+	strings  map[string]string
+	integers map[string]uint64
+}
+
+func newInstalledAppValues(
+	maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	estimatedSize uint32,
+) installedAppValues {
+	displayName := productName
+	if unsigned {
+		displayName += " (Unsigned Local Test Build)"
+	}
+	return installedAppValues{
+		strings: map[string]string{
+			installedAppOwnerValue: transactionID,
+			"InstallLocation":      installRoot,
+			"DisplayName":          displayName,
+			"DisplayVersion":       version,
+			"Publisher":            defaultPublisher,
+			"DisplayIcon":          filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+			"UninstallString":      quote(maintenancePath) + " /uninstall",
+			"QuietUninstallString": quote(maintenancePath) + " /uninstall /quiet",
+			"ModifyPath":           quote(maintenancePath) + " /repair",
+			"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
+		},
+		integers: map[string]uint64{
+			"NoModify":      0,
+			"EstimatedSize": uint64(estimatedSize),
+		},
+	}
+}
+
 func writeInstalledAppValues(
 	key registry.Key,
 	maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) error {
-	displayName := productName
-	if unsigned {
-		displayName += " (Unsigned Local Test Build)"
-	}
+	return writeInstalledAppValuesSnapshot(key, newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	))
+}
+
+func writeInstalledAppValuesSnapshot(key registry.Key, values installedAppValues) error {
 	// Publish the ownership pair first and flush it before decorative values.
 	// Existing owned keys remain repairable after every subsequent boundary;
 	// fresh keys are not made visible until the entire staged key is complete.
-	for _, pair := range [][2]string{
-		{installedAppOwnerValue, transactionID},
-		{"InstallLocation", installRoot},
+	for _, name := range []string{
+		installedAppOwnerValue,
+		"InstallLocation",
 	} {
-		if err := key.SetStringValue(pair[0], pair[1]); err != nil {
+		if err := key.SetStringValue(name, values.strings[name]); err != nil {
 			return err
 		}
 	}
 	if err := flushRegistryKey(key); err != nil {
 		return err
 	}
-	for _, pair := range [][2]string{
-		{"DisplayName", displayName},
-		{"DisplayVersion", version},
-		{"Publisher", defaultPublisher},
-		{"DisplayIcon", filepath.Join(installRoot, "bin", "defenseclaw.exe")},
-		{"UninstallString", quote(maintenancePath) + " /uninstall"},
-		{"QuietUninstallString", quote(maintenancePath) + " /uninstall /quiet"},
-		{"ModifyPath", quote(maintenancePath) + " /repair"},
-		{"URLInfoAbout", "https://github.com/cisco-ai-defense/defenseclaw"},
+	for _, name := range []string{
+		"DisplayName",
+		"DisplayVersion",
+		"Publisher",
+		"DisplayIcon",
+		"UninstallString",
+		"QuietUninstallString",
+		"ModifyPath",
+		"URLInfoAbout",
 	} {
-		if err := key.SetStringValue(pair[0], pair[1]); err != nil {
+		if err := key.SetStringValue(name, values.strings[name]); err != nil {
 			return err
 		}
 	}
-	if err := key.SetDWordValue("NoModify", 0); err != nil {
+	if err := key.SetDWordValue("NoModify", uint32(values.integers["NoModify"])); err != nil {
 		return err
 	}
-	if err := key.SetDWordValue("EstimatedSize", estimateInstallKB(installRoot)); err != nil {
+	if err := key.SetDWordValue("EstimatedSize", uint32(values.integers["EstimatedSize"])); err != nil {
 		return err
 	}
 	return flushRegistryKey(key)
@@ -1307,23 +1494,18 @@ func installedAppValuesMatchKey(
 	maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) (bool, error) {
-	displayName := productName
-	if unsigned {
-		displayName += " (Unsigned Local Test Build)"
-	}
-	expectedStrings := map[string]string{
-		installedAppOwnerValue: transactionID,
-		"InstallLocation":      installRoot,
-		"DisplayName":          displayName,
-		"DisplayVersion":       version,
-		"Publisher":            defaultPublisher,
-		"DisplayIcon":          filepath.Join(installRoot, "bin", "defenseclaw.exe"),
-		"UninstallString":      quote(maintenancePath) + " /uninstall",
-		"QuietUninstallString": quote(maintenancePath) + " /uninstall /quiet",
-		"ModifyPath":           quote(maintenancePath) + " /repair",
-		"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
-	}
-	for name, want := range expectedStrings {
+	return installedAppValuesMatchKeySnapshot(key, newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	))
+}
+
+func installedAppValuesMatchKeySnapshot(key registry.Key, values installedAppValues) (bool, error) {
+	for name, want := range values.strings {
 		got, valueType, err := key.GetStringValue(name)
 		if err != nil {
 			if err == registry.ErrNotExist {
@@ -1335,10 +1517,7 @@ func installedAppValuesMatchKey(
 			return false, nil
 		}
 	}
-	for name, want := range map[string]uint64{
-		"NoModify":      0,
-		"EstimatedSize": uint64(estimateInstallKB(installRoot)),
-	} {
+	for name, want := range values.integers {
 		got, valueType, err := key.GetIntegerValue(name)
 		if err != nil {
 			if err == registry.ErrNotExist {
@@ -1357,6 +1536,24 @@ func installedAppValuesMatchAt(
 	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) (bool, error) {
+	return installedAppValuesMatchAtSnapshot(
+		registryPath,
+		registryKey,
+		newInstalledAppValues(
+			maintenancePath,
+			installRoot,
+			version,
+			transactionID,
+			unsigned,
+			estimateInstallKB(installRoot),
+		),
+	)
+}
+
+func installedAppValuesMatchAtSnapshot(
+	registryPath, registryKey string,
+	values installedAppValues,
+) (bool, error) {
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
 		registryPath+`\`+registryKey,
@@ -1368,14 +1565,7 @@ func installedAppValuesMatchAt(
 	if err != nil {
 		return false, err
 	}
-	matches, matchErr := installedAppValuesMatchKey(
-		key,
-		maintenancePath,
-		installRoot,
-		version,
-		transactionID,
-		unsigned,
-	)
+	matches, matchErr := installedAppValuesMatchKeySnapshot(key, values)
 	return matches, errors.Join(matchErr, key.Close())
 }
 

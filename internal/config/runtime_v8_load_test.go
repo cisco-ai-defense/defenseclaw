@@ -6,11 +6,48 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestRuntimeV8LoadersPreserveEmptyConnectorPolicyEntries(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+observability: {}
+`)
+	loaders := map[string]func() (*Config, error){
+		"activation": func() (*Config, error) {
+			return LoadRuntimeV8FromBytes("config.yaml", raw)
+		},
+		"candidate": func() (*Config, error) {
+			return LoadRuntimeV8CandidateFromBytes("config.yaml", raw)
+		},
+		"inspection-candidate": func() (*Config, error) {
+			return LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", raw)
+		},
+	}
+	for name, load := range loaders {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"claudecode", "codex"}
+			if got := cfg.ActiveConnectors(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("target runtime connectors = %v, want %v", got, want)
+			}
+		})
+	}
+}
 
 func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
 	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")

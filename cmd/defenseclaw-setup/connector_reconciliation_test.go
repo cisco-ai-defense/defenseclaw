@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -266,6 +267,241 @@ func TestReconcileRemovedConnectorsDoesNotLetClientFailureEscape(t *testing.T) {
 	}
 	if len(recorder.failures) != 1 || recorder.failures[0].Operation != "teardown" {
 		t.Fatalf("third-party failure was not isolated as residue: %+v", recorder.failures)
+	}
+}
+
+func TestReconcileRemovedConnectorsCleansValidatedCurrentHomeAfterHistoricalRestore(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	historicalHome := filepath.Join(root, "historical-codex")
+	currentHome := filepath.Join(root, "current-codex")
+	transaction := setupTransaction{
+		ID:                 strings.Repeat("7", 32),
+		DataRoot:           filepath.Join(root, "data"),
+		PreviousConnectors: []string{"codex"},
+		PreviousCodexHome:  historicalHome,
+		CodexHome:          currentHome,
+		PreviousState: &installState{
+			CodexHome: currentHome,
+		},
+	}
+	verifyCalls := map[string]int{}
+	var calls []string
+	run := func(_, _, connectorName, action string, env []string) error {
+		home := envValue(env, "CODEX_HOME")
+		calls = append(calls, action+":"+home)
+		if connectorName != "codex" {
+			return fmt.Errorf("unexpected connector %s", connectorName)
+		}
+		if action == "verify" {
+			verifyCalls[home]++
+			if home == currentHome && verifyCalls[home] == 1 {
+				return errors.New("strict product residue remains")
+			}
+		}
+		return nil
+	}
+
+	recorder := reconcileRemovedConnectors(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		transactionPreviousChildEnv(transaction),
+		run,
+	)
+	want := []string{
+		"teardown:" + historicalHome,
+		"verify:" + historicalHome,
+		"verify:" + currentHome,
+		"teardown:" + currentHome,
+		"verify:" + currentHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("multi-home cleanup calls = %v, want %v", calls, want)
+	}
+	if len(recorder.failures) != 0 {
+		t.Fatalf("healed current-home residue was retained: %+v", recorder.failures)
+	}
+}
+
+func TestReconcileRemovedConnectorsCleansDefaultHomeAfterLegacyBackupLosesBinding(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	staleHome := filepath.Join(root, "stale-codex-override")
+	defaultHome := filepath.Join(root, ".codex")
+	transaction := setupTransaction{
+		ID:                 strings.Repeat("6", 32),
+		DataRoot:           filepath.Join(root, ".defenseclaw"),
+		PreviousConnectors: []string{"codex"},
+		PreviousCodexHome:  staleHome,
+		CodexHome:          staleHome,
+		PreviousState: &installState{
+			CodexHome: staleHome,
+		},
+	}
+	verifyCalls := map[string]int{}
+	var calls []string
+	run := func(_, _, connectorName, action string, env []string) error {
+		home := envValue(env, "CODEX_HOME")
+		calls = append(calls, action+":"+home)
+		if connectorName != "codex" {
+			return fmt.Errorf("unexpected connector %s", connectorName)
+		}
+		if action == "verify" {
+			verifyCalls[home]++
+			if home == defaultHome && verifyCalls[home] == 1 {
+				return errors.New("strict product residue remains")
+			}
+		}
+		return nil
+	}
+
+	recorder := reconcileRemovedConnectors(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		transactionPreviousChildEnv(transaction),
+		run,
+	)
+	want := []string{
+		"teardown:" + staleHome,
+		"verify:" + staleHome,
+		"verify:" + defaultHome,
+		"teardown:" + defaultHome,
+		"verify:" + defaultHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("legacy default-home cleanup calls = %v, want %v", calls, want)
+	}
+	if len(recorder.failures) != 0 {
+		t.Fatalf("healed default-home residue was retained: %+v", recorder.failures)
+	}
+}
+
+func TestConnectorCleanupHomesDoesNotAddDefaultFallbackWithManagedBinding(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, ".defenseclaw")
+	backupPath := filepath.Join(dataRoot, "connector_backups", "codex", "config.toml.json")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("synthetic binding"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleHome := filepath.Join(root, "stale-codex-override")
+	homes := connectorCleanupHomes(setupTransaction{
+		DataRoot:          dataRoot,
+		PreviousCodexHome: staleHome,
+		CodexHome:         staleHome,
+	}, "codex")
+	if !reflect.DeepEqual(homes, []string{staleHome}) {
+		t.Fatalf("managed binding cleanup homes = %v, want only %s", homes, staleHome)
+	}
+}
+
+func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, ".defenseclaw")
+	for connectorName, want := range map[string]string{
+		"codex":      filepath.Join(root, ".codex"),
+		"claudecode": filepath.Join(root, ".claude"),
+	} {
+		if got := connectorDefaultHomeBesideDataRoot(dataRoot, connectorName); !samePath(got, want) {
+			t.Fatalf("%s default home = %q, want %q", connectorName, got, want)
+		}
+	}
+	for _, test := range []struct {
+		dataRoot string
+		name     string
+	}{
+		{dataRoot: filepath.Join(root, "data"), name: "codex"},
+		{dataRoot: ".defenseclaw", name: "codex"},
+		{dataRoot: dataRoot, name: "openclaw"},
+	} {
+		if got := connectorDefaultHomeBesideDataRoot(test.dataRoot, test.name); got != "" {
+			t.Fatalf("unbound default home for %q/%q = %q", test.dataRoot, test.name, got)
+		}
+	}
+}
+
+func TestReconcileRemovedConnectorsDoesNotMutateCleanFallbackHome(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	historicalHome := filepath.Join(root, "historical-claude")
+	currentHome := filepath.Join(root, "current-claude")
+	transaction := setupTransaction{
+		ID:                      strings.Repeat("8", 32),
+		DataRoot:                filepath.Join(root, "data"),
+		PreviousConnectors:      []string{"claudecode"},
+		PreviousClaudeConfigDir: historicalHome,
+		ClaudeConfigDir:         currentHome,
+	}
+	var calls []string
+	run := func(_, _, _ string, action string, env []string) error {
+		calls = append(calls, action+":"+envValue(env, "CLAUDE_CONFIG_DIR"))
+		return nil
+	}
+
+	recorder := reconcileRemovedConnectors(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		transactionPreviousChildEnv(transaction),
+		run,
+	)
+	want := []string{
+		"teardown:" + historicalHome,
+		"verify:" + historicalHome,
+		"verify:" + currentHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("clean fallback calls = %v, want verify-only %v", calls, want)
+	}
+	if len(recorder.failures) != 0 {
+		t.Fatalf("clean fallback produced residue: %+v", recorder.failures)
+	}
+}
+
+func TestReconcileRemovedConnectorsRetainsFallbackFailureAtExactHome(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	historicalHome := filepath.Join(root, "historical-codex")
+	persistedHome := filepath.Join(root, "persisted-codex")
+	transaction := setupTransaction{
+		ID:                 strings.Repeat("9", 32),
+		DataRoot:           filepath.Join(root, "data"),
+		PreviousConnectors: []string{"codex"},
+		PreviousCodexHome:  historicalHome,
+		PreviousState: &installState{
+			CodexHome: persistedHome,
+		},
+	}
+	var calls []string
+	run := func(_, _, _ string, action string, env []string) error {
+		home := envValue(env, "CODEX_HOME")
+		calls = append(calls, action+":"+home)
+		if home == persistedHome {
+			return errors.New("strict product residue remains")
+		}
+		return nil
+	}
+
+	recorder := reconcileRemovedConnectors(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		transactionChildEnvForHomes(transaction, historicalHome, ""),
+		run,
+	)
+	want := []string{
+		"teardown:" + historicalHome,
+		"verify:" + historicalHome,
+		"verify:" + persistedHome,
+		"teardown:" + persistedHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("fallback failure calls = %v, want %v", calls, want)
+	}
+	if len(recorder.failures) != 1 || recorder.failures[0].Operation != "teardown" || recorder.failures[0].ConfigHome != persistedHome {
+		t.Fatalf("fallback failure was not retained at exact home: %+v", recorder.failures)
 	}
 }
 

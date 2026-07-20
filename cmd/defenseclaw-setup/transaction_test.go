@@ -643,16 +643,20 @@ func TestDurableTransactionMarkerRoundTripAndNoOverwrite(t *testing.T) {
 
 func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 	tests := []struct {
-		phase string
-		want  []string
+		schema int
+		phase  string
+		want   []string
 	}{
-		{phase: setupPhaseIntent, want: []string{"rollback", "intent->complete"}},
+		{schema: setupJournalSchemaVersion, phase: setupPhaseIntent, want: []string{"abort", "intent->complete"}},
+		{schema: setupJournalSchemaVersion, phase: setupPhaseQuiescing, want: []string{"rollback", "quiescing->complete"}},
+		{schema: setupJournalLegacySchemaVersion, phase: setupPhaseIntent, want: []string{"rollback", "intent->complete"}},
+		{phase: setupPhasePublished, want: []string{"activate", "published->committed", "converge", "committed->converged", "cleanup", "converged->complete"}},
 		{phase: setupPhaseCommitted, want: []string{"converge", "committed->converged", "cleanup", "converged->complete"}},
 		{phase: setupPhaseConverged, want: []string{"cleanup", "converged->complete"}},
 		{phase: setupPhaseComplete, want: nil},
 	}
 	for _, test := range tests {
-		t.Run(test.phase, func(t *testing.T) {
+		t.Run(fmt.Sprintf("schema-%d-%s", test.schema, test.phase), func(t *testing.T) {
 			var got []string
 			appendStep := func(step string) error {
 				got = append(got, step)
@@ -660,11 +664,13 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 			}
 			transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
 			err := recoverSetupJournalPhase(setupJournal{
-				SchemaVersion: setupJournalSchemaVersion,
+				SchemaVersion: test.schema,
 				Phase:         test.phase,
 				Transaction:   transaction,
 			}, setupRecoveryOps{
+				Abort:    func(setupTransaction) error { return appendStep("abort") },
 				Rollback: func(setupTransaction) error { return appendStep("rollback") },
+				Activate: func(setupTransaction) error { return appendStep("activate") },
 				Converge: func(setupTransaction) error { return appendStep("converge") },
 				Cleanup:  func(setupTransaction) error { return appendStep("cleanup") },
 				Transition: func(_ setupTransaction, from, to string) error {
@@ -678,6 +684,235 @@ func TestRecoverSetupJournalPhaseDispatchesMonotonically(t *testing.T) {
 				t.Fatalf("steps = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestAbortPreparedSetupLeavesLiveStateByteIdenticalAndRemovesOnlyStaging(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, &previous)
+	writeInstallTree(t, installRoot, previous)
+	writeInstallTree(t, transaction.StagingPath, testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		transaction.ID,
+		transaction.TargetVersion,
+	))
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dataRoot, "config.yaml")
+	configBefore := []byte("config_version: 7\nobservability: realistic-fixture\n")
+	dataPath := filepath.Join(dataRoot, "runtime-state.bin")
+	dataBefore := []byte{0, 1, 2, 3, 0xff}
+	if err := os.WriteFile(configPath, configBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataPath, dataBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(maintenancePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	maintenanceBefore := []byte("previous-maintenance-fixture")
+	if err := os.WriteFile(maintenancePath, maintenanceBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transaction.MaintenanceExisted = true
+	maintenanceDigest, err := fileSHA256(maintenancePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction.PreviousMaintenanceSHA256 = maintenanceDigest
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := abortPreparedSetupTransaction(transaction); err != nil {
+			t.Fatalf("abort attempt %d: %v", attempt+1, err)
+		}
+	}
+	assertPathAbsent(t, transaction.StagingPath)
+	assertInstallVersion(t, installRoot, transaction, previous.Version)
+	for path, want := range map[string][]byte{
+		configPath:      configBefore,
+		dataPath:        dataBefore,
+		maintenancePath: maintenanceBefore,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("live fixture %s changed: %x, %v", filepath.Base(path), got, err)
+		}
+	}
+}
+
+func TestAbortPreparedSetupRefusesPublicationArtifactsWithoutMutation(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	if err := os.MkdirAll(transaction.StagingPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(transaction.BackupPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := abortPreparedSetupTransaction(transaction); err == nil {
+		t.Fatal("prepared abort accepted an application publication artifact")
+	}
+	if !pathExists(transaction.StagingPath) || !pathExists(transaction.BackupPath) {
+		t.Fatal("refused prepared abort mutated transaction artifacts")
+	}
+}
+
+func TestReadSetupJournalSupportsLegacyIntentButRejectsLegacyQuiescing(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+	journal := setupJournal{
+		SchemaVersion: setupJournalLegacySchemaVersion,
+		Phase:         setupPhaseIntent,
+		Transaction:   transaction,
+	}
+	if err := writeDurableJournal(path, journal, false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := readSetupJournal(path)
+	if err != nil || loaded == nil || loaded.SchemaVersion != setupJournalLegacySchemaVersion {
+		t.Fatalf("legacy intent journal = %+v, %v", loaded, err)
+	}
+	journal.Phase = setupPhaseQuiescing
+	if err := writeDurableJournal(path, journal, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSetupJournal(path); err == nil {
+		t.Fatal("legacy journal accepted the v2 quiescing phase")
+	}
+}
+
+func TestInstallJournalPublishesOnlyAfterQuiescing(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+	if err := beginSetupTransactionAt(path, transaction); err != nil {
+		t.Fatal(err)
+	}
+	if err := transitionSetupJournalAt(path, transaction, setupPhaseIntent, setupPhaseQuiescing); err != nil {
+		t.Fatalf("enter quiescing: %v", err)
+	}
+	if err := transitionSetupJournalAt(path, transaction, setupPhaseIntent, setupPhasePublished); err == nil {
+		t.Fatal("published journal bypassed durable quiescing phase")
+	}
+	if err := transitionSetupJournalAt(path, transaction, setupPhaseQuiescing, setupPhasePublished); err != nil {
+		t.Fatalf("publish after quiescing: %v", err)
+	}
+}
+
+func TestSetupTransactionCommitSourcePhaseKeepsUninstallOnIntent(t *testing.T) {
+	tests := []struct {
+		action string
+		want   string
+	}{
+		{action: "install", want: setupPhasePublished},
+		{action: "uninstall", want: setupPhaseIntent},
+	}
+	for _, test := range tests {
+		t.Run(test.action, func(t *testing.T) {
+			got, err := setupTransactionCommitSourcePhase(test.action)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("commit source phase = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if _, err := setupTransactionCommitSourcePhase("repair"); err == nil {
+		t.Fatal("commit source phase accepted an unsupported action")
+	}
+}
+
+func TestRecoverPublishedMigrationRefusalRollsBackBeforeCompletingJournal(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	refusal := errors.New("candidate field=$.observability.destinations[0].protocol; reason=unsupported value")
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error {
+			calls = append(calls, "activate")
+			return refusal
+		},
+		Rollback: func(setupTransaction) error {
+			calls = append(calls, "rollback-files-maintenance-services")
+			return nil
+		},
+		Converge: func(setupTransaction) error {
+			t.Fatal("published refusal reached committed convergence")
+			return nil
+		},
+		Cleanup: func(setupTransaction) error { return nil },
+		Transition: func(_ setupTransaction, from, to string) error {
+			calls = append(calls, from+"->"+to)
+			return nil
+		},
+	})
+	if !errors.Is(err, refusal) {
+		t.Fatalf("recovery error = %v, want migration refusal", err)
+	}
+	want := "activate,rollback-files-maintenance-services,published->complete"
+	if got := strings.Join(calls, ","); got != want {
+		t.Fatalf("published refusal calls = %q, want %q", got, want)
+	}
+}
+
+func TestRecoverPublishedMigrationRollbackFailureKeepsJournalPublished(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	rollbackFailure := errors.New("injected post-publication rollback failure")
+	transitioned := false
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error { return errors.New("candidate refusal") },
+		Rollback: func(setupTransaction) error { return rollbackFailure },
+		Transition: func(setupTransaction, string, string) error {
+			transitioned = true
+			return nil
+		},
+	})
+	if !errors.Is(err, rollbackFailure) || transitioned {
+		t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+	}
+}
+
+func TestRecoverPublishedMigrationStateChangeRetainsTargetRuntime(t *testing.T) {
+	transaction := testSetupTransactionForRoots("install", "root", "data", "maintenance", nil)
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhasePublished,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Activate: func(setupTransaction) error {
+			calls = append(calls, "activate")
+			return errors.Join(errPublishedActivationStateChanged, errors.New("synthetic post-activation fault"))
+		},
+		Rollback: func(setupTransaction) error {
+			calls = append(calls, "rollback")
+			return nil
+		},
+		Transition: func(_ setupTransaction, from, to string) error {
+			calls = append(calls, from+"->"+to)
+			return nil
+		},
+	})
+	if !errors.Is(err, errPublishedActivationStateChanged) {
+		t.Fatalf("recovery error = %v, want migration-state-change sentinel", err)
+	}
+	if got, want := strings.Join(calls, ","), "activate"; got != want {
+		t.Fatalf("state-change recovery calls = %q, want %q", got, want)
 	}
 }
 
@@ -760,12 +995,12 @@ func TestBeginAndCommitJournalNormalizesEmptyConnectorList(t *testing.T) {
 	if loaded == nil || loaded.Transaction.PreviousConnectors != nil {
 		t.Fatalf("journal connector representation = %#v, want normalized nil", loaded)
 	}
-	if err := transitionSetupJournalAt(path, transaction, setupPhaseIntent, setupPhaseCommitted); err != nil {
-		t.Fatalf("commit after JSON round trip: %v", err)
+	if err := transitionSetupJournalAt(path, transaction, setupPhaseIntent, setupPhaseQuiescing); err != nil {
+		t.Fatalf("quiesce after JSON round trip: %v", err)
 	}
 	loaded, err = readSetupJournal(path)
-	if err != nil || loaded == nil || loaded.Phase != setupPhaseCommitted {
-		t.Fatalf("committed journal = %#v, %v", loaded, err)
+	if err != nil || loaded == nil || loaded.Phase != setupPhaseQuiescing {
+		t.Fatalf("quiescing journal = %#v, %v", loaded, err)
 	}
 }
 
@@ -963,7 +1198,10 @@ func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *tes
 			); err != nil {
 				t.Fatal(err)
 			}
-			previous := connectorsForNativeUninstall(nil, dataRoot)
+			previous, err := connectorsForNativeUninstall(nil, dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
 			got, err := resolvePreviousConnectorHome(
 				"", previous, dataRoot, test.connector, test.logicalName, `C:\fallback`,
 			)
@@ -1008,6 +1246,86 @@ func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *te
 	}
 }
 
+func TestLegacyConnectorHomesFollowValidatedOverridesWithoutManagedBinding(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows setup transaction connector-home resolution")
+	}
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex_config_backup.json", "claudecode_backup.json"} {
+		if err := os.WriteFile(filepath.Join(dataRoot, name), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clientRoot := filepath.Join(filepath.Dir(dataRoot), "client-homes")
+	codexHome := filepath.Join(clientRoot, "codex")
+	claudeHome := filepath.Join(clientRoot, "claude")
+	for _, path := range []string{codexHome, claudeHome} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	legacyState := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"0.8.0",
+	)
+	transaction, err := newSetupTransaction(
+		"uninstall",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		"0.8.0",
+		"0.8.6",
+		&legacyState,
+		options{Action: "uninstall", Connector: "none", Mode: "observe"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(transaction.PreviousCodexHome, codexHome) ||
+		!samePath(transaction.PreviousClaudeConfigDir, claudeHome) {
+		t.Fatalf(
+			"legacy transaction homes = (%q, %q), want validated overrides (%q, %q)",
+			transaction.PreviousCodexHome,
+			transaction.PreviousClaudeConfigDir,
+			codexHome,
+			claudeHome,
+		)
+	}
+
+	source := transaction
+	source.Action = "install"
+	source.ID = testCurrentTransactionID
+	source.CodexHome = codexHome
+	source.ClaudeConfigDir = claudeHome
+	handoff, err := newUninstallHandoffTransaction(
+		source,
+		&legacyState,
+		options{Action: "uninstall", Connector: "none", Mode: "observe"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(handoff.PreviousCodexHome, codexHome) ||
+		!samePath(handoff.PreviousClaudeConfigDir, claudeHome) {
+		t.Fatalf(
+			"legacy handoff homes = (%q, %q), want source overrides (%q, %q)",
+			handoff.PreviousCodexHome,
+			handoff.PreviousClaudeConfigDir,
+			codexHome,
+			claudeHome,
+		)
+	}
+}
+
 func envValue(env []string, name string) string {
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -1019,7 +1337,7 @@ func envValue(env []string, name string) string {
 }
 
 func TestRecoverSetupTransactionAtPersistsCompleteTombstone(t *testing.T) {
-	for _, phase := range []string{setupPhaseIntent, setupPhaseCommitted, setupPhaseConverged} {
+	for _, phase := range []string{setupPhaseIntent, setupPhaseQuiescing, setupPhasePublished, setupPhaseCommitted, setupPhaseConverged} {
 		t.Run(phase, func(t *testing.T) {
 			installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 			transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
@@ -1030,7 +1348,9 @@ func TestRecoverSetupTransactionAtPersistsCompleteTombstone(t *testing.T) {
 			}
 			var effects int
 			ops := setupRecoveryOps{
+				Abort:    func(setupTransaction) error { effects++; return nil },
 				Rollback: func(setupTransaction) error { effects++; return nil },
+				Activate: func(setupTransaction) error { effects++; return nil },
 				Converge: func(setupTransaction) error { effects++; return nil },
 				Cleanup:  func(setupTransaction) error { effects++; return nil },
 				Transition: func(want setupTransaction, from, to string) error {
@@ -1347,6 +1667,7 @@ func TestRollbackRestoreIncludesOwnedRuntimeStartedAfterIntent(t *testing.T) {
 			}
 			return liveDuringRecovery, nil
 		},
+		func(string, string) error { return nil },
 		func(gatewayPath, gotDataRoot string, wanted serviceState) (serviceState, error) {
 			if gatewayPath != filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe") || gotDataRoot != dataRoot {
 				t.Fatalf("start roots = %q, %q", gatewayPath, gotDataRoot)
@@ -1395,6 +1716,7 @@ func TestRollbackRestoresOwnedRuntimeWhenFileRollbackFails(t *testing.T) {
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
 		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(string, string) error { return nil },
 		func(_ string, _ string, wanted serviceState) (serviceState, error) {
 			restored = wanted
 			return wanted, nil
@@ -1439,6 +1761,7 @@ func TestRollbackRestoresStoppedFreshRuntimeWhenFileRollbackFails(t *testing.T) 
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
 		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(string, string) error { return nil },
 		func(_ string, _ string, wanted serviceState) (serviceState, error) {
 			restored = wanted
 			return wanted, nil
@@ -1450,6 +1773,168 @@ func TestRollbackRestoresStoppedFreshRuntimeWhenFileRollbackFails(t *testing.T) 
 	}
 	if restored != liveDuringRecovery {
 		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)
+	}
+}
+
+func TestRollbackRecoveryRequiresRuntimeReleaseBeforeTreeMutation(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"1.0.0",
+	)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		&previous,
+	)
+	transaction.PreviousServices = serviceState{Gateway: true, Watchdog: true}
+	writeInstallTree(t, transaction.BackupPath, previous)
+	writeInstallTree(t, installRoot, testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		transaction.ID,
+		transaction.TargetVersion,
+	))
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("target gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseErr := errors.New("gateway executable handle remains open")
+	var calls []string
+	err := rollbackSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) {
+			calls = append(calls, "authenticate-stop")
+			return serviceState{Gateway: true, Watchdog: true}, nil
+		},
+		func(string, string) error {
+			calls = append(calls, "verify-release")
+			return releaseErr
+		},
+		func(string, string, serviceState) (serviceState, error) {
+			calls = append(calls, "restore-services")
+			return serviceState{}, nil
+		},
+	)
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("rollback error = %v, want executable-release refusal", err)
+	}
+	if got := strings.Join(calls, ","); got != "authenticate-stop,verify-release" {
+		t.Fatalf("recovery calls = %q, want stop and release verification only", got)
+	}
+	assertInstallVersion(t, installRoot, transaction, transaction.TargetVersion)
+	assertInstallVersion(t, transaction.BackupPath, transaction, previous.Version)
+}
+
+func TestCommittedRecoveryQuiescesOwnedRuntimeBeforeConvergence(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		nil,
+	)
+	if err := os.MkdirAll(filepath.Join(installRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("committed gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := setupPhaseCommitted
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseCommitted,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Converge: func(got setupTransaction) error {
+			return convergeRecoveredCommittedSetupTransactionWithRuntime(
+				got,
+				func(string, string) (serviceState, error) {
+					calls = append(calls, "authenticate-stop:gateway+watchdog")
+					return serviceState{Gateway: true, Watchdog: true}, nil
+				},
+				func(string, string) error {
+					calls = append(calls, "verify-release")
+					return nil
+				},
+				func(setupTransaction) error {
+					calls = append(calls, "converge")
+					return nil
+				},
+			)
+		},
+		Cleanup: func(setupTransaction) error {
+			calls = append(calls, "cleanup")
+			return nil
+		},
+		Transition: func(_ setupTransaction, from, to string) error {
+			if phase != from {
+				return fmt.Errorf("journal transition from %s while phase is %s", from, phase)
+			}
+			calls = append(calls, "journal:"+to)
+			phase = to
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "authenticate-stop:gateway+watchdog,verify-release,converge,journal:converged,cleanup,journal:complete"
+	if got := strings.Join(calls, ","); got != want {
+		t.Fatalf("committed recovery calls = %q, want %q", got, want)
+	}
+}
+
+func TestCommittedRecoveryRejectsForeignRuntimeBeforeConvergence(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		nil,
+	)
+	if err := os.MkdirAll(filepath.Join(installRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("committed gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignErr := errors.New("foreign process owns gateway path")
+	converged := false
+	err := convergeRecoveredCommittedSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) { return serviceState{}, nil },
+		func(string, string) error { return foreignErr },
+		func(setupTransaction) error {
+			converged = true
+			return nil
+		},
+	)
+	if !errors.Is(err, foreignErr) || converged {
+		t.Fatalf("committed foreign-process result = %v, converged=%t", err, converged)
 	}
 }
 
@@ -1513,6 +1998,45 @@ func TestUninstallHandoffSurvivesInjectedCrashAndResumesIntent(t *testing.T) {
 	}
 	if got := strings.Join(recoveryCalls, ","); got != "validate-quiesce-cleanup,resume-uninstall" {
 		t.Fatalf("handoff recovery calls = %q", got)
+	}
+}
+
+func TestExplicitUninstallRecoversPreparedOrQuiescingInstallBeforeNewIntent(t *testing.T) {
+	for _, phase := range []string{setupPhaseIntent, setupPhaseQuiescing} {
+		t.Run(phase, func(t *testing.T) {
+			installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+			source := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+			path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+			journal := setupJournal{
+				SchemaVersion: setupJournalSchemaVersion,
+				Phase:         phase,
+				Transaction:   source,
+			}
+			if err := writeDurableJournal(path, journal, false); err != nil {
+				t.Fatal(err)
+			}
+			expected := setupTransactionExpectations{
+				InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+			}
+			recovered := false
+			prepared, err := preparePendingSetupTransactionForUninstallAt(path, expected, uninstallRecoveryOps{
+				rollbackInstall: func(setupTransaction) error {
+					t.Fatal("v2 pre-publication install used legacy uninstall handoff rollback")
+					return nil
+				},
+				buildHandoff: func(setupTransaction) (setupTransaction, error) {
+					t.Fatal("v2 pre-publication install built an uninstall handoff")
+					return setupTransaction{}, nil
+				},
+				recoverUninstall: func(got setupJournal) error {
+					recovered = got.Phase == phase && got.Transaction.ID == source.ID
+					return nil
+				},
+			})
+			if err != nil || prepared != nil || !recovered {
+				t.Fatalf("prepare uninstall = %+v, recovered=%v, error=%v", prepared, recovered, err)
+			}
+		})
 	}
 }
 

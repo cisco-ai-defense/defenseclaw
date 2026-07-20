@@ -1401,6 +1401,7 @@ otel:
     assert result.summary.local_observability == "full"
     assert trace_destination["protocol"] == "grpc"
     assert trace_destination["signal_overrides"] == {"traces": {"endpoint": "127.0.0.1:4317"}}
+    assert "tls" not in trace_destination
     assert trace_destination["routes"] == [
         {
             "name": "legacy-local-observability-traces-1",
@@ -1410,6 +1411,8 @@ otel:
         }
     ]
     assert log_metric_destination["protocol"] == "http/protobuf"
+    assert log_metric_destination["tls"] == {"insecure": True}
+    assert log_metric_destination["network_safety"] == {"allow_private_networks": True}
     assert log_metric_destination["routes"] == [
         {
             "name": "legacy-individual-findings-disabled-1",
@@ -1436,6 +1439,58 @@ otel:
         for values in route["selector"].values()
     )
     load_validate_v8(result.candidate)
+
+
+def test_released_v7_http_endpoint_materializes_plaintext_transport_policy() -> None:
+    result = _convert(
+        """config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      endpoint: http://127.0.0.1:4318
+      protocol: http/protobuf
+      traces: {enabled: true}
+      logs: {enabled: true}
+      metrics: {enabled: true}
+"""
+    )
+
+    destination = _destination(_document(result), "local-observability")
+    assert destination["tls"] == {"insecure": True}
+    assert destination["network_safety"] == {"allow_private_networks": True}
+    load_validate_v8(result.candidate)
+
+
+@pytest.mark.parametrize(
+    "conflicting_endpoint",
+    ["https://never-render-mixed-endpoint.example.test/v1/logs", "never-render-mixed-endpoint:4318"],
+)
+def test_mixed_implicit_http_security_fails_with_exact_value_safe_path(
+    conflicting_endpoint: str,
+) -> None:
+    secret_canary = "never-render-mixed-endpoint"
+    with pytest.raises(V8MigrationError) as captured:
+        _convert(
+            f"""config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: local-observability
+      enabled: true
+      endpoint: http://127.0.0.1:4318
+      protocol: http/protobuf
+      traces: {{enabled: true}}
+      logs: {{enabled: true, endpoint: '{conflicting_endpoint}'}}
+"""
+        )
+
+    assert captured.value.code == "mixed_otel_transport_security"
+    assert captured.value.path == "$.otel.destinations[0].logs.endpoint"
+    assert secret_canary not in str(captured.value)
+    assert secret_canary not in repr(captured.value)
 
 
 def test_flat_signal_protocol_becomes_v7_destination_fallback() -> None:

@@ -1741,7 +1741,7 @@ def _convert_otel_destination(
         headers = _convert_headers(source.get("headers", {}), name, ctx)
         if headers:
             target["headers"] = headers
-        if tls := _tls(source.get("tls", {}), path, ctx):
+        if tls := _otel_transport_tls(source, signals, group, protocol, path, ctx):
             target["tls"] = tls
         if batch := _batch(source.get("batch", {}), path, ctx):
             target["batch"] = batch
@@ -2662,6 +2662,64 @@ def _tls(value: Any, path: str, ctx: _Context) -> dict[str, Any]:
         result["insecure_skip_verify"] = source["insecure_skip_verify"]
     if ca_cert := source.get("ca_cert"):
         result["ca_cert"] = _text(ca_cert, f"{path}.tls.ca_cert", ctx)
+    return result
+
+
+def _otel_transport_tls(
+    source: Mapping[str, Any],
+    signals: Mapping[str, Mapping[str, Any]],
+    group: list[str],
+    protocol: str,
+    path: str,
+    ctx: _Context,
+) -> dict[str, Any]:
+    result = _tls(source.get("tls", {}), path, ctx)
+    if protocol != "http/protobuf" or "insecure" in result:
+        return result
+
+    transport_modes: dict[str, str] = {}
+    for signal in group:
+        signal_endpoint = signals[signal].get("endpoint")
+        endpoint = signal_endpoint or source.get("endpoint")
+        if not endpoint:
+            continue
+        endpoint_path = f"{path}.{signal}.endpoint" if signal_endpoint else f"{path}.endpoint"
+        text = _text(endpoint, endpoint_path, ctx)
+        if "://" not in text:
+            # V7 handed a bare endpoint to the HTTP exporter without
+            # WithInsecure, so its effective transport was TLS.
+            transport_modes[endpoint_path] = "secure"
+            continue
+        try:
+            scheme = urlsplit(text).scheme.lower()
+        except ValueError:
+            raise _error(
+                ctx,
+                "invalid_endpoint",
+                endpoint_path,
+                "use a syntactically valid collector endpoint",
+            ) from None
+        if scheme == "http":
+            transport_modes[endpoint_path] = "plaintext"
+        elif scheme == "https":
+            transport_modes[endpoint_path] = "secure"
+
+    if "plaintext" in transport_modes.values() and "secure" in transport_modes.values():
+        conflicting_path = next(
+            field_path for field_path, mode in transport_modes.items() if mode == "secure"
+        )
+        raise _error(
+            ctx,
+            "mixed_otel_transport_security",
+            conflicting_path,
+            "use one HTTP endpoint scheme per destination or split the destination before upgrading",
+        )
+    if transport_modes and all(mode == "plaintext" for mode in transport_modes.values()):
+        # Released v7 HTTP exporters inferred plaintext transport directly from
+        # an http:// endpoint. V8 deliberately requires the equivalent policy
+        # to be explicit, so preserve the effective v7 behavior in the staged
+        # candidate instead of letting target-runtime validation reject it.
+        result["insecure"] = True
     return result
 
 

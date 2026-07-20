@@ -66,9 +66,10 @@ active connector is resolved in this order:
 }
 
 var (
-	connectorFlagName    string
-	connectorFlagJSON    bool
-	connectorFlagDataDir string
+	connectorFlagName       string
+	connectorFlagJSON       bool
+	connectorFlagDataDir    string
+	connectorFlagConfigHome string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
@@ -151,6 +152,9 @@ func init() {
 		"Emit machine-readable JSON instead of the human-readable view")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagDataDir, "data-dir", "",
 		"Override the data directory (defaults to cfg.DataDir)")
+	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
+		"Bind native connector maintenance to an installer-validated configuration home")
+	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
@@ -196,6 +200,46 @@ func resolveConnectorDataDir() string {
 		return cfg.DataDir
 	}
 	return ""
+}
+
+// bindConnectorLifecycleConfigHome turns Setup's explicit, validated home
+// binding into the connector's existing environment contract. Normal operator
+// calls remain unchanged when the hidden flag is absent. Setup supplies both
+// the flag and a matching environment value so teardown and VerifyClean cannot
+// silently agree on an unrelated inherited profile.
+func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
+	home := connectorFlagConfigHome
+	if home == "" {
+		return func() {}, nil
+	}
+	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
+		!filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return nil, fmt.Errorf("config home is not an absolute normalized path")
+	}
+	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
+		return nil, fmt.Errorf("config home path is unsafe: %w", err)
+	}
+
+	variable := ""
+	switch connectorName {
+	case "codex":
+		variable = "CODEX_HOME"
+	case "claudecode":
+		variable = "CLAUDE_CONFIG_DIR"
+	default:
+		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
+	}
+	previous, existed := os.LookupEnv(variable)
+	if err := os.Setenv(variable, home); err != nil {
+		return nil, fmt.Errorf("bind %s: %w", variable, err)
+	}
+	return func() {
+		if existed {
+			_ = os.Setenv(variable, previous)
+		} else {
+			_ = os.Unsetenv(variable)
+		}
+	}, nil
 }
 
 // newConnectorRegistryWithPlugins mirrors the sidecar startup path
@@ -261,6 +305,11 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: no data directory configured")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector reconcile: %w", err)
+	}
+	defer restoreConfigHome()
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
 	if !ok {
@@ -350,6 +399,11 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector teardown: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector teardown: %w", err)
+	}
+	defer restoreConfigHome()
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
@@ -402,6 +456,11 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector verify: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector verify: %w", err)
+	}
+	defer restoreConfigHome()
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
