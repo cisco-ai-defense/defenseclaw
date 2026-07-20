@@ -16,7 +16,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "js-yaml": "^4.2.0"
+    "js-yaml": "^4.3.0"
   },
   "peerDependencies": {
     "@openclaw/plugin-sdk": ">=1.0.0"
