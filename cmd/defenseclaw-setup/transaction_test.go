@@ -1667,6 +1667,7 @@ func TestRollbackRestoreIncludesOwnedRuntimeStartedAfterIntent(t *testing.T) {
 			}
 			return liveDuringRecovery, nil
 		},
+		func(string, string) error { return nil },
 		func(gatewayPath, gotDataRoot string, wanted serviceState) (serviceState, error) {
 			if gatewayPath != filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe") || gotDataRoot != dataRoot {
 				t.Fatalf("start roots = %q, %q", gatewayPath, gotDataRoot)
@@ -1715,6 +1716,7 @@ func TestRollbackRestoresOwnedRuntimeWhenFileRollbackFails(t *testing.T) {
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
 		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(string, string) error { return nil },
 		func(_ string, _ string, wanted serviceState) (serviceState, error) {
 			restored = wanted
 			return wanted, nil
@@ -1759,6 +1761,7 @@ func TestRollbackRestoresStoppedFreshRuntimeWhenFileRollbackFails(t *testing.T) 
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
 		func(string, string) (serviceState, error) { return liveDuringRecovery, nil },
+		func(string, string) error { return nil },
 		func(_ string, _ string, wanted serviceState) (serviceState, error) {
 			restored = wanted
 			return wanted, nil
@@ -1770,6 +1773,168 @@ func TestRollbackRestoresStoppedFreshRuntimeWhenFileRollbackFails(t *testing.T) 
 	}
 	if restored != liveDuringRecovery {
 		t.Fatalf("rollback restored services = %+v, want %+v", restored, liveDuringRecovery)
+	}
+}
+
+func TestRollbackRecoveryRequiresRuntimeReleaseBeforeTreeMutation(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	previous := testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		testPreviousTransactionID,
+		"1.0.0",
+	)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		&previous,
+	)
+	transaction.PreviousServices = serviceState{Gateway: true, Watchdog: true}
+	writeInstallTree(t, transaction.BackupPath, previous)
+	writeInstallTree(t, installRoot, testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		transaction.ID,
+		transaction.TargetVersion,
+	))
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("target gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseErr := errors.New("gateway executable handle remains open")
+	var calls []string
+	err := rollbackSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) {
+			calls = append(calls, "authenticate-stop")
+			return serviceState{Gateway: true, Watchdog: true}, nil
+		},
+		func(string, string) error {
+			calls = append(calls, "verify-release")
+			return releaseErr
+		},
+		func(string, string, serviceState) (serviceState, error) {
+			calls = append(calls, "restore-services")
+			return serviceState{}, nil
+		},
+	)
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("rollback error = %v, want executable-release refusal", err)
+	}
+	if got := strings.Join(calls, ","); got != "authenticate-stop,verify-release" {
+		t.Fatalf("recovery calls = %q, want stop and release verification only", got)
+	}
+	assertInstallVersion(t, installRoot, transaction, transaction.TargetVersion)
+	assertInstallVersion(t, transaction.BackupPath, transaction, previous.Version)
+}
+
+func TestCommittedRecoveryQuiescesOwnedRuntimeBeforeConvergence(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		nil,
+	)
+	if err := os.MkdirAll(filepath.Join(installRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("committed gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := setupPhaseCommitted
+	var calls []string
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseCommitted,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Converge: func(got setupTransaction) error {
+			return convergeRecoveredCommittedSetupTransactionWithRuntime(
+				got,
+				func(string, string) (serviceState, error) {
+					calls = append(calls, "authenticate-stop:gateway+watchdog")
+					return serviceState{Gateway: true, Watchdog: true}, nil
+				},
+				func(string, string) error {
+					calls = append(calls, "verify-release")
+					return nil
+				},
+				func(setupTransaction) error {
+					calls = append(calls, "converge")
+					return nil
+				},
+			)
+		},
+		Cleanup: func(setupTransaction) error {
+			calls = append(calls, "cleanup")
+			return nil
+		},
+		Transition: func(_ setupTransaction, from, to string) error {
+			if phase != from {
+				return fmt.Errorf("journal transition from %s while phase is %s", from, phase)
+			}
+			calls = append(calls, "journal:"+to)
+			phase = to
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "authenticate-stop:gateway+watchdog,verify-release,converge,journal:converged,cleanup,journal:complete"
+	if got := strings.Join(calls, ","); got != want {
+		t.Fatalf("committed recovery calls = %q, want %q", got, want)
+	}
+}
+
+func TestCommittedRecoveryRejectsForeignRuntimeBeforeConvergence(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots(
+		"install",
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		nil,
+	)
+	if err := os.MkdirAll(filepath.Join(installRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe"),
+		[]byte("committed gateway fixture"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignErr := errors.New("foreign process owns gateway path")
+	converged := false
+	err := convergeRecoveredCommittedSetupTransactionWithRuntime(
+		transaction,
+		func(string, string) (serviceState, error) { return serviceState{}, nil },
+		func(string, string) error { return foreignErr },
+		func(setupTransaction) error {
+			converged = true
+			return nil
+		},
+	)
+	if !errors.Is(err, foreignErr) || converged {
+		t.Fatalf("committed foreign-process result = %v, converged=%t", err, converged)
 	}
 }
 

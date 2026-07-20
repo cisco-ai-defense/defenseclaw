@@ -67,6 +67,9 @@ func renameDurableFile(source, destination string) error    { return os.Rename(s
 func replaceDurableFile(source, destination string) error   { return os.Rename(source, destination) }
 func validatePrivateTransactionPath(_ string, _ bool) error { return nil }
 func waitForProcessExit(_ uint32, _ time.Duration) error    { return errors.New("windows-only operation") }
+func waitForExecutableRelease(_ string, _ time.Duration) error {
+	return errors.New("windows-only operation")
+}
 func removeDirectoryAfterExit(_, _ string, _ int, _ string) error {
 	return errors.New("windows-only operation")
 }

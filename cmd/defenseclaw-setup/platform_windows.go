@@ -142,6 +142,78 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 	return true, nil
 }
 
+func waitForExecutableRelease(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := probeExecutableRelease(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
+			!errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for executable handle release: %w", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func probeExecutableRelease(path string) error {
+	if err := rejectReparseAncestors(path); err != nil {
+		return err
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("executable release path is not a regular file: %s", path)
+	}
+	if reparse, err := isReparsePoint(path); err != nil {
+		return err
+	} else if reparse {
+		return fmt.Errorf("executable release path is a reparse point: %s", path)
+	}
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ|windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return os.ErrNotExist
+		}
+		return err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return fmt.Errorf("wrap executable release handle: %s", path)
+	}
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil {
+		return errors.Join(statErr, closeErr)
+	}
+	if !os.SameFile(before, opened) {
+		return fmt.Errorf("executable release path changed while opening: %s", path)
+	}
+	return nil
+}
+
 func defaultInstallRoot() (string, error) {
 	programs, err := winfolders.UserProgramFiles()
 	if err != nil {

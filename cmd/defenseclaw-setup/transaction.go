@@ -15,11 +15,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const setupTransactionSchemaVersion = 1
+
+const setupExecutableReleaseTimeout = 30 * time.Second
 
 const (
 	setupJournalLegacySchemaVersion = 1
@@ -1249,7 +1252,7 @@ func recoverPendingSetupTransaction(installRoot, dataRoot string) error {
 		Abort:    abortPreparedSetupTransaction,
 		Rollback: rollbackSetupTransaction,
 		Activate: activatePublishedSetupTransaction,
-		Converge: convergeCommittedSetupTransaction,
+		Converge: convergeRecoveredCommittedSetupTransaction,
 		Cleanup:  cleanupCommittedSetupTransaction,
 		Transition: func(transaction setupTransaction, fromPhase, toPhase string) error {
 			return transitionSetupJournal(transaction, fromPhase, toPhase)
@@ -1283,7 +1286,7 @@ func preparePendingSetupTransactionForUninstall(opts options, installRoot, dataR
 				Abort:    abortPreparedSetupTransaction,
 				Rollback: rollbackSetupTransaction,
 				Activate: activatePublishedSetupTransaction,
-				Converge: convergeCommittedSetupTransaction,
+				Converge: convergeRecoveredCommittedSetupTransaction,
 				Cleanup:  cleanupCommittedSetupTransaction,
 				Transition: func(transaction setupTransaction, fromPhase, toPhase string) error {
 					return transitionSetupJournal(transaction, fromPhase, toPhase)
@@ -1559,6 +1562,7 @@ func rollbackSetupTransaction(transaction setupTransaction) error {
 	return rollbackSetupTransactionWithRuntime(
 		transaction,
 		stopOwnedServices,
+		verifyOwnedRuntimeReleased,
 		startMissingServices,
 	)
 }
@@ -1566,6 +1570,7 @@ func rollbackSetupTransaction(transaction setupTransaction) error {
 func rollbackSetupTransactionWithRuntime(
 	transaction setupTransaction,
 	stopServices func(string, string) (serviceState, error),
+	verifyStopped func(string, string) error,
 	startServices func(string, string, serviceState) (serviceState, error),
 ) error {
 	restoreServices := transaction.PreviousServices
@@ -1583,6 +1588,9 @@ func rollbackSetupTransactionWithRuntime(
 		// Preserve services this recovery invocation actually stopped instead of
 		// losing them to the intent's now-stale pre-operation snapshot.
 		restoreServices = mergeServiceStates(restoreServices, stopped)
+		if err := verifyStopped(currentGateway, transaction.DataRoot); err != nil {
+			return err
+		}
 	}
 	restoreRuntime := func(restoreStoppedFreshRuntime bool) error {
 		if !restoreServices.Gateway && !restoreServices.Watchdog {
@@ -1613,6 +1621,39 @@ func rollbackSetupTransactionWithRuntime(
 		restoreErrors = append(restoreErrors, err)
 	}
 	return errors.Join(restoreErrors...)
+}
+
+func convergeRecoveredCommittedSetupTransaction(transaction setupTransaction) error {
+	return convergeRecoveredCommittedSetupTransactionWithRuntime(
+		transaction,
+		stopOwnedServices,
+		verifyOwnedRuntimeReleased,
+		convergeCommittedSetupTransaction,
+	)
+}
+
+func convergeRecoveredCommittedSetupTransactionWithRuntime(
+	transaction setupTransaction,
+	stopServices func(string, string) (serviceState, error),
+	verifyStopped func(string, string) error,
+	converge func(setupTransaction) error,
+) error {
+	if transaction.Action != "install" {
+		return converge(transaction)
+	}
+	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	if pathExists(gatewayPath) {
+		if err := rejectReparseTree(transaction.InstallRoot); err != nil {
+			return err
+		}
+		if _, err := stopServices(gatewayPath, transaction.DataRoot); err != nil {
+			return fmt.Errorf("quiesce committed setup recovery: %w", err)
+		}
+		if err := verifyStopped(gatewayPath, transaction.DataRoot); err != nil {
+			return fmt.Errorf("verify committed setup recovery quiescence: %w", err)
+		}
+	}
+	return converge(transaction)
 }
 
 func mergeServiceStates(left, right serviceState) serviceState {
@@ -2156,6 +2197,29 @@ func verifyOwnedServicesStopped(gatewayPath, dataRoot string) error {
 	}
 	if state.any() {
 		return errors.New("owned gateway or watchdog process remains running")
+	}
+	return nil
+}
+
+func verifyOwnedRuntimeReleased(gatewayPath, dataRoot string) error {
+	if err := verifyOwnedServicesStopped(gatewayPath, dataRoot); err != nil {
+		return err
+	}
+	installRoot := filepath.Dir(filepath.Dir(gatewayPath))
+	pid, imagePath, err := liveProcessWithinInstallRoot(installRoot)
+	if err != nil {
+		return fmt.Errorf("inspect install processes after owned runtime stop: %w", err)
+	}
+	if pid != 0 {
+		return fmt.Errorf(
+			"%w after owned runtime stop (PID %d, %s)",
+			errInstalledProcessRunning,
+			pid,
+			imagePath,
+		)
+	}
+	if err := waitForExecutableRelease(gatewayPath, setupExecutableReleaseTimeout); err != nil {
+		return fmt.Errorf("verify gateway executable handle release: %w", err)
 	}
 	return nil
 }
