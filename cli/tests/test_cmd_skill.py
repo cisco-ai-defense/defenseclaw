@@ -1897,6 +1897,23 @@ class TestSkillList(SkillCommandTestBase):
 
 
 class TestSkillInfo(SkillCommandTestBase):
+    def _configure_native_info_fixture(self, skill_name: str) -> dict[str, str]:
+        roots = {
+            connector: os.path.join(self.tmp_dir, connector, "skills")
+            for connector in ("claudecode", "codex")
+        }
+        for root in roots.values():
+            skill_dir = os.path.join(root, skill_name)
+            os.makedirs(skill_dir)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as marker:
+                marker.write("---\ndescription: synthetic status fixture\n---\n")
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [  # type: ignore[method-assign]
+            roots[connector or "claudecode"]
+        ] if (connector or "claudecode") in roots else []
+        return roots
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_info_unknown_skill_errors(self, _mock):
         # SK-2: a true miss errors (exit 1) instead of rendering a blank card
@@ -2165,6 +2182,144 @@ class TestSkillInfo(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["name"], "my-skill")
+
+    def test_info_reports_scoped_runtime_disable_and_reenable_for_native_connectors(self):
+        skill_name = "runtime-status-skill"
+        self._configure_native_info_fixture(skill_name)
+
+        for disabled_connector, peer_connector in (
+            ("claudecode", "codex"),
+            ("codex", "claudecode"),
+        ):
+            with self.subTest(disabled_connector=disabled_connector):
+                disabled = self.invoke([
+                    "disable", skill_name, "--connector", disabled_connector,
+                ])
+                self.assertEqual(disabled.exit_code, 0, disabled.output)
+
+                scoped_json = self.invoke([
+                    "info", skill_name, "--connector", disabled_connector, "--json",
+                ])
+                self.assertEqual(scoped_json.exit_code, 0, scoped_json.output)
+                scoped_data = json.loads(scoped_json.output)
+                self.assertIs(scoped_data["disabled"], True)
+                self.assertEqual(scoped_data["actions"]["runtime"], "disable")
+
+                peer_json = self.invoke([
+                    "info", skill_name, "--connector", peer_connector, "--json",
+                ])
+                self.assertEqual(peer_json.exit_code, 0, peer_json.output)
+                self.assertIs(json.loads(peer_json.output)["disabled"], False)
+
+                listed = self.invoke([
+                    "list", "--connector", disabled_connector, "--json",
+                ])
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                listed_item = next(
+                    item for item in json.loads(listed.output)["skills"]
+                    if item["name"] == skill_name
+                )
+                self.assertIs(listed_item["disabled"], True)
+                self.assertEqual(listed_item["status"], "disabled")
+
+                scoped_text = self.invoke([
+                    "info", skill_name, "--connector", disabled_connector,
+                ])
+                peer_text = self.invoke([
+                    "info", skill_name, "--connector", peer_connector,
+                ])
+                self.assertIn("Disabled:    True", scoped_text.output)
+                self.assertIn("Disabled:    False", peer_text.output)
+
+                enabled = self.invoke([
+                    "enable", skill_name, "--connector", disabled_connector,
+                ])
+                self.assertEqual(enabled.exit_code, 0, enabled.output)
+                restored = self.invoke([
+                    "info", skill_name, "--connector", disabled_connector, "--json",
+                ])
+                self.assertEqual(restored.exit_code, 0, restored.output)
+                self.assertIs(json.loads(restored.output)["disabled"], False)
+
+    def test_info_reports_global_runtime_disable_with_per_field_scoped_fallback(self):
+        skill_name = "global-runtime-status-skill"
+        self._configure_native_info_fixture(skill_name)
+        pe = PolicyEngine(self.app.store)
+        pe.disable("skill", skill_name, "global fixture")
+        pe.allow_for_connector("skill", skill_name, "codex", "unrelated scoped field")
+
+        for connector in ("claudecode", "codex"):
+            with self.subTest(connector=connector):
+                result = self.invoke([
+                    "info", skill_name, "--connector", connector, "--json",
+                ])
+                self.assertEqual(result.exit_code, 0, result.output)
+                data = json.loads(result.output)
+                self.assertIs(data["disabled"], True)
+                self.assertEqual(data["actions"]["runtime"], "disable")
+        codex = json.loads(self.invoke([
+            "info", skill_name, "--connector", "codex", "--json",
+        ]).output)
+        self.assertEqual(codex["actions"]["install"], "allow")
+
+        pe.enable("skill", skill_name)
+        for connector in ("claudecode", "codex"):
+            result = self.invoke([
+                "info", skill_name, "--connector", connector, "--json",
+            ])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIs(json.loads(result.output)["disabled"], False)
+
+    def test_info_normalizes_claude_connector_alias_for_runtime_state(self):
+        skill_name = "alias-runtime-status-skill"
+        claude_config_dir = os.path.join(self.tmp_dir, "alias-claude-config")
+        claude_skill_dir = os.path.join(claude_config_dir, "skills", skill_name)
+        openclaw_skill_dir = os.path.join(self.tmp_dir, "skills", "openclaw-only")
+        os.makedirs(claude_skill_dir)
+        os.makedirs(openclaw_skill_dir)
+        with open(os.path.join(claude_skill_dir, "SKILL.md"), "w", encoding="utf-8") as marker:
+            marker.write("---\ndescription: canonical Claude fixture\n---\n")
+        with open(os.path.join(openclaw_skill_dir, "SKILL.md"), "w", encoding="utf-8") as marker:
+            marker.write("---\ndescription: wrong connector fixture\n---\n")
+        self.app.cfg.active_connector = lambda: "claude-code"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claude-code", "codex"]  # type: ignore[method-assign]
+
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": claude_config_dir}):
+            listed = self.invoke(["list", "--connector", "claude-code", "--json"])
+            self.assertEqual(listed.exit_code, 0, listed.output)
+            listed_names = {
+                item["name"] for item in json.loads(listed.output)["skills"]
+            }
+            self.assertIn(skill_name, listed_names)
+            self.assertNotIn("openclaw-only", listed_names)
+
+            disabled = self.invoke([
+                "disable", skill_name, "--connector", "claude-code",
+            ])
+            self.assertEqual(disabled.exit_code, 0, disabled.output)
+            self.assertTrue(self.app.store.has_action(
+                "skill", skill_name, "runtime", "disable", "claudecode",
+            ))
+
+            reported = self.invoke([
+                "info", skill_name, "--connector", "claude-code", "--json",
+            ])
+            self.assertEqual(reported.exit_code, 0, reported.output)
+            reported_data = json.loads(reported.output)
+            self.assertIs(reported_data["disabled"], True)
+            self.assertEqual(reported_data["description"], "canonical Claude fixture")
+
+            enabled = self.invoke([
+                "enable", skill_name, "--connector", "claude-code",
+            ])
+            self.assertEqual(enabled.exit_code, 0, enabled.output)
+            restored = self.invoke([
+                "info", skill_name, "--connector", "claude-code", "--json",
+            ])
+            self.assertEqual(restored.exit_code, 0, restored.output)
+            restored_data = json.loads(restored.output)
+            self.assertIs(restored_data["disabled"], False)
+            self.assertEqual(restored_data["description"], "canonical Claude fixture")
 
 
 # ---------------------------------------------------------------------------
