@@ -48,6 +48,7 @@ TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 DEFAULT_API_ATTEMPTS = 4
 DEFAULT_API_DELAY_SECONDS = 2.0
 DEFAULT_API_TIMEOUT_SECONDS = 20.0
+MAX_RELEASE_LIST_PAGES = 10
 # Preserve the former publication-custody convergence window: immutable
 # release asset digests can take several observations to become available.
 # The same window also makes an absence result strong enough to authorize a
@@ -155,7 +156,7 @@ class GitHubReleaseAPI:
             )
         return _parse_included_response(completed)
 
-    def get_json(self, endpoint: str, *, absent_ok: bool) -> dict[str, object] | None:
+    def _get_json_value(self, endpoint: str, *, absent_ok: bool) -> object | None:
         last: APIResponse | None = None
         for attempt in range(1, self.attempts + 1):
             response = self._request(endpoint)
@@ -165,8 +166,6 @@ class GitHubReleaseAPI:
                     value = json.loads(response.body)
                 except json.JSONDecodeError as exc:
                     raise ReleaseAPIError(f"GitHub returned invalid JSON for {endpoint}: {exc}") from exc
-                if not isinstance(value, dict):
-                    raise ReleaseAPIError(f"GitHub returned a non-object response for {endpoint}")
                 return value
             if response.status == 404 and absent_ok:
                 return None
@@ -189,6 +188,20 @@ class GitHubReleaseAPI:
             f"could not establish GitHub state for {endpoint} after {self.attempts} attempt(s): {detail}"
         )
 
+    def get_json(self, endpoint: str, *, absent_ok: bool) -> dict[str, object] | None:
+        value = self._get_json_value(endpoint, absent_ok=absent_ok)
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ReleaseAPIError(f"GitHub returned a non-object response for {endpoint}")
+        return value
+
+    def get_json_list(self, endpoint: str) -> list[object]:
+        value = self._get_json_value(endpoint, absent_ok=False)
+        if not isinstance(value, list):
+            raise ReleaseAPIError(f"GitHub returned a non-list response for {endpoint}")
+        return value
+
     def _endpoint(self, suffix: str) -> str:
         return f"repos/{self.repository}/{suffix}"
 
@@ -206,8 +219,22 @@ class GitHubReleaseAPI:
         return self.get_json(self._endpoint(f"git/ref/tags/{encoded}"), absent_ok=True)
 
     def release_by_tag(self, tag: str) -> dict[str, object] | None:
-        encoded = quote(tag, safe="")
-        return self.get_json(self._endpoint(f"releases/tags/{encoded}"), absent_ok=True)
+        # The tag-specific endpoint returns published releases only. During an
+        # ambiguous immutable-release create, GitHub may already hold a draft
+        # with no tag ref. Authenticated release listing includes that draft.
+        for page in range(1, MAX_RELEASE_LIST_PAGES + 1):
+            endpoint = self._endpoint(f"releases?per_page=100&page={page}")
+            releases = self.get_json_list(endpoint)
+            for item in releases:
+                if not isinstance(item, dict):
+                    raise ReleaseAPIError(f"GitHub returned an invalid release row for {endpoint}")
+                if item.get("tag_name") == tag:
+                    return item
+            if len(releases) < 100:
+                return None
+        raise ReleaseAPIError(
+            f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}"
+        )
 
     def resolve_tag_commit(self, payload: dict[str, object]) -> str:
         current = payload
@@ -389,8 +416,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.candidate_root is None:
             raise ReleaseAPIError(f"{args.command} requires --candidate-root")
-        if args.check_main:
-            require_main_commit(api, args.commit)
         state = reconcile_create(
             api,
             tag=args.tag,

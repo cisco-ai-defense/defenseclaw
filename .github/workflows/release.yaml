@@ -1451,7 +1451,8 @@ jobs:
               --tag "$RELEASE_TAG" \
               --commit "$RELEASE_COMMIT" \
               --candidate-root release-candidate \
-              --omit-windows-binaries
+              --omit-windows-binaries \
+              --check-main
             reconcile_status=$?
             set -e
             if [[ "$reconcile_status" == "0" ]]; then

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -46,7 +47,7 @@ def _api(responses: list[subprocess.CompletedProcess[str]], sleeps: list[float])
     )
 
 
-def test_absence_is_only_an_explicit_404_after_transient_retry() -> None:
+def test_tag_absence_is_only_an_explicit_404_after_transient_retry() -> None:
     sleeps: list[float] = []
     api = _api(
         [
@@ -56,8 +57,41 @@ def test_absence_is_only_an_explicit_404_after_transient_retry() -> None:
         sleeps,
     )
 
-    assert api.release_by_tag(TAG) is None
+    assert api.tag_ref(TAG) is None
     assert sleeps == [0.25]
+
+
+def test_release_absence_requires_successful_authenticated_listing() -> None:
+    sleeps: list[float] = []
+    api = _api([_completed(200, body="[]")], sleeps)
+
+    assert api.release_by_tag(TAG) is None
+    assert sleeps == []
+
+
+def test_release_listing_includes_draft_with_no_tag_ref() -> None:
+    sleeps: list[float] = []
+    draft = {"tag_name": TAG, "draft": True, "immutable": False, "assets": []}
+    api = _api([_completed(200, body=json.dumps([draft]))], sleeps)
+
+    assert api.release_by_tag(TAG) == draft
+    assert sleeps == []
+
+
+def test_release_listing_paginates_before_declaring_absence() -> None:
+    sleeps: list[float] = []
+    first_page = [{"tag_name": f"old-{index}"} for index in range(100)]
+    target = {"tag_name": TAG, "draft": True, "immutable": False, "assets": []}
+    api = _api(
+        [
+            _completed(200, body=json.dumps(first_page)),
+            _completed(200, body=json.dumps([target])),
+        ],
+        sleeps,
+    )
+
+    assert api.release_by_tag(TAG) == target
+    assert sleeps == []
 
 
 def test_transient_exhaustion_is_never_reported_as_absence() -> None:
@@ -96,7 +130,7 @@ def test_api_timeout_is_retried_and_never_reported_as_absence() -> None:
         sleep=sleeps.append,
     )
 
-    assert api.release_by_tag(TAG) is None
+    assert api.tag_ref(TAG) is None
     assert calls == 2
     assert sleeps == [0.25]
 
@@ -451,7 +485,7 @@ def test_cli_publish_precheck_rechecks_main_after_absence(
 ) -> None:
     class ChangingMainAPI:
         def __init__(self) -> None:
-            self.commits = iter((COMMIT, "b" * 40))
+            self.commits = iter(("b" * 40,))
 
         def main_commit(self) -> str:
             return next(self.commits)

@@ -524,6 +524,7 @@ def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -
     assert "for attempt in 1 2 3" in rendered
     assert "timeout --signal=TERM --kill-after=30s 10m" in rendered
     assert "scripts/release_api_retry.py reconcile-create" in rendered
+    assert rendered.count("--check-main") == 2
     assert 'reconcile_status" != "10"' in rendered
     assert "refusing another create" in rendered
     assert "Release API retries exhausted" in rendered
