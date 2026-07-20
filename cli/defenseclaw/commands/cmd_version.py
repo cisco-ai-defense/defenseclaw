@@ -42,6 +42,10 @@ import defenseclaw
 from defenseclaw import gateway, ux
 from defenseclaw.paths import bundled_extensions_dir
 
+# Legacy upgrade processes inspect this mirror after reloading the module.
+# Runtime version reporting below intentionally reads the package dynamically.
+__version__ = defenseclaw.__version__
+
 
 # Matches the semantic version format we ship (MAJOR.MINOR.PATCH plus
 # optional ``-rc1`` / ``+meta`` suffixes). We compare by the (major,
