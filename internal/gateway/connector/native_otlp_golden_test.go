@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -305,6 +306,56 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if len(wantAttrs) != 0 {
 		t.Errorf("OTEL_RESOURCE_ATTRIBUTES missing entries %v; got %v",
 			wantAttrs, env["OTEL_RESOURCE_ATTRIBUTES"])
+	}
+}
+
+func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(t *testing.T) {
+	const apiAddr = "127.0.0.1:18970"
+	dataDir := filepath.Join("fixture", "defenseclaw")
+	scopedOTLPToken := strings.Repeat("c", 64)
+	scopedHookToken := strings.Repeat("d", 64)
+
+	render := func(masterToken string) []byte {
+		t.Helper()
+		opts := SetupOpts{
+			DataDir:            dataDir,
+			APIAddr:            apiAddr,
+			APIToken:           masterToken,
+			HookAPIToken:       scopedHookToken,
+			HookAPITokenScoped: true,
+			OTLPPathToken:      scopedOTLPToken,
+		}
+		hookCommand, hookArgs := claudeCodeHookInvocation(
+			opts,
+			filepath.Join(dataDir, "hooks", "claude-code-hook.sh"),
+		)
+		hooks := map[string]interface{}{}
+		appendClaudeCodeHookMatrix(hooks, hookCommand, hookArgs)
+		projection := map[string]interface{}{
+			"env":   buildClaudeCodeOtelEnv(opts),
+			"hooks": hooks,
+		}
+		raw, err := json.MarshalIndent(projection, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal Claude managed settings projection: %v", err)
+		}
+		return raw
+	}
+
+	masterA := strings.Repeat("a", 64)
+	masterB := strings.Repeat("b", 64)
+	projectionA := render(masterA)
+	projectionB := render(masterB)
+	if string(projectionA) != string(projectionB) {
+		t.Fatal("Claude managed settings changed across gateway master rotation")
+	}
+	for _, masterToken := range []string{masterA, masterB} {
+		if strings.Contains(string(projectionB), masterToken) {
+			t.Fatal("Claude managed settings exposed a gateway master credential")
+		}
+	}
+	if !strings.Contains(string(projectionB), scopedOTLPToken) {
+		t.Fatal("Claude managed settings omitted the stable scoped OTLP credential")
 	}
 }
 
