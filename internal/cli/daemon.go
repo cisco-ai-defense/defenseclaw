@@ -917,6 +917,7 @@ func rotationRequiredConnectorNames(cfg *config.Config) []string {
 }
 
 var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
+var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
 
 func verifyRotationConnectorOTLPAuthentication(
 	client *http.Client,
@@ -931,7 +932,8 @@ func verifyRotationConnectorOTLPAuthentication(
 		return errors.New("scoped OTLP authentication client is unavailable")
 	}
 	base, err := url.Parse(statusURL)
-	if err != nil || base.Scheme != "http" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
+		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
 		return errors.New("scoped OTLP authentication endpoint is invalid")
 	}
 	host := strings.TrimSpace(base.Hostname())
@@ -947,6 +949,31 @@ func verifyRotationConnectorOTLPAuthentication(
 	for _, name := range requiredConnectors {
 		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
 		if !ok {
+			continue
+		}
+		if scope == connector.OTLPScopeClaude {
+			probes, loadErr := loadRotationClaudeNativeOTLPProbes()
+			if loadErr != nil {
+				return fmt.Errorf("connector %s native OTLP settings are unavailable: %w", name, loadErr)
+			}
+			if len(probes) != 2 {
+				return fmt.Errorf("connector %s native OTLP settings do not configure logs and metrics", name)
+			}
+			for _, probe := range probes {
+				if probe.Signal != connector.NativeOTLPSignalLogs && probe.Signal != connector.NativeOTLPSignalMetrics {
+					return fmt.Errorf("connector %s native OTLP settings contain an unsupported signal", name)
+				}
+				if probeErr := probeRotationConnectorOTLPAuthentication(
+					&requestClient,
+					base,
+					name,
+					probe.Endpoint,
+					"/v1/"+string(probe.Signal),
+					probe.Headers,
+				); probeErr != nil {
+					return probeErr
+				}
+			}
 			continue
 		}
 		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
@@ -995,6 +1022,37 @@ func verifyRotationConnectorOTLPAuthentication(
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
 		}
+	}
+	return nil
+}
+
+func probeRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	endpoint string,
+	expectedPath string,
+	headers http.Header,
+) error {
+	probeURL, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || probeURL.Scheme != "http" || probeURL.User != nil || probeURL.RawQuery != "" ||
+		probeURL.Fragment != "" || probeURL.RawPath != "" || !strings.EqualFold(probeURL.Host, base.Host) ||
+		probeURL.Path != expectedPath {
+		return fmt.Errorf("connector %s native OTLP endpoint does not match the gateway", connectorName)
+	}
+	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe could not be created", connectorName)
+	}
+	req.Header = headers.Clone()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe failed", connectorName)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s native OTLP authentication probe returned %s", connectorName, resp.Status)
 	}
 	return nil
 }

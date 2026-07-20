@@ -535,6 +535,41 @@ func TestSerializeOTLPHeadersRoundTripsThroughJavaScriptURIParser(t *testing.T) 
 	}
 }
 
+func TestLiteralOTLPHeadersPreserveBearerSpaceAndRejectAmbiguousValues(t *testing.T) {
+	t.Parallel()
+
+	spec := NativeOTLPSpec{
+		Kind:           NativeOTLPEnvBlock,
+		Endpoint:       "http://127.0.0.1:18970",
+		LiteralHeaders: true,
+		Headers: map[string]string{
+			"Authorization":        "Bearer scoped-token",
+			"X-DefenseClaw-Source": "claudecode",
+		},
+	}
+	env, err := spec.EnvBlock()
+	if err != nil {
+		t.Fatalf("literal EnvBlock: %v", err)
+	}
+	if got, want := env["OTEL_EXPORTER_OTLP_HEADERS"],
+		"authorization=Bearer scoped-token,x-defenseclaw-source=claudecode"; got != want {
+		t.Fatalf("literal OTLP headers = %q, want %q", got, want)
+	}
+
+	for _, invalid := range []string{"Bearer token,extra=value", "Bearer token\r\nX-Evil: injected"} {
+		invalidSpec := spec
+		invalidSpec.Headers = map[string]string{"Authorization": invalid}
+		if _, err := invalidSpec.EnvBlock(); err == nil {
+			t.Errorf("literal OTLP header value %q was accepted", invalid)
+		}
+	}
+	duplicateSpec := spec
+	duplicateSpec.Headers = map[string]string{"Authorization": "Bearer one", "authorization": "Bearer two"}
+	if _, err := duplicateSpec.EnvBlock(); err == nil {
+		t.Error("case-insensitive duplicate literal OTLP headers were accepted")
+	}
+}
+
 // toStringMap canonicalizes header keys to lower-case so values
 // produced by either map[string]string or map[string]interface{}
 // renderers compare equal.

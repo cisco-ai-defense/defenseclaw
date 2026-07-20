@@ -152,9 +152,22 @@ func TestGatewaySnapshotReadyRotationRequiresEveryConfiguredConnector(t *testing
 	}
 }
 
+func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCodeNativeOTLPProbe {
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+credential)
+	headers.Set("X-DefenseClaw-Client", "claudecode-otel/1.0")
+	headers.Set("X-DefenseClaw-Source", "claudecode")
+	return []connector.ClaudeCodeNativeOTLPProbe{
+		{Signal: connector.NativeOTLPSignalLogs, Endpoint: baseURL + "/v1/logs", Headers: headers.Clone()},
+		{Signal: connector.NativeOTLPSignalMetrics, Endpoint: baseURL + "/v1/metrics", Headers: headers.Clone()},
+	}
+}
+
 func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testing.T) {
 	originalLoader := loadRotationOTLPPathToken
 	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
 	tokens := map[connector.OTLPPathTokenScope]string{
 		connector.OTLPScopeCodex:     strings.Repeat("c", 64),
 		connector.OTLPScopeClaude:    strings.Repeat("d", 64),
@@ -165,13 +178,17 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	}
 
 	seen := map[string]int{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, tokens[connector.OTLPScopeClaude]), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("probe method = %s, want GET", r.Method)
 		}
 		source := r.Header.Get("X-DefenseClaw-Source")
 		switch {
-		case r.URL.Path == "/v1/logs" && (source == "codex" || source == "claudecode"):
+		case (r.URL.Path == "/v1/logs" || r.URL.Path == "/v1/metrics") && (source == "codex" || source == "claudecode"):
 			scope, _ := connector.OTLPPathTokenScopeForConnector(source)
 			if got, want := r.Header.Get("Authorization"), "Bearer "+tokens[scope]; got != want {
 				t.Errorf("%s authorization did not use its scoped credential", source)
@@ -195,9 +212,9 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	if err != nil {
 		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
 	}
-	for _, name := range []string{"claudecode", "codex", "geminicli"} {
-		if seen[name] != 1 {
-			t.Fatalf("%s auth probes = %d, want 1", name, seen[name])
+	for name, want := range map[string]int{"claudecode": 2, "codex": 1, "geminicli": 1} {
+		if seen[name] != want {
+			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
 		}
 	}
 }
@@ -205,11 +222,17 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
 	originalLoader := loadRotationOTLPPathToken
 	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
 	credential := strings.Repeat("f", 64)
 	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
 		return credential, nil
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, credential), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -225,12 +248,68 @@ func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCrede
 	}
 }
 
+func TestVerifyRotationConnectorOTLPAuthenticationUsesPersistedClaudeHeaderLiterally(t *testing.T) {
+	originalTokenLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalTokenLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+
+	credential := strings.Repeat("a", 64)
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		t.Fatal("Claude convergence synthesized a credential from the token file")
+		return "", fmt.Errorf("unreachable")
+	}
+	var receivedAuthorization string
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		probes := testClaudeRotationProbes(srv.URL, credential)
+		for index := range probes {
+			probes[index].Headers.Set("Authorization", "Bearer%20"+credential)
+		}
+		return probes, nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("encoded persisted Claude auth error = %v, want HTTP 401 convergence failure", err)
+	}
+	if receivedAuthorization != "Bearer%20"+credential {
+		t.Fatal("Claude convergence did not send the persisted Authorization value literally")
+	}
+	if strings.Contains(err.Error(), credential) {
+		t.Fatal("Claude convergence error leaked the persisted credential")
+	}
+}
+
 func TestVerifyRotationConnectorOTLPAuthenticationRefusesNonLoopbackEndpoint(t *testing.T) {
 	err := verifyRotationConnectorOTLPAuthentication(
 		&http.Client{}, "http://collector.example.test/status", "D:\\fixture-data", []string{"claudecode"},
 	)
 	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("non-loopback authentication probe error = %v, want fail-closed refusal", err)
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationRefusesMismatchedClaudeExporterEndpoint(t *testing.T) {
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	credential := strings.Repeat("a", 64)
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes("http://collector.example.test", credential), nil
+	}
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match the gateway") {
+		t.Fatalf("mismatched Claude exporter endpoint error = %v, want fail-closed refusal", err)
 	}
 }
 
@@ -438,12 +517,19 @@ func TestWaitForStartedDaemonRotationRejectsPartialConnectorRosterAndStopsB(t *t
 func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T) {
 	originalLoader := loadRotationOTLPPathToken
 	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	credential := strings.Repeat("a", 64)
 	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
-		return strings.Repeat("a", 64), nil
+		return credential, nil
 	}
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
 	snap.Connectors = []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning}}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, credential), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/logs" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -468,7 +554,7 @@ func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T
 			expectedDataDir:     "D:\\fixture-data",
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "scoped OTLP authentication") || ready {
+	if err == nil || !strings.Contains(err.Error(), "native OTLP authentication") || ready {
 		t.Fatalf("rejected scoped auth readiness = %v, error = %v, want convergence failure", ready, err)
 	}
 	if base.stopCalls != 1 || base.stoppedPID != 42 {
