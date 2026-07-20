@@ -24,9 +24,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const (
@@ -188,6 +191,10 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	if rotationTransaction {
+		requirements.requiredConnectors = rotationRequiredConnectorNames(cfg)
+		requirements.verifyConnectorOTLP = true
+	}
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -580,14 +587,20 @@ type daemonReadinessRequirements struct {
 	guardrailEnabled bool
 	watcherEnabled   bool
 	telemetryEnabled bool
-	startedNotBefore time.Time
-	expectedPID      int
-	expectedDataDir  string
-	token            func() string
-	listenerHost     string
-	listenerPort     int
-	listenerOwner    func(string, int) (int, error)
-	requireOwnership bool
+	// requiredConnectors and verifyConnectorOTLP are transaction-only gates.
+	// Ordinary starts retain multi-connector failure isolation; token rotation
+	// must prove that every enabled configured connector converged and that the
+	// gateway accepts each connector's persisted scoped OTLP credential.
+	requiredConnectors  []string
+	verifyConnectorOTLP bool
+	startedNotBefore    time.Time
+	expectedPID         int
+	expectedDataDir     string
+	token               func() string
+	listenerHost        string
+	listenerPort        int
+	listenerOwner       func(string, int) (int, error)
+	requireOwnership    bool
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -823,10 +836,29 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 		return running && currentPID == pid
 	})
 	if err == nil && ready {
-		if identity, ok := d.(managedProcessIdentity); !ok || identity.HasManagedProcessIdentity(pid) {
-			return snap, true, nil
+		identityOK := true
+		if identity, ok := d.(managedProcessIdentity); ok {
+			identityOK = identity.HasManagedProcessIdentity(pid)
 		}
-		err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+		if identityOK {
+			if requirements.verifyConnectorOTLP {
+				err = verifyRotationConnectorOTLPAuthentication(
+					client,
+					statusURL,
+					requirements.expectedDataDir,
+					requirements.requiredConnectors,
+				)
+				if err != nil {
+					err = fmt.Errorf("rotation connector convergence: %w", err)
+				} else {
+					return snap, true, nil
+				}
+			} else {
+				return snap, true, nil
+			}
+		} else {
+			err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+		}
 	}
 	if err == nil {
 		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
@@ -862,6 +894,109 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		requireOwnership: requireStartupListenerOwnership,
 	}
 	return requirements
+}
+
+func rotationRequiredConnectorNames(cfg *config.Config) []string {
+	if cfg == nil || !cfg.Guardrail.Enabled {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
+
+func verifyRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	statusURL string,
+	dataDir string,
+	requiredConnectors []string,
+) error {
+	if len(requiredConnectors) == 0 {
+		return nil
+	}
+	if client == nil {
+		return errors.New("scoped OTLP authentication client is unavailable")
+	}
+	base, err := url.Parse(statusURL)
+	if err != nil || base.Scheme != "http" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return errors.New("scoped OTLP authentication endpoint is invalid")
+	}
+	host := strings.TrimSpace(base.Hostname())
+	hostIP := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
+		return fmt.Errorf("refusing scoped OTLP authentication probe to non-loopback host %q", host)
+	}
+
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	for _, name := range requiredConnectors {
+		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
+		if !ok {
+			continue
+		}
+		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
+		if loadErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
+		}
+
+		probeURL := *base
+		probeURL.RawPath = ""
+		probeURL.RawQuery = ""
+		probeURL.Fragment = ""
+		switch scope {
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
+			probeURL.Path = "/v1/logs"
+		case connector.OTLPScopeGeminiCLI:
+			probeURL.Path = "/otlp/" + string(scope) + "/" + url.PathEscape(token) + "/v1/logs"
+		default:
+			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
+		}
+
+		req, requestErr := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+		if requestErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
+		}
+		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Source", name)
+		}
+		resp, requestErr := requestClient.Do(req)
+		if requestErr != nil {
+			// Do not wrap the transport error: for path-token connectors it may
+			// include the credential-bearing URL.
+			return fmt.Errorf("connector %s scoped OTLP authentication probe failed", name)
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+		_ = resp.Body.Close()
+		// Authentication happens before the OTLP handler's POST-only method
+		// check. A valid credential therefore reaches the handler and returns
+		// 405 without ingesting a synthetic telemetry record; 401/403 proves
+		// the persisted credential and gateway runtime did not converge.
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
+		}
+	}
+	return nil
 }
 
 // waitForGatewayReadiness waits for every required startup subsystem to reach
@@ -1046,6 +1181,27 @@ func gatewaySnapshotReady(
 			}
 		default:
 			return false, nil
+		}
+	}
+	if len(requirements.requiredConnectors) > 0 {
+		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
+		for _, health := range snap.Connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				readyConnectors[name] = struct{}{}
+			}
+		}
+		missing := make([]string, 0)
+		for _, name := range requirements.requiredConnectors {
+			if _, ok := readyConnectors[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return false, fmt.Errorf(
+				"rotation connector convergence failed; configured connectors not ready: %s",
+				strings.Join(missing, ", "),
+			)
 		}
 	}
 	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {

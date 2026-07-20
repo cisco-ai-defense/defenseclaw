@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gateway.HealthSnapshot {
@@ -103,6 +104,133 @@ func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
 	if !requirements.telemetryEnabled {
 		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
+	}
+}
+
+func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {},
+		"claudecode": {},
+	}
+	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "claudecode,codex" {
+		t.Fatalf("rotation required connectors = %q, want claudecode,codex", got)
+	}
+
+	disabled := false
+	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Enabled: &disabled}
+	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "codex" {
+		t.Fatalf("rotation required connectors with Claude disabled = %q, want codex", got)
+	}
+
+	cfg.Guardrail.Enabled = false
+	if got := rotationRequiredConnectorNames(cfg); len(got) != 0 {
+		t.Fatalf("disabled guardrail rotation required connectors = %v, want none", got)
+	}
+}
+
+func TestGatewaySnapshotReadyRotationRequiresEveryConfiguredConnector(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "codex", State: gateway.StateRunning}}
+
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+		guardrailEnabled:   true,
+		requiredConnectors: []string{"claudecode", "codex"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "claudecode") {
+		t.Fatalf("gatewaySnapshotReady() error = %v, want missing Claude convergence failure", err)
+	}
+	if ready {
+		t.Fatal("gatewaySnapshotReady() ready = true with only one of two required connectors")
+	}
+
+	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true})
+	if err != nil || !ready {
+		t.Fatalf("ordinary readiness changed by rotation-only roster gate: ready=%v error=%v", ready, err)
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	tokens := map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:     strings.Repeat("c", 64),
+		connector.OTLPScopeClaude:    strings.Repeat("d", 64),
+		connector.OTLPScopeGeminiCLI: strings.Repeat("e", 64),
+	}
+	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
+		return tokens[scope], nil
+	}
+
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("probe method = %s, want GET", r.Method)
+		}
+		source := r.Header.Get("X-DefenseClaw-Source")
+		switch {
+		case r.URL.Path == "/v1/logs" && (source == "codex" || source == "claudecode"):
+			scope, _ := connector.OTLPPathTokenScopeForConnector(source)
+			if got, want := r.Header.Get("Authorization"), "Bearer "+tokens[scope]; got != want {
+				t.Errorf("%s authorization did not use its scoped credential", source)
+			}
+			seen[source]++
+		case r.URL.Path == "/otlp/geminicli/"+tokens[connector.OTLPScopeGeminiCLI]+"/v1/logs":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("geminicli path-token probe sent an Authorization header")
+			}
+			seen["geminicli"]++
+		default:
+			t.Errorf("unexpected convergence probe path %q source %q", r.URL.Path, source)
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex", "geminicli"},
+	)
+	if err != nil {
+		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
+	}
+	for _, name := range []string{"claudecode", "codex", "geminicli"} {
+		if seen[name] != 1 {
+			t.Fatalf("%s auth probes = %d, want 1", name, seen[name])
+		}
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	credential := strings.Repeat("f", 64)
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		return credential, nil
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "claudecode") {
+		t.Fatalf("authentication error = %v, want connector-scoped failure", err)
+	}
+	if strings.Contains(err.Error(), credential) {
+		t.Fatal("authentication error leaked the connector-scoped credential")
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationRefusesNonLoopbackEndpoint(t *testing.T) {
+	err := verifyRotationConnectorOTLPAuthentication(
+		&http.Client{}, "http://collector.example.test/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("non-loopback authentication probe error = %v, want fail-closed refusal", err)
 	}
 }
 
@@ -274,6 +402,77 @@ func TestWaitForStartedDaemonRejectsReadyProcessWithoutStrongIdentity(t *testing
 	}
 	if base.stopCalls != 1 || base.stoppedPID != 42 {
 		t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationRejectsPartialConnectorRosterAndStopsB(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "codex", State: gateway.StateRunning}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled:   true,
+			requiredConnectors: []string{"claudecode", "codex"},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "claudecode") || ready {
+		t.Fatalf("partial rotation readiness = %v, error = %v, want Claude convergence failure", ready, err)
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		return strings.Repeat("a", 64), nil
+	}
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/logs" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL+"/status",
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled:    true,
+			requiredConnectors:  []string{"claudecode"},
+			verifyConnectorOTLP: true,
+			expectedDataDir:     "D:\\fixture-data",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "scoped OTLP authentication") || ready {
+		t.Fatalf("rejected scoped auth readiness = %v, error = %v, want convergence failure", ready, err)
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
 	}
 }
 
