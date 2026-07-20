@@ -1512,7 +1512,8 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
 
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
-        assert "defenseclaw alerts dismiss --severity HIGH" in screen.preview.masked_display
+        assert "defenseclaw alerts dismiss --id a1" in screen.preview.masked_display
+        assert "--severity" not in screen.preview.masked_display
 
 
 @pytest.mark.asyncio
@@ -5273,6 +5274,9 @@ async def test_overview_startup_uses_persisted_totals_before_health_loads() -> N
     class HookStatsStore:
         def __init__(self) -> None:
             self.stats_calls = 0
+
+        def audit_data_version(self) -> int:
+            return 1
 
         def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
             return list(events[-limit:])

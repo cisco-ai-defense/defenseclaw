@@ -408,6 +408,7 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"alert_acknowledgement_health":     retentionOwnedProtected,
 	"quarantine_records":               retentionOwnedProtected,
 	"quarantine_record_connectors":     retentionOwnedProtected,
+	"runtime_asset_state":              retentionOwnedProtected,
 	// Correlation state is graph-owned rather than independent row history.
 	// Its bounded graph reaper is added alongside the ledger so the generic
 	// table reaper can never delete a parent before its cursor, receipt, or

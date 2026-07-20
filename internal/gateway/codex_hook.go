@@ -171,6 +171,12 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Direction: "prompt",
 			Connector: "codex",
 		})
+		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{
+				targetType: "skill",
+				decision:   decision,
+			})
+		}
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
 			Tool:          codexToolName(req),

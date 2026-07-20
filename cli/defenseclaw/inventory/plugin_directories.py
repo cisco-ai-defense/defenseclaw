@@ -24,7 +24,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 from defenseclaw.inventory.plugin_identity import (
     AmbiguousPluginIdentityError,

@@ -691,8 +691,7 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			t.Fatalf("windows command still uses vulnerable bare launcher: %q", command)
 		}
 		decoded := decodePowerShellEncodedCommandForTest(t, command)
-		if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
-			!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
+		if !strings.Contains(decoded, windowsNativePowerShellStartForTest(defenseclawHookBinary(), "antigravity")) ||
 			!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
 			t.Fatalf("windows encoded command lost managed launcher or hardening:\n%s", decoded)
 		}
@@ -766,6 +765,7 @@ func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) 
 	setHookBinaryOverride(t, `C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`)
 	current := hookInvocationCommandFor("windows", "antigravity", "")
 	legacy := legacyAntigravityWindowsHookCommand()
+	legacyNonWaiting := legacyAntigravityNonWaitingWindowsHookCommand()
 	foreign := `foreign-hook.exe hook --connector antigravity`
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	cfg := map[string]interface{}{
@@ -776,6 +776,7 @@ func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) 
 					"hooks": []interface{}{
 						map[string]interface{}{"type": "command", "command": current},
 						map[string]interface{}{"type": "command", "command": legacy},
+						map[string]interface{}{"type": "command", "command": legacyNonWaiting},
 					},
 				},
 			},
@@ -811,7 +812,7 @@ func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) 
 	if err := json.Unmarshal(after, &pruned); err != nil {
 		t.Fatalf("parse pruned hooks.json: %v\n%s", err, after)
 	}
-	if structuredHookCommandReferences(pruned, []string{current, legacy}) {
+	if structuredHookCommandReferences(pruned, []string{current, legacy, legacyNonWaiting}) {
 		t.Fatalf("managed Antigravity command survived pruning:\n%s", after)
 	}
 	if !strings.Contains(string(after), foreign) {

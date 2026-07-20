@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gateway.HealthSnapshot {
@@ -103,6 +104,212 @@ func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
 	if !requirements.telemetryEnabled {
 		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
+	}
+}
+
+func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {},
+		"claudecode": {},
+	}
+	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "claudecode,codex" {
+		t.Fatalf("rotation required connectors = %q, want claudecode,codex", got)
+	}
+
+	disabled := false
+	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Enabled: &disabled}
+	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "codex" {
+		t.Fatalf("rotation required connectors with Claude disabled = %q, want codex", got)
+	}
+
+	cfg.Guardrail.Enabled = false
+	if got := rotationRequiredConnectorNames(cfg); len(got) != 0 {
+		t.Fatalf("disabled guardrail rotation required connectors = %v, want none", got)
+	}
+}
+
+func TestGatewaySnapshotReadyRotationRequiresEveryConfiguredConnector(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "codex", State: gateway.StateRunning}}
+
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+		guardrailEnabled:   true,
+		requiredConnectors: []string{"claudecode", "codex"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "claudecode") {
+		t.Fatalf("gatewaySnapshotReady() error = %v, want missing Claude convergence failure", err)
+	}
+	if ready {
+		t.Fatal("gatewaySnapshotReady() ready = true with only one of two required connectors")
+	}
+
+	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true})
+	if err != nil || !ready {
+		t.Fatalf("ordinary readiness changed by rotation-only roster gate: ready=%v error=%v", ready, err)
+	}
+}
+
+func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCodeNativeOTLPProbe {
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+credential)
+	headers.Set("X-DefenseClaw-Client", "claudecode-otel/1.0")
+	headers.Set("X-DefenseClaw-Source", "claudecode")
+	return []connector.ClaudeCodeNativeOTLPProbe{
+		{Signal: connector.NativeOTLPSignalLogs, Endpoint: baseURL + "/v1/logs", Headers: headers.Clone()},
+		{Signal: connector.NativeOTLPSignalMetrics, Endpoint: baseURL + "/v1/metrics", Headers: headers.Clone()},
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	tokens := map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:     strings.Repeat("c", 64),
+		connector.OTLPScopeClaude:    strings.Repeat("d", 64),
+		connector.OTLPScopeGeminiCLI: strings.Repeat("e", 64),
+	}
+	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
+		return tokens[scope], nil
+	}
+
+	seen := map[string]int{}
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, tokens[connector.OTLPScopeClaude]), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("probe method = %s, want GET", r.Method)
+		}
+		source := r.Header.Get("X-DefenseClaw-Source")
+		switch {
+		case (r.URL.Path == "/v1/logs" || r.URL.Path == "/v1/metrics") && (source == "codex" || source == "claudecode"):
+			scope, _ := connector.OTLPPathTokenScopeForConnector(source)
+			if got, want := r.Header.Get("Authorization"), "Bearer "+tokens[scope]; got != want {
+				t.Errorf("%s authorization did not use its scoped credential", source)
+			}
+			seen[source]++
+		case r.URL.Path == "/otlp/geminicli/"+tokens[connector.OTLPScopeGeminiCLI]+"/v1/logs":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("geminicli path-token probe sent an Authorization header")
+			}
+			seen["geminicli"]++
+		default:
+			t.Errorf("unexpected convergence probe path %q source %q", r.URL.Path, source)
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex", "geminicli"},
+	)
+	if err != nil {
+		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
+	}
+	for name, want := range map[string]int{"claudecode": 2, "codex": 1, "geminicli": 1} {
+		if seen[name] != want {
+			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
+		}
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	credential := strings.Repeat("f", 64)
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		return credential, nil
+	}
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, credential), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "claudecode") {
+		t.Fatalf("authentication error = %v, want connector-scoped failure", err)
+	}
+	if strings.Contains(err.Error(), credential) {
+		t.Fatal("authentication error leaked the connector-scoped credential")
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationUsesPersistedClaudeHeaderLiterally(t *testing.T) {
+	originalTokenLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalTokenLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+
+	credential := strings.Repeat("a", 64)
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		t.Fatal("Claude convergence synthesized a credential from the token file")
+		return "", fmt.Errorf("unreachable")
+	}
+	var receivedAuthorization string
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		probes := testClaudeRotationProbes(srv.URL, credential)
+		for index := range probes {
+			probes[index].Headers.Set("Authorization", "Bearer%20"+credential)
+		}
+		return probes, nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("encoded persisted Claude auth error = %v, want HTTP 401 convergence failure", err)
+	}
+	if receivedAuthorization != "Bearer%20"+credential {
+		t.Fatal("Claude convergence did not send the persisted Authorization value literally")
+	}
+	if strings.Contains(err.Error(), credential) {
+		t.Fatal("Claude convergence error leaked the persisted credential")
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationRefusesNonLoopbackEndpoint(t *testing.T) {
+	err := verifyRotationConnectorOTLPAuthentication(
+		&http.Client{}, "http://collector.example.test/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("non-loopback authentication probe error = %v, want fail-closed refusal", err)
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationRefusesMismatchedClaudeExporterEndpoint(t *testing.T) {
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	credential := strings.Repeat("a", 64)
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes("http://collector.example.test", credential), nil
+	}
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", "D:\\fixture-data", []string{"claudecode"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match the gateway") {
+		t.Fatalf("mismatched Claude exporter endpoint error = %v, want fail-closed refusal", err)
 	}
 }
 
@@ -274,6 +481,84 @@ func TestWaitForStartedDaemonRejectsReadyProcessWithoutStrongIdentity(t *testing
 	}
 	if base.stopCalls != 1 || base.stoppedPID != 42 {
 		t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationRejectsPartialConnectorRosterAndStopsB(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "codex", State: gateway.StateRunning}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled:   true,
+			requiredConnectors: []string{"claudecode", "codex"},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "claudecode") || ready {
+		t.Fatalf("partial rotation readiness = %v, error = %v, want Claude convergence failure", ready, err)
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T) {
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
+	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
+	credential := strings.Repeat("a", 64)
+	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
+		return credential, nil
+	}
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning}}
+	var srv *httptest.Server
+	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
+		return testClaudeRotationProbes(srv.URL, credential), nil
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/logs" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL+"/status",
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled:    true,
+			requiredConnectors:  []string{"claudecode"},
+			verifyConnectorOTLP: true,
+			expectedDataDir:     "D:\\fixture-data",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "native OTLP authentication") || ready {
+		t.Fatalf("rejected scoped auth readiness = %v, error = %v, want convergence failure", ready, err)
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
 	}
 }
 

@@ -740,6 +740,15 @@ function Get-CodexWindowsHookCommand([string]$Config) {
     return [pscustomobject]@{ Command = $command; Encoded = $encoded.Groups[1].Value; Script = $script }
 }
 
+function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [string]$Context) {
+    $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    if ($CodexCommand.Script -notmatch $startProcessPattern -or
+        $CodexCommand.Script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
+        $CodexCommand.Script -match '(?i)\$LASTEXITCODE') {
+        throw "$Context does not use the exact synchronous native hook command"
+    }
+}
+
 function Assert-DoctorHookRegistration {
     $doctor = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1)
     try {
@@ -764,9 +773,7 @@ function Assert-DoctorHookRegistration {
     $registration = [IO.File]::ReadAllText($config)
     if ($Connector -eq 'codex') {
         $codexCommand = Get-CodexWindowsHookCommand $registration
-        if ($codexCommand.Script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
-            throw 'setup-created Codex registration does not invoke the native hook executable with PowerShell call semantics'
-        }
+        Assert-CodexSynchronousWindowsHookCommand $codexCommand 'setup-created Codex registration'
     } elseif ($registration -notmatch '(?i)defenseclaw-hook(?:\.exe|\.cmd)') {
         throw "setup-created $Connector registration does not use a native DefenseClaw hook launcher"
     }
@@ -969,9 +976,7 @@ function Assert-DoctorWindowsHookRegistration {
         if (-not $nativeHookFound) { throw 'claudecode setup did not register the Windows native exec-form hook command' }
     } else {
         $codexCommand = Get-CodexWindowsHookCommand $config
-        if ($codexCommand.Script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
-            throw "$Connector setup did not register the Windows native hook command"
-        }
+        Assert-CodexSynchronousWindowsHookCommand $codexCommand "$Connector setup"
     }
 
     $result = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout 120

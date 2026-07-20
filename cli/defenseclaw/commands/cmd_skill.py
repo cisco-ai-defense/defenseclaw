@@ -3677,7 +3677,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # skill disable (runtime, via gateway RPC)
 # ---------------------------------------------------------------------------
 
-_SKILL_RUNTIME_PROBE_CONNECTORS = {"codex", "claudecode"}
+_SKILL_RUNTIME_NATIVE_SELECTION_CONNECTORS = {"codex", "claudecode"}
 
 
 def _normalize_runtime_connector(connector: str) -> str:
@@ -3692,8 +3692,26 @@ def _active_connector_name(app: AppContext) -> str:
     return "openclaw"
 
 
-def _skill_runtime_probe_enforced(connector: str) -> bool:
-    return _normalize_runtime_connector(connector) in _SKILL_RUNTIME_PROBE_CONNECTORS
+def _skill_runtime_native_selection_enforced(connector: str) -> bool:
+    return (
+        _normalize_runtime_connector(connector)
+        in _SKILL_RUNTIME_NATIVE_SELECTION_CONNECTORS
+    )
+
+
+def _skill_runtime_enforcement_claim(connector: str) -> str:
+    normalized = _normalize_runtime_connector(connector)
+    if normalized == "codex":
+        return (
+            "Enforced for a leading $skill selection by the native "
+            "Codex UserPromptSubmit gate."
+        )
+    if normalized == "claudecode":
+        return (
+            "Enforced for a native skill expansion by the Claude Code "
+            "UserPromptExpansion gate."
+        )
+    return ""
 
 
 def _skill_runtime_fanout_connectors(
@@ -3728,7 +3746,8 @@ def _warn_skill_runtime_disable_advisory(skill_name: str, connector: str, scoped
     scope = f"connector={connector}" if scoped else f"active connector={connector}"
     click.secho(
         f"warning: skill runtime disable is advisory for {scope}; that connector "
-        "does not emit skill runtime events DefenseClaw can gate. Use "
+        "does not expose a connector-native skill selection hook DefenseClaw "
+        "can reject. Use "
         f"'defenseclaw skill quarantine {skill_name}"
         + (f" --connector {connector}" if scoped else "")
         + "' for hard enforcement on that peer.",
@@ -3744,10 +3763,11 @@ def _warn_skill_runtime_disable_advisory(skill_name: str, connector: str, scoped
 def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Disable a skill at runtime.
 
-    OpenClaw uses the gateway RPC. Hook connectors store a runtime-disable
-    policy row that the hook runtime gate enforces when that connector emits
-    skill runtime events. This is runtime-only — it does not block install or
-    quarantine files.
+    OpenClaw uses the gateway RPC. Codex and Claude Code store a runtime-disable
+    policy row enforced at their native prompt-selection/expansion hooks.
+    Other connectors record advisory state and require quarantine for hard
+    enforcement. This is runtime-only — it does not block install or quarantine
+    files.
 
     Bare records the disable for every matching configured connector copy when
     one can be found, falling back to the legacy unscoped row for older
@@ -3789,10 +3809,8 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
                         f"[skill] {skill_name!r} runtime disable recorded "
                         f"(connector={target})"
                     )
-                    if _skill_runtime_probe_enforced(target):
-                        click.echo(
-                            f"  Enforced by hook runtime gate for connector={target}."
-                        )
+                    if _skill_runtime_native_selection_enforced(target):
+                        click.echo(f"  {_skill_runtime_enforcement_claim(target)}")
                     else:
                         _warn_skill_runtime_disable_advisory(skill_name, target, True)
 
@@ -3818,18 +3836,16 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
             f"[skill] {skill_name!r} runtime disable recorded "
             f"(connector={target_connector})"
         )
-        if _skill_runtime_probe_enforced(target_connector):
+        if _skill_runtime_native_selection_enforced(target_connector):
             click.echo(
-                f"  Enforced by hook runtime gate for connector={target_connector}."
+                f"  {_skill_runtime_enforcement_claim(target_connector)}"
             )
         else:
             _warn_skill_runtime_disable_advisory(skill_name, target_connector, True)
     else:
         click.echo(f"[skill] {skill_name!r} runtime disable recorded globally")
-        if _skill_runtime_probe_enforced(target_connector):
-            click.echo(
-                "  Enforced by hook runtime gates for connectors that emit skill events."
-            )
+        if _skill_runtime_native_selection_enforced(target_connector):
+            click.echo(f"  {_skill_runtime_enforcement_claim(target_connector)}")
         else:
             _warn_skill_runtime_disable_advisory(skill_name, target_connector, False)
 

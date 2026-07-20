@@ -7598,6 +7598,35 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
 	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	} {
+		value, _ := env[key].(string)
+		if !strings.Contains(value, "authorization=Bearer "+scoped) || strings.Contains(value, "Bearer%20") {
+			t.Errorf("%s does not use Claude's literal managed Authorization contract", key)
+		}
+	}
+	probes, err := LoadClaudeCodeNativeOTLPProbes()
+	if err != nil {
+		t.Fatalf("LoadClaudeCodeNativeOTLPProbes: %v", err)
+	}
+	if len(probes) != 2 {
+		t.Fatalf("Claude native OTLP probes = %d, want logs and metrics", len(probes))
+	}
+	for _, probe := range probes {
+		if probe.Headers.Get("Authorization") != "Bearer "+scoped {
+			t.Fatalf("Claude %s probe did not preserve the literal scoped bearer", probe.Signal)
+		}
+		if probe.Headers.Get("X-DefenseClaw-Source") != "claudecode" {
+			t.Fatalf("Claude %s probe source = %q", probe.Signal, probe.Headers.Get("X-DefenseClaw-Source"))
+		}
+		if !strings.HasSuffix(probe.Endpoint, "/v1/"+string(probe.Signal)) {
+			t.Fatalf("Claude %s probe endpoint does not select its signal", probe.Signal)
+		}
+	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
@@ -7605,6 +7634,86 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		t.Fatalf("stat settings.json: %v", err)
 	} else if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
+	}
+}
+
+func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	scopedToken := strings.Repeat("a", 64)
+	legacyHeaders := "authorization=Bearer%20" + scopedToken +
+		",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode"
+	legacyEnv := map[string]interface{}{
+		"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
+		"OTEL_LOGS_EXPORTER":                  "otlp",
+		"OTEL_METRICS_EXPORTER":               "otlp",
+		"OTEL_EXPORTER_OTLP_HEADERS":          legacyHeaders,
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     legacyHeaders,
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  legacyHeaders,
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   legacyHeaders,
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "http://127.0.0.1:18970/v1/logs",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:18970/v1/metrics",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://127.0.0.1:18970/v1/traces",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  "http/json",
+	}
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: scopedToken,
+	}
+	applyClaudeCodeManagedOtelEnv(legacyEnv, buildClaudeCodeOtelEnv(opts))
+	settings := map[string]interface{}{"env": legacyEnv}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := settings["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("migrated Claude settings env has type %T", settings["env"])
+	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	} {
+		value, _ := env[key].(string)
+		if strings.Contains(value, "Bearer%20") || !strings.Contains(value, "authorization=Bearer "+scopedToken) {
+			t.Errorf("%s was not migrated to Claude's literal Authorization contract", key)
+		}
+	}
+	if _, err := LoadClaudeCodeNativeOTLPProbes(); err != nil {
+		t.Fatalf("migrated Claude native OTLP contract is not probeable: %v", err)
+	}
+}
+
+func TestClaudeCodeOtelHeadersAreDefenseClawOnlyRecognizesScopedBearers(t *testing.T) {
+	scopedToken := strings.Repeat("a", 64)
+	for _, headers := range []string{
+		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+		"authorization=Bearer%20" + scopedToken + ",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode",
+	} {
+		if !claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
+			t.Errorf("DefenseClaw-only Claude headers were not recognized")
+		}
+	}
+	for _, headers := range []string{
+		"authorization=Bearer operator-token,x-defenseclaw-source=claudecode",
+		"authorization=Bearer " + scopedToken + ",x-operator-trace=keep,x-defenseclaw-source=claudecode",
+		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0",
+	} {
+		if claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
+			t.Errorf("operator or incomplete Claude headers were claimed as DefenseClaw-only")
+		}
 	}
 }
 

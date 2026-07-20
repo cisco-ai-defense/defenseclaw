@@ -1604,9 +1604,10 @@ print('packaged TUI state and audit export DACLs are private')
 
 function Set-MinimalGatewayAcceptanceConfig([string]$Python) {
     # Installer lifecycle acceptance needs a real managed daemon, but it does
-    # not need to wait for connector scanners or the guardrail proxy. Those
-    # subsystems have their own required Windows suites and can make startup
-    # depend on unrelated host inventory.
+    # not need to wait for connector scanners, the guardrail proxy, or an
+    # external observability collector. Those subsystems have their own
+    # required Windows suites and can make startup depend on unrelated host
+    # inventory or intentionally absent test services.
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     try {
         $listener.Start()
@@ -1616,13 +1617,33 @@ function Set-MinimalGatewayAcceptanceConfig([string]$Python) {
     }
     $code = @'
 import sys
-from defenseclaw.config import load
+from defenseclaw.config import config_path_for_data_dir, load
+from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.observability.v8_writer import mutate_v8_config
+from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
 cfg = load()
 cfg.guardrail.enabled = False
 cfg.gateway.watcher.enabled = False
 cfg.gateway.api_port = int(sys.argv[1])
 cfg.save()
+config_path = config_path_for_data_dir(cfg.data_dir)
+source = load_validate_v8(
+    config_path.read_bytes(), source_name=str(config_path)
+).source
+destinations = (source.get("observability") or {}).get("destinations") or []
+network_destination_kinds = frozenset({"http_jsonl", "otlp", "splunk_hec"})
+mutations = tuple(
+    V8YAMLMutation.set(
+        ("observability", "destinations", index, "enabled"), False
+    )
+    for index, destination in enumerate(destinations)
+    if isinstance(destination, dict)
+    and destination.get("kind") in network_destination_kinds
+    and destination.get("enabled", True)
+)
+if mutations:
+    mutate_v8_config(config_path, mutations, data_dir=cfg.data_dir)
 print(f'packaged gateway fixture uses isolated API port {cfg.gateway.api_port}')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $apiPort) -Timeout 60 | Out-Null
@@ -2551,8 +2572,11 @@ function Assert-WizardHookRegistration(
         if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
         catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-        if ($script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
-            throw "wizard-selected Codex registration does not use its exact native hook command: $($Specification.ConfigPath)"
+        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+        if ($script -notmatch $startProcessPattern -or
+            $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
+            $script -match '(?i)\$LASTEXITCODE') {
+            throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
         }
     } elseif ($Specification.Connector -eq 'claudecode') {
         try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
@@ -2584,6 +2608,80 @@ function Assert-WizardHookRegistration(
     }
     Assert-NoDefenseClawRegistration @($Specification.OtherConfigPath)
 }
+
+function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
+    if ($Specification.Connector -ne 'codex') { return }
+
+    $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
+    $encodedMatches = [regex]::Matches(
+        $registration,
+        '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)'
+    )
+    if ($encodedMatches.Count -eq 0) {
+        throw 'cannot stage legacy Codex hook: registration has no EncodedCommand'
+    }
+    $currentEncoded = $encodedMatches[0].Groups['encoded'].Value
+    try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
+    catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
+
+    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    $start = [regex]::Match($script, $startPattern)
+    if (-not $start.Success) {
+        throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
+    }
+    $legacyScript = $script.Replace(
+        $start.Value,
+        ('& ' + $start.Groups['file'].Value + ' hook --connector codex')
+    ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
+    if ($legacyScript -ceq $script) {
+        throw 'cannot stage legacy Codex hook: generated command did not change'
+    }
+    $legacyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($legacyScript))
+    $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    if ($updated -ceq $registration) {
+        throw 'cannot stage legacy Codex hook: registration bytes did not change'
+    }
+    [IO.File]::WriteAllText(
+        $Specification.ConfigPath,
+        $updated,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Assert-WizardCodexLegacyLauncherNeedsRepair(
+    [string]$Launcher,
+    [string]$Gateway,
+    [object]$Specification,
+    [string]$Logs
+) {
+    if ($Specification.Connector -ne 'codex') { return }
+
+    # The configured gateway and watchdog continuously repair managed hook
+    # registrations. Pause both before staging the deliberately stale launcher
+    # so Doctor observes the fixture instead of racing connector self-heal.
+    Invoke-Installed $Gateway @('watchdog', 'stop') @(0, 1) 90 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-watchdog-stop.log') | Out-Null
+    Invoke-Installed $Gateway @('stop') @(0, 1) 90 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-gateway-stop.log') | Out-Null
+    $stopped = Invoke-Installed $Gateway @('status') @(1) 30 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-gateway-status.log')
+    if ($stopped.ExitCode -eq 0) {
+        throw 'cannot stage legacy Codex hook while connector self-heal is running'
+    }
+
+    Set-WizardCodexLegacyNonWaitingHook $Specification
+    $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
+        (Join-Path $Logs 'wizard-codex-legacy-launcher-doctor.json')
+    try { $doctor = $doctorResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "legacy-launcher doctor did not emit valid JSON: $($_.Exception.Message)" }
+    $hookRows = @($doctor.checks | Where-Object {
+        [string]::Equals([string]$_.label, $Specification.DoctorLabel, [StringComparison]::Ordinal)
+    })
+    if ($hookRows.Count -ne 1 -or [string]$hookRows[0].status -eq 'pass') {
+        throw "Doctor accepted the legacy non-waiting Codex launcher: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
+    }
+}
+
 
 function Assert-WizardConnectorHealth(
     [string]$Launcher,
@@ -2762,6 +2860,7 @@ function Invoke-WizardConnectorAcceptance(
         $beforeWatchdog.ProcessId
     )
     Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'before-repair'
+    Assert-WizardCodexLegacyLauncherNeedsRepair $launcher $gateway $specification $Logs
 
     $preserved = Join-Path $DataRoot "wizard-$ConnectorName-preservation.txt"
     Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii

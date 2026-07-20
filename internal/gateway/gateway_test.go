@@ -26,7 +26,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -6026,42 +6025,41 @@ func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 		t.Fatalf("render Claude OTLP environment: %v", err)
 	}
 
-	decodedHeaders := make(http.Header)
+	// Claude Code consumes its persisted OTEL_EXPORTER_OTLP_HEADERS value as
+	// the literal comma-separated key=value contract documented for managed
+	// settings. Do not decode the persisted value here: doing so would test a
+	// synthetic credential that the real Claude exporter never sends.
+	claudeHeaders := make(http.Header)
 	for _, pair := range strings.Split(env["OTEL_EXPORTER_OTLP_HEADERS"], ",") {
 		keyValue := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(keyValue) != 2 {
 			t.Fatalf("malformed rendered OTLP header pair %q", pair)
 		}
-		// OpenTelemetry JS uses decodeURIComponent for each key and value.
-		key, err := url.PathUnescape(keyValue[0])
-		if err != nil {
-			t.Fatalf("decode rendered OTLP header key %q: %v", keyValue[0], err)
-		}
-		value, err := url.PathUnescape(keyValue[1])
-		if err != nil {
-			t.Fatalf("decode rendered OTLP header value %q: %v", keyValue[1], err)
-		}
-		decodedHeaders.Set(key, value)
+		claudeHeaders.Set(keyValue[0], keyValue[1])
 	}
-	if got := decodedHeaders.Get("Authorization"); got != "Bearer "+scopedToken {
-		t.Fatalf("decoded Claude Authorization = %q, want scoped bearer", got)
-	}
-
-	api, called := tokenAuthTestServer(t, "master-token")
+	cfg := &config.Config{}
+	cfg.Gateway.Token = "master-token"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	called := false
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
 		connector.OTLPScopeClaude: scopedToken,
 	})
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*called = true
+		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header = decodedHeaders
+	req.Header = claudeHeaders
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK || !*called {
-		t.Fatalf("gateway rejected Claude-rendered scoped Authorization: status=%d called=%v", rr.Code, *called)
+	if rr.Code != http.StatusOK || !called {
+		t.Fatalf(
+			"gateway rejected Claude's literal persisted Authorization: status=%d called=%v literal_bearer=%v",
+			rr.Code,
+			called,
+			claudeHeaders.Get("Authorization") == "Bearer "+scopedToken,
+		)
 	}
 }
 

@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -80,7 +80,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import atomic_write_private_bytes, delete_file_durable
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
@@ -118,6 +118,31 @@ _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
+_TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS = 120
+_TOKEN_ROTATION_TRANSACTION_FLAG = "--rotation-transaction"
+_TOKEN_ROTATION_CLEANUP_FLAG = "--rotation-cleanup"
+_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
+_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+_DEFENSECLAW_HOME_ENV = "DEFENSECLAW_HOME"
+_DEFENSECLAW_DATA_DIR_ENV = "DEFENSECLAW_DATA_DIR"
+_TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+)
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
 
@@ -2323,6 +2348,81 @@ def _rotate_token_dotenv_path(app: AppContext) -> str:
     return os.path.join(data_dir, ".env")
 
 
+@dataclass(frozen=True)
+class _RotateTokenDotenvSnapshot:
+    existed: bool
+    body: bytes
+    mode: int | None
+
+
+def _rotate_token_snapshot_locked(dotenv_path: str) -> _RotateTokenDotenvSnapshot:
+    """Capture the exact dotenv bytes while the caller owns its lock."""
+
+    if not os.path.lexists(dotenv_path):
+        return _RotateTokenDotenvSnapshot(existed=False, body=b"", mode=None)
+    reject_symlink(dotenv_path)
+    info = os.lstat(dotenv_path)
+    if not stat.S_ISREG(info.st_mode):
+        raise click.ClickException("Gateway dotenv is not a regular file; refusing token rotation.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(dotenv_path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+            raise click.ClickException("Gateway dotenv identity changed while opening; refusing token rotation.")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            return _RotateTokenDotenvSnapshot(
+                existed=True,
+                body=stream.read(),
+                mode=stat.S_IMODE(opened.st_mode),
+            )
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
+    """Replace only canonical token lines and retain every unrelated byte."""
+
+    safe_token = sanitize_dotenv_value(new_token, key=_GATEWAY_TOKEN_ENV).encode("utf-8")
+    token_prefix = (_GATEWAY_TOKEN_ENV + "=").encode("ascii")
+
+    def is_token_line(line: bytes) -> bool:
+        candidate = line.rstrip(b"\r\n").strip()
+        if os.name == "nt":
+            return candidate.upper().startswith(token_prefix)
+        return candidate.startswith(token_prefix)
+
+    lines = [
+        line
+        for line in snapshot.body.splitlines(keepends=True)
+        if not is_token_line(line)
+    ]
+    body = b"".join(lines)
+    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+    if body and not body.endswith((b"\r", b"\n")):
+        body += newline
+    return body + token_prefix + safe_token + newline
+
+
+def _rotate_token_restore_locked(
+    dotenv_path: str,
+    snapshot: _RotateTokenDotenvSnapshot,
+) -> None:
+    """Durably restore the exact pre-transaction dotenv bytes or absence."""
+
+    if snapshot.existed:
+        atomic_write_private_bytes(dotenv_path, snapshot.body)
+        if os.name != "nt" and snapshot.mode is not None:
+            os.chmod(dotenv_path, snapshot.mode)
+        return
+    if os.path.lexists(dotenv_path):
+        reject_symlink(dotenv_path)
+        delete_file_durable(dotenv_path)
+
+
 def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     with locked_file_update(dotenv_path):
         _rotate_token_atomic_write_locked(dotenv_path, new_token)
@@ -2330,39 +2430,226 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
 
 def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     """Rewrite the dotenv file with the new token, preserving every
-    other line. Atomic via os.replace; mode 0o600.
+    unrelated byte. Atomic and durable; mode 0o600.
 
-    Mirrors internal/gateway/firstboot.go appendEnvLine semantics so a
-    Python-side rotation produces the same byte-shape on disk as the
-    Go-side first-boot synthesis.
+    Uses the canonical key consumed by internal/gateway/firstboot.go while
+    preserving the existing file's unrelated byte shape.
     """
-    lines: list[str] = []
-    if os.path.exists(dotenv_path):
-        with open(dotenv_path, encoding="utf-8") as fh:
-            for raw in fh.read().splitlines():
-                stripped = raw.strip()
-                if stripped.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
-                    continue
-                lines.append(raw)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
-    body = "\n".join(lines) + "\n"
+    snapshot = _rotate_token_snapshot_locked(dotenv_path)
+    atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
 
-    atomic_write_private_bytes(dotenv_path, body.encode("utf-8"))
+
+def _restore_rotate_token_environment(snapshot: dict[str, str | None]) -> None:
+    for name, value in snapshot.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _rotate_token_snapshot_value(snapshot: _RotateTokenDotenvSnapshot, name: str) -> str:
+    """Return one named dotenv value without materializing unrelated entries."""
+
+    expected = name.encode("ascii")
+    value = b""
+    for raw_line in snapshot.body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(b"#"):
+            continue
+        key, separator, candidate = line.partition(b"=")
+        if not separator:
+            continue
+        key = key.strip()
+        matches = key.upper() == expected if os.name == "nt" else key == expected
+        if not matches:
+            continue
+        value = candidate.strip()
+        if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
+            value = value[1:-1]
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise click.ClickException("Gateway dotenv token is not valid UTF-8; refusing token rotation.") from exc
+
+
+def _rotate_token_previous_value(app: AppContext, snapshot: _RotateTokenDotenvSnapshot) -> str:
+    """Resolve A using the daemon's dotenv-before-process precedence."""
+
+    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = _rotate_token_snapshot_value(snapshot, name).strip()
+        if value:
+            return value
+    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return str(getattr(app.cfg.gateway, "token", "") or "").strip()
+
+
+def _rotate_token_child_environment(data_dir: str, token: str) -> dict[str, str]:
+    """Build the bounded lifecycle environment from individually named inputs."""
+
+    child_env: dict[str, str] = {}
+    for name in _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST:
+        value = os.environ.get(name)
+        if value is not None:
+            child_env[name] = value
+    normalized_data_dir = os.path.abspath(data_dir)
+    child_env[_DEFENSECLAW_HOME_ENV] = normalized_data_dir
+    child_env[_DEFENSECLAW_DATA_DIR_ENV] = normalized_data_dir
+    child_env[_GATEWAY_TOKEN_ENV] = token
+    return child_env
+
+
+def _run_rotate_token_lifecycle(
+    data_dir: str,
+    action: str,
+    *,
+    token: str,
+    cleanup: bool = False,
+) -> None:
+    """Run one bounded lifecycle phase without placing a token on argv."""
+
+    if action not in {"start", "stop"}:
+        raise ValueError("unsupported token-rotation lifecycle action")
+    if cleanup and action != "stop":
+        raise ValueError("token-rotation cleanup is only valid for stop")
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        raise click.ClickException("Gateway lifecycle executable was not found.")
+    command = [executable, action, _TOKEN_ROTATION_TRANSACTION_FLAG]
+    if cleanup:
+        command.append(_TOKEN_ROTATION_CLEANUP_FLAG)
+    child_env = _rotate_token_child_environment(data_dir, token)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
+            timeout=_TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise click.ClickException(f"Gateway {action} timed out during the token-rotation transaction.") from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"Gateway {action} could not be executed during the token-rotation transaction."
+        ) from exc
+    if result.returncode != 0:
+        # The child output is deliberately not replayed: lifecycle diagnostics
+        # are not a trusted secret-redaction boundary.
+        raise click.ClickException(f"Gateway {action} failed during the token-rotation transaction.")
+
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is not None:
+        ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+
+
+def _rotate_token_transaction(
+    app: AppContext,
+    dotenv_path: str,
+    new_token: str,
+    audit_details: str,
+) -> None:
+    """Commit token B only between verified stop(A) and start(B)."""
+
+    data_dir = os.path.abspath(app.cfg.data_dir or os.path.dirname(dotenv_path))
+    config_file = str(config_path_for_data_dir(data_dir))
+    environment_before = {_GATEWAY_TOKEN_ENV: os.environ.get(_GATEWAY_TOKEN_ENV)}
+
+    # PR #444 later centralizes daemon config loading. Integration must retain
+    # this on-disk A/B boundary: stop loads config+dotenv A, while start reloads
+    # config+dotenv B under the explicit data directory. Do not reuse a
+    # post-commit loader result for the authenticated stop phase.
+    with locked_config_yaml(config_file), locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        old_token = _rotate_token_previous_value(app, snapshot)
+        pid_file = os.path.join(data_dir, "gateway.pid")
+        was_running = _is_pid_alive(pid_file)
+        old_stopped = False
+        mutation_attempted = False
+        try:
+            try:
+                _run_rotate_token_lifecycle(data_dir, "stop", token=old_token)
+            except BaseException as stop_error:
+                # The bounded child may fail after it has completed shutdown
+                # (for example while verifying listener release). If A's
+                # authenticated PID disappeared, restore and readiness-check A
+                # before returning without ever committing B.
+                if was_running and not _is_pid_alive(pid_file):
+                    try:
+                        _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
+                    except BaseException:
+                        raise click.ClickException(
+                            "Token rotation stopped gateway A before the transaction could commit; "
+                            "gateway A did not return to verified readiness."
+                        ) from stop_error
+                raise
+            old_stopped = True
+
+            mutation_attempted = True
+            atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+            os.environ[_GATEWAY_TOKEN_ENV] = new_token
+
+            _run_rotate_token_lifecycle(data_dir, "start", token=new_token)
+            _log_setup_action(
+                app,
+                ACTION_SETUP_GATEWAY,
+                audit_details,
+                allow_offline=False,
+            )
+        except BaseException as primary_error:
+            if not old_stopped:
+                raise
+
+            if mutation_attempted:
+                try:
+                    # Reconcile a READY replacement (including a watchdog-start
+                    # failure) while B is still the durable authentication state.
+                    _run_rotate_token_lifecycle(data_dir, "stop", token=new_token, cleanup=True)
+                except BaseException:
+                    raise click.ClickException(
+                        "Token rotation failed and the replacement gateway could not be "
+                        "safely stopped; token B was preserved on disk."
+                    ) from primary_error
+
+            try:
+                _rotate_token_restore_locked(dotenv_path, snapshot)
+            except BaseException:
+                raise click.ClickException(
+                    "Token rotation failed and the exact prior dotenv snapshot could not "
+                    "be restored; the gateway remains stopped."
+                ) from primary_error
+
+            _restore_rotate_token_environment(environment_before)
+            if was_running:
+                try:
+                    _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
+                except BaseException:
+                    raise click.ClickException(
+                        "Token rotation failed; the exact prior dotenv snapshot was restored, "
+                        "but gateway A did not return to verified readiness."
+                    ) from primary_error
+            raise
+        finally:
+            _restore_rotate_token_environment(environment_before)
 
 
 @setup.command("rotate-token")
 @click.option(
     "--connector",
     default=None,
-    help="Override the connector used for the restart hint (the token is shared, "
-    "so ALL active connectors are refreshed regardless).",
+    help="Optional presentation hint (the token is shared, so ALL active connectors are refreshed).",
 )
 @click.option(
     "--no-restart",
     is_flag=True,
-    help="Skip the gateway restart that re-bakes the new token into every connector's hook .token file.",
+    help="Deprecated unsafe mode; retained only to return a fail-closed migration error.",
 )
 @click.option(
     "--yes",
@@ -2373,10 +2660,10 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
 def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
     """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
 
-    Generates a new 32-byte CSPRNG hex token, rewrites
-    ~/.defenseclaw/.env atomically (mode 0o600), then restarts the
-    gateway so its boot loop re-runs Setup for EVERY active connector and
-    re-bakes the new token into each connector's hook ``.token`` file.
+    Generates a new 32-byte CSPRNG hex token, verifies and stops gateway A
+    with token/config A, durably commits ~/.defenseclaw/.env B, then starts
+    and verifies gateway B. Any post-stop failure restores the exact dotenv
+    snapshot and the prior ready generation.
 
     The token is a single shared secret baked into every connector's hook
     scripts, so rotation is inherently global: refreshing only one
@@ -2389,6 +2676,19 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     import secrets
 
     dotenv_path = _rotate_token_dotenv_path(app)
+    if no_restart:
+        raise click.ClickException(
+            "--no-restart is not safe for token rotation; the daemon must cross the verified A/B lifecycle boundary."
+        )
+    token_env = str(getattr(app.cfg.gateway, "token_env", "") or "").strip()
+    canonical_token_env = (
+        token_env.casefold() == _GATEWAY_TOKEN_ENV.casefold() if os.name == "nt" else token_env == _GATEWAY_TOKEN_ENV
+    )
+    if token_env and not canonical_token_env:
+        raise click.ClickException(
+            "Token rotation requires gateway.token_env to be unset or DEFENSECLAW_GATEWAY_TOKEN; "
+            "an externally managed token environment cannot be durably rotated here."
+        )
 
     # ``active_connectors`` is the authoritative configured roster.  The
     # command-line connector is only a restart presentation hint: treating it
@@ -2407,20 +2707,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
             actives.append(active)
 
     requested_hint = normalize_connector(connector)
-    configured_primary = normalize_connector(
-        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
-    )
     if requested_hint and requested_hint not in actives:
         click.echo(f"  Ignoring inactive connector restart hint {connector!r}.")
-    restart_connector = (
-        requested_hint
-        if requested_hint in actives
-        else configured_primary
-        if configured_primary in actives
-        else actives[0]
-        if actives
-        else ""
-    )
 
     if not yes:
         scope = ", ".join(actives) if actives else "no active connector"
@@ -2432,57 +2720,16 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         )
 
     new_token = secrets.token_hex(32)
-    _rotate_token_atomic_write(dotenv_path, new_token)
-    ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
+    audit_details = f"action=rotate-token active_connectors={len(actives)} restart=true"
+    target_summary = ", ".join(actives) if actives else "no active connectors"
+    click.echo(f"  {ux.dim('Rotating gateway token for')} {target_summary}…")
+    _rotate_token_transaction(app, dotenv_path, new_token, audit_details)
 
-    restart_planned = bool(actives) and not no_restart
-    audit_details = (
-        f"action=rotate-token active_connectors={len(actives)} restart={str(restart_planned).lower()}"
-    )
-
-    if not actives:
+    ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600); gateway B is verified ready.")
+    if actives:
+        ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
+    else:
         ux.subhead("active connector roster: none")
-        _log_setup_action(
-            app,
-            ACTION_SETUP_GATEWAY,
-            audit_details,
-            allow_offline=True,
-        )
-        ux.subhead("(no active connector configured; nothing to refresh)")
-        return
-
-    if no_restart:
-        _log_setup_action(
-            app,
-            ACTION_SETUP_GATEWAY,
-            audit_details,
-            allow_offline=True,
-        )
-        ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
-        ux.subhead("The new token takes effect only once the gateway restarts and re-runs Setup for every connector:")
-        ux.subhead("  defenseclaw-gateway restart")
-        return
-
-    # Restart the gateway: its boot loop re-runs Connector.Setup for ALL active
-    # connectors, which rewrites each connector's hook .token file from the
-    # freshly-rotated .env. A full restart (not a per-connector teardown) is
-    # what keeps every connector's shared token in lockstep.
-    os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = new_token
-    click.echo(f"  {ux.dim('Refreshing hook scripts for')} {', '.join(actives)}…")
-    _restart_services(
-        app.cfg.data_dir,
-        app.cfg.gateway.host,
-        app.cfg.gateway.port,
-        connector=restart_connector,
-        connectors=actives,
-    )
-    _log_setup_action(
-        app,
-        ACTION_SETUP_GATEWAY,
-        audit_details,
-        allow_offline=False,
-    )
-    ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
     click.echo()
     ux.subhead("Next step: restart each agent so it picks up the new token in its")
     ux.subhead("inspect / hook subprocess invocations.")

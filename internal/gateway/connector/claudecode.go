@@ -400,6 +400,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:           "http://" + opts.APIAddr,
 			Protocol:           "http/json",
 			Headers:            headers,
+			LiteralHeaders:     true,
 			PerSignal:          true,
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
@@ -1079,6 +1080,112 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	return env
 }
 
+func applyClaudeCodeManagedOtelEnv(existing map[string]interface{}, managed map[string]string) {
+	for key, value := range managed {
+		existing[key] = value
+	}
+}
+
+// ClaudeCodeNativeOTLPProbe is one persisted exporter signal exactly as a new
+// Claude Code process will consume it from settings.json. Headers remain in
+// memory and callers must never include them in errors or logs.
+type ClaudeCodeNativeOTLPProbe struct {
+	Signal   NativeOTLPSignal
+	Endpoint string
+	Headers  http.Header
+}
+
+// LoadClaudeCodeNativeOTLPProbes reads the persisted Claude Code logs and
+// metrics exporter contract without URI-decoding header components. Token
+// rotation uses these values for side-effect-free authenticated probes, which
+// prevents a synthetic token-file request from masking a broken managed
+// settings credential.
+func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
+	settingsPath := claudeCodeSettingsPath()
+	data, exists, err := readStableClaudeCodeSettingsFile(settingsPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("Claude Code native OTLP settings are missing")
+	}
+	settings, err := decodeClaudeCodeSettings(data, "native OTLP settings")
+	if err != nil {
+		return nil, err
+	}
+	env, ok := settings["env"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("Claude Code native OTLP env is missing or invalid")
+	}
+	if claudeCodeOTLPEnvString(env, "CLAUDE_CODE_ENABLE_TELEMETRY") != "1" {
+		return nil, fmt.Errorf("Claude Code native telemetry is not enabled")
+	}
+
+	probes := make([]ClaudeCodeNativeOTLPProbe, 0, 2)
+	for _, signal := range []NativeOTLPSignal{NativeOTLPSignalLogs, NativeOTLPSignalMetrics} {
+		upperSignal := strings.ToUpper(string(signal))
+		if claudeCodeOTLPEnvString(env, "OTEL_"+upperSignal+"_EXPORTER") != "otlp" {
+			return nil, fmt.Errorf("Claude Code native %s exporter is not configured for OTLP", signal)
+		}
+		prefix := "OTEL_EXPORTER_OTLP_" + upperSignal
+		if claudeCodeOTLPEnvString(env, prefix+"_PROTOCOL") != "http/json" {
+			return nil, fmt.Errorf("Claude Code native %s OTLP protocol is not http/json", signal)
+		}
+		endpoint := claudeCodeOTLPEnvString(env, prefix+"_ENDPOINT")
+		if endpoint == "" {
+			return nil, fmt.Errorf("Claude Code native %s OTLP endpoint is missing", signal)
+		}
+		headers, parseErr := parseClaudeCodeLiteralOTLPHeaders(claudeCodeOTLPEnvString(env, prefix+"_HEADERS"))
+		if parseErr != nil {
+			return nil, fmt.Errorf("Claude Code native %s OTLP headers are invalid: %w", signal, parseErr)
+		}
+		probes = append(probes, ClaudeCodeNativeOTLPProbe{
+			Signal:   signal,
+			Endpoint: endpoint,
+			Headers:  headers,
+		})
+	}
+	return probes, nil
+}
+
+func claudeCodeOTLPEnvString(env map[string]interface{}, key string) string {
+	value, _ := env[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func parseClaudeCodeLiteralOTLPHeaders(raw string) (http.Header, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("managed header block is missing")
+	}
+	headers := make(http.Header)
+	for _, part := range strings.Split(raw, ",") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		name = strings.ToLower(strings.TrimSpace(name))
+		if !ok || !validLiteralOTLPHeaderName(name) || value == "" || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("managed header block contains an invalid entry")
+		}
+		if headers.Get(name) != "" {
+			return nil, fmt.Errorf("managed header block contains a duplicate entry")
+		}
+		switch name {
+		case "authorization", "x-defenseclaw-client", "x-defenseclaw-source":
+		default:
+			return nil, fmt.Errorf("managed header block contains an unexpected entry")
+		}
+		headers.Set(name, value)
+	}
+	if headers.Get("Authorization") == "" {
+		return nil, fmt.Errorf("managed Authorization is missing")
+	}
+	if headers.Get("X-DefenseClaw-Source") != "claudecode" {
+		return nil, fmt.Errorf("managed source does not identify claudecode")
+	}
+	if headers.Get("X-DefenseClaw-Client") != "claudecode-otel/1.0" {
+		return nil, fmt.Errorf("managed client does not identify the Claude Code exporter")
+	}
+	return headers, nil
+}
+
 // patchClaudeCodeOtelEnv merges OpenTelemetry env vars into
 // ~/.claude/settings.json's `env` block. Claude Code reads this
 // block at startup and exports it into the CLI process environment
@@ -1198,9 +1305,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				delete(existing, key)
 				backup.ManagedAbsentEnv = append(backup.ManagedAbsentEnv, key)
 			}
-			for k, v := range managedEnv {
-				existing[k] = v
-			}
+			applyClaudeCodeManagedOtelEnv(existing, managedEnv)
 			backupNeedsSave = true
 			backupToSave = backup
 			settings["env"] = existing
@@ -1337,20 +1442,42 @@ func claudeCodeOtelHeadersAreDefenseClawOnly(value string) bool {
 	if len(parts) == 0 {
 		return false
 	}
+	seenSource := false
 	for _, part := range parts {
 		name, headerValue, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok || strings.TrimSpace(headerValue) == "" {
 			return false
 		}
 		switch strings.ToLower(strings.TrimSpace(name)) {
-		case "x-defenseclaw-client", "x-defenseclaw-source", "x-defenseclaw-token":
+		case "x-defenseclaw-source":
+			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
+			if err != nil || decoded != "claudecode" {
+				return false
+			}
+			seenSource = true
+		case "x-defenseclaw-client":
+			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
+			if err != nil || !strings.HasPrefix(decoded, "claudecode-otel/") {
+				return false
+			}
+		case "x-defenseclaw-token":
+			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
+			if err != nil || !otlpTokenHexRE.MatchString(decoded) {
+				return false
+			}
+		case "authorization":
+			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
+			if err != nil || !strings.HasPrefix(decoded, "Bearer ") ||
+				!otlpTokenHexRE.MatchString(strings.TrimPrefix(decoded, "Bearer ")) {
+				return false
+			}
 		default:
 			// A mixed block belongs to the operator even when it also contains
 			// DefenseClaw headers; teardown must not discard the other headers.
 			return false
 		}
 	}
-	return true
+	return seenSource
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.

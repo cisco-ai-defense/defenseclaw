@@ -112,7 +112,8 @@ jobs:
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
-  #                                  surfaces, in which case → full matrix.
+  #                                  surfaces or a Windows release-sensitive
+  #                                  surface, in which case → full matrix.
   # ---------------------------------------------------------------------------
   changes:
     name: Select contract cells
@@ -151,7 +152,12 @@ jobs:
           echo "Changed files in PR:"
           printf '%s\n' "${changed}"
 
-          # connector / hook / registry / contract-script / workflow surfaces.
+          # Keep this allowlist anchored and reviewable. The Windows entries are
+          # limited to canonical release workflows, native executable/resource
+          # payload sources, installer lifecycle/signing/setup helpers, and the
+          # native acceptance harness. Contract:
+          # cli/tests/test_connector_live_e2e_path_policy.py.
+          # BEGIN connector full-matrix path allowlist
           if printf '%s\n' "${changed}" | grep -qE \
             -e '^internal/gateway/connector/' \
             -e '^internal/gateway/sidecar_observability_v8' \
@@ -163,13 +169,24 @@ jobs:
             -e '^cli/defenseclaw/commands/cmd_init\.py$' \
             -e '^test/e2e/' \
             -e '^scripts/live-connector-e2e/' \
+            -e '^\.goreleaser\.yaml$' \
+            -e '^\.github/workflows/release\.yaml$' \
+            -e '^\.github/workflows/windows-native\.yml$' \
+            -e '^cmd/(defenseclaw|defenseclaw-hook|defenseclaw-launcher|defenseclaw-setup|defenseclaw-startup)/' \
+            -e '^internal/(tools/)?windowsresources/' \
+            -e '^cli/defenseclaw/commands/windows_uninstall_helper\.py$' \
+            -e '^cli/defenseclaw/windows_acl\.py$' \
+            -e '^scripts/(build-windows-installer|initialize-windows-native-ci-paths|install|invoke-windows-setup-standard-user-ci|test-fresh-install-release-windows|test-upgrade-release-windows|test-windows-disposable-user-safety|test-windows-setup-wizard|upgrade|windows-authenticode|windows-binary-identity|windows-disposable-user-safety|windows-native-ci|windows-native-paths)\.ps1$' \
+            -e '^scripts/windows_installer_artifacts\.py$' \
+            -e '^scripts/windows-(disposable-file-guard|disposable-standard-user-launcher|setup-standard-user-launcher)\.cs$' \
             -e '^\.github/workflows/connector-live-e2e\.yml$'; then
             echo "matrix=${full}" >> "$GITHUB_OUTPUT"
-            echo "connector-relevant change -> full Linux + macOS matrix"
+            echo "connector/release-sensitive change -> full Linux + macOS matrix"
           else
             echo "matrix=${minimal}" >> "$GITHUB_OUTPUT"
-            echo "no connector-relevant change -> macOS codex smoke only"
+            echo "no connector/release-sensitive change -> macOS codex smoke only"
           fi
+          # END connector full-matrix path allowlist
 
   # ---------------------------------------------------------------------------
   # Layer A — deterministic Unix contract matrix (no secrets).

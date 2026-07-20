@@ -402,7 +402,10 @@ case "$connector" in
         fi
         ;;
     claudecode)
-        grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as an Authorization bearer"
+        grep -Fq "authorization=Bearer ${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as a literal Authorization bearer"
+        if grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config"; then
+            fail "Claude config retained the obsolete percent-encoded Authorization bearer"
+        fi
         ;;
 esac
 sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"

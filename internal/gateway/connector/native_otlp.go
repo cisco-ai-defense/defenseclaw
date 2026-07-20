@@ -80,6 +80,11 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //     OTLP request. Used for tenant-aware tokens. Keys are canonicalized
 //     (lower-case) by the installer so equality checks downstream are
 //     case-insensitive.
+//   - LiteralHeaders: render OTEL_EXPORTER_OTLP_HEADERS values literally
+//     after validating the comma-separated header grammar. The default URI
+//     encoding remains appropriate for exporters that decode header
+//     components; Claude Code's managed-settings parser requires the literal
+//     `Authorization=Bearer <token>` form documented by the vendor.
 //   - PerSignal: when true the installer emits per-signal exporter env
 //     vars (OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER /
 //     OTEL_LOGS_EXPORTER) and per-signal endpoint env vars. Required
@@ -113,6 +118,7 @@ type NativeOTLPSpec struct {
 	Endpoint           string
 	Protocol           string
 	Headers            map[string]string
+	LiteralHeaders     bool
 	PerSignal          bool
 	SignalPaths        map[NativeOTLPSignal]string
 	PathToken          string
@@ -262,18 +268,18 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 	}
 	out["OTEL_EXPORTER_OTLP_PROTOCOL"] = s.normalizedProtocol()
 
-	if len(s.Headers) > 0 {
-		out["OTEL_EXPORTER_OTLP_HEADERS"] = serializeOTLPHeaders(s.Headers)
+	serializedHeaders, err := s.serializedHeaders()
+	if err != nil {
+		return nil, err
+	}
+	if serializedHeaders != "" {
+		out["OTEL_EXPORTER_OTLP_HEADERS"] = serializedHeaders
 	}
 
 	if s.PerSignal {
 		out["OTEL_METRICS_EXPORTER"] = "otlp"
 		out["OTEL_LOGS_EXPORTER"] = "otlp"
 		out["OTEL_TRACES_EXPORTER"] = "otlp"
-		serializedHeaders := ""
-		if len(s.Headers) > 0 {
-			serializedHeaders = serializeOTLPHeaders(s.Headers)
-		}
 		for _, signal := range AllNativeOTLPSignals() {
 			prefix := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal))
 			ep := s.signalEndpoint(signal)
@@ -301,6 +307,16 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+func (s NativeOTLPSpec) serializedHeaders() (string, error) {
+	if len(s.Headers) == 0 {
+		return "", nil
+	}
+	if s.LiteralHeaders {
+		return serializeLiteralOTLPHeaders(s.Headers)
+	}
+	return serializeOTLPHeaders(s.Headers), nil
 }
 
 // TOMLBlock renders a TOML-block spec into a map suitable for embedding
@@ -405,6 +421,51 @@ func serializeOTLPHeaders(h map[string]string) string {
 		}
 	}
 	return strings.Join(parts, ",")
+}
+
+// serializeLiteralOTLPHeaders renders the literal key=value grammar used by
+// Claude Code managed settings. Literal rendering is intentionally opt-in:
+// commas delimit entries, so unsafe names or values must fail closed instead
+// of producing an ambiguous or header-injecting configuration.
+func serializeLiteralOTLPHeaders(h map[string]string) (string, error) {
+	values := make(map[string]string, len(h))
+	keys := make([]string, 0, len(h))
+	for originalName, value := range h {
+		name := strings.ToLower(strings.TrimSpace(originalName))
+		if !validLiteralOTLPHeaderName(name) {
+			return "", fmt.Errorf("NativeOTLPSpec: invalid literal OTLP header name")
+		}
+		if _, exists := values[name]; exists {
+			return "", fmt.Errorf("NativeOTLPSpec: duplicate literal OTLP header name")
+		}
+		if value == "" || strings.ContainsAny(value, ",\r\n") {
+			return "", fmt.Errorf("NativeOTLPSpec: invalid literal OTLP header value for %s", name)
+		}
+		values[name] = value
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, name := range keys {
+		parts = append(parts, name+"="+values[name])
+	}
+	return strings.Join(parts, ","), nil
+}
+
+func validLiteralOTLPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // serializeOTLPAttributes renders ResourceAttributes as the

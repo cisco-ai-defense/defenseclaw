@@ -24,9 +24,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const (
@@ -46,6 +49,8 @@ const (
 	gracefulShutdownResponseMax  = 4 << 10
 	restartPortReleaseTimeout    = defaultStopTimeout
 	restartPortReleaseInterval   = 25 * time.Millisecond
+	rotationTransactionFlag      = "rotation-transaction"
+	rotationCleanupFlag          = "rotation-cleanup"
 )
 
 var startCmd = &cobra.Command{
@@ -110,13 +115,36 @@ func init() {
 	startCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	stopCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	restartCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
+	startCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade startup verification")
+	stopCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade shutdown verification")
+	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
+	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
+	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
+	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
 }
 
+func rotationTransactionRequested(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	enabled, err := cmd.Flags().GetBool(rotationTransactionFlag)
+	return err == nil && enabled
+}
+
+func rotationCleanupRequested(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	enabled, err := cmd.Flags().GetBool(rotationCleanupFlag)
+	return err == nil && enabled
+}
+
 func runStart(cmd *cobra.Command, _ []string) error {
+	rotationTransaction := rotationTransactionRequested(cmd)
 	d := daemon.New(config.DefaultDataPath())
 	// Start can return early when the configured listener is already healthy.
 	// Validate every process-identity artifact before that fast path so malformed
@@ -124,7 +152,10 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
-	cfg, _ := loadDaemonConfig(cmd)
+	cfg, cfgLoadErr := loadDaemonConfig(cmd)
+	if rotationTransaction && cfgLoadErr != nil {
+		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
+	}
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
@@ -133,6 +164,9 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if alreadyRunning {
+		if rotationTransaction {
+			return fmt.Errorf("rotation start requires a stopped gateway; managed PID %d is already running", pid)
+		}
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
@@ -151,9 +185,16 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	}
 
 	cfg, cfgErr = loadDaemonConfig(cmd)
+	if rotationTransaction && cfgErr != nil {
+		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
+	}
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	if rotationTransaction {
+		requirements.requiredConnectors = rotationRequiredConnectorNames(cfg)
+		requirements.verifyConnectorOTLP = true
+	}
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -180,6 +221,9 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	// Auto-start watchdog if enabled in config.
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
+			if rotationTransaction {
+				return fmt.Errorf("rotation start watchdog readiness: %w", err)
+			}
 			fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
 		} else {
 			fmt.Println("  Watchdog: started")
@@ -192,13 +236,68 @@ func runStart(cmd *cobra.Command, _ []string) error {
 }
 
 func runStop(cmd *cobra.Command, _ []string) error {
-	// Stop watchdog first since it monitors the gateway.
-	_ = runWatchdogStop(nil, nil)
-
+	rotationTransaction := rotationTransactionRequested(cmd)
+	rotationCleanup := rotationCleanupRequested(cmd)
+	if rotationCleanup && !rotationTransaction {
+		return errors.New("rotation cleanup requires transaction-grade verification")
+	}
 	d := daemon.New(config.DefaultDataPath())
-	cfg, _ := loadDaemonConfig(cmd)
+	cfg, cfgErr := loadDaemonConfig(cmd)
+	var running bool
+	var pid int
+	var err error
+	if rotationTransaction {
+		// Validate every identity artifact before the watchdog or gateway can
+		// be touched. A foreign listener or malformed watchdog record must leave
+		// both processes unchanged.
+		if err := d.ValidateStartIdentityFiles(); err != nil {
+			return err
+		}
+		if cfgErr != nil {
+			return fmt.Errorf("rotation stop requires valid configuration: %w", cfgErr)
+		}
+		client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		running, pid, err = inspectRotationStopTarget(
+			d,
+			cfg,
+			client,
+			rotationCleanup,
+			defaultStartReadinessTimeout,
+			defaultReadinessPollInterval,
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		running, pid = d.IsRunning()
+	}
 
-	running, pid := d.IsRunning()
+	watchdogWasRunning := false
+	if rotationTransaction {
+		watchdogWasRunning, err = rotationWatchdogRunning(config.DefaultDataPath())
+		if err != nil {
+			return err
+		}
+		if watchdogWasRunning && !running {
+			return errors.New("rotation watchdog owns the data directory without a running managed gateway")
+		}
+		if watchdogWasRunning && !cfg.Gateway.Watchdog.Enabled {
+			return errors.New("rotation watchdog is running while disabled in configuration")
+		}
+		if err := runWatchdogStop(nil, nil); err != nil {
+			if watchdogWasRunning {
+				if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
+					return fmt.Errorf("rotation stop watchdog ownership: %w; restore failed: %v", err, restoreErr)
+				}
+			}
+			return fmt.Errorf("rotation stop watchdog ownership: %w", err)
+		}
+	} else {
+		// Stop watchdog first since it monitors the gateway. Ordinary operator
+		// stop keeps the historical best-effort behavior after identity preflight.
+		_ = runWatchdogStop(nil, nil)
+	}
+
 	if !running {
 		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
@@ -208,11 +307,101 @@ func runStop(cmd *cobra.Command, _ []string) error {
 
 	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		if rotationTransaction && watchdogWasRunning {
+			if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
+				return fmt.Errorf("stop daemon: %w; watchdog ownership restore failed: %v", err, restoreErr)
+			}
+		}
 		return fmt.Errorf("stop daemon: %w", err)
+	}
+	if rotationTransaction {
+		if err := waitForConfiguredPortFree(
+			cfg,
+			pid,
+			restartPortReleaseTimeout,
+			restartPortReleaseInterval,
+		); err != nil {
+			return fmt.Errorf("rotation stop listener release: %w", err)
+		}
 	}
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
 	printHint("Start again:  defenseclaw-gateway start")
+	return nil
+}
+
+func rotationWatchdogRunning(dataDir string) (bool, error) {
+	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+	locked, info, err := watchdogIsLocked(pidPath)
+	if err != nil {
+		return false, fmt.Errorf("rotation watchdog ownership: %w", err)
+	}
+	if !locked {
+		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+			return false, fmt.Errorf(
+				"rotation watchdog PID %d is alive without the ownership lock",
+				liveInfo.PID,
+			)
+		}
+		return false, nil
+	}
+	if !verifyWatchdogProcess(info) {
+		return false, errors.New("rotation watchdog ownership fingerprint is not valid")
+	}
+	return true, nil
+}
+
+func inspectRotationStopTarget(
+	d daemonState,
+	cfg *config.Config,
+	client *http.Client,
+	cleanup bool,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) (bool, int, error) {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return false, 0, err
+	}
+	if running && !cleanup {
+		if err := waitForRunningDaemonReadiness(d, pid, client, cfg, timeout, pollInterval); err != nil {
+			return false, 0, fmt.Errorf("rotation stop readiness: %w", err)
+		}
+	}
+	return running, pid, nil
+}
+
+func waitForRunningDaemonReadiness(
+	d daemonState,
+	pid int,
+	client *http.Client,
+	cfg *config.Config,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
+	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+	requirements.expectedPID = pid
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	_, ready, err := waitForGatewayReadiness(
+		client,
+		sidecarStatusURL(cfg),
+		timeout,
+		pollInterval,
+		requirements,
+		func() bool {
+			running, currentPID := d.IsRunning()
+			return running && currentPID == pid
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return errors.New("managed gateway did not report READY")
+	}
+	if identity, ok := d.(managedProcessIdentity); !ok || !identity.HasManagedProcessIdentity(pid) {
+		return fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", pid)
+	}
 	return nil
 }
 
@@ -398,14 +587,20 @@ type daemonReadinessRequirements struct {
 	guardrailEnabled bool
 	watcherEnabled   bool
 	telemetryEnabled bool
-	startedNotBefore time.Time
-	expectedPID      int
-	expectedDataDir  string
-	token            func() string
-	listenerHost     string
-	listenerPort     int
-	listenerOwner    func(string, int) (int, error)
-	requireOwnership bool
+	// requiredConnectors and verifyConnectorOTLP are transaction-only gates.
+	// Ordinary starts retain multi-connector failure isolation; token rotation
+	// must prove that every enabled configured connector converged and that the
+	// gateway accepts each connector's persisted scoped OTLP credential.
+	requiredConnectors  []string
+	verifyConnectorOTLP bool
+	startedNotBefore    time.Time
+	expectedPID         int
+	expectedDataDir     string
+	token               func() string
+	listenerHost        string
+	listenerPort        int
+	listenerOwner       func(string, int) (int, error)
+	requireOwnership    bool
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -641,10 +836,29 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 		return running && currentPID == pid
 	})
 	if err == nil && ready {
-		if identity, ok := d.(managedProcessIdentity); !ok || identity.HasManagedProcessIdentity(pid) {
-			return snap, true, nil
+		identityOK := true
+		if identity, ok := d.(managedProcessIdentity); ok {
+			identityOK = identity.HasManagedProcessIdentity(pid)
 		}
-		err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+		if identityOK {
+			if requirements.verifyConnectorOTLP {
+				err = verifyRotationConnectorOTLPAuthentication(
+					client,
+					statusURL,
+					requirements.expectedDataDir,
+					requirements.requiredConnectors,
+				)
+				if err != nil {
+					err = fmt.Errorf("rotation connector convergence: %w", err)
+				} else {
+					return snap, true, nil
+				}
+			} else {
+				return snap, true, nil
+			}
+		} else {
+			err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+		}
 	}
 	if err == nil {
 		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
@@ -680,6 +894,167 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		requireOwnership: requireStartupListenerOwnership,
 	}
 	return requirements
+}
+
+func rotationRequiredConnectorNames(cfg *config.Config) []string {
+	if cfg == nil || !cfg.Guardrail.Enabled {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
+var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
+
+func verifyRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	statusURL string,
+	dataDir string,
+	requiredConnectors []string,
+) error {
+	if len(requiredConnectors) == 0 {
+		return nil
+	}
+	if client == nil {
+		return errors.New("scoped OTLP authentication client is unavailable")
+	}
+	base, err := url.Parse(statusURL)
+	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
+		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return errors.New("scoped OTLP authentication endpoint is invalid")
+	}
+	host := strings.TrimSpace(base.Hostname())
+	hostIP := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
+		return fmt.Errorf("refusing scoped OTLP authentication probe to non-loopback host %q", host)
+	}
+
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	for _, name := range requiredConnectors {
+		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
+		if !ok {
+			continue
+		}
+		if scope == connector.OTLPScopeClaude {
+			probes, loadErr := loadRotationClaudeNativeOTLPProbes()
+			if loadErr != nil {
+				return fmt.Errorf("connector %s native OTLP settings are unavailable: %w", name, loadErr)
+			}
+			if len(probes) != 2 {
+				return fmt.Errorf("connector %s native OTLP settings do not configure logs and metrics", name)
+			}
+			for _, probe := range probes {
+				if probe.Signal != connector.NativeOTLPSignalLogs && probe.Signal != connector.NativeOTLPSignalMetrics {
+					return fmt.Errorf("connector %s native OTLP settings contain an unsupported signal", name)
+				}
+				if probeErr := probeRotationConnectorOTLPAuthentication(
+					&requestClient,
+					base,
+					name,
+					probe.Endpoint,
+					"/v1/"+string(probe.Signal),
+					probe.Headers,
+				); probeErr != nil {
+					return probeErr
+				}
+			}
+			continue
+		}
+		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
+		if loadErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
+		}
+
+		probeURL := *base
+		probeURL.RawPath = ""
+		probeURL.RawQuery = ""
+		probeURL.Fragment = ""
+		switch scope {
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
+			probeURL.Path = "/v1/logs"
+		case connector.OTLPScopeGeminiCLI:
+			probeURL.Path = "/otlp/" + string(scope) + "/" + url.PathEscape(token) + "/v1/logs"
+		default:
+			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
+		}
+
+		req, requestErr := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+		if requestErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
+		}
+		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Source", name)
+		}
+		resp, requestErr := requestClient.Do(req)
+		if requestErr != nil {
+			// Do not wrap the transport error: for path-token connectors it may
+			// include the credential-bearing URL.
+			return fmt.Errorf("connector %s scoped OTLP authentication probe failed", name)
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+		_ = resp.Body.Close()
+		// Authentication happens before the OTLP handler's POST-only method
+		// check. A valid credential therefore reaches the handler and returns
+		// 405 without ingesting a synthetic telemetry record; 401/403 proves
+		// the persisted credential and gateway runtime did not converge.
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
+		}
+	}
+	return nil
+}
+
+func probeRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	endpoint string,
+	expectedPath string,
+	headers http.Header,
+) error {
+	probeURL, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || probeURL.Scheme != "http" || probeURL.User != nil || probeURL.RawQuery != "" ||
+		probeURL.Fragment != "" || probeURL.RawPath != "" || !strings.EqualFold(probeURL.Host, base.Host) ||
+		probeURL.Path != expectedPath {
+		return fmt.Errorf("connector %s native OTLP endpoint does not match the gateway", connectorName)
+	}
+	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe could not be created", connectorName)
+	}
+	req.Header = headers.Clone()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe failed", connectorName)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s native OTLP authentication probe returned %s", connectorName, resp.Status)
+	}
+	return nil
 }
 
 // waitForGatewayReadiness waits for every required startup subsystem to reach
@@ -864,6 +1239,27 @@ func gatewaySnapshotReady(
 			}
 		default:
 			return false, nil
+		}
+	}
+	if len(requirements.requiredConnectors) > 0 {
+		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
+		for _, health := range snap.Connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				readyConnectors[name] = struct{}{}
+			}
+		}
+		missing := make([]string, 0)
+		for _, name := range requirements.requiredConnectors {
+			if _, ok := readyConnectors[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return false, fmt.Errorf(
+				"rotation connector convergence failed; configured connectors not ready: %s",
+				strings.Join(missing, ", "),
+			)
 		}
 	}
 	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {

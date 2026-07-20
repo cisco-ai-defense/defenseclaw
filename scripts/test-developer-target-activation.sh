@@ -467,10 +467,19 @@ expected_environment = (
     }
 )
 if not legacy_source:
-    historical_environment = dotenv_values(evidence_dir / "environment.historical.source")
+    historical_environment = dotenv_values(
+        evidence_dir / "environment.historical.source"
+    )
     historical_gateway_token = historical_environment.get("DEFENSECLAW_GATEWAY_TOKEN")
-    if not isinstance(historical_gateway_token, str) or not historical_gateway_token.strip():
-        raise SystemExit("native-v8 source fixture has no established gateway token")
+    if (
+        not isinstance(historical_gateway_token, str)
+        or len(historical_gateway_token) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in historical_gateway_token
+        )
+    ):
+        raise SystemExit("native-v8 fixture has no canonical generated gateway token")
     expected_environment["DEFENSECLAW_GATEWAY_TOKEN"] = historical_gateway_token
 actual_environment = dotenv_values(data_dir / ".env")
 for name, value in expected_environment.items():

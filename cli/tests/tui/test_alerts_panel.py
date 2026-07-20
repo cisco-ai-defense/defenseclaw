@@ -59,6 +59,59 @@ def test_alerts_filter_selection_and_counts() -> None:
     assert action.filter_change.new == "CRITICAL"
 
 
+def test_alert_mutation_intents_always_send_actual_ids() -> None:
+    model = AlertsPanelModel()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", timestamp=now),
+            AlertEvent(
+                id="a2",
+                severity="LOW",
+                action="proxy",
+                target="gateway",
+                timestamp=now - timedelta(seconds=1),
+            ),
+        ]
+    )
+
+    dismissed = model.handle_key("d")
+    assert dismissed.intent is not None
+    assert dismissed.intent.args == ("alerts", "dismiss", "--id", "a1")
+
+    model.set_severity_filter_exact("")
+    model.select_all()
+    acknowledged = model.handle_key("x")
+    assert acknowledged.intent is not None
+    assert acknowledged.intent.args == (
+        "alerts",
+        "acknowledge",
+        "--id",
+        "a1",
+        "--id",
+        "a2",
+        "--yes",
+    )
+
+    model.set_severity_filter_exact("HIGH")
+    filtered = model.handle_key("c")
+    assert filtered.intent is not None
+    assert filtered.intent.args == ("alerts", "dismiss", "--id", "a1")
+
+    all_loaded = model.handle_key("C")
+    assert all_loaded.intent is not None
+    assert all_loaded.intent.args == (
+        "alerts",
+        "dismiss",
+        "--id",
+        "a1",
+        "--id",
+        "a2",
+        "--yes",
+    )
+    assert "--severity" not in all_loaded.intent.args
+
+
 def test_alerts_set_events_owns_the_input_list() -> None:
     events = [AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one")]
     model = AlertsPanelModel()

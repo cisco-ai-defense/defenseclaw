@@ -9,6 +9,19 @@ dependencies = [
     "click>=8.3.3,<9",
     "pyyaml==6.0.3",
     "requests==2.33.0",
+    # uv overrides are resolver-only and are not emitted as Requires-Dist.
+    # Keep every advisory-backed transitive floor direct and unmarked so plain
+    # wheel installs enforce the same minimums on every supported Python line.
+    "cryptography>=48.0.1,<49",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.31",
+    "urllib3>=2.7.0",
+    "idna>=3.15",
+    "pydantic-settings>=2.14.2",
+    "aiohttp>=3.14.1,<4",
+    "pyjwt>=2.13.0",
+    "starlette>=1.3.1,<1.4",
+    "fastapi>=0.137.1,<0.138",
     # The scanner/TUI runtime is one dependency set. DefenseClaw uses the
     # Textual 8.2 ANSI-theme and Tabs APIs, and Textual 8 requires Rich >=14.2.
     # Keep the tested 8.x bounds in wheel metadata so managed installs do not
@@ -201,7 +214,6 @@ override-dependencies = [
     "python-multipart>=0.0.31",
     "urllib3>=2.7.0",           # CVE-2026-44431, CVE-2026-44432 fixed in 2.7.0
     "idna>=3.15",               # CVE-2026-45409 fixed in 3.15
-    "msgpack>=1.2.1",            # GHSA-6v7p-g79w-8964 fixed in 1.2.1
     "pydantic-settings>=2.14.2", # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes

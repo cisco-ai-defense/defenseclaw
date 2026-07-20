@@ -112,6 +112,34 @@ class WindowsHookDoctorTests(unittest.TestCase):
         path.write_bytes(body)
         return path
 
+    @staticmethod
+    def _encoded_hook_command(
+        runtime: Path, connector: str = "codex", *, legacy: bool = False, unqualified: bool = False
+    ) -> str:
+        literal = str(runtime).replace("'", "''")
+        if legacy and unqualified:
+            raise ValueError("legacy and unqualified fixtures are mutually exclusive")
+        if legacy:
+            script = (
+                "$ErrorActionPreference='Stop'; "
+                "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                f"& '{literal}' hook --connector {connector}; exit $LASTEXITCODE"
+            )
+        else:
+            start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
+            script = (
+                "$ErrorActionPreference='Stop'; "
+                "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                f"$hookProcess={start_process} -FilePath '{literal}' "
+                f"-ArgumentList @('hook','--connector','{connector}') "
+                "-NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode"
+            )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
+            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        )
+
     def _lock(
         self,
         connector: str,
@@ -783,18 +811,41 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(raised.exception.state, "malformed")
         self.assertIn("explicitly disabled", raised.exception.detail)
 
+    def test_healthy_codex_synchronous_encoded_invocation(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("Windows-native executable", check.detail)
+
+    def test_codex_legacy_non_waiting_encoded_invocation_requires_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime, legacy=True)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("legacy non-waiting launcher", check.detail)
+        self.assertIn("repair", check.detail)
+
+    def test_codex_unqualified_start_process_invocation_requires_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime, unqualified=True)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("unqualified Start-Process launcher", check.detail)
+        self.assertIn("repair", check.detail)
+
     def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:
         runtime = self._runtime()
-        script = (
-            "$ErrorActionPreference='Stop'; "
-            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
-            f"& '{runtime}' hook --connector codex; exit $LASTEXITCODE"
-        )
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        command = (
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
-            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
-        )
+        command = self._encoded_hook_command(runtime)
         config = self._config(
             "codex",
             f'"{runtime}" hook --connector codex',
@@ -808,16 +859,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def test_codex_encoded_obsolete_gateway_is_classified_as_stale(self) -> None:
         legacy = self._runtime("defenseclaw-gateway.exe")
-        script = (
-            "$ErrorActionPreference='Stop'; "
-            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
-            f"& '{legacy}' hook --connector codex; exit $LASTEXITCODE"
-        )
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        command = (
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
-            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
-        )
+        command = self._encoded_hook_command(legacy)
         config = self._config(
             "codex",
             command,

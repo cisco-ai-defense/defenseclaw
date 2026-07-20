@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -308,6 +309,56 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(t *testing.T) {
+	const apiAddr = "127.0.0.1:18970"
+	dataDir := filepath.Join("fixture", "defenseclaw")
+	scopedOTLPToken := strings.Repeat("c", 64)
+	scopedHookToken := strings.Repeat("d", 64)
+
+	render := func(masterToken string) []byte {
+		t.Helper()
+		opts := SetupOpts{
+			DataDir:            dataDir,
+			APIAddr:            apiAddr,
+			APIToken:           masterToken,
+			HookAPIToken:       scopedHookToken,
+			HookAPITokenScoped: true,
+			OTLPPathToken:      scopedOTLPToken,
+		}
+		hookCommand, hookArgs := claudeCodeHookInvocation(
+			opts,
+			filepath.Join(dataDir, "hooks", "claude-code-hook.sh"),
+		)
+		hooks := map[string]interface{}{}
+		appendClaudeCodeHookMatrix(hooks, hookCommand, hookArgs)
+		projection := map[string]interface{}{
+			"env":   buildClaudeCodeOtelEnv(opts),
+			"hooks": hooks,
+		}
+		raw, err := json.MarshalIndent(projection, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal Claude managed settings projection: %v", err)
+		}
+		return raw
+	}
+
+	masterA := strings.Repeat("a", 64)
+	masterB := strings.Repeat("b", 64)
+	projectionA := render(masterA)
+	projectionB := render(masterB)
+	if string(projectionA) != string(projectionB) {
+		t.Fatal("Claude managed settings changed across gateway master rotation")
+	}
+	for _, masterToken := range []string{masterA, masterB} {
+		if strings.Contains(string(projectionB), masterToken) {
+			t.Fatal("Claude managed settings exposed a gateway master credential")
+		}
+	}
+	if !strings.Contains(string(projectionB), scopedOTLPToken) {
+		t.Fatal("Claude managed settings omitted the stable scoped OTLP credential")
+	}
+}
+
 func TestNativeOTLPShape_Copilot(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
@@ -481,6 +532,41 @@ func TestSerializeOTLPHeadersRoundTripsThroughJavaScriptURIParser(t *testing.T) 
 	want := []string{"authorization=" + value}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("JavaScript-style header round-trip mismatch:\n  got=%q\n want=%q\nencoded=%q", got, want, encoded)
+	}
+}
+
+func TestLiteralOTLPHeadersPreserveBearerSpaceAndRejectAmbiguousValues(t *testing.T) {
+	t.Parallel()
+
+	spec := NativeOTLPSpec{
+		Kind:           NativeOTLPEnvBlock,
+		Endpoint:       "http://127.0.0.1:18970",
+		LiteralHeaders: true,
+		Headers: map[string]string{
+			"Authorization":        "Bearer scoped-token",
+			"X-DefenseClaw-Source": "claudecode",
+		},
+	}
+	env, err := spec.EnvBlock()
+	if err != nil {
+		t.Fatalf("literal EnvBlock: %v", err)
+	}
+	if got, want := env["OTEL_EXPORTER_OTLP_HEADERS"],
+		"authorization=Bearer scoped-token,x-defenseclaw-source=claudecode"; got != want {
+		t.Fatalf("literal OTLP headers = %q, want %q", got, want)
+	}
+
+	for _, invalid := range []string{"Bearer token,extra=value", "Bearer token\r\nX-Evil: injected"} {
+		invalidSpec := spec
+		invalidSpec.Headers = map[string]string{"Authorization": invalid}
+		if _, err := invalidSpec.EnvBlock(); err == nil {
+			t.Errorf("literal OTLP header value %q was accepted", invalid)
+		}
+	}
+	duplicateSpec := spec
+	duplicateSpec.Headers = map[string]string{"Authorization": "Bearer one", "authorization": "Bearer two"}
+	if _, err := duplicateSpec.EnvBlock(); err == nil {
+		t.Error("case-insensitive duplicate literal OTLP headers were accepted")
 	}
 }
 

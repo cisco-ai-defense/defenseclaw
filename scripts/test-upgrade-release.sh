@@ -1342,8 +1342,11 @@ seed_native_v8_observability_fixture() {
     local data_dir="${SMOKE_HOME}/.defenseclaw"
     local openclaw_home="${SMOKE_HOME}/.openclaw"
     local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    local baseline_python="${data_dir}/.venv/bin/python"
     mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
     chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+    [[ -x "${baseline_python}" ]] \
+        || die "published config-v8 baseline interpreter is unavailable"
 
     cat >"${data_dir}/config.yaml" <<YAML
 # ┌──── OBSERVABILITY UPGRADE SMOKE ────┐
@@ -1400,26 +1403,22 @@ DEFENSECLAW_GATEWAY_TOKEN=upgrade-smoke-v8-gateway-fixture
 DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
-
-    # A working native-v8 host has already completed gateway first boot. Keep
-    # that invariant in the fixture so starting the target runtime does not
-    # manufacture an unrelated dotenv mutation after the continuity snapshot.
-    python3 -I - "${data_dir}/.env" <<'PY'
-import secrets
+    # A working native-v8 host has already completed gateway first boot. Seed
+    # one canonical gateway credential before the continuity snapshot so the
+    # target runtime cannot manufacture an unrelated dotenv mutation.
+    "${baseline_python}" -I - "${data_dir}/.env" <<'PY'
 from pathlib import Path
+import secrets
 import sys
 
 environment_path = Path(sys.argv[1])
-with environment_path.open("a", encoding="utf-8", newline="\n") as stream:
-    stream.write(f"DEFENSECLAW_GATEWAY_TOKEN={secrets.token_urlsafe(32)}\n")
+with environment_path.open("a", encoding="utf-8", newline="") as stream:
+    stream.write(f"DEFENSECLAW_GATEWAY_TOKEN={secrets.token_hex(32)}\n")
 PY
 
     # A real config-v8 host already has the v8 activation recorded. Seed the
     # cursor through the authenticated published baseline's own state API so a
     # later candidate must preserve, rather than invent, that history.
-    local baseline_python="${data_dir}/.venv/bin/python"
-    [[ -x "${baseline_python}" ]] \
-        || die "published config-v8 baseline interpreter is unavailable"
     HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${data_dir}" \
         "${baseline_python}" -I - "${data_dir}" "${FROM_VERSION}" <<'PY'
 import os
@@ -1856,8 +1855,15 @@ historical_config = (evidence_dir / "config.historical.source").read_bytes()
 historical_environment = (evidence_dir / "environment.historical.source").read_bytes()
 historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
 historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
-if not isinstance(historical_gateway_token, str) or not historical_gateway_token.strip():
-    raise SystemExit("native-v8 source fixture has no established gateway token")
+if (
+    not isinstance(historical_gateway_token, str)
+    or len(historical_gateway_token) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in historical_gateway_token
+    )
+):
+    raise SystemExit("native-v8 fixture has no canonical generated gateway token")
 
 if config_bytes != historical_config:
     raise SystemExit("native-v8 config bytes changed without a target config migration")
