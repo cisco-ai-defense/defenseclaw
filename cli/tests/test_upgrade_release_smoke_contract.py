@@ -45,6 +45,10 @@ MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
 PRE_RELEASE_CERTIFICATION = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
 RECEIPT_CHECK = ROOT / "scripts" / "check_upgrade_receipt.py"
+POSIX_UPGRADE_CUSTODY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="descriptor-relative POSIX ownership, mode, exchange, and quarantine contract",
+)
 
 
 def _bash_executable() -> str:
@@ -543,6 +547,7 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     assert "if len(members) == 100000:" in cleanup
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -592,6 +597,7 @@ otel:
 
 
 @pytest.mark.parametrize("unsafe_kind", ["source-symlink", "source-hardlink", "source-oversize", "active-symlink"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kind: str) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -621,6 +627,7 @@ def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kin
     assert "configuration source" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -645,6 +652,7 @@ def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Pat
 
 
 @pytest.mark.parametrize("commit_check", ["pre-unlink", "final-readback"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_commit_checks_include_metadata(
     tmp_path: Path,
     commit_check: str,
@@ -672,6 +680,7 @@ def test_bridge_comment_restore_commit_checks_include_metadata(
     assert "was not committed exactly" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_closes(
     tmp_path: Path,
 ) -> None:
@@ -718,6 +727,7 @@ def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_clo
     assert active.read_bytes() == b"# operator guide\n" + original_active
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -762,6 +772,7 @@ def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path)
     assert replacement.read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -832,6 +843,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     assert quarantines[0].read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -1096,6 +1108,7 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
     assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

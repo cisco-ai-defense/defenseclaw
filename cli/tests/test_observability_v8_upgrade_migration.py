@@ -925,6 +925,10 @@ audit_sinks:
                 clear=True,
             ),
             patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
+            ),
+            patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
                 return_value={"installed": True, "degraded_errors": []},
             ) as refresh,
@@ -1099,6 +1103,10 @@ audit_sinks:
                 clear=True,
             ),
             patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
+            ),
+            patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
                 return_value={"installed": True, "degraded_errors": []},
             ) as refresh,
@@ -1126,6 +1134,10 @@ audit_sinks:
                     "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "{}",
                 },
                 clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
             ),
             patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",

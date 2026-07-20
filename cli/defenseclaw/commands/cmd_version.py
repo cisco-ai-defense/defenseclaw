@@ -38,7 +38,8 @@ from pathlib import Path
 
 import click
 
-from defenseclaw import __version__, gateway, ux
+import defenseclaw
+from defenseclaw import gateway, ux
 from defenseclaw.paths import bundled_extensions_dir
 
 
@@ -64,7 +65,11 @@ def _cli_component() -> Component:
     """The Python CLI is definitional — its version is always known."""
     return Component(
         name="cli",
-        version=__version__,
+        # Read the package version at probe time. Upgrade tests temporarily
+        # replace ``defenseclaw.__version__`` while importing staged helpers;
+        # copying it at module import would leak that transient source version
+        # into later, otherwise clean ``defenseclaw version`` invocations.
+        version=defenseclaw.__version__,
         origin="defenseclaw (python)",
         detail="",
         status="ok",

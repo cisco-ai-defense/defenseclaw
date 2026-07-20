@@ -2914,7 +2914,7 @@ def _locked_claude_file_update(path: str, *, label: str):
     bound = None
     guard = None
     try:
-        file_lock._lock_file_exclusive(lock_file)
+        file_lock._lock_file_exclusive(lock_file, timeout_seconds=None)
         opened = os.fstat(lock_file.fileno())
         identity = _claude_lock_identity(lock_path)
         if identity[:2] != (opened.st_dev, opened.st_ino):

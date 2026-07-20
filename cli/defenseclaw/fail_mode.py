@@ -569,7 +569,7 @@ def fail_mode_transaction_lock(cfg: Any) -> Iterator[None]:
         os.close(descriptor)
         raise
     try:
-        _lock_file_exclusive(lock)
+        _lock_file_exclusive(lock, timeout_seconds=None)
         try:
             yield
         finally:

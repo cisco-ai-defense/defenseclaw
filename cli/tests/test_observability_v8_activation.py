@@ -749,6 +749,7 @@ def test_held_update_lock_is_rejected_pre_stop_and_bounded_in_target(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@POSIX_TRANSACTION_INJECTION
 def test_read_only_preflight_atomic_probe_failure_cleans_private_probes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -781,6 +782,7 @@ def test_read_only_preflight_atomic_probe_failure_cleans_private_probes(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@POSIX_PERMISSION_CONTRACT
 def test_read_only_preflight_rejects_promoted_secret_in_readable_environment(
     tmp_path: Path,
 ) -> None:

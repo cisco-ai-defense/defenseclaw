@@ -235,6 +235,7 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release shell and symlink contract")
 def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
     real_bin = tmp_path / "real-bin"
     command_dir = tmp_path / "commands"
@@ -353,6 +354,7 @@ def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path)
     assert checksum_rows[source_map_path.name] == hashlib.sha256(source_map_path.read_bytes()).hexdigest()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="executes generated POSIX cosign shims")
 def test_live_continuity_cosign_fixture_delegates_published_signatures(
     tmp_path: Path,
 ) -> None:

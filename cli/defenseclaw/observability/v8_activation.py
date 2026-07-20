@@ -773,7 +773,23 @@ def _preflight_existing_update_lock(
 ) -> None:
     """Prove an existing advisory-lock leaf is safely openable for update."""
 
-    snapshot = _snapshot_regular_file(path, required=False)
+    try:
+        snapshot = _snapshot_regular_file(path, required=False)
+    except (OSError, V8ActivationError) as exc:
+        # A Windows byte-range lock can deny the snapshot reader access to the
+        # held sentinel byte before the non-blocking lock probe runs. Treat
+        # that platform-specific sharing violation as contention. The
+        # preflight still fails closed and the target transaction performs its
+        # own bounded acquisition after the gateway stops.
+        if _is_windows() and (
+            isinstance(exc, OSError) or exc.code == "source_unreadable"
+        ):
+            raise V8ActivationError(
+                "lock_file_busy",
+                "read_only_activation_preflight",
+                target_path=path,
+            ) from None
+        raise
     if not snapshot.existed:
         return
     _assert_leaf_owner(snapshot, trusted_owners)

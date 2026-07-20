@@ -38,6 +38,7 @@ _GENERATED_COMPATIBILITY = json.loads(v7_exporter_selection_bytes())
 _TYPED_COMPATIBILITY = V7CompatibilitySelection.from_mapping(_GENERATED_COMPATIBILITY)
 _ALL_BUCKETS = list(BUCKETS)
 _TEST_DATA_DIR = str(Path(Path.cwd().anchor) / "var" / "lib" / "defenseclaw")
+_TEST_CA_CERT = str(Path.cwd().resolve() / "collector-ca.pem")
 _FRESH_080_DEFAULT_OTEL_CONFIG = """config_version: 7
 otel:
   enabled: false
@@ -1245,6 +1246,7 @@ otel:
   tls: {ca_cert: /tmp/collector-ca.pem}
   traces: {enabled: true}
 """
+            .replace("/tmp/collector-ca.pem", _TEST_CA_CERT)
         )
 
     assert captured.value.code == "conflicting_v7_otel_tls"
@@ -1264,11 +1266,12 @@ otel:
       tls: {ca_cert: /tmp/collector-ca.pem}
       traces: {enabled: true}
 """
+        .replace("/tmp/collector-ca.pem", _TEST_CA_CERT)
     )
     destination = _destination(_document(result), "backend")
 
     assert destination["endpoint"] == "https://collector.example.test:4317"
-    assert destination["tls"] == {"ca_cert": "/tmp/collector-ca.pem"}
+    assert destination["tls"] == {"ca_cert": _TEST_CA_CERT}
     load_validate_v8(result.candidate)
 
 
@@ -1285,6 +1288,7 @@ otel:
       tls: {insecure: true, ca_cert: /tmp/collector-ca.pem}
       traces: {enabled: true}
 """
+        .replace("/tmp/collector-ca.pem", _TEST_CA_CERT)
     )
     destination = _destination(_document(result), "backend")
 
@@ -1307,6 +1311,7 @@ otel:
       tls: {ca_cert: /tmp/collector-ca.pem}
       logs: {enabled: true}
 """
+        .replace("/tmp/collector-ca.pem", _TEST_CA_CERT)
     )
     destination = _destination(_document(result), "backend")
 
@@ -1570,6 +1575,7 @@ otel:
       traces: {enabled: true}
       logs: {enabled: true, endpoint: http://logs.example.test:4317}
 """
+        .replace("/tmp/collector-ca.pem", _TEST_CA_CERT)
     )
     document = _document(result)
     destinations = [item for item in document["observability"]["destinations"] if item["kind"] == "otlp"]
@@ -1578,7 +1584,7 @@ otel:
     assert len(destinations) == 1
     assert destination["endpoint"] == "https://collector.example.test:4317"
     assert destination["signal_overrides"] == {"logs": {"endpoint": "https://logs.example.test:4317"}}
-    assert destination["tls"] == {"ca_cert": "/tmp/collector-ca.pem"}
+    assert destination["tls"] == {"ca_cert": _TEST_CA_CERT}
     load_validate_v8(result.candidate)
 
 

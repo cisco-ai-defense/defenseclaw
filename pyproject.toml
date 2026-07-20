@@ -237,13 +237,6 @@ override-dependencies = [
     "fastapi>=0.137.1,<0.138",
     "textual>=8.2.8,<9",
     "pygments>=2.20,<3",
-    # ``pytest-textual-snapshot==1.1.0`` transitively pins
-    # ``syrupy==4.8.0``, which in turn pins ``pytest>=7,<9``. We are on
-    # pytest 9.x project-wide, so override to a syrupy version that
-    # supports pytest 9. Verified locally that the snapshot plugin runs
-    # against this newer syrupy without API breakage (the only surface
-    # used is SerializerFactory + SnapshotSession).
-    "syrupy>=4.9.1",
 ]
 
 [tool.ruff]
