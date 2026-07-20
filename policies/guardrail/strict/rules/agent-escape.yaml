@@ -1,0 +1,49 @@
+version: 1
+category: agent-escape
+# Coding-agent sandbox-escape rules. A sandboxed agent can still WRITE files
+# and config that a trusted, unsandboxed host component later EXECUTES (the
+# IDE, a language extension, git, or a local daemon). Each rule requires a
+# sensitive target AND a dangerous payload token to co-occur, so scaffolding a
+# plain config file does not fire — only the executable shape does. Patterns
+# match barewords with bounded gaps because tool-call content arrives
+# JSON-escaped. Keep in sync with the compiled-in defaults in
+# `internal/gateway/rules.go` (agentEscapeRules).
+# Related advisories: CVE-2026-48124, GHSA-pc9j-3qc2-95wv,
+# GHSA-p9g2-cr55-cw9c, GHSA-v4xv-rqh3-w9mc.
+rules:
+  - id: ESC-CLAUDE-HOOK
+    pattern: '(?i)\.claude[\\/][^"\s]*?\.json[\s\S]{0,1000}?\bhooks\b[\s\S]{0,800}?\bcommand\b\s*\\?["'']?\s*[:=]'
+    title: "Workspace .claude hook installs a command"
+    severity: CRITICAL
+    confidence: 0.88
+    tags: [agent-escape, write-then-execute]
+  - id: ESC-CLAUDE-HOOK-DIR
+    pattern: '(?i)\.claude[\\/]hooks[\\/][\w.-]+'
+    title: "Write into .claude/hooks directory"
+    severity: HIGH
+    confidence: 0.80
+    tags: [agent-escape, write-then-execute]
+  - id: ESC-VENV-CFG
+    pattern: '(?i)(?:^|["''\s/\\])(?:\.venv|venv|env)[\\/]pyvenv\.cfg'
+    title: "Virtualenv interpreter redirect (pyvenv.cfg)"
+    severity: HIGH
+    confidence: 0.80
+    tags: [agent-escape, write-then-execute]
+  - id: ESC-GIT-CONFIG-EXEC
+    pattern: '(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge)|uploadpack\.packObjectsHook)\b|(?:^|[\s"''\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["'']?\s*[=:])'
+    title: "git config execution-indirection key set"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [agent-escape, code-execution]
+  - id: ESC-GIT-READ-WEAPONIZED
+    pattern: '(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|format-patch|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)'
+    title: "Read-only git command with file-writing/exec flag"
+    severity: HIGH
+    confidence: 0.85
+    tags: [agent-escape, code-execution]
+  - id: ESC-DOCKER-SOCK
+    pattern: '(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)'
+    title: "Docker daemon socket access"
+    severity: HIGH
+    confidence: 0.85
+    tags: [agent-escape, privilege-escalation]
