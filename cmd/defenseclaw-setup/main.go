@@ -1568,7 +1568,7 @@ func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []s
 	return nil
 }
 
-const packagedMigrationScript = `import json, sys
+const packagedMigrationScript = `import inspect, json, sys
 from defenseclaw import migration_state
 from defenseclaw.migrations import run_migrations
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
@@ -1577,13 +1577,33 @@ with open(manifest_path, encoding="utf-8") as stream:
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
 required = tuple(manifest.get("required_cli_migrations", ()))
+parameters = inspect.signature(run_migrations).parameters
+accepts_kwargs = any(
+    parameter.kind == inspect.Parameter.VAR_KEYWORD
+    for parameter in parameters.values()
+)
+
+def supports_keyword(name):
+    parameter = parameters.get(name)
+    return accepts_kwargs or (
+        parameter is not None
+        and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    )
+
+kwargs = {}
+if supports_keyword("upgrade_handles_local_bundle"):
+    kwargs["upgrade_handles_local_bundle"] = True
+if supports_keyword("strict_required"):
+    kwargs["strict_required"] = required
 count = run_migrations(
     from_version,
     to_version,
     openclaw_home,
     data_root,
-    upgrade_handles_local_bundle=True,
-    strict_required=required,
+    **kwargs,
 )
 state = migration_state.load(data_root)
 applied = set(state.applied if state else ())

@@ -7,8 +7,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -674,6 +676,134 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 			t.Fatalf("packaged migration environment is missing %q", entry)
 		}
 	}
+}
+
+func TestCommittedRecoveryPackagedMigrationScriptSupportsInstalledRuntimeWithoutStrictRequired(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
+    if not upgrade_handles_local_bundle:
+        raise RuntimeError("local bundle authority was not passed")
+    return 1
+`,
+		`class State:
+    applied = ("0.8.5",)
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err != nil {
+		t.Fatalf("legacy installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if got := strings.TrimSpace(string(output)); got != "1" {
+		t.Fatalf("legacy installed migration output = %q, want 1", got)
+	}
+}
+
+func TestPackagedMigrationScriptPassesStrictRequiredWhenSupported(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False, strict_required=()):
+    if not upgrade_handles_local_bundle:
+        raise RuntimeError("local bundle authority was not passed")
+    if tuple(strict_required) != ("0.8.5",):
+        raise RuntimeError("strict required migrations were not passed")
+    return 1
+`,
+		`class State:
+    applied = ("0.8.5",)
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err != nil {
+		t.Fatalf("strict installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if got := strings.TrimSpace(string(output)); got != "1" {
+		t.Fatalf("strict installed migration output = %q, want 1", got)
+	}
+}
+
+func TestPackagedMigrationScriptLegacyAPIMissingRequiredMigrationFailsClosed(t *testing.T) {
+	output, err := runPackagedMigrationScriptFixture(
+		t,
+		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
+    return 0
+`,
+		`class State:
+    applied = ()
+
+def load(data_root):
+    return State()
+`,
+		[]string{"0.8.5"},
+	)
+	if err == nil {
+		t.Fatalf("legacy installed runtime accepted a missing required migration: %s", strings.TrimSpace(string(output)))
+	}
+	if !strings.Contains(string(output), "required migrations are missing: 0.8.5") {
+		t.Fatalf("missing required migration diagnostic = %q", strings.TrimSpace(string(output)))
+	}
+}
+
+func runPackagedMigrationScriptFixture(
+	t *testing.T,
+	migrationsSource, migrationStateSource string,
+	required []string,
+) ([]byte, error) {
+	t.Helper()
+	python, err := exec.LookPath("python")
+	if err != nil {
+		t.Skipf("python is unavailable: %v", err)
+	}
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "defenseclaw")
+	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"__init__.py":        "",
+		"migrations.py":      migrationsSource,
+		"migration_state.py": migrationStateSource,
+	} {
+		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := json.Marshal(map[string]interface{}{
+		"release_version":         "0.8.6",
+		"required_cli_migrations": required,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, "upgrade-manifest.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(root, "data")
+	if err := os.Mkdir(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		python,
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationScript,
+		"0.8.0",
+		"0.8.6",
+		filepath.Join(root, "openclaw"),
+		dataRoot,
+		manifestPath,
+	)
+	cmd.Dir = root
+	cmd.Env = sanitizePythonEnv(os.Environ())
+	return cmd.CombinedOutput()
 }
 
 func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
